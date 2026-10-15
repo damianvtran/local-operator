@@ -60,6 +60,7 @@ def _entry_owners() -> dict[str, str]:
     """
     from local_operator.browser_bridge.resources import RESOURCE_NAME
     from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.monitors.arm import MONITOR_LOCK_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
@@ -89,6 +90,7 @@ def _entry_owners() -> dict[str, str]:
 
     return {
         TRANSCRIPT_FILENAME: "session.transcript",
+        SESSION_EXPORT_NAME: "memory",
         TITLE_SIDECAR_NAME: "resume",
         ATTACHMENT_SIDECAR_NAME: "resume",
         ATTACHMENT_SIDECAR_FILENAME: "resume",
@@ -276,6 +278,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/team_bridge/connector/lock.py": (
+        1,
+        "``CONNECTOR_LOCK_NAME`` ('connector.lock'): the machine-wide connector "
+        "singleton under ``<config>/team_bridge/`` — beside the bridge state "
+        "database, the same family as the wake lock's dotted sidecars. Outside "
+        "``sessions/``, keyed to a long-lived process rather than to a "
+        "conversation, and deliberately dotted so a listing that walks the config "
+        "dir cannot mistake it for a user file",
     ),
     "local_operator/session/runtime/stop_ledger.py": (
         1,

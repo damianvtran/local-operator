@@ -164,6 +164,7 @@ PREFIXES_TEXT_POLICY = {
     # forwards (the reserved vocabulary below), and it is not completable inline
     # here only because the composer does not yet offer the subcommand rows or
     # project names (the TUI argument rows are the projects-view slice).
+    "memory": False,
     "project": False,
     # FALSE, like `/usage` and `/stop`: the argument is a SELECTOR word (`read`)
     # rather than free text, and a sentence after the word must stay a message —
@@ -266,6 +267,7 @@ ARGUMENT_SHAPE_POLICY = {
     # same `command_argument_words`. At most two tokens, the second name-shaped, so
     # `/project delete this thing` stays a message while `/project delete x` is
     # the command on every surface that validates it.
+    "memory": ArgumentShape.SUBCOMMAND,
     "project": ArgumentShape.SUBCOMMAND,
     # ANY text, because everything after the word is either a reserved word
     # (`AIDA_SUBCOMMANDS`) the HANDLER parses or a request she is given.

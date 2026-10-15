@@ -19,6 +19,9 @@ from textual.binding import Binding
 from textual.message import Message
 
 from local_operator.harness.types import ImageContent
+from local_operator.i18n.keys import tui_small as copy
+from local_operator.i18n.text import tr
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
@@ -28,6 +31,12 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
 )
+
+#: The slice's catalogued copy, resolved at the render point. This module is
+#: constructed per presentation and resolves per frame, so it holds no
+#: module-level constant and registers no locale refresher (text.py: only
+#: CONSTANTS need re-materialising on a locale move).
+_t = tr("tui.small")
 
 #: Resident bytes of retained text one parked presentation may hold, measured
 #: with ``sys.getsizeof`` rather than estimated from a character count. It must
@@ -426,7 +435,14 @@ class DraftRecoveryNotice(HeldPayloadNotice):
             1 for attachment in draft.attachments.values() if getattr(attachment, "image", None)
         )
         if images:
-            parts.append(f"({images} image{'s' if images != 1 else ''})")
+            # A catalogue plural, not a hand-rolled s-suffix: en renders
+            # '(1 image)' / '(3 images)' byte for byte, and a translation wave
+            # changes the CATEGORIES where the language's rules say so. `shown`
+            # carries the bare digit the pre-extraction f-string printed (the
+            # `images` slot exists only to select the branch and would group
+            # '1,200' if it were interpolated), so byte fidelity holds at every
+            # magnitude. The parentheses live in the message branches.
+            parts.append(_t(copy.draft_attachment_count(images=images, shown=str(images))))
         return " ".join(parts) + " — enter"
 
     def action_restore(self) -> None:
@@ -1128,6 +1144,7 @@ def project_settled_rows(
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_SEND_NOTICE_MESSAGE_TYPE,
+        TEAM_BRIDGE_MESSAGE_TYPE,
     )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
@@ -1155,6 +1172,7 @@ def project_settled_rows(
         AssistantBlock,
         MonitorDeltaBlock,
         PeerMessageBlock,
+        TeamBridgeBlock,
         UserBlock,
         WakeBlock,
         _resume_tail_start,
@@ -1439,6 +1457,25 @@ def project_settled_rows(
                         if certificate is not None:
                             block.peer_cycle_certificate = certificate
                         self._append_block(block)
+                        appended = True
+                continue
+            # A team-bridge wake (§13.4: its OWN provenance kind, never the
+            # peer card) replays with the SAME dedup and cross-session gates as
+            # the peer branch directly above — the row is a receipt either way,
+            # and a bridge delivery is no more the user's own turn than a peer
+            # note is. The branch paints the dedicated card; the `continue`
+            # keeps the message consumed even when the mount is hidden.
+            if getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                if str(getattr(message, "id", "")) not in self._live_peer_receipts:
+                    if not hide_cross_session:
+                        self._append_block(
+                            TeamBridgeBlock(
+                                bridge_card_text(details),
+                                bridge_card_sender(details),
+                                fold_width=fold_width,
+                            )
+                        )
                         appended = True
                 continue
             # A gate that timed out unattended is the most expensive event

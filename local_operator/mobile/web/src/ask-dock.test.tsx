@@ -60,13 +60,37 @@ describe("AskDock", () => {
 		expect(open).toHaveBeenCalledTimes(1);
 	});
 
-	it("counts a timed-out ask too, and still NAMES it", () => {
+	it("still NAMES a timed-out ask when it is the only one left", () => {
 		/* U7 (UX round 1): with only a timed-out ask left the chip counted it but
-		   previewed nothing — the count and the preview disagreed about which
-		   question was waiting, in the one state R7 keeps answerable. */
+		   previewed nothing. The count is now the lapsed one (design round 1, D1,
+		   pinned below); the preview must still name the question. */
 		render(<AskDock rows={[ask({ status: "timed_out" })]} onOpen={() => {}} />);
-		expect(screen.getByText("1 question waiting")).toBeTruthy();
 		expect(screen.getByText(/ship the fix\?/)).toBeTruthy();
+	});
+
+	it("does not call a queue of only lapsed asks waiting: a quiet entry that still opens", () => {
+		/* Design round 1, D1: a stopped conversation whose only ask has lapsed
+		   showed an accent chip reading "1 question waiting" — the most prominent
+		   mark on the screen calling a lapsed ask a live decision. The entry stays
+		   (it is the way to Dismiss), in the dim register, saying what it holds. */
+		const open = vi.fn();
+		render(<AskDock rows={[ask({ status: "timed_out" })]} onOpen={open} />);
+		expect(screen.getByText("1 lapsed question")).toBeTruthy();
+		expect(screen.queryByText(/waiting/)).toBeNull();
+		const dock = screen.getByTestId("ask-dock");
+		expect(dock.className).not.toMatch(/border-accent|bg-accent-wash/);
+		fireEvent.click(dock);
+		expect(open).toHaveBeenCalledTimes(1);
+	});
+
+	it("counts only the questions still offered as waiting when lapsed ones sit beside them", () => {
+		render(
+			<AskDock
+				rows={[ask({ ask_id: "o" }), ask({ ask_id: "t", status: "timed_out" })]}
+				onOpen={() => {}}
+			/>,
+		);
+		expect(screen.getByText("1 question waiting")).toBeTruthy();
 	});
 
 	it("is a chip, not a full-bleed strip", () => {

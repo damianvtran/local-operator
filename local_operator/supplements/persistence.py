@@ -51,7 +51,7 @@ def new_job_id() -> str:
 
 
 def file_entry(candidate: Candidate) -> SupplementFile:
-    return SupplementFile(
+    entry = SupplementFile(
         path=candidate.path,
         name=candidate.name,
         kind=candidate.kind,
@@ -59,6 +59,10 @@ def file_entry(candidate: Candidate) -> SupplementFile:
         mtime=candidate.mtime,
         why=candidate.why,
     )
+    if candidate.linked_in_answer:
+        # Omitted when False so a row stays byte-identical to what older builds wrote.
+        entry["linked_in_answer"] = True
+    return entry
 
 
 def decision_record(decision: Decision, *, skipped: str | None = None) -> SupplementDecision:

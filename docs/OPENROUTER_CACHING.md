@@ -270,6 +270,57 @@ toward "no eligible endpoints"; a routing optimisation must never be able to
 make a model unreachable. At the cap the harness stops retiring and says so once
 at debug level.
 
+### Leaving a host that decodes slowly
+
+A host can cache perfectly and still be slow, and the cache strikes above never
+notice. One measured run (DeepSeek v4.1 Flash) sat 63 consecutive requests on a
+host decoding at ~20 tok/s while two other hosts served the same model at
+120-170 tok/s; that host held 93% of the run's request time. The pin made it
+worse: it re-selected the host that had just served.
+
+`SessionStreamFn._score_host_decode_rate` is an **opt-in experiment**, controlled
+by `providers.openrouter.retire_below_tps` (**default 0/off**). The one measured
+model/run motivates a trial floor of **25 tok/s**, not a universal intervention
+across all cached OpenRouter models. The await-only estimator described below is
+new and needs broader live validation; the benchmark must enable it explicitly
+as a declared apparatus setting. No extra provider calls are made.
+
+Routing measures output tokens divided by **time spent awaiting the upstream's
+next event between the first and last output deltas**. It excludes queue/prefill
+before the first delta, usage/end trailers after the last, and time the local
+consumer spends processing yielded output. The opt-in path adds two monotonic
+clock reads per upstream event and scalar accumulation (no per-event container
+or wrapper); the off path does not collect these timings. The existing
+analytics/band rate remains the client-observed first-to-last wall interval.
+
+This is still an upstream-wait heuristic, not pure GPU decode speed: network
+stalls and upstream iterator work count; buffering can overstate speed. Historical
+fast readings do **not** prove present host availability/eligibility, so the guard
+reduces all-ignored risk but cannot promise to prevent every routing 404.
+
+- Only real turns with **>= 500 output tokens** count; shorter turns neither
+  strike nor clear.
+- **3 consecutive** qualifying turns under the configured positive floor retire
+  the host into the existing `provider.ignore` set, sharing the **3-host cap**.
+- A qualifying turn at or above the floor clears that host's strikes; strikes
+  more than 30 minutes apart do not pair.
+- Retirement needs another un-retired host **last measured** at or above the
+  floor. Without one the pin is only *released* (nothing added to `ignore`) and
+  promoted to retirement once a faster host is measured. With no known-fast
+  alternative the only seen host and an all-hosts-slow conversation stay usable.
+- Setting **0** live clears speed-only exclusions and speed evidence on the
+  **next request**, preserving cache-miss retirements and the current pin.
+- Speed retirements survive compaction while enabled (speed is not a fact about
+  the prefix). Like the existing pin, speed evidence is memory-only on resume;
+  transcript forks receive independent copies.
+- A `NoticeEvent` names the host, the measured rate, the floor and cold-cache
+  cost. This is a harness setting, not an OpenRouter wire preference.
+
+The task-065 replay remains a **simulation**: its original request windows include
+queue/prefill; replay decode time is approximated by subtracting each host's
+fitted intercept. The router's faster response after `ignore` is modeled, not a
+live observed speedup. No paid inference is needed for regression coverage.
+
 Verified live that the two compose: with `order` naming one host and `ignore`
 another, the ordered host served 8/8 calls and the ignored one was never
 attempted.

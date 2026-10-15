@@ -29,8 +29,10 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.asks import policy, store
+from local_operator.session.session import Session
 from local_operator.tui import ask_open_policy
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, bridge_decision_target
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.ask_queue import (
     DELIVERING_MARK,
     EMPTY_ALL,
@@ -50,6 +52,7 @@ from local_operator.tui.widgets.ask_queue import (
     filter_counts,
     settled_chip,
 )
+from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 pytestmark = pytest.mark.asyncio
@@ -84,6 +87,46 @@ def _row(
     }
 
 
+def _bridge_row(ask_id: str, *, status: str = "open", **extra: Any) -> dict[str, Any]:
+    """One fold-shaped AGENT-MESSAGES request, the shape ``ask_rows`` flattens.
+
+    The producer's ``question_id`` is what makes the row a request (the same
+    predicate the session's door uses), and the options carry the wire ids the
+    decision validates against.
+
+        ``persist`` is False, which is what the fold carries: the carriage is not a
+    credential question, and ``bridge_request_question`` does not stamp it
+    (round 13) — a row with ``persist`` and no ``secret`` is one the ask family's
+    validator refuses, which is how a real cross-member ask went undrawable.
+    """
+    return {
+        "ask_id": ask_id,
+        "created_at": _NOW - 60_000,
+        "expires_at": _NOW + 3_600_000,
+        "timeout_s": 3600,
+        "urgent": False,
+        "status": status,
+        "delivered": False,
+        "questions": [
+            {
+                "id": "bridge-bmsg_1",
+                "question": "dana@acme.example · wants your sign-off",
+                "options": [
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "deny", "label": "Deny"},
+                ],
+                "multi": False,
+                "recommended": None,
+                "secret": False,
+                "persist": False,
+                "human_required": True,
+                "question_id": "bmsg_1",
+            }
+        ],
+        **extra,
+    }
+
+
 class _RecordingSession(FakeSession):
     """The owner contract, recorded — the path a current-session row keeps."""
 
@@ -91,10 +134,27 @@ class _RecordingSession(FakeSession):
         super().__init__()
         self.answered: list[tuple[str, dict[str, Any], str]] = []
         self.declined: list[tuple[str, str]] = []
+        #: The VERIFIED decision door's calls (U1): the owner path must reach
+        #: this one for a bridge row and ``respond_ask`` for everything else.
+        self.decided: list[tuple[str, str, str]] = []
+        #: Set to a typed refusal to pin the door's refusal carriage.
+        self.decide_refusal: dict[str, Any] | None = None
+        #: Ask ids whose CARRIAGE makes the plain door refuse, mirroring the
+        #: product's ``BRIDGE_DECISION_DOOR_REQUIRED``: ``respond_ask`` refuses
+        #: every bridge record by construction, so a fixture that accepted one
+        #: would hide U1 rather than reproduce it. A refused call records
+        #: nothing, exactly as the real door writes nothing.
+        self.bridge_ask_ids: set[str] = set()
 
     def respond_ask(self, ask_id, answers, *, by="unknown"):
+        if ask_id in self.bridge_ask_ids:
+            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
         self.answered.append((ask_id, dict(answers), by))
         return {"ok": True}
+
+    def bridge_decide(self, ask_id, question_id, word):
+        self.decided.append((ask_id, question_id, word))
+        return self.decide_refusal or {"ok": True}
 
     def decline_ask(self, ask_id, *, by="unknown"):
         self.declined.append((ask_id, by))
@@ -684,6 +744,12 @@ class _FakeAttachClient:
         self._record["respond"] = (ask_id, {k: list(v) for k, v in answers.items()}, by)
         return "ok"
 
+    async def bridge_decide(self, ask_id, question_id, word):
+        if "decide" in self._raise_on:
+            raise RuntimeError("this request needs the operator's own decision surface.")
+        self._record["decide"] = (ask_id, question_id, word)
+        return "decided"
+
     async def ask_decline(self, ask_id, *, by=""):
         self._record["decline"] = (ask_id, by)
         return "ok"
@@ -702,6 +768,125 @@ def _patch_engage(monkeypatch, record: dict[str, Any], raise_on: set[str] | None
         return _FakeAttachClient(record, raise_on), "detail"
 
     monkeypatch.setattr("local_operator.mobile.attach_client.engage_session_client", _fake)
+
+
+async def test_a_bridge_card_answer_decides_through_the_verified_door(
+    enabled, isolated_index, monkeypatch
+):
+    """TB-02 wiring: the human's card answer IS a decision.
+
+    The plain ask door refuses an agent-messages request by construction, so a
+    worker that sent ``ask_respond`` would leave the human with a card that
+    cannot answer. The row's own option id travels as the word (never the drawn
+    label), and the ordinary door is not touched.
+    """
+
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_bridge_row("b1")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        row = ask_rows([_bridge_row("b1", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "respond", {"bridge-bmsg_1": ["Approve"]})
+        assert record["engage"] == ("s-other", "AskErrand", "b1")
+        assert "respond" not in record  # the ordinary door is never used for a request
+        assert record["decide"] == ("b1", "bmsg_1", "approve")
+        assert record["closed"] is True
+
+
+@pytest.mark.parametrize("status", ["open", "timed_out"])
+async def test_a_same_session_bridge_card_decides_through_the_owner_path(
+    enabled, isolated_index, status: str
+):
+    """U1: the request that arrives in THIS session is decidable from its card.
+
+    The card's own door (the bar, ``f4``) mounts the ask in the SESSION scope, so
+    the settle callback hands it to the owner contract. Before this fix that
+    contract sent ``respond_ask``, which refuses every bridge record by
+    construction (``BRIDGE_DECISION_DOOR_REQUIRED``) — so the ordinary carriage
+    closed its card on a warning that named that very card, and no test covered
+    it. The decision now rides the SAME verified door the fleet route calls, with
+    exactly one submission and the ordinary door untouched. The timed-out card
+    (the state the reviewer also pressed Approve on) takes the same route.
+    """
+    session = _RecordingSession()
+    session.bridge_ask_ids = {"b1"}
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_bridge_row("b1", status=status)]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["Approve"])
+        await _settle(pilot, 6)
+        assert session.decided == [("b1", "bmsg_1", "approve")]
+        assert session.answered == []  # the ordinary door is never used for a request
+        # ...and the dead-end warning the plain door answers with is gone.
+        notices = [block.text() for block in app.query(NoticeBlock)]
+        assert not any(Session.BRIDGE_DECISION_DOOR_REQUIRED in text for text in notices), notices
+
+
+async def test_an_ordinary_ask_still_answers_through_the_owner_contract(enabled, isolated_index):
+    """The other half of the row-picked door: nothing moved for ordinary asks."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["yes"])
+        await _settle(pilot, 6)
+        assert session.answered == [("a1", {"q1": ["yes"]}, "terminal")]
+        assert session.decided == []
+
+
+async def test_a_refused_bridge_decision_reaches_the_surface_typed(enabled, isolated_index):
+    """The door's refusal is reported in its own words, and the ask is not lost."""
+    session = _RecordingSession()
+    session.bridge_ask_ids = {"b1"}
+    session.decide_refusal = {
+        "ok": False,
+        "code": "decision_expired",
+        "error": "that answer expired before it could be sent — please answer again",
+    }
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_bridge_row("b1")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["Approve"])
+        await _settle(pilot, 6)
+        assert session.decided == [("b1", "bmsg_1", "approve")]
+        assert session.answered == []
+        notices = [block.text() for block in app.query(NoticeBlock)]
+        assert any("expired before it could be sent" in text for text in notices), notices
+
+
+def test_bridge_decision_target_reads_option_ids_and_ignores_ordinary_asks() -> None:
+    """Only a request's own question decides, and its option ID is the word."""
+
+    ordinary = ask_rows([_row("a1")])[0]
+    assert bridge_decision_target(ordinary, {"q1": ["yes"]}) is None
+    bridge = ask_rows([_bridge_row("b1")])[0]
+    assert bridge_decision_target(bridge, {"bridge-bmsg_1": ["Approve"]}) == (
+        "b1",
+        "bmsg_1",
+        "approve",
+    )
+    assert bridge_decision_target(bridge, {"bridge-bmsg_1": ["deny"]}) == (
+        "b1",
+        "bmsg_1",
+        "deny",
+    )
+    # No pick, or more than one, is never a decision.
+    assert bridge_decision_target(bridge, {}) is None
+    assert bridge_decision_target(bridge, {"bridge-bmsg_1": ["Approve", "Deny"]}) is None
 
 
 async def test_a_fleet_row_of_another_session_answers_through_the_engage_chain(
@@ -875,14 +1060,21 @@ async def test_a_snapshot_never_tears_down_a_fleet_list_or_card(enabled, isolate
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
+        # Pilot ticks do not join admission. Priming with None would make the
+        # eventual legitimate session swap compete with the snapshot under test.
+        async with asyncio.timeout(30):  # Deadlock guard, not a startup-speed assertion.
+            for worker in list(app.workers):
+                if worker.group == "session":
+                    await worker.wait()
+        assert app._session is not None, "snapshot fixture requires an admitted session"
         # PRIME THE SWAP DETECTOR FIRST, so only the two teardown checks under
         # test can fire: a session SWAP legitimately collapses the surface (the
         # dock belongs to the conversation), and a fleet surface must be judged
         # against the branches the reviewer named.
         app._ask_session = app._session
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
-        listing = app.query_one(AskQueueList)
+        async with asyncio.timeout(30):
+            listing = await _fleet_list_ready(app, "b1")
         assert app._ask_scope == SCOPE_FLEET
         # The ordinary fleet-door case: nothing outstanding HERE, so the
         # snapshot carries no current-session rows at all.
@@ -998,7 +1190,7 @@ async def test_a_second_fleet_gesture_is_dropped_and_the_first_engage_survives(
         assert app._ask_in_flight == set()
 
 
-async def _fleet_card_ready(app, pilot, ask_id, waiting):
+async def _fleet_list_ready(app, ask_id, waiting: asyncio.Event | None = None):
     # Pilot turns do not join the off-thread index read or the title lookup.
     # A user cannot pick a row before its list is mounted; a direct Picked
     # message must respect that same affordance. Join ONLY this finite worker,
@@ -1007,13 +1199,33 @@ async def _fleet_card_ready(app, pilot, ask_id, waiting):
     # A fast completed worker can already have left the manager; the mounted
     # row below is authoritative in that case, not the worker registry entry.
     assert len(workers) <= 1, "the fleet load is exclusive"
-    waiting.set()
+    if waiting is not None:
+        waiting.set()
     for worker in workers:
         await worker.wait()
     listing = app._ask_list
-    assert listing is not None and any(row.ask_id == ask_id for row in listing.rows)
+    assert listing is not None and any(
+        row.ask_id == ask_id for row in listing.rows
+    ), f"fleet ask fixture missing expected row: {ask_id}"
     await listing._mounted_event.wait()
     assert listing.is_mounted
+    assert app.query_one(AskQueueList) is listing, "published fleet list must remain attached"
+    return listing
+
+
+async def test_fleet_list_readiness_does_not_hide_a_missing_seed(enabled, isolated_index):
+    # Joining publication must not turn an empty/wrong index into a passing
+    # snapshot fixture: the expected row is still a hard precondition.
+    app = _app()
+    async with app.run_test(size=(130, 30)):
+        app.action_open_fleet_asks()
+        with pytest.raises(AssertionError, match="fleet ask fixture missing expected row: b1"):
+            async with asyncio.timeout(30):
+                await _fleet_list_ready(app, "b1")
+
+
+async def _fleet_card_ready(app, pilot, ask_id, waiting):
+    await _fleet_list_ready(app, ask_id, waiting)
     app.on_ask_queue_list_picked(AskQueueList.Picked(ask_id))
     assert app._ask_card is not None, "the row's card must mount"
     await app._ask_card._mounted_event.wait()
@@ -1390,3 +1602,44 @@ async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(enabl
         await _settle(pilot)
         assert app._ask_scope == SCOPE_SESSION and app._ask_fleet_rows == []
         assert app._ask_tick is None, "the fleet list's clock outlived the fleet list"
+
+
+async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, isolated_index):
+    """``asks.lapsed_visible_for`` (decision D8, review round 1 R1-1): the tally
+    behind the sidebar marks and the picker's ``asks: N`` must hide the rows the
+    fleet LIST hides, or "asks: 1" opens an empty list. Under ``at_expiry`` a
+    timed-out row 2 h past its deadline (and a stale ``open`` past its deadline,
+    which the readers judge as lapsed) is out of both; an open ask is in both."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import process_watcher
+
+    created_at, expires_at = _NOW - 3 * 3_600_000, _NOW - 2 * 3_600_000
+    _seed(
+        isolated_index,
+        "s-lapsed",
+        [_row("l1", status="timed_out", created_at=created_at, expires_at=expires_at)],
+    )
+    _seed(isolated_index, "s-stale", [_row("s1", created_at=created_at, expires_at=expires_at)])
+    _seed(isolated_index, "s-open", [_row("o1")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        counts, total = app._read_fleet_asks()
+        assert counts == {"s-lapsed": 1, "s-stale": 1, "s-open": 1} and total == 3
+
+        settings_io._store(
+            ConfigManager(isolated_index),
+            settings_io.BY_KEY["asks.lapsed_visible_for"].path,
+            "at_expiry",
+        )
+        process_watcher(isolated_index).poll_now()
+        counts, total = app._read_fleet_asks()
+        listed = store.index_asks(isolated_index, lapsed_visible_ms=0)
+        assert counts == {"s-open": 1} and total == 1
+        listed_counts: dict[str, int] = {}
+        for row in listed:
+            if store.is_outstanding(row.get("status")):
+                sid = str(row["session_id"])
+                listed_counts[sid] = listed_counts.get(sid, 0) + 1
+        assert counts == listed_counts

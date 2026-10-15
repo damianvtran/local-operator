@@ -714,6 +714,11 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             # here, same rule as the gates above, so the assertion below sees
             # the fully-capable inventory DEFAULT_TOOL_NAMES describes.
             quiet_end=_quiet_door_for_blocks,
+            # H5d's ``bridge`` is createIf-gated on the signed-in session's
+            # bridge runtime — presence-only here, same rule as the gates
+            # above, so the inventory below includes it and the assertion
+            # compares like-for-like against DEFAULT_TOOL_NAMES.
+            bridge_runtime=object(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

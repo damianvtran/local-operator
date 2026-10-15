@@ -76,8 +76,9 @@ class Journal:
     def __init__(self, network: str, owner: str, root: Path | None = None):
         store.safe_component(network)
         store.safe_component(owner)
-        self.network, self.owner, self.root = network, owner, root
-        self.path = placement.placement_path(network, root).with_name("finite-journal.json")
+        self.network, self.owner = network, owner
+        self.root = placement._config_root(root)
+        self.path = placement.placement_path(network, self.root).with_name("finite-journal.json")
         self.sentinel = self.path.with_name("finite-journal.initialized.json")
         if self.path.parent.is_symlink() or self.path.is_symlink() or self.sentinel.is_symlink():
             _refuse()
@@ -94,7 +95,9 @@ class Journal:
             return
         placement.credentials_dir_for(self.network, self.root)
         with store._write_lock(self.path):
-            with placement._cross_process_lock(self.path.with_name(".finite-journal.lock")):
+            with placement._cross_process_lock(
+                self.path.with_name(".finite-journal.lock"), root=self.root
+            ):
                 try:
                     yield
                 finally:

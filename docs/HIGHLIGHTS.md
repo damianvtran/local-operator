@@ -1,14 +1,19 @@
 # Highlights: reliability and prepared documents
 
 Highlights supplement a completed real-user answer; they never replace it or
-modify its model route. Graphics must be enabled. Headless hosts, subagents,
+modify its model route. Graphics are enabled by default (`supplements.graphics`; off with
+`false`, or everything off with `supplements.enabled: false` / `LOP_SUPPLEMENTS=0`). A
+real-user turn includes one resumed by the operator's *answered* ask. Headless hosts, subagents,
 background wakes, failed turns and the feature kill switch retain their existing
 exclusion rules. Generated media stays in its existing transcript tiles.
 
 ## Automatic graphics
 
 Automatic graphics remain evidence-driven: a numeric table/data result can justify
-a chart, ordinary prose alone cannot. `supplements.model: auto` prefers the resolved
+a chart. A list-structured answer with four explicit operational entity counts
+(comments / profiles / links / matches) can also justify a small labelled summary table:
+heterogeneous units are marked table-only, never a comparable bar series or a total.
+Single numbers, versions and ordinary prose still cannot. `supplements.model: auto` prefers the resolved
 operator `hi` tier (including its full provider-qualified model id), then a shipped
 registry-known design model, then the effective conversation model. Credential
 presence is not current quota availability.
@@ -62,9 +67,34 @@ interactions and readable data labels. Do not require hover to understand a valu
 
 Known document and HTML edits contribute metadata candidates; source-code edits
 remain ordinary tool/diff rows. Relative final-answer deliverable references are
-recognized, but already-linked files normally remain deduplicated. Prepared HTML
-is the narrow exception above. No recursive directory scan or indiscriminate
-read-call harvesting is performed.
+recognized, but a file the turn only *mentions* that the answer already links remains
+deduplicated. A deliverable the turn *wrote* (a `write`, or a shell/python output) is kept
+even when the answer links it, and the row marks it `linked_in_answer`.
+
+Shell and python writes are read with the command's `cd` tracked (heredoc bodies fed to an
+interpreter are scanned for `open(..., 'w')`/`to_csv`/`write_text` literals; `cp`/`mv`/`tee`/
+redirect destinations count). A python write through a *variable* path arms a one-level,
+<=200-entry look at the directory the command worked in, keeping only visible
+deliverable-kind files (and checksum manifests such as `SHA256SUMS`) modified during the
+turn. No recursive scan and no read-call harvesting is performed. Every exclusion
+(scratch, `.env`/credentials, `*.log`, outside the cwd and `~`, `denyPrefixes`) applies to
+these doors exactly as to the old ones.
 
 
 Desktop cold/older-page and SSE-open snapshots declare `supplements=1` alongside `open_frame=1`. Only a capable reader and that specific viewer receive bounded `supplement_v1` metadata; unknown custom types and errand prompts remain excluded. Component bodies remain authorized digest-addressed attachments, never embedded in paintable history. Older viewers omitting the declaration retain their prior page.
+
+### Table recall versus chart precision
+
+Graphics still need a real user turn, grounded evidence and a vendor answer. Charts/series
+retain probability >=0.7. A validated **labelled-summary/table-only** dataset of four exact,
+distinct operational entity counts uses `SUMMARY_TABLE_THRESHOLD=0.6`: collecting explicit
+labels/values into a table has lower false-positive harm than inferring a ranking/trend across
+comparable bars. Mixed datasets do not get this threshold. Conservative uncertainty guards,
+no-vendor refusal and all timeout/cost/kill switches remain. This is an explicit recall tradeoff,
+not a claim that prior live p=.60/.65 decisions passed the old .7 gate. The prior explicit-table
+generator pilot cost computed $0.004602 for1741/112 tokens in4.150s; it was not automatic proof.
+A subsequent whole-Session automatic sanitized replay at the new policy returned real vendor
+p=.68, then generated and persisted one labelled table in one turn:1764/121 tokens, computed
+$0.004738, answer settled0.419s and component/file row settled4.691s from pilot start. All four
+files were offered; the vendor selected only the primary receipt. These are observations,
+not fixed latency/cost promises; the decision vendor supplied no dollar receipt.

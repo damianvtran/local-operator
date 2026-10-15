@@ -1588,6 +1588,16 @@ class EpisodeRunner:
                 # end the episode. The ORIGINAL error propagates on the last
                 # attempt, so the recorded diagnostic names the real fault
                 # rather than the recovery that could not fix it.
+                #
+                # COMMITTED-ONLY, deliberately. This loop's recovery call is
+                # ``resume_observation``, whose contract is "the batch committed,
+                # skip the re-apply" (see the docstring above). A pre-dispatch
+                # refusal (``invalid_state``) did NOT commit, so resuming would
+                # be the wrong recovery -- and, if the worker returned to a live
+                # state, could return a never-applied batch's observation as the
+                # committed sequence. The refusal is handled one level up, at
+                # the BRIDGE (``ActionBridge._after_failed_execute``), which
+                # re-reads via the read-only ``observe`` seam instead.
                 if attempt == attempts or not _observation_phase_failure(error):
                     raise
                 self._record_observation_retry(error, attempt + 1, attempts)
@@ -2933,6 +2943,53 @@ def _observation_phase_failure(error: BaseException) -> bool:
         and error.detail is not None
         and error.detail.phase == "observation"
     )
+
+
+def _refused_before_dispatch(error: BaseException) -> bool:
+    """Did the WORKER refuse the call before any adapter code ran?
+
+    WHY THIS EXISTS (the accuracy loss it closes). A paid episode ran 257
+    action batches and then died unscoreable: the guest screenshot transport
+    exhausted its retries (the recognised, committed ``phase=observation``
+    class) and then the NEXT read-back answered ``invalid_state`` instead. That
+    code is emitted by ``Worker._handle`` BEFORE ``_dispatch``
+    (``adapters/worker.py``), so the adapter saw nothing of this call and the
+    guest state is exactly what it was after the committed failure: a REFUSAL,
+    not an ambiguous mutation. Because the whole re-bind apparatus is gated on
+    error CLASS, the one changed costume mid-retry defeated it and 257 applied
+    steps were discarded with ``score=null``.
+
+    A refusal is *safer* to re-bind than the committed class, not less: there
+    is no partially-applied batch to wonder about, only a read the environment
+    refused to answer. So the single read-only re-bind is admitted for it too.
+
+    THE ONE EXCLUSION. ``begin_rescue``-unsupported also answers
+    ``invalid_state`` (``worker.py`` ``AdapterRescueUnsupported``), but it is
+    not reachable here: rescue runs on a fresh worker through ``run_rescue``'s
+    ``_call_raw``, never through the mutating/observation paths this predicate
+    gates, so no text match is needed to keep it out.
+    """
+
+    return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
+
+
+def _rebindable_failure(error: BaseException) -> bool:
+    """The failures for which the ONE read-only re-bind may run.
+
+    Either the adapter declared the batch committed and only the read-back was
+    lost (``_observation_phase_failure``), or the worker refused before any
+    adapter code ran (``_refused_before_dispatch``). Everything else stays
+    ambiguous, poisons the session and ends the episode exactly as before.
+
+    THE ONLY CONSUMER is ``ActionBridge._after_failed_execute``, whose recovery
+    is a fresh read-only ``observe``. It must NOT gate ``resume_observation``
+    (``_execute_with_observation_recovery``): a refusal did not commit, so
+    "skip the re-apply and resume" is the wrong recovery and could accept a
+    never-applied batch's observation as committed. The retry loop therefore
+    keeps the committed-only predicate.
+    """
+
+    return _observation_phase_failure(error) or _refused_before_dispatch(error)
 
 
 def _diagnostic_code(error: BaseException) -> str:

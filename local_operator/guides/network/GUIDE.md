@@ -22,6 +22,16 @@ rendering is not a contract.
 
 ## When the user asks to set it up
 
+For a reachable SSH target, use the existing **signed remote onboarding** path
+below: `lop network approvals request` proposes a `device_onboard` record, the
+human approves the existing presence-gated card, and `lop network approvals run`
+executes the idempotent install/join/anchor/grant/verify steps. Resume that same
+record after interruption; do not replace it with an unsigned shell bootstrap
+or silently add grants. For a device the human has locally, use the `join` flow
+below with its **typed six-digit code comparison**; the signed runner never
+bypasses that trust boundary. Phone/tunnel setup is separate—use `guide://mobile`
+and `lop tunnel setup --json`, not mesh admission.
+
 1. `lop network status --json` first — it answers "is there a relay, is there an
    identity, which networks" without changing anything. Expect `installed`,
    `relay_running`, `identity_present`, `networks`.
@@ -825,6 +835,28 @@ the pushed bundles declare it (`ref:<NAME>`); otherwise the pairing screens' sha
 add, so a `not offered` secret reaches a device by being marked `sync` before the
 approval, or by `credential share` after it.
 
+A standing permission to borrow your FUTURE sign-ins is authored, not assumed. For ONE
+native OAuth provider and ONE account (never a copy of the login, never GitHub, MCP,
+device-bound or static-key credentials): `lop network credential inherit <provider> --to
+<device> [--account A] [--org O] --request-approval` files the card (an agent may do
+this; it cannot approve on its own authority), the operator answers it with `lop network
+approvals approve <id>` on the command line — the account, recipient, key fingerprint and
+duration are printed BEFORE the signature — and `... --approval <id>` records it. The permission lasts UNTIL
+REVOKED (`credential revoke <provider> --from <device>`); the one-hour figure on the card
+is only how long the request stays answerable. It needs `broker_credential` on both member
+rows and does not grant it: a missing one is refused with the exact `member grant` remedy
+and nothing is changed. `... --status` reports PERMISSION from this device's disk
+(`no-consent`, `awaiting-approval`, `approved-not-applied`, `ready`, `notready:<why>`,
+`withdrawn`, `not-applicable`), never whether the recipient holds a working login now;
+with no permission, read-only offload still works and only work that needs that login
+fails with an authentication gap. A signed-in different account is `notready:scope_mismatch`
+until the approved account signs in again. The desktop app cannot yet state what this
+signs, so it refuses to approve it and names the exact command; deny stays available.
+"Cannot approve" is only as strong as the operator key: with a presence-gated key (Secure
+Enclave / Touch ID) every approval needs the human's gesture, but a `file-only` key is readable
+by any process running as the same user, so there an agent on this machine CAN run the approve
+command itself. `lop operator status` reports which level this machine has.
+
 Un-approving a device (`lop network member rm`) and `credential revoke` each END the
 copies they can reach: a reachable device deletes its copy and confirms, and the
 receipt says so; a device that is unreachable at that instant keeps its copy — and
@@ -1294,7 +1326,11 @@ the code alone: a receipt is not a success); `2` a usage error, including `--pri
 together with `--json` and `--force` without `--stop`; `3` a human decision is
 required and did not arrive — a parked pair (`join --park`) whose window closed with
 nobody answering, reported as `pairing_unanswered`. Nothing is joined in that case,
-the invite is untouched, and the ceremony is not resumed: park a new one.
+the invite is untouched, and the ceremony is not resumed: park a new one. Phase two's
+two gone-holder refusals are **exit `1`**, not `3` (only `pairing_unanswered` is
+exit `3`): `pairing_stopped` when the holder stopped before it reported back (nothing
+was joined, the invite is untouched), and `pairing_abandoned` when the holder is gone
+with no recorded outcome.
 
 **Commands.**
 

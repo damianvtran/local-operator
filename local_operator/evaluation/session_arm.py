@@ -142,6 +142,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeSpec,
     UndeclaredDisclosedInfra,
     _observation_phase_failure,
+    _rebindable_failure,
     _terminal_kind,
 )
 from local_operator.evaluation.runner.model import EpisodeTurn
@@ -690,9 +691,10 @@ RecordBatch = Callable[[str, Mapping[str, Any]], None]
 ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 
 #: The re-bind seam: one bounded attempt to fetch the observation the episode
-#: may continue from, called by the bridge only after an execute failure the
-#: adapter declared COMMITTED (``_observation_phase_failure``). The driver
-#: fills it with the read-only ``observe`` call; tests fill it with a fake.
+#: may continue from, called by the bridge after an execute failure that is
+#: RE-BINDABLE (``_rebindable_failure``: the committed read-back class, or a
+#: pre-dispatch refusal). The driver fills it with the read-only ``observe``
+#: call; tests fill it with a fake.
 #: ``None`` means the bridge has no re-read path and a failed execute is
 #: terminal -- legibly (see ``ActionBridge._after_failed_execute``).
 RecoverObservation = Callable[[], Awaitable[Observation]]
@@ -777,10 +779,10 @@ class ActionBridge:
     #: a receipt (see ``_split_ask_delivery``).
     ask: Callable[[ActionBatch], Awaitable[Any]] | None = None
     #: The re-bind seam (see :data:`RecoverObservation`): exactly ONE read of
-    #: the environment's current observation, attempted only after an execute
-    #: failure the adapter declared committed. The bridge owns WHEN; the
-    #: driver owns the RPC. ``None`` degrades a failed execute to a legible
-    #: end rather than a silent one.
+    #: the environment's current observation, attempted after an execute
+    #: failure that is re-bindable (``_rebindable_failure``). The bridge owns
+    #: WHEN; the driver owns the RPC. ``None`` degrades a failed execute to a
+    #: legible end rather than a silent one.
     recover: RecoverObservation | None = None
     #: The task as it was stated -- the reset observation's text -- restated by
     #: the completion challenge (the same source the runner's gate uses).
@@ -1637,11 +1639,22 @@ class ActionBridge:
         failure the ADAPTER declared committed, and the episode stays dead even
         when the environment is healthy again. So this method attempts exactly
         ONE re-bind through the driver's ``recover`` seam (a read-only fetch of
-        the environment's current observation), and only for that committed
-        class (``_observation_phase_failure``) -- the same predicate the
-        read-back retries trust. For any other failure the batch's state is
-        ambiguous, the supervisor has poisoned the session, and re-reading is
-        not safe; the episode ends legibly instead.
+        the environment's current observation).
+
+        WHICH FAILURES QUALIFY (``_rebindable_failure``). Either the adapter
+        declared the batch committed and only the read-back was lost
+        (``_observation_phase_failure``), OR the worker refused before any
+        adapter code ran (``_refused_before_dispatch`` -- ``invalid_state``, the
+        task_077 wedge): a refusal applied NOTHING, so a read-only re-read is
+        safe, and the episode continues instead of discarding its applied work.
+        For any OTHER failure the batch's state is ambiguous, the supervisor has
+        poisoned the session, and re-reading is not safe; the episode ends
+        legibly instead.
+
+        This is the ONLY consumer of ``_rebindable_failure``; the read-back
+        retry loops keep the committed-only predicate because their recovery is
+        ``resume_observation`` ("the batch committed, skip the re-apply"), which
+        a refusal must not trigger.
 
         THE BOUND AND ITS COST. One ``recover`` call per failed batch, and none
         at all on the healthy path; the call itself is bounded by the caller's
@@ -1655,8 +1668,13 @@ class ActionBridge:
         """
 
         recover = self.recover
+        # ``committed`` keeps its STRICT meaning for the wedge sentence ("the
+        # adapter declared the batch committed"); the RE-BIND gate is wider --
+        # it also admits a pre-dispatch refusal (``invalid_state``), which is
+        # provably non-committed but still safe to re-read. See
+        # ``_refused_before_dispatch`` for the accuracy loss this closes.
         committed = _observation_phase_failure(error)
-        recovery_attempted = recover is not None and committed
+        recovery_attempted = recover is not None and _rebindable_failure(error)
         recovered: Observation | None = None
         recover_error: Exception | None = None
         if recovery_attempted and recover is not None:
@@ -2469,8 +2487,8 @@ async def run_session_episode(
             surface=surface,
             render=renderer.render,
             execute=_make_execute(adapter_session, config, record),
-            # The re-bind seam: one read-only ``observe`` after a failed
-            # execute the adapter declared committed (see ``_make_recover``).
+            # The re-bind seam: one read-only ``observe`` after a re-bindable
+            # failed execute (see ``_make_recover``).
             recover=_make_recover(adapter_session, config, spec.episode_id),
             max_steps=config.max_steps,
             record=lambda kind, payload: record.write(
@@ -3433,6 +3451,10 @@ def _make_execute(
                     timeout=config.step_timeout,
                 )
             except Exception as error:
+                # COMMITTED-ONLY, mirroring ``episode._execute_with_observation_recovery``:
+                # the recovery here is ``resume_observation``, which resumes a
+                # batch the adapter declared COMMITTED. A pre-dispatch refusal is
+                # handled at the bridge's read-only re-bind instead.
                 if attempt == attempts or not _observation_phase_failure(error):
                     raise
                 record.write(
@@ -3454,11 +3476,13 @@ def _make_recover(
     """The re-bind seam: ONE bounded read of the environment's current state.
 
     WHY ONE, AND WHY THIS CALL. The bridge calls this only after an execute
-    failure the adapter declared committed (``phase == "observation"``: the
-    batch applied, only the read-back lost) and whose configured read-back
-    retries have already run out -- so this is NOT a retry of that read-back
-    (raising those is a comparability-affecting change, see INFRA.md) but a
-    fresh state read through the read-only ``observe`` method every adapter
+    failure that is RE-BINDABLE -- the committed read-back class
+    (``phase == "observation"``: the batch applied, only the read-back lost) or
+    a pre-dispatch refusal (``invalid_state``: nothing applied) -- and whose
+    configured read-back retries have already run out, so this is NOT a retry
+    of that read-back (raising those is a comparability-affecting change, see
+    INFRA.md) but a fresh state read through the read-only ``observe`` method
+    every adapter
     already answers (``reset_start`` reads observation zero through it). It
     re-establishes what the bridge lost: a current observation the token can
     be re-armed with. When it cannot -- the environment is still unable to

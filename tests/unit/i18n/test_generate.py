@@ -94,19 +94,47 @@ def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
 def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
     """Drift/ownership pin against the COMMITTED tree (not a fixture).
 
-    The bundle that ships must be the explicit owned namespace, whole, and
+    The bundle that ships must be the explicit owned namespaces, whole, and
     nothing else — the client-side half of "no implicit wire prose bundled".
+    C2 adds ``relay.session`` beside ``relay.shell``; both are the SPA's own
+    copy and both must be present and complete.
     """
     bundle = (REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts").read_text(
         encoding="utf-8"
     )
-    en = json.loads((REPO / "local_operator/i18n/catalogues/en/relay.shell.json").read_text())
-    namespace = "relay.shell"
-    assert '"relay.shell": {' in bundle
-    for key, message in en.items():
-        assert key.startswith(f"{namespace}.")
-        assert json.dumps(message) in bundle, key
+    for namespace in ("relay.shell", "relay.session"):
+        en = json.loads((REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text())
+        assert f'"{namespace}": {{' in bundle
+        for key, message in en.items():
+            assert key.startswith(f"{namespace}.")
+            assert json.dumps(message) in bundle, key
     assert "wire." not in bundle and "relay.login" not in bundle
+
+
+def test_committed_relay_session_namespace_is_whole_and_generated() -> None:
+    """The relay.session key module, TS key map and en catalogue agree exactly.
+
+    Drift/ownership pin against the COMMITTED tree: every authored key must be
+    reachable as a generated Python ``Msg`` function and a typed TS key, and no
+    generated artifact may carry a key the catalogue does not (a hand edit that
+    desynced one of the three would otherwise ship a dead key or a missing one).
+    """
+    namespace = "relay.session"
+    en = json.loads((REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text())
+    module = (REPO / "local_operator/i18n/keys/relay_session.py").read_text(encoding="utf-8")
+    ts = (REPO / "local_operator/mobile/web/src/i18n/keys.gen.ts").read_text(encoding="utf-8")
+    for key in en:
+        assert key.startswith(f"{namespace}.")
+        assert f'Msg("{key}",' in module, key
+        assert f'"{key}":' in ts, key
+    # The Python module owns ONLY this namespace's keys.
+    import re as _re
+
+    for match in _re.finditer(r'Msg\("([^"]+)"', module):
+        assert match.group(1).startswith(f"{namespace}."), match.group(1)
+    # relay.session is registered in the generated package __init__.
+    init = (REPO / "local_operator/i18n/keys/__init__.py").read_text(encoding="utf-8")
+    assert "relay_session" in init
 
 
 def test_ts_plan_only_owns_wire_and_relay_types(generated, i18n_generate) -> None:
@@ -398,3 +426,46 @@ def test_drift_check_passes_on_the_committed_tree() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "byte-identical" in result.stdout
+
+
+@pytest.mark.parametrize("slash_status", [None, "failed", "passed"])
+@pytest.mark.parametrize("candidate", ["zh-CN", "zh-cn", "zh-Hans", "zh_CN"])
+def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
+    generated, i18n_generate, slash_status, candidate
+) -> None:
+    """Synthetic bytes only: omission is the bypass the carried gate cannot see."""
+    root, _ = generated
+    entries = []
+    for locale in ("en", "fr", candidate):
+        (root / locale).mkdir(exist_ok=True)
+        (root / locale / "wire.exec.json").write_text(
+            json.dumps({"wire.exec.demo": "Synthetic receipt"})
+        )
+    (root / "en" / "wire.slash.json").write_text(
+        json.dumps({"wire.slash.demo": "Synthetic action"})
+    )
+    for locale in ("fr", candidate):
+        entries.append(
+            {
+                "locale": locale,
+                "namespace": "wire.exec",
+                "status": "passed",
+                "source_sha256": catalogues.catalogue_sha256("en", "wire.exec"),
+            }
+        )
+    if slash_status is not None:
+        (root / candidate / "wire.slash.json").write_text(
+            json.dumps({"wire.slash.demo": "Synthetic action"})
+        )
+        entries.append(
+            {
+                "locale": candidate,
+                "namespace": "wire.slash",
+                "status": slash_status,
+                "source_sha256": catalogues.catalogue_sha256("en", "wire.slash"),
+            }
+        )
+    i18n_generate.LEDGER.write_text(json.dumps({"entries": entries}))
+    # fr proves that ordinary partial namespace eligibility remains supported.
+    # Even fabricated passes do not constitute explicit security disposition.
+    assert i18n_generate._shipped_locales() == ["en", "fr"]

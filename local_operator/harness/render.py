@@ -55,6 +55,7 @@ from local_operator.harness.message_types import (
 )
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
+    PEER_FAMILY_INPUT_TYPES,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
@@ -63,6 +64,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     SESSION_SEND_NOTICE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
 from local_operator.harness.rows import gate_waited_text
@@ -360,6 +362,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             HUB_MESSAGE_TYPE,
             JOB_RESULT_MESSAGE_TYPE,
             PEER_MESSAGE_MESSAGE_TYPE,
+            TEAM_BRIDGE_MESSAGE_TYPE,
             MONITOR_PROMPT_MESSAGE_TYPE,
         ):
             # A monitor delivery (a delta, or a lifecycle notice — disabled,
@@ -410,6 +413,16 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                     id=message.id,
                 )
             )
+        elif isinstance(message, CustomMessage) and message.custom_type in PEER_FAMILY_INPUT_TYPES:
+            # THE A1-CLASS DEFENCE, and deliberately the LAST arm: every type
+            # the session declares as family input (``harness/message_types.py``
+            # — peer, hub, team-bridge) surfaces to the model even if a future
+            # member is forgotten in the explicit tuple above. The trap this
+            # closes is silent: an unlisted custom type is dropped as
+            # bookkeeping, so the human sees a card and the model never does
+            # (measured for a peer message before this file listed it). Types
+            # OUTSIDE the family still drop — bookkeeping stays hidden.
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
     return out
 
 

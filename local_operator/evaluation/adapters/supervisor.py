@@ -132,6 +132,25 @@ def _mutation_committed(error: BaseException) -> bool:
     )
 
 
+def _refused_before_dispatch(error: BaseException) -> bool:
+    """Did the WORKER refuse the call before any adapter code ran?
+
+    Kept as its own predicate (rather than imported from ``episode``) so this
+    module keeps stating the condition it depends on, exactly as
+    ``_mutation_committed`` mirrors ``episode._observation_phase_failure``. The
+    two must stay in lockstep with ``episode._refused_before_dispatch``.
+
+    IMPORTANT -- WHERE THIS MAY BE USED. A refusal is NOT a committed mutation:
+    the only recovery that fits it is the bridge's read-only ``observe`` re-bind
+    (``session_arm._after_failed_execute``). It must NOT license
+    ``resume_observation``, whose contract is "the batch committed, skip the
+    re-apply". So this is consulted ONLY to keep the session usable after a
+    refused ``execute`` (see ``_mutating_call``) -- never to retry or resume.
+    """
+
+    return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
+
+
 class _Tail:
     """A bounded tail of one drained stream, with an idle signal.
 
@@ -750,7 +769,17 @@ class VerifiedAdapterSession:
             validate(result)
             return result
         except BaseException as error:
-            if not _mutation_committed(error):
+            # A refused ``execute`` (``invalid_state``, emitted before
+            # ``_dispatch``) applied NOTHING, but the bridge still needs the
+            # session usable to run its read-only ``observe`` re-bind -- so the
+            # refusal does not poison. Scoped to ``execute`` on purpose: the
+            # bridge's re-bind is the only consumer, and widening every mutating
+            # method would be scope drift (``_mutation_committed`` stays the
+            # committed-class predicate). The refusal never licenses a resume.
+            stays_usable = _mutation_committed(error) or (
+                method == "execute" and _refused_before_dispatch(error)
+            )
+            if not stays_usable:
                 await self._poison_after_ambiguous_mutation()
             raise
 

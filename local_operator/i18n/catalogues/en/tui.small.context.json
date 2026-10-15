@@ -1,0 +1,32 @@
+{
+  "tui.small.approval.allow_verb": {
+    "role": "approval prompt verb",
+    "tone": "plain, instructional",
+    "note": "The live approval card's verb, shown after the tool name so the row reads 'allow <tool>'. The message IS the verb: it has zero ICU arguments and is appended to a Rich Text row that then supplies the target, so the value's TRAILING SPACE is load-bearing — do not trim it. No maxCells: the card's own scored ladder sheds clauses by width rather than capping this word. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.draft.attachment_count": {
+    "role": "restored-draft clause",
+    "tone": "plain count",
+    "note": "The parenthesised image tally appended to a recovered draft's notice row, e.g. '(1 image)' / '(3 images)'. ICU plural on the raw count: zero never reaches this key (the caller guards `if images`), so the other branch is the only one that renders in practice and one covers the singular. The parentheses are INSIDE the branches, and {shown} carries the digit: the pre-extraction code used the bare integer (f'{images} image...'), so {shown} must be str(images) — a {images, number}/`#` slot would group 1200 as '1,200' and break byte identity. No maxCells: the notice row wraps/clips through the transcript block's own budget. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.model_picker.window_position": {
+    "role": "picker footer position counter",
+    "tone": "plain count",
+    "note": "The catalogue-position summary in the /model footer, e.g. '14 of 300' — the visible window's size against the full match count, drawn only when the window cannot show the whole list. {shown} and {total} are RAW digit strings, exactly as the pre-extraction f-string printed them; both are typed as plain args (not {x, number}/plural) because grouping them into '1,200 of 3,000' would be a visible change the catalogue slice must not smuggle in, matching tui.analytics.totals.calls_meta's raw-count convention. The footer joins this with ' · ' separators in code, so the value carries no separator. No maxCells: the footer is fitted by the picker's clause-fit pass. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session.resume_hint": {
+    "role": "post-exit scrollback line",
+    "tone": "plain, helpful",
+    "note": "Printed AFTER the TUI has released the terminal, so it lands in the user's scrollback where the command can be copied. {hint} is a ready-made 'lop --resume <id>' command string, kept verbatim (a command is syntax, never translated). The LEADING and TRAILING newlines are part of the value and are load-bearing: the leading one detaches the block from the frame above it and the trailing one is followed by print()'s own newline, so the caller must keep a plain print(). The em dash is literal text, not ICU syntax. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.spend.channel_not_itemised": {
+    "role": "session-spend channel note",
+    "tone": "plain, factual",
+    "note": "The note appended to a spend row whose channel is the residual 'other' bucket, so the row's money figure is not itemised per channel. 'itemised' is the British spelling used across this panel; keep it. Zero ICU arguments, one line; the row's note budget is applied by the caller. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.timing.no_samples": {
+    "role": "session timing table cell",
+    "tone": "plain, factual",
+    "note": "The dim cell drawn in the timing table where a row has no bar because no sample was recorded (timing is None, empty, or the scale is degenerate). It must NOT read as a measured zero: an absent sample is not a fast one, which is why the words are drawn and the zero in parentheses is the literal sample count rather than a measurement — the whole string is one fixed value with no ICU arguments and no substitution. 'samples' is the plural noun for the table's unit; do not pluralise a count into it. No maxCells. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  }
+}

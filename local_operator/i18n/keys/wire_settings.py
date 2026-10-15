@@ -138,6 +138,54 @@ def approvals_title() -> Msg:
     return Msg("wire.settings.approvals.title", {})
 
 
+def asks_description() -> Msg:
+    return Msg("wire.settings.asks.description", {})
+
+
+def asks_title() -> Msg:
+    return Msg("wire.settings.asks.title", {})
+
+
+def asks_lapsed_visible_for_choice_1h_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.1h.description", {})
+
+
+def asks_lapsed_visible_for_choice_1h_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.1h.label", {})
+
+
+def asks_lapsed_visible_for_choice_24h_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.24h.description", {})
+
+
+def asks_lapsed_visible_for_choice_24h_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.24h.label", {})
+
+
+def asks_lapsed_visible_for_choice_7d_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.7d.description", {})
+
+
+def asks_lapsed_visible_for_choice_7d_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.7d.label", {})
+
+
+def asks_lapsed_visible_for_choice_at_expiry_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.at_expiry.description", {})
+
+
+def asks_lapsed_visible_for_choice_at_expiry_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.at_expiry.label", {})
+
+
+def asks_lapsed_visible_for_help() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.help", {})
+
+
+def asks_lapsed_visible_for_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.label", {})
+
+
 def auto_save_conversation_choice_false_description() -> Msg:
     return Msg("wire.settings.auto_save_conversation.choice.false.description", {})
 
@@ -1120,18 +1168,6 @@ def hub_check_interval_min_help() -> Msg:
 
 def hub_check_interval_min_label() -> Msg:
     return Msg("wire.settings.hub_check_interval_min.label", {})
-
-
-def hub_merge_model_help() -> Msg:
-    return Msg("wire.settings.hub_merge_model.help", {})
-
-
-def hub_merge_model_label() -> Msg:
-    return Msg("wire.settings.hub_merge_model.label", {})
-
-
-def hub_merge_model_placeholder() -> Msg:
-    return Msg("wire.settings.hub_merge_model.placeholder", {})
 
 
 def keymap_description() -> Msg:

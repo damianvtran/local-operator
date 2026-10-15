@@ -1040,32 +1040,22 @@ async def test_account_id_reads_the_login_account_and_degrades_silently(tmp_path
         assert await tunnels_api.RadientTunnels(9999, client).account_id() is None
 
 
-@pytest.mark.parametrize("billing_succeeds", [False, True])
-def test_mobile_enable_reactivates_existing_tunnel_before_starting(
-    tmp_path, monkeypatch, billing_succeeds
-):
-    from local_operator.tunnels import cli
+def test_mobile_enable_uses_shared_setup_and_preserves_its_receipts(monkeypatch):
+    from local_operator.tunnels import cli, setup
 
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    config.save({"tunnel_id": "existing"})
-    calls = []
-
-    async def command(args):
-        calls.append(args)
-        if args.tunnel_command == "configure":
-            assert args.remote_enabled is True
-            assert args.accept_monthly_price == "0.05"
-            if not billing_succeeds:
-                raise ValueError("The accepted price differs from the current quote.")
-            return "Reactivated"
-        return "Service started"
-
-    monkeypatch.setattr(cli, "dispatch", command)
-    receipt = cli.mobile_action("enable", "0.05")
-    assert [args.tunnel_command for args in calls] == (
-        ["configure", "install"] if billing_succeeds else ["configure"]
+    runner = AsyncMock(
+        return_value={
+            "step": "failed",
+            "verified": False,
+            "receipts": ["Reservation saved"],
+            "remedy": "Retry",
+        }
     )
-    assert ("Service started" in receipt) is billing_succeeds
+    monkeypatch.setattr(setup, "apply", runner)
+    receipt = cli.mobile_action("enable", "0.05")
+    runner.assert_awaited_once_with(None, "0.05", progress=None)
+    assert "Reservation saved" in receipt
+    assert "/mobile status" in receipt and "/mobile enable" in receipt
 
 
 @pytest.mark.asyncio

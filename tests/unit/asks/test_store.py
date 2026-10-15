@@ -715,3 +715,185 @@ def test_a_revision_cannot_smuggle_attachments_in() -> None:
     }
     (record,) = store.fold([_queued(), _answered(at=1_500_000), revised], now=1_600_000)
     assert "attachments" not in record
+
+
+def _stale_open_entry(root: Path, session_id: str, now: int) -> None:
+    """An index entry still saying ``open`` one minute past its deadline — what a
+    runtime stopped before the deadline leaves behind (it never wrote the fold
+    again)."""
+    (root / store.SESSIONS_DIRNAME / session_id).mkdir(parents=True)
+    store.write_entry(
+        root,
+        session_id,
+        cwd="/tmp/w",
+        asks=[
+            {
+                "ask_id": "stale-1",
+                "created_at": now - 600_000,
+                "expires_at": now - 60_000,
+                "timeout_s": 540,
+                "urgent": False,
+                "status": store.STATUS_OPEN,
+                "delivered": False,
+                "questions": [],
+            }
+        ],
+    )
+
+
+def test_a_stale_open_row_past_its_deadline_reads_timed_out_from_every_index_reader(
+    tmp_path: Path,
+) -> None:
+    """The index holds the status as last WRITTEN; the readers judge it at ``now``.
+
+    Without the re-derivation the phone showed a lapsed ask with no control (the
+    queue would accept a dismiss — it folds the log to ``timed_out`` — but the
+    surface read the index's stale ``open``), the legacy mirror painted it as a
+    live card, and every count called it waiting.
+    """
+    now = int(time.time() * 1000)
+    _stale_open_entry(tmp_path, "s-stale", now)
+    assert [row["status"] for row in store.session_asks(tmp_path, "s-stale", now=now)] == [
+        store.STATUS_TIMED_OUT
+    ]
+    assert [row["status"] for row in store.index_asks(tmp_path, now=now)] == [
+        store.STATUS_TIMED_OUT
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The lapsed-visibility window (decisions D6–D8: `asks.lapsed_visible_for`)
+# ---------------------------------------------------------------------------
+
+HOUR_MS = 3600 * 1000
+
+
+def _lapsed_and_answered_entry(root: Path, session_id: str, expires_at: int) -> None:
+    """One timed-out ask and one answered ask sharing the SAME deadline.
+
+    The pair is what pins D6's scope: the window is about LAPSED rows only, so
+    an answered row with the identical ``expires_at`` must survive the window
+    that hides its timed-out neighbour (an answer receipt is not an expired
+    question)."""
+    (root / store.SESSIONS_DIRNAME / session_id).mkdir(parents=True)
+    store.write_entry(
+        root,
+        session_id,
+        cwd="/tmp/w",
+        asks=[
+            store.pending_row(
+                {
+                    **_queued("lapsed-1", at=expires_at - 120_000, timeout_s=120),
+                    "expires_at": expires_at,
+                    "status": store.STATUS_TIMED_OUT,
+                }
+            ),
+            store.pending_row(
+                {
+                    **_queued("answered-1", at=expires_at - 120_000, timeout_s=120),
+                    "expires_at": expires_at,
+                    "status": store.STATUS_ANSWERED,
+                }
+            ),
+        ],
+    )
+
+
+def test_a_zero_window_hides_a_timed_out_row_but_keeps_an_answered_one(tmp_path: Path):
+    _lapsed_and_answered_entry(tmp_path, "s1", BASE)
+    rows = store.index_asks(tmp_path, now=BASE + 1, lapsed_visible_ms=0)
+    assert [row["ask_id"] for row in rows] == ["answered-1"]
+
+
+def test_no_window_keyword_is_todays_seven_day_result(tmp_path: Path):
+    _lapsed_and_answered_entry(tmp_path, "s1", BASE)
+    default = store.index_asks(tmp_path, now=BASE + 6 * DAY_MS)
+    assert sorted(row["ask_id"] for row in default) == ["answered-1", "lapsed-1"]
+    explicit = store.index_asks(
+        tmp_path, now=BASE + 6 * DAY_MS, lapsed_visible_ms=store.LATE_WINDOW_S * 1000
+    )
+    assert explicit == default
+    # And the default IS the 7 d choice of the setting, not a second number.
+    assert store.LAPSED_VISIBLE_FOR_S[store.DEFAULT_LAPSED_VISIBLE_FOR] == store.LATE_WINDOW_S
+
+
+def test_a_stale_open_row_past_its_deadline_is_hidden_after_the_window(tmp_path: Path):
+    """D5's re-derived ``open`` past ``expires_at`` IS lapsed, so the window
+    applies to it exactly as to a written ``timed_out``."""
+    now = BASE
+    _stale_open_entry(tmp_path, "s-stale", now)  # expires_at = now - 60 s
+    assert [
+        r["ask_id"] for r in store.index_asks(tmp_path, now=now, lapsed_visible_ms=HOUR_MS)
+    ] == ["stale-1"]
+    later = now - 60_000 + HOUR_MS + 1
+    assert store.index_asks(tmp_path, now=later, lapsed_visible_ms=HOUR_MS) == []
+
+
+def test_an_open_row_before_its_deadline_ignores_the_window(tmp_path: Path):
+    (tmp_path / store.SESSIONS_DIRNAME / "s1").mkdir(parents=True)
+    store.write_entry(
+        tmp_path,
+        "s1",
+        cwd="/tmp",
+        asks=[store.pending_row({**_queued(at=BASE, timeout_s=3600), "status": "open"})],
+    )
+    assert len(store.index_asks(tmp_path, now=BASE + 1, lapsed_visible_ms=0)) == 1
+
+
+def test_session_asks_honours_the_window(tmp_path: Path):
+    _lapsed_and_answered_entry(tmp_path, "s1", BASE)
+    assert [
+        r["ask_id"] for r in store.session_asks(tmp_path, "s1", now=BASE + 1, lapsed_visible_ms=0)
+    ] == ["answered-1"]
+    assert len(store.session_asks(tmp_path, "s1", now=BASE + 1)) == 2
+
+
+def test_the_sweep_keeps_an_entry_whose_only_row_is_hidden_by_the_window(tmp_path: Path):
+    """The window is DISPLAY only (D6): the index's TTL sweep stays at 7 d, so
+    widening the setting again brings the row back for a stopped session."""
+    (tmp_path / store.SESSIONS_DIRNAME / "s1").mkdir(parents=True)
+    store.write_entry(
+        tmp_path,
+        "s1",
+        cwd="/tmp",
+        asks=[
+            store.pending_row(
+                {
+                    **_queued(at=BASE - 120_000, timeout_s=120),
+                    "expires_at": BASE,
+                    "status": "timed_out",
+                }
+            )
+        ],
+    )
+    now = BASE + 2 * HOUR_MS
+    assert store.index_asks(tmp_path, now=now, lapsed_visible_ms=HOUR_MS) == []
+    entry = store.read_entry(tmp_path, "s1")
+    assert entry is not None
+    assert store.entry_is_stale(entry, now, session_exists=True) is False
+    assert store.entry_path(tmp_path, "s1").exists()
+    assert len(store.index_asks(tmp_path, now=now)) == 1
+
+
+@pytest.mark.parametrize(
+    ("choice", "seconds"),
+    [("at_expiry", 0), ("1h", 3600), ("24h", 86_400), ("7d", 7 * 86_400)],
+)
+def test_the_choice_table_maps_every_choice_from_expires_at(choice: str, seconds: int):
+    assert store.LAPSED_VISIBLE_FOR_S[choice] == seconds
+
+
+def test_is_lapsed_names_timed_out_only():
+    assert store.LAPSED_STATUSES == frozenset({store.STATUS_TIMED_OUT})
+    assert store.is_lapsed(store.STATUS_TIMED_OUT) is True
+    for status in (
+        "open",
+        "answered",
+        "declined",
+        "late",
+        "dismissed",
+        "withdrawn",
+        "expired",
+        None,
+    ):
+        assert store.is_lapsed(status) is False, status

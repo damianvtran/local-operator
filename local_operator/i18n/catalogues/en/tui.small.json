@@ -1,0 +1,8 @@
+{
+  "tui.small.approval.allow_verb": "allow ",
+  "tui.small.draft.attachment_count": "{images, plural, one {({shown} image)} other {({shown} images)}}",
+  "tui.small.model_picker.window_position": "{shown} of {total}",
+  "tui.small.session.resume_hint": "\nsession ended — resume with:\n  {hint}\n",
+  "tui.small.spend.channel_not_itemised": "not itemised",
+  "tui.small.timing.no_samples": "unknown (0 samples)"
+}

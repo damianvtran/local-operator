@@ -2563,6 +2563,26 @@ class AttachClient:
             fields["images"] = list(images)
         return await self._request("ask_respond", **fields)
 
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
+        """Decide an AGENT-MESSAGES request from its card (TB-02 wiring).
+
+        THE VERIFIED DOOR, and the reason the card can answer at all: the
+        runtime's authority seam admits this op only for a connection that
+        proved the spawn capability or presented a verified operator/device
+        signature, and mints the one-shot grant the dispatcher consumes at the
+        point of effect. ``question_id`` is the request's message id (what the
+        card was rendered from) and ``word`` is one of the request's own option
+        ids (``approve``/``deny``). A plain :meth:`ask_respond` on the same ask
+        is refused by the session — an unproven answer can neither decide the
+        request nor stall a real decision.
+        """
+        fields: dict[str, Any] = {
+            "ask_id": ask_id,
+            "question_id": question_id,
+            "word": word,
+        }
+        return await self._request("bridge_decide", **fields)
+
     async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
         """REVISE a queued ask's recorded answer before it is delivered (§10).
 

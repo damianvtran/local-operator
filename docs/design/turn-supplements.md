@@ -215,7 +215,7 @@ Both stamp `provider_payload[RENDERED_INJECTION_KEY]` (`session.py:8155`, `:8267
 | User message, then a courtesy wake mid-turn | **not** eligible | the wake is the last non-internal trigger |
 | Wake / monitor-only turn | not eligible | no typed user row |
 | Peer `send`, hub/agent message, job result | not eligible | `internal` (`session.py:11753-11754`) |
-| Queued ask answer (`ask_response`, attribution user) | **not** eligible | `custom_type` set → `internal`. The *answer* is the operator's, but the turn's final message responds to a question the agent raised. **Open question Q4** (§11) offers an opt-in. |
+| Queued ask answer (`ask_response`, attribution user, `details.status == "answered"`) | eligible | **Amended after v0.71.3** (Q4 resolved): the turn that resumes after an ask is the one that does the approved work and writes the deliverables, and a person chose to start it. `Session._note_run_input` still classes the row `internal` for the notify record but also sets the supplement facts (`supplements.trigger.ask_answer_is_person`). `declined`, `late`, `ask_timeout` and any harness-minted row stay **not** eligible. The decision's request text is the answer plus the session's last typed request. |
 | Mid-turn typed steer | eligible, if it is the last trigger | drained steers pass through `_note_run_input` (`session.py:16004`) |
 | Goal-loop / judge continuation, spooled owner chrome | not eligible | `RENDERED_INJECTION_KEY` |
 | Spooled *real* owner prompt (sent during an update window) | eligible | `harness_injected` False on a typed spool row |
@@ -1348,7 +1348,9 @@ Every other lane codes against those fixtures.
   - Graphics spend money before any UI can render them. C1 therefore **keeps
     `supplements.graphics` off by default until U-b or R has shipped**.
   - The flip is a one-line follow-up PR in the release window that carries the first
-    renderer.
+    renderer. *(Done after v0.71.3: the desktop UI renders components, so
+    `DEFAULT_GRAPHICS` is `True`; the evidence gate, the 0.7 threshold and `maxCostUsd`
+    are what bound the spend.)*
 
 **The security round (S-matrix, §4.4)** is an *independent* reviewer pass per surface
 (a `reviewer` subagent with the security brief, not the implementing coder). Each surface's
@@ -1501,7 +1503,7 @@ bounded scan of the run's messages (target ≤ 5 ms, measured in C1's evidence).
 | Q1 | **Default-on for graphics, and the per-job cap.** Files are free; graphics cost ≈ $0.04-0.08 per generated job at Sonnet-class (estimate, §5.3), and only on eligible turns that pass the decision. | `supplements.enabled=true`, `files=true`, **`graphics=true` once a renderer ships** (§6), `maxCostUsd=1.00` (sized to cover roughly one Opus-class turn, not derived from the $0.04-0.08 Sonnet-class envelope estimate; R3, units per R2-6 — the cap is only checked between turns). Add a daily cap only if the dogfood week shows > $1/day. |
 | Q2 | **Which model "auto" prefers** when several design-capable models are logged in (the ladder order in §2.5). | Sonnet-class first: the best measured HTML/SVG quality per dollar in prior design work. Revisit with the §5.3 arms. |
 | Q3 | **The user-facing name.** | "Highlights" (§0). The alternative is "Supporting graphics" if the files half should stay unnamed. |
-| Q4 | **Should answering a queued ask make the follow-up answer eligible?** The answer is the operator's input, but it replies to the agent's question. | No in v1 (precision). Revisit if the dogfood week shows missed charts after ask answers. |
+| Q4 | **Should answering a queued ask make the follow-up answer eligible?** The answer is the operator's input, but it replies to the agent's question. | ~~No in v1 (precision).~~ **Yes** (after v0.71.3): the dogfood week showed the resumed-after-ask turn is where approved deliverables get written, and it went unhighlighted. |
 | Q5 | **Featuring files on code-edit turns** (the diff is already visible). | No (§5.2 note); F4 adds an opt-in. |
 | Q6 | **Mesh sessions in v1**: show peer files and components as "on <peer>", preview disabled, or hide them? | Show them, disabled, with the peer named; F2 adds transfer. |
 

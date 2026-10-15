@@ -413,13 +413,30 @@ class PeerMessageDelivered(SessionEvent):
     the cross-session indicator immediately, even while the session is idle.
     ``message_id`` is the persisted transcript row's id, recorded by the app so
     a later history replay does not mount a second copy of the same delivery.
+    ``custom_type`` is the delivery's provenance kind (empty = peer), so the
+    live paint chooses the same card the replay fold does (§13.4).
     """
 
-    def __init__(self, body: str, sender: dict[str, Any], message_id: str = "") -> None:
+    def __init__(
+        self,
+        body: str,
+        sender: dict[str, Any],
+        message_id: str = "",
+        custom_type: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
         self.body = body
         self.sender = sender
         self.message_id = message_id
+        self.custom_type = custom_type
+        #: The persisted row's own ``details`` (round 13). The bridge card is
+        #: built from the row's VALIDATED provenance, so the live paint needs
+        #: the same input the replay fold reads; carrying only ``body`` here is
+        #: what made the live bridge branch read an attribute this message does
+        #: not have. Empty on a plain peer delivery, which is what every peer
+        #: path paints from anyway.
+        self.details: dict[str, Any] = dict(details or {})
 
 
 class NoticePosted(SessionEvent):
@@ -1184,7 +1201,15 @@ class EventController:
         # No generation guard: a peer delivery is a state fact about the
         # session (this message landed), not a turn-scoped boundary, so a
         # superseded turn cannot invalidate it — same rationale as a wake.
-        self._post(PeerMessageDelivered(event.body, dict(event.sender), event.message_id))
+        self._post(
+            PeerMessageDelivered(
+                event.body,
+                dict(event.sender),
+                event.message_id,
+                event.custom_type,
+                details=dict(event.details),
+            )
+        )
 
     def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
         # No TURN guard, deliberately: the drain belongs to whichever turn is

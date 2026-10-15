@@ -258,6 +258,15 @@ def evidence_block(
                 "source": dataset.source,
                 "columns": list(dataset.columns),
                 "rows": [list(row) for row in dataset.rows],
+                **(
+                    {
+                        "presentation": "table-only: distinct entity units; "
+                        "do not compare with bars, "
+                        "axes, percentages or totals; preserve each row's entity label"
+                    }
+                    if dataset.presentation == "table-only"
+                    else {}
+                ),
             },
             ensure_ascii=False,
             separators=(",", ":"),

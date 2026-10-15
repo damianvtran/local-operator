@@ -25,6 +25,8 @@ from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
 from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -75,6 +77,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
+        OPENROUTER_RETIRE_BELOW_TPS,
     )
 
     # The mesh audit log's three bounds, taken from the module that READS them:
@@ -270,6 +273,12 @@ def _consumer_defaults() -> dict[str, object]:
         # (``rollouts.rollout_policy`` resolves an absent key against exactly
         # this constant — the reader's own fallback, not a restatement).
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
+        "memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "memory.capture": MEMORY_DEFAULT_ENABLED,
+        "memory.suggest": MEMORY_DEFAULT_ENABLED,
+        "network.memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "network.memory.scopes": list(SCOPES),
+        "network.memory.exclude_devices": list(DEFAULT_EXCLUDED_DEVICES),
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
@@ -330,6 +339,11 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.openrouter.preferred_max_latency": (
             DEFAULT_CONFIG.values["providers"]["openrouter"]["preferred_max_latency"]
         ),
+        # Three restatements of one number (registry literal, DEFAULT_CONFIG, the
+        # consumer constant): the registry default is checked against the
+        # constant here, and DEFAULT_CONFIG against it in
+        # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
+        "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -372,6 +386,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers.update(_monitor_consumer_defaults())
     consumers.update(_supplements_consumer_defaults())
     consumers.update(_team_bridge_consumer_defaults())
+    # ``asks.lapsed_visible_for``'s reader table lives beside its consumer in
+    # the stdlib-only store; the registry row carries a literal (D7).
+    from local_operator.asks.store import DEFAULT_LAPSED_VISIBLE_FOR
+
+    consumers["asks.lapsed_visible_for"] = DEFAULT_LAPSED_VISIBLE_FOR
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -603,7 +622,6 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.rate": "tui/settings.py derives its defaults from this registry",
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
-    "hub.merge_model": "free text; empty means 'use the default model', no constant",
     "subagents.models.lo": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.med": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.hi": "free text; empty removes the tier; 'default' tracks it, no constant",
@@ -1381,7 +1399,7 @@ def test_openrouter_defaults_mean_no_opinion() -> None:
         for key in settings_io.BY_KEY
         if key.startswith("providers.openrouter.")
     }
-    assert len(defaults) == 14
+    assert len(defaults) == 15
     # STILL None with all 14 defaults present, including the ON-by-default
     # ``provider_affinity``. That is the point of asserting it here: that key is
     # a HARNESS switch read by ``SessionStreamFn._affinity_enabled``, and it is
@@ -3115,3 +3133,38 @@ def test_delegated_rows_round_trip_through_the_policy_reader(manager: ConfigMana
     )
     policy = policy_from_config(ConfigManager(manager.config_dir))
     assert (policy.delegated_enabled, policy.delegated_max_age_hours) == (False, 96)
+
+
+class TestTheLapsedAskWindowRow:
+    """``asks.lapsed_visible_for`` (decisions D6/D7): a four-choice dropdown."""
+
+    def test_the_row_is_a_nested_enum_in_its_own_live_section(self) -> None:
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        assert setting.path == ("asks", "lapsed_visible_for")
+        assert setting.kind is settings_io.Kind.ENUM
+        assert setting.default == "7d"
+        section = next(s for s in settings_io.SECTIONS if s.name == setting.section)
+        assert section.name == "asks"
+        assert section.scope is settings_io.Scope.LIVE
+
+    def test_the_choices_are_exactly_the_readers_table(self) -> None:
+        from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
+
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        values = [choice.value for choice in setting.choices]
+        assert values == ["at_expiry", "1h", "24h", "7d"]
+        assert set(values) == set(LAPSED_VISIBLE_FOR_S)
+
+    @pytest.mark.parametrize("value", ["at_expiry", "1h", "24h", "7d"])
+    def test_every_choice_validates(self, value: str) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["asks.lapsed_visible_for"], value) is None
+
+    @pytest.mark.parametrize("value", ["2h", "", "7D", 3600, None])
+    def test_a_value_outside_the_dropdown_is_refused(self, value: object) -> None:
+        assert (
+            settings_io.validate(settings_io.BY_KEY["asks.lapsed_visible_for"], value) is not None
+        )
+
+    def test_the_help_fits_with_the_default_clause(self) -> None:
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help

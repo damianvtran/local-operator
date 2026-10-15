@@ -527,7 +527,7 @@ jobs:
           $env:USERPROFILE = $env:HOME
           $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py -n0 -q
+          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout -n0 -q
 
   # The cross-platform probe battery (`scripts/xplat_probe.py`), one leg per OS.
   #
@@ -722,7 +722,11 @@ jobs:
     # unmeasured test file at the 30.786s fallback, taking the heaviest shard
     # to 6001.689s -- 1500.42s, 0.42s past the budget. 27 is the guard's own
     # minimum, ceil((1500.42 + 60)/60); measured walls are still far below it.
-    timeout-minutes: 27
+    # Leave growth margin: the 2026-10-15 merge refs project up to 1562.952s
+    # plus 60s setup overhead, exceeding the former 27-minute ceiling.
+    # Thirty minutes leaves 177s of headroom; weights, worker count, shard
+    # formula and watchdogs are unchanged. This is not a test-failure waiver.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

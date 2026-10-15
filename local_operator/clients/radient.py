@@ -1999,6 +1999,58 @@ class RadientClient:
                 f"Response Body: {error_body}"
             ) from e
 
+    def delete_tenant_agent(self, tenant_id: str, agent_id: str) -> None:
+        """
+        Delete an organization agent through the documented tenant route.
+
+        The public surface (``delete_agent_from_marketplace``) answers 404 for
+        an org-scoped row -- it does not know it. The server's org-sharing API
+        documents ``DELETE /v1/tenants/:tenantid/agents/:agentid`` (admin+),
+        which is the only working path for those rows. Both ids land in the URL
+        path, so they are validated BEFORE the request is built, and the rule is
+        a CANONICAL UUID: literal separators are not enough because requests
+        normalizes "." / ".." / percent-encoded components before sending, so a
+        "safe-looking" id could still address a different resource (review R3:
+        `--id ..` prepared a DELETE for the tenant root).
+
+        Args:
+            tenant_id (str): The organization owning the agent.
+            agent_id (str): The agent ID to delete.
+
+        Raises:
+            ValueError: If either id is empty or path-unsafe.
+            RuntimeError: If the API key is not set or the delete fails.
+        """
+        tenant = str(tenant_id or "").strip()
+        agent = str(agent_id or "").strip()
+        # UUID parsing refuses dots, percent-encoded traversal, slashes,
+        # control characters and empty strings in one rule; the canonical-form
+        # comparison additionally refuses braced/urn/compact spellings.
+        for label, value in (("tenant_id", tenant), ("agent_id", agent)):
+            try:
+                canonical = str(uuid.UUID(value))
+            except (ValueError, TypeError, AttributeError):
+                canonical = ""
+            if not value or value.lower() != canonical:
+                raise ValueError(f"invalid {label}: a canonical UUID is required")
+        url = f"{self.base_url}/tenants/{tenant}/agents/{agent}"
+        headers = self._get_headers(content_type=None, require_api_key=True)
+        try:
+            response = requests.delete(url, headers=headers)
+            if response.status_code == 204:
+                return
+            error_body = self._surfaceable_body(scrubbed_response_body(response))
+            raise RuntimeError(
+                f"Failed to delete organization agent from Radient: HTTP "
+                f"{response.status_code}, Response Body: {error_body}"
+            )
+        except requests.exceptions.RequestException as e:
+            error_body = self._surfaceable_body(response_body(e))
+            raise RuntimeError(
+                f"Failed to delete organization agent from Radient: {str(e)}, "
+                f"Response Body: {error_body}"
+            ) from e
+
     def send_email_to_self(self, subject: str, body: str) -> RadientSendEmailResponseData:
         """Send an email to the authenticated user's email address.
 
