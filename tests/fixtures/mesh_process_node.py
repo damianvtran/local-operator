@@ -21,19 +21,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def main() -> None:
-    from local_operator.network import identity, relay
-    from local_operator.network.credentials import github
+def install_fixture_anchor(root: Path) -> dict[str, int]:
+    """One synthetic OS boundary for BOTH loader bindings, never host fallback.
+
+    operator imports/reexports load_anchor before this helper runs. Patching
+    only trust left its authority report reading the real host anchor: Darwin
+    could pass via an installed anchor while clean Linux truthfully refused.
+    Native aliases must instead trip this guard BEFORE any OS path is read.
+    """
+    from local_operator import operator
     from local_operator.operator import trust
-    from tests.unit.network.test_relay_e2e import _init_network
 
-    SOURCE_ROOT = Path(__file__).resolve().parents[2]
-    assert Path(relay.__file__).resolve() == SOURCE_ROOT / "local_operator/network/relay.py"
-    HELPER_SOURCE = sys.modules[_init_network.__module__].__file__
-    assert HELPER_SOURCE is not None
-    assert Path(HELPER_SOURCE).resolve() == SOURCE_ROOT / "tests/unit/network/test_relay_e2e.py"
-
-    root = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
     public_anchor = root / "fixture-owned-anchor.json"
 
     def os_anchor(uid=None):
@@ -52,7 +50,35 @@ def main() -> None:
             exists=anchor is not None,
         )
 
+    reads = {"native_anchor_reads": 0}
+    # Existing test-only path seam also fences any path-construction alias;
+    # it is never a product environment override or an installed host anchor.
+    trust._ANCHOR_ROOT_OVERRIDE = root / "forbidden-native-anchor"
+
+    def forbidden_native_path(uid=None):
+        reads["native_anchor_reads"] += 1
+        raise AssertionError("fixture attempted a native OS anchor read")
+
+    trust.anchor_path = forbidden_native_path
     trust.load_anchor = os_anchor
+    operator.load_anchor = os_anchor
+    assert operator.authority_level_load.__globals__["load_anchor"] is os_anchor
+    return reads
+
+
+def main() -> None:
+    from local_operator.network import identity, relay
+    from local_operator.network.credentials import github
+    from tests.unit.network.test_relay_e2e import _init_network
+
+    SOURCE_ROOT = Path(__file__).resolve().parents[2]
+    assert Path(relay.__file__).resolve() == SOURCE_ROOT / "local_operator/network/relay.py"
+    HELPER_SOURCE = sys.modules[_init_network.__module__].__file__
+    assert HELPER_SOURCE is not None
+    assert Path(HELPER_SOURCE).resolve() == SOURCE_ROOT / "tests/unit/network/test_relay_e2e.py"
+
+    root = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
+    native_reads = install_fixture_anchor(root)
     # Match the existing network conftest's OS-discovery seam in child
     # processes too: discovering native gh must not reach the user's keychain.
     github._resolve_program = lambda name, path=None: None
@@ -90,6 +116,7 @@ def main() -> None:
                 "port": port,
                 "network_id": record.network_id if record else "",
                 "pid": os.getpid(),
+                "native_anchor_attempts": native_reads["native_anchor_reads"],
             }
         ),
         flush=True,
@@ -97,6 +124,7 @@ def main() -> None:
     try:
         for line in sys.stdin:
             request = json.loads(line)
+            assert native_reads["native_anchor_reads"] == 0, "native OS anchor isolation failed"
             if request.get("stop"):
                 break
             if request.get("audit"):
@@ -123,8 +151,16 @@ def main() -> None:
                         rc = int(exit_result.code or 0)
             finally:
                 sys.argv = saved
+            assert native_reads["native_anchor_reads"] == 0, "native OS anchor isolation failed"
             print(
-                json.dumps({"rc": rc, "stdout": out.getvalue(), "stderr": err.getvalue()}),
+                json.dumps(
+                    {
+                        "rc": rc,
+                        "stdout": out.getvalue(),
+                        "stderr": err.getvalue(),
+                        "native_anchor_attempts": native_reads["native_anchor_reads"],
+                    }
+                ),
                 flush=True,
             )
     finally:
