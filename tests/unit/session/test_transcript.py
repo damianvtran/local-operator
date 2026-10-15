@@ -64,15 +64,13 @@ async def test_an_image_only_send_stores_no_empty_text_block(transcript):
     await transcript.append_message(message)
 
     payload = json.loads(transcript.path.read_text().splitlines()[-1])["payload"]
-    assert payload["content"] == [{"data": "aGk="}], (
-        "an empty text block is dumped as {} and poisons every later turn"
-    )
+    assert payload["content"] == [
+        {"data": "aGk="}
+    ], "an empty text block is dumped as {} and poisons every later turn"
     assert payload["input_mode"] == "typed"
 
     # And the replayed message must not resurrect one.
-    (replayed,) = [
-        m for m in transcript.build_llm_history() if getattr(m, "role", None) == "user"
-    ]
+    (replayed,) = [m for m in transcript.build_llm_history() if getattr(m, "role", None) == "user"]
     assert [type(block).__name__ for block in replayed.content] == ["ImageContent"]
 
 

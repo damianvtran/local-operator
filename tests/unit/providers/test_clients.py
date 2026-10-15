@@ -4609,9 +4609,9 @@ def test_anthropic_recovers_a_transcript_that_already_stores_the_empty_block() -
     ]
     for entry in body["messages"]:
         for block in entry["content"]:
-            assert block.get("type") != "text" or block["text"].strip(), (
-                "an empty text block is the 400 this issue is about"
-            )
+            assert (
+                block.get("type") != "text" or block["text"].strip()
+            ), "an empty text block is the 400 this issue is about"
 
 
 def test_anthropic_never_sends_a_message_whose_blocks_all_dropped() -> None:
@@ -4643,6 +4643,32 @@ def test_anthropic_still_carries_an_image_only_turn() -> None:
     body = AnthropicClient()._build_body(request)
     assert [m["role"] for m in body["messages"]] == ["user"]
     assert [block["type"] for block in body["messages"][0]["content"]] == ["image"]
+
+
+def test_responses_keeps_a_shape_for_an_empty_user_turn() -> None:
+    """#2460, second-order: ``Message.user`` no longer emits a text block for
+    absent text, so an empty user message now reaches this wire with ZERO
+    blocks.
+
+    Every other wire already had a shape for that — Google backfills
+    (``parts or [{"text": ""}]``), the chat wire joins parts into one string —
+    and the Responses wire is the one that would have emitted an empty
+    ``content`` array it has never sent. Pinned here so the write-side fix
+    cannot silently introduce it: an image-only turn must carry its image with
+    no invented text part.
+    """
+    assert _messages_to_openai_responses([Message.user("")]) == [
+        {"role": "user", "content": [{"type": "input_text", "text": ""}]}
+    ]
+    image_only = _messages_to_openai_responses(
+        [Message.user("", images=[ImageContent(data="aGk=", mime_type="image/png")])]
+    )
+    assert image_only == [
+        {
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": "data:image/png;base64,aGk="}],
+        }
+    ]
 
 
 def test_google_drops_whitespace_only_assistant_turns() -> None:

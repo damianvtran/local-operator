@@ -2334,6 +2334,16 @@ def _messages_to_openai_responses(
                     "The OpenAI Responses API cannot carry audio input; audio "
                     "requests must use the chat-completions wire."
                 )
+        if not content and message.role == "user":
+            # A user turn with nothing to say is backfilled, not skipped, and
+            # this mirrors the rule the Google wire below already applies
+            # (``parts or [{"text": ""}]``). It became reachable when
+            # ``Message.user`` stopped emitting an empty text block (#2460):
+            # the message now renders zero blocks where it used to render one
+            # blank ``input_text``, and an empty ``content`` array is a shape
+            # this wire has never sent. A user item is also the one item a
+            # request cannot simply drop — it is the request's own subject.
+            content = [{"type": "input_text", "text": ""}]
         items.append({"role": message.role, "content": content})
     return items
 
