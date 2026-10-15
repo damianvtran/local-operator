@@ -620,9 +620,7 @@ def test_bridge_asks_ride_a_separate_budget(tmp_path: Path) -> None:
         issuance_key="iss-cap-over",
         fingerprint=FP,
         questions=[
-            bridge_request_question(
-                message_id="bmsg_cap_over", sender="s", excerpt="", scope=SCOPE
-            )
+            bridge_request_question(message_id="bmsg_cap_over", sender="s", excerpt="", scope=SCOPE)
         ],
     )
     assert refused["ok"] is False
