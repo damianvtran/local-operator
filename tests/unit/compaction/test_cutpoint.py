@@ -4,12 +4,19 @@ import pytest
 
 from local_operator.compaction.cutpoint import (
     _message_tokens,
+    advance_cut_to_wire_band,
     extract_preserved_user_turns,
     find_cut_point,
     prepare_partitions,
 )
 from local_operator.compaction.tokens import _encode_len, estimate_tokens
-from local_operator.harness.types import CustomMessage, Message, ToolCall
+from local_operator.harness.types import (
+    CustomMessage,
+    ImageContent,
+    Message,
+    TextContent,
+    ToolCall,
+)
 
 
 def _big_user(words: int = 200) -> Message:
@@ -539,3 +546,121 @@ def test_extract_refuses_a_legacy_harness_notice_as_a_user_turn():
     assert [t["text"] for t in extract_preserved_user_turns(to_summarize)] == [
         "NEVER touch billing.py"
     ]
+
+
+# ---------------------------------------------------------------------------
+# advance_cut_to_wire_band: the byte-ruled correction to the token-ruled cut
+# ---------------------------------------------------------------------------
+
+FRAME = 100_000  # bytes per synthetic observation; the helper is unit-agnostic
+
+
+def _observation_run(groups: int, *, first_user_image: bool = False) -> list[Message]:
+    """``user, (assistant call, tool result + image) * groups`` -- the shape of a
+    screenshot-driving run, one FRAME-byte image per tool result."""
+    messages: list[Message] = [Message.user("goal")]
+    if first_user_image:
+        messages[0] = Message(
+            role="user",
+            content=[TextContent(text="goal"), ImageContent(data="A" * FRAME)],
+        )
+    for index in range(groups):
+        call_id = f"c{index}"
+        messages.append(_assistant_with_call(call_id))
+        messages.append(
+            Message(
+                role="tool",
+                tool_call_id=call_id,
+                tool_name="computer",
+                content=[TextContent(text="ok"), ImageContent(data="A" * FRAME)],
+            )
+        )
+    return messages
+
+
+def _kept_bytes_of(messages: list[Message]):
+    """The caller-side ruler: image bytes only, no ``fixed`` prefix."""
+    sizes = [sum(len(b.data) for b in m.content if isinstance(b, ImageContent)) for m in messages]
+    return lambda index: sum(sizes[index:])
+
+
+def test_advance_moves_the_cut_later_until_the_kept_side_fits_the_band():
+    messages = _observation_run(12)
+    # A token-ruled cut that kept 10 frames: over an 8-frame band.
+    cut = 3  # index 3 = assistant of group 1; keeps groups 1..11 = 11 frames
+    advanced = advance_cut_to_wire_band(
+        messages, cut, kept_bytes=_kept_bytes_of(messages), band_bytes=8 * FRAME
+    )
+    assert advanced > cut, "the cut did not move although the kept side was over the band"
+    assert _kept_bytes_of(messages)(advanced) <= 8 * FRAME
+    # FIRST fitting cut, not an over-shoot: one legal cut earlier would not fit.
+    assert _kept_bytes_of(messages)(advanced - 2) > 8 * FRAME
+
+
+def test_advance_is_inert_when_the_kept_side_already_fits_or_the_band_is_off():
+    messages = _observation_run(12)
+    kept = _kept_bytes_of(messages)
+    assert advance_cut_to_wire_band(messages, 9, kept_bytes=kept, band_bytes=8 * FRAME) == 9
+    assert advance_cut_to_wire_band(messages, 3, kept_bytes=kept, band_bytes=0) == 3
+
+
+def test_advance_never_lands_on_a_tool_result_or_orphans_a_call():
+    messages = _observation_run(12)
+    advanced = advance_cut_to_wire_band(
+        messages, 3, kept_bytes=_kept_bytes_of(messages), band_bytes=5 * FRAME
+    )
+    landed = messages[advanced]
+    assert landed.role != "tool"
+    answered_after = {m.tool_call_id for m in messages[advanced:] if m.role == "tool"}
+    for summarized in messages[:advanced]:
+        assert not any(call.id in answered_after for call in summarized.tool_calls)
+
+
+def test_advance_never_passes_the_newest_observation():
+    messages = _observation_run(12)
+    # A band no cut can satisfy: even keeping only the newest frame is over it.
+    advanced = advance_cut_to_wire_band(
+        messages, 3, kept_bytes=_kept_bytes_of(messages), band_bytes=FRAME // 2
+    )
+    newest_image = max(
+        i for i, m in enumerate(messages) if any(isinstance(b, ImageContent) for b in m.content)
+    )
+    assert advanced <= newest_image
+    # ... and it is the furthest legal cut: the assistant that produced it.
+    assert messages[advanced] is messages[newest_image - 1]
+
+
+def test_advance_never_passes_a_user_attached_image_in_the_kept_window():
+    messages = _observation_run(12)
+    attached = Message(
+        role="user", content=[TextContent(text="look at this"), ImageContent(data="A" * FRAME)]
+    )
+    messages.insert(7, attached)  # a person pasted a screenshot mid-run
+    advanced = advance_cut_to_wire_band(
+        messages, 3, kept_bytes=_kept_bytes_of(messages), band_bytes=2 * FRAME
+    )
+    assert advanced <= 7, "the cut summarized away an image the user attached"
+
+
+def test_advance_honours_the_replayability_guard():
+    messages = _observation_run(12)
+    replayable_from = 9  # only entries at/after index 9 are transcript entries
+    advanced = advance_cut_to_wire_band(
+        messages,
+        3,
+        kept_bytes=_kept_bytes_of(messages),
+        band_bytes=5 * FRAME,
+        replayable=lambda index: index >= replayable_from,
+    )
+    assert advanced >= replayable_from
+    # Nothing replayable at all -> the original cut, never an unreplayable one.
+    assert (
+        advance_cut_to_wire_band(
+            messages,
+            3,
+            kept_bytes=_kept_bytes_of(messages),
+            band_bytes=5 * FRAME,
+            replayable=lambda index: False,
+        )
+        == 3
+    )

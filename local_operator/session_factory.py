@@ -3282,7 +3282,11 @@ def _log_classification_cost(recommendation: Any) -> None:
     decision call through it would suppress that rebuild, quietly dropping the
     restored history's dollars from a resumed session's total. The cost is
     therefore logged here in the vendor's own units, and the accounting path is
-    left to the slice that owns it. ``Recommendation`` carries the vendor's token
+    left to the channel ledger (``classification.accounting``, bound by
+    :func:`attach_classification_spend`), which records one row per vendor request at
+    the service's single cascade point — not here, because this line sees only the
+    ANSWER of a call and misses every failed, timed-out and re-walked request.
+    ``Recommendation`` carries the vendor's token
     counts as of the 2026-09-18 cost change, so the line reports the real per-call
     figures; a field this seam does not publish still prints ``-``.
     """
@@ -4844,6 +4848,23 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
+    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
+    # account-bound designated session. The decision is the HOST's, taken at
+    # the ONE construction seam, and a gate miss adds NO key at all (the
+    # ordinary kwargs dict cannot drift from what existing callers built).
+    # The helper is import-light and NETWORK-FREE: it reads local
+    # enrollment/settings/availability state and constructs the runtime — no
+    # fetch, no spawn; the client stays cheap until its first request.
+    # Subagent children are built elsewhere and never receive it (see the
+    # parameter's comment on ``Session``).
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    if bridge_runtime is not None:
+        session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,
@@ -5494,6 +5515,43 @@ def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | No
     return _hook
 
 
+def attach_classification_spend(session: Session, hooks: "_KnowledgeHooks | None") -> None:
+    """Route the classification seam's vendor requests into the session's channel ledger.
+
+    WHY HERE AND WHY LATE: the service is built in ``_attach_classification`` during
+    knowledge setup, before any ``Session`` exists, and only the session can ingest a
+    channel record (fold, journal, analytics mirror, publish to every surface). So the
+    composition root binds ``Session.record_channel_spend`` once the session is built —
+    the same callback the tools receive on ``ToolContext.record_channel_spend`` — and
+    every front end (TUI, phone, server, SDK, exec) that builds a session through this
+    factory gets the rows without a host-specific line.
+
+    Resolved off the seam with ``getattr`` and re-resolved by the caller, never
+    assumed: ``hooks.classifier`` is an injectable attribute (tests and hosts swap in
+    their own seam, whose contract is ``recommend_resources`` alone) and a seam that
+    does not publish ``bind_spend_sink`` simply has nothing of ours to account. A
+    session built with ``values.classification.auto`` false has ``classifier is None``
+    and this is a no-op: no socket is ever opened and nothing is recorded.
+
+    A SUBAGENT CHILD NEEDS NO BINDING OF ITS OWN. Children share the parent's knowledge
+    hooks only to REUSE its already-rendered block (``harness.subagent`` reads
+    ``frozen_block``); the child ``Session`` is built without ``monitor_classify``,
+    ``title_fit_check`` or ``supplement_seam`` and its prompt provider never runs the
+    selection leg, so no child path reaches this service. Were one added, its rows
+    would land in the PARENT's ledger (the one service, the one sink), which is also
+    where a child's spend rolls up.
+    """
+    if hooks is None:
+        return
+    bind = getattr(hooks.classifier, "bind_spend_sink", None)
+    # ``None`` is the documented "this host tracks no channels" value (the same one
+    # ``ToolContext.record_channel_spend`` takes): a facade or double without the
+    # ingest leaves the service unbound, which records nothing — never a raise at boot.
+    ingest = getattr(session, "record_channel_spend", None)
+    if callable(bind) and callable(ingest):
+        bind(ingest)
+
+
 def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | None") -> None:
     """Fold the classification seam's ``aclose()`` into the session's dispose path.
 
@@ -5985,6 +6043,7 @@ async def create_session(
     # dispose (one leaked pool per turn on the server facade otherwise).
     # The classification seam's client and memos are per SESSION, so the
     # keep-alive client has to be released with everything else the root owns.
+    attach_classification_spend(session, plan.knowledge_hooks)
     attach_classification_dispose(session, plan.knowledge_hooks)
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])
     # Config seam: follow ``config.yml`` while the session lives, so an edit in

@@ -37,7 +37,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, SupportsIndex, cast
 
 import pytest
 
@@ -2371,87 +2371,138 @@ def test_a_numeric_row_inside_an_open_block_is_not_charged_per_line(
     assert cpu < 0.5, f"one 65-character table row inside an open block cost {cpu:.3f} s of CPU"
 
 
+class _HeaderScanWork:
+    """Logical scanner visits, NOT CPU or C-engine character comparisons.
+
+    The header decider uses Python character walks and literal str.find, not
+    C regex internals. Count those actual visits and consumed find prefixes;
+    charging each whole requested find window would falsely call a single
+    forward search per candidate quadratic. Membership windows and splitting
+    are charged conservatively once. Native SIMD/skip-table costs are not
+    inferred, and answers still come from the real str operations.
+    """
+
+    def __init__(self) -> None:
+        self.characters = 0
+        self.search_span = 0
+        self.split_span = 0
+        self.begin_searches = 0
+
+    @property
+    def total(self) -> int:
+        return self.characters + self.search_span + self.split_span
+
+
+class _ObservedHeaderText(str):
+    _work: _HeaderScanWork
+
+    def __new__(cls, text: str, work: _HeaderScanWork) -> _ObservedHeaderText:
+        value = super().__new__(cls, text)
+        value._work = work
+        return value
+
+    def __getitem__(self, key: SupportsIndex | slice, /) -> str:
+        result = super().__getitem__(key)
+        self._work.characters += len(result)
+        return _ObservedHeaderText(result, self._work) if isinstance(key, slice) else result
+
+    def __iter__(self) -> Iterator[str]:
+        for char in super().__iter__():
+            self._work.characters += 1
+            yield char
+
+    def __contains__(self, key: str, /) -> bool:
+        self._work.search_span += len(self)
+        return super().__contains__(key)
+
+    def find(
+        self, sub: str, start: SupportsIndex | None = 0, end: SupportsIndex | None = None, /
+    ) -> int:
+        found = super().find(sub, start, end)
+        floor, ceiling, _step = slice(start, end).indices(len(self))
+        self._work.search_span += max(
+            0, found - floor + len(sub) if found >= 0 else ceiling - floor
+        )
+        if sub == redaction_shapes._PEM_BEGIN:
+            self._work.begin_searches += 1
+        return found
+
+    def split(self, sep: str | None = None, maxsplit: SupportsIndex = -1) -> list[str]:
+        self._work.split_span += len(self)
+        return [_ObservedHeaderText(piece, self._work) for piece in super().split(sep, maxsplit)]
+
+
+def test_the_header_work_observer_preserves_actual_string_operations() -> None:
+    # Fidelity comes before the complexity oracle. In particular split must
+    # retain observed pieces, or the public entry point silently loses counts.
+    for raw in ("", "abc\r\nxyz", "BEGIN BEGIN PRIVATE KEY---\rZ", "\u2502 3. abc"):
+        observed = _ObservedHeaderText(raw, _HeaderScanWork())
+        assert list(observed) == list(raw)
+        assert ("BEGIN" in observed) == ("BEGIN" in raw)
+        assert observed.split("\n") == raw.split("\n")
+        assert all(isinstance(piece, _ObservedHeaderText) for piece in observed.split("\n"))
+        for start in (-20, -1, 0, 2, 99):
+            assert observed[start:] == raw[start:]
+            for end in (None, -1, 0, 4, 99):
+                assert observed.find("BEGIN", start, end) == raw.find("BEGIN", start, end)
+
+
 def test_a_header_candidate_line_is_not_charged_per_stop_or_per_begin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The two mechanisms that made a header candidate line quadratic, red first.
+    """Keep the exact full-size corpus/offsets, but measure scan work, not CPU.
 
-    `_pem_header_piece_end` re-ran the whole BEGIN/KEY scan once per armour-tail stop,
-    and re-answered the prefix machine's conjunct once per KEY occurrence, so a line of
-    BEGIN literals or a line of CR terminators cost the two POPULATIONS MULTIPLIED.
-    Both families below are ~40-46 KB and return nothing: the shape a pipe read hands
-    the decider, and a shape no other arm in this file carries — the linearity arm
-    above is a numeric row.
+    Main CI charged0.330/0.522 process CPU seconds against0.2, including a
+    same-SHA fail/pass rerun. Prefix-calls==1 passes on the old quadratic
+    algorithm too: it is a not-skipped guard, NOT a complexity oracle.
 
-    Measured on this box with `time.process_time()`, one call each, at the head this
-    arm was written against (the PR's own `ed8f924f1`):
-
-    * `per BEGIN` (k=4000, 40019 bytes): 3337 ms before the correction, 2.1 ms after;
-    * `per stop` (k=2000, 46002 bytes): 2712 ms before the correction, 6.3 ms after;
-    * the armour line (29 bytes): an offset answer, microseconds on both trees.
-
-    The ceiling is `0.2` s of CPU: ~95x above the honest post-correction reading of the
-    first family and ~32x above the second, and ~17x / ~14x BELOW the two
-    pre-correction readings — so red and green are ~1600x and ~430x apart, with the
-    ceiling about a decade inside each end. That is a CATASTROPHE-shaped bound and not
-    a CI-derived sample: it is set so a regression fails here in seconds instead of
-    wedging a shard (the suite has no `pytest-timeout`), and the margin is what keeps a
-    loaded box from reddening an honest run. CPU rather than wall for the same reason —
-    this fleet shares ~14 cores with ~25 agent sessions, so wall inflates 5-25x while
-    CPU does not.
-
-    The spy is the NOT-SKIPPED arm and never the cost evidence: `spy.calls` is 1 per
-    case on BOTH trees, and it reddens only if the prefix machine is never reached (0:
-    the piece was not looked at) or is re-run per BEGIN (more than 1), so "it was fast"
-    cannot mean "it was skipped". The cost is asserted after the loop, which is what
-    makes one pre-fix run report both readings while every answer and spy assertion in
-    that same run is already green.
-
-    The `got == want` pins hold on the PRE-FIX tree too, and that is what makes this
-    arm evidence that the correction moves no answer while it is red on cost. The third
-    case is the only one whose answer is an offset, so a decider that got cheap by
-    stopping the scan early fails it.
+    The transparent observer above instead exposes repeated candidate searches
+    and run walks. Exact old ed8f924f1 body on N64/128: BEGIN work63160/240888,
+    CR stops302155/1194123; current3704/7288 and9165/18317. Both retain every
+    answer and prefix call. That discriminates the old multiplicative loops
+    without inferring opaque regex work or changing a security algorithm.
     """
     spy = _CountingDecider(redaction_shapes._pem_prefix_end_flags)
     monkeypatch.setattr(redaction_shapes, "_pem_prefix_end_flags", spy)
-    per_begin = (
-        "Z"
-        + redaction_shapes._PEM_BEGIN * 4000
-        + redaction_shapes._PEM_KEY
-        + "Y" * 16000
-        + _DASHES
-        + "\rZ"
-    )  # 40019 bytes, no match
-    per_stop = (
-        "Z"
-        + (redaction_shapes._PEM_BEGIN + redaction_shapes._PEM_KEY + _DASHES + "\r") * 2000
-        + "Z"
-    )  # 46002 bytes, no match
-    armour = _banner(redaction_shapes._PEM_KEY).rstrip("\n") + "\r\n"  # 29 bytes, answer 27
-    # _DASHES + "BEGIN " + "PRIVATE KEY" + _DASHES = 27, and 27 is the index of the "\r".
-    cases = (
-        ("per BEGIN", per_begin, None),
-        ("per stop", per_stop, None),
-        ("armour line", armour, 27),
-    )
-    readings: dict[str, float] = {}
-    for what, text, want in cases:
+
+    def per_begin(count: int) -> str:
+        return (
+            "Z"
+            + redaction_shapes._PEM_BEGIN * count
+            + redaction_shapes._PEM_KEY
+            + "Y" * (4 * count)
+            + _DASHES
+            + "\rZ"
+        )
+
+    def per_stop(count: int) -> str:
+        return (
+            "Z"
+            + (redaction_shapes._PEM_BEGIN + redaction_shapes._PEM_KEY + _DASHES + "\r") * count
+            + "Z"
+        )
+
+    def measure(what: str, text: str, want: int | None, minimum_candidates: int) -> int:
+        work = _HeaderScanWork()
         before = spy.calls
-        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the header decider on the {what} family"):
-            start = time.process_time()
-            got = redaction_shapes.pem_header_line_end(text)
-            cpu = time.process_time() - start
-        assert got == want, f"the header decider answered {got} on the {what} line, not {want}"
-        assert spy.calls - before == 1, (
-            f"the prefix machine ran {spy.calls - before} times for one piece on the {what} "
-            "line: it must run once for the piece, not once per stop and not once per BEGIN"
-        )
-        readings[what] = cpu
-    for what, cpu in readings.items():
-        assert cpu < 0.2, (
-            f"the {what} line cost {cpu:.3f} s of CPU (readings: {readings}): a header "
-            "candidate line is being charged per stop or per BEGIN again"
-        )
+        # Retain the existing hang backstop; it is not the cost oracle.
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the header decider on {what}"):
+            got = redaction_shapes.pem_header_line_end(_ObservedHeaderText(text, work))
+        assert got == want, f"the header decider answered {got} on {what}, not {want}"
+        assert spy.calls - before == 1, "prefix machine was skipped or rerun per candidate"
+        assert work.begin_searches >= minimum_candidates, "literal scan escaped observation"
+        return work.total
+
+    # The original40019/46002-byte families and29-byte CRLF armour line remain
+    # unchanged. Half-size companions pin growth, not an absolute CPU budget.
+    begin_small = measure("per BEGIN half", per_begin(2000), None, 2000)
+    begin_large = measure("per BEGIN full", per_begin(4000), None, 4000)
+    stop_small = measure("per stop half", per_stop(1000), None, 1000)
+    stop_large = measure("per stop full", per_stop(2000), None, 2000)
+    armour = _banner(redaction_shapes._PEM_KEY).rstrip("\n") + "\r\n"
+    measure("armour line", armour, 27, 1)
+    assert begin_large <= 2 * begin_small, (begin_small, begin_large)
+    assert stop_large <= 2 * stop_small, (stop_small, stop_large)
 
 
 def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:

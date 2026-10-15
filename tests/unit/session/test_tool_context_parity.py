@@ -100,6 +100,13 @@ SENTINELS: dict[str, Any] = {
     # ``/project`` surface would answer "unavailable" while the store sat right
     # there on disk.
     "project_registry": object(),
+    # The Team Bridge runtime (H5d) backs the ``bridge`` tool AND the decide
+    # executor (H5b). Dropped on the way to the executor, a signed-in and
+    # designated session would still advertise the tool (the createIf gate saw
+    # the runtime) while every bridge call answered from a no-runtime
+    # fallback — silently unreadable, exactly the drop class this guard exists
+    # for.
+    "bridge_runtime": object(),
     # The confinement root backs every local tool's enforcement points (shell
     # spawn, path readers). Dropped on the way to the executor, a session the
     # caller confined would run its UNCONFINED default -- shell on the host,

@@ -1,0 +1,131 @@
+"""The HUMAN-facing view of a bridge carriage (D1).
+
+A bridge row carries two different things and they must not be confused:
+
+- ``details["text"]`` / ``details["body"]`` — what the MODEL receives. That is
+  the wire payload: the §11.1 untrusted-content clause, the body hash, the
+  locator. It is deliberately explicit because a model must be told the bytes
+  are third-party.
+- ``details["bridge"]`` — the ``bridge_meta`` the receiver VALIDATED against its
+  own stored provenance (sender, organization, excerpt, thread). It is a hint by
+  contract, never authority — but it is the only thing a human surface may show.
+
+Contract §13.9.10/§12.1.3: no ledger row carries third-party body text, and the
+render must not turn a provenance view into a body view. So the card is built
+from the validated meta only, and a row whose meta lacks those fields degrades
+to ONE generic sentence — never the wire text (which would put the clause and
+the body hash in front of a reader), and never the wake's own sender account id,
+which names this side's owner rather than the member asking (RD-1).
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+#: What the card says when the validated meta named nobody. One generic sentence:
+#: never the wire payload, and never a raw account id (see the module docstring).
+GENERIC_CARD_SUBJECT = "an organization member"
+
+#: ONE spelling for ONE absence: the excerpt is not derivable on this side. Both
+#: human surfaces that compose this feature's copy state it rather than leaving
+#: the body slot silent — silence reads as "the sender sent nothing", where an
+#: empty excerpt can equally mean the preview could not be derived here (the
+#: byte-fitter trims it, an empty screened body has none, and the render-time
+#: lookup degrades to "" by design). `asks_bridge` states the same absence.
+NO_PREVIEW_TEXT = "(no preview available)"
+
+
+def _first_line(value: Any) -> str:
+    """One bounded line: a carriage's fields are single-line by contract, but a
+    rendered frame must not be reflowed by a newline that slipped through."""
+    return " ".join(str(value or "").split())
+
+
+def bridge_card_subject(details: Mapping[str, Any] | None) -> str:
+    """Who a reader is looking at: the VALIDATED member, else the generic line.
+
+    NOT reached with a named member by the card's own body line:
+    ``bridge_card_text`` asks the same question first (``bridge_card_sender``'s
+    name, which reads this meta's ``sender_name`` too) and takes the
+    excerpt-alone branch when a member resolved, so every call from that path
+    lands on :data:`GENERIC_CARD_SUBJECT`. The enriched branches below stay
+    because this is the module's one "who" answer — a direct caller handed a
+    meta that names a member must not be told the generic line.
+
+    Only ``details["bridge"]`` — the meta the receiver checked against its own
+    stored provenance — can name a member here. It used to fall back to
+    ``details["sender"]["account_id"]``, and that dict is the WAKE's own sender,
+    stamped from the RECEIVING side's owner (``connector/wake.py``); a carriage
+    whose display meta was absent (a shape ``screening`` explicitly tolerates as
+    "unknown provenance") therefore named the reader's OWN account as the human
+    asking, on the one card whose whole subject is that somebody else is. The
+    sibling's docstring already said it: that dict "names the receiving side,
+    never the human asking" (RD-1). A raw account id identifies nobody the
+    reader can place anyway, so the absent-meta carriage degrades straight to
+    :data:`GENERIC_CARD_SUBJECT`.
+    """
+    meta = (details or {}).get("bridge") or {}
+    name = _first_line(meta.get("sender_name"))
+    organization = _first_line(meta.get("organization"))
+    if name and organization:
+        return f"{name} · {organization}"
+    return name or GENERIC_CARD_SUBJECT
+
+
+def bridge_card_text(details: Mapping[str, Any] | None) -> str:
+    """The card's BODY line: the screened excerpt ALONE when the identity column
+    resolved a member, else the subject-prefixed form. Never the model's payload
+    (see the module docstring).
+
+    D8 (design round 2, PR #2378). The identity column sits immediately to this
+    row's left and paints ``<name> (<organization>)`` from exactly the fields
+    the old ``<subject> — <excerpt>`` prefix restated. On one collapsed row that
+    spent the budget twice on the same two validated fields: measured 114 cells
+    at 100 columns against a budget of 82, and at 60 columns the reader got the
+    member twice (``Priya Raman (Acme Research) · Priya Raman…``) and no request
+    at all. So the composition rule is: the identity slot carries identity, the
+    body carries the excerpt, and never the reverse.
+
+    The predicate is the identity column's OWN — ``bridge_card_sender``, which
+    ``TeamBridgeBlock._sender_name`` reads — so the two surfaces cannot disagree
+    about whether a member was named. When a name resolved, this returns the
+    excerpt, or — D9 (design round 3, PR #2378) — :data:`NO_PREVIEW_TEXT` when the
+    excerpt is empty. An identity-only row asserts something the surface cannot
+    know (that the sender sent nothing), and the row's own budget has room for
+    the absence (52 cells against the 82-cell collapsed budget at 100 columns).
+
+    When NO name resolved the subject IS the generic line — the only place a
+    human is named at all on that carriage — so it keeps the old
+    ``<subject> — <excerpt>`` / ``<subject> — (no preview available)`` form.
+    This branch is reached exactly when ``bridge_card_sender`` resolved nothing,
+    so ``bridge_card_subject`` returns :data:`GENERIC_CARD_SUBJECT` here: it
+    consults the same meta name the predicate above does, which is why a
+    "name that arrived without an organization" cannot reach this path (a name
+    in either the wire sender or the meta takes the branch above). Its
+    enriched branches stay for direct callers — the helper is the module's one
+    "who" answer and must not report the generic line for a meta that DOES name
+    a member.
+    """
+    meta = (details or {}).get("bridge") or {}
+    excerpt = _first_line(meta.get("excerpt"))
+    if bridge_card_sender(details).get("name"):
+        return excerpt or NO_PREVIEW_TEXT
+    subject = bridge_card_subject(details)
+    return f"{subject} — {excerpt}" if excerpt else f"{subject} — {NO_PREVIEW_TEXT}"
+
+
+def bridge_card_sender(details: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The identity column's fields, enriched from the validated meta.
+
+    The wake's own sender carries the LOCAL owner account (the receiving side)
+    plus the provenance kind; the member a reader needs to see is the producer's
+    screened sender, which is what ``bridge_meta`` validated. The wire sender
+    wins where it already names someone, so a transport that stamps a display
+    name keeps it.
+    """
+    sender = dict((details or {}).get("sender") or {})
+    meta = (details or {}).get("bridge") or {}
+    for wire_key, meta_key in (("name", "sender_name"), ("organization", "organization")):
+        if not sender.get(wire_key) and meta.get(meta_key):
+            sender[wire_key] = _first_line(meta.get(meta_key))
+    return sender

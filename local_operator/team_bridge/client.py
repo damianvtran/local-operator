@@ -62,6 +62,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -441,6 +442,91 @@ MAX_ERROR_BODY_BYTES = 16 * 1024
 #: §5.2's body bound: a settings body is a fixed small shape, never content.
 SETTINGS_BODY_MAX_BYTES = 4 * 1024
 
+#: Per-type caps on the NFC-normalized text (§6.2): note/question ≤16 KiB,
+#: request ≤64 KiB. Counted in UTF-8 BYTES of the normalized text because that
+#: is what the server counts — len(str) is the same number only for ASCII.
+SEND_TEXT_CAPS: dict[str, int] = {
+    "note": 16 * 1024,
+    "question": 16 * 1024,
+    "request": 64 * 1024,
+}
+SEND_TYPES = ("note", "question", "request")
+
+#: The decide receipt (§10.1): the ask id grammar the server checks, and the
+#: closed ``decided_via`` set (v1: exactly "bearer-only", S-27/m2).
+ASK_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,32}")
+VALID_DECIDED_VIA = ("bearer-only",)
+VALID_DECISIONS = ("approved", "denied")
+
+#: Batch decide is a bounded select-and-approve (§10.2): ≤50 per call.
+BATCH_DECIDE_MAX = 50
+
+#: The decide note rides the courier as a delimited field (§10.1): ≤1 KiB.
+DECIDE_NOTE_MAX_BYTES = 1024
+
+
+def _require_client_ref(client_ref: Any) -> str:
+    """The send idempotency key is REQUIRED and caller-owned (§6.2, §13.5).
+
+    The method never mints one: a ref the caller cannot remember is a ref the
+    caller cannot retry with, and "retry only with the same ``client_ref``" is
+    the whole rule. The outbox layer mints uuid4s and persists them BEFORE the
+    first attempt; this check is the transport's half.
+    """
+    ref = str(client_ref or "").strip()
+    if not ref or len(ref) > 64:
+        raise ValueError("a send carries a caller-owned client_ref uuid (1..64 chars)")
+    return ref
+
+
+def _normalized_text(text: Any) -> str:
+    return unicodedata.normalize("NFC", str(text))
+
+
+def _require_ask_ref(ask_ref: Any, *, message_id: str) -> dict[str, str]:
+    """The decide receipt's local half of the server's own checks (§10.1).
+
+    Well-formedness and the ``question_id == :messageid`` binding are checked
+    HERE so a caller bug never becomes a server refusal with a request on the
+    wire; the server re-checks both regardless — this is duplication by
+    design, not authority.
+    """
+    if not isinstance(ask_ref, Mapping):
+        raise ValueError("a decide carries the ask_ref receipt: {ask_id, question_id}")
+    ask_id = str(ask_ref.get("ask_id") or "")
+    question_id = str(ask_ref.get("question_id") or "")
+    if not ASK_ID_PATTERN.fullmatch(ask_id):
+        raise ValueError(
+            "ask_ref.ask_id must match [A-Za-z0-9_-]{1,32} (the client-minted ask instance)"
+        )
+    if question_id != str(message_id):
+        raise ValueError(
+            "ask_ref.question_id must equal the request's message id — the binding "
+            "the server checks (§10.1)"
+        )
+    return {"ask_id": ask_id, "question_id": question_id}
+
+
+def _require_decision(decision: Any, decided_via: Any) -> tuple[str, str]:
+    if decision not in VALID_DECISIONS:
+        raise ValueError(f"decision must be one of {VALID_DECISIONS!r}; got {decision!r}")
+    via = str(decided_via or "bearer-only")
+    if via not in VALID_DECIDED_VIA:
+        raise ValueError(f"decided_via must be one of {VALID_DECIDED_VIA!r} in v1; got {via!r}")
+    return decision, via
+
+
+def _require_send_text(send_type: str, text: str) -> str:
+    normalized = _normalized_text(text)
+    cap = SEND_TEXT_CAPS[send_type]
+    size = len(normalized.encode("utf-8"))
+    if size > cap:
+        raise ValueError(
+            f"a {send_type} body is at most {cap} bytes of NFC-normalized text; got {size}"
+        )
+    return normalized
+
+
 #: §6.1's allowlist cap: a bounded replace-set of at most this many entries.
 ALLOWLIST_MAX_ENTRIES = 200
 
@@ -646,6 +732,29 @@ class TeamBridgeClient:
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
         return await self._fresh_pinned_access(row.id, expected_account_id=owner)
 
+    def guidance_note(self) -> str:
+        """The served guidance text for ADVISORY injection into tool results.
+
+        N1: §11.3 guidance was accepted at status boundaries but never used.
+        This getter exposes the last served snapshot's guidance text ("" when
+        none was served/fetched) — absence degrades advice only, never a
+        failure, so every read is guarded.
+        """
+
+        for state in getattr(self, "_states", {}).values():
+            texts = getattr(state, "texts", None)
+            getter = getattr(texts, "snapshot", None)
+            if not callable(getter):
+                continue
+            try:
+                served = getter()
+            except Exception:  # noqa: BLE001 — advice only
+                continue
+            section = served.get("guidance") if isinstance(served, Mapping) else None
+            if isinstance(section, Mapping) and str(section.get("text") or ""):
+                return str(section["text"])
+        return ""
+
     async def _fresh_pinned_access(
         self, credential_id: int, *, expected_account_id: str, force: bool = False
     ) -> OAuthAccess:
@@ -840,6 +949,119 @@ class TeamBridgeClient:
 
         return await self._send("GET", f"/tenants/{tenant_id}/messaging/state", access=access)
 
+    async def inbox(
+        self,
+        *,
+        tenant_id: str,
+        after: str | None = None,
+        limit: int | None = None,
+        state: str | None = None,
+        thread_id: str | None = None,
+        sender_account_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One inbox page (§6.1): deliveries for MY endpoint, cursor paginated.
+
+        ``tenant_id`` is REQUIRED — the server resolves "my endpoint" through
+        the membership the caller names, and H2's exact-owner guard must be
+        able to compare the answer to the committed owner BEFORE anything is
+        persisted (``pull.inbox`` does the comparison; this method is the
+        transport). The cursor is opaque and passed through verbatim: it can
+        reset/regress on a server resync, so nothing here orders or
+        interprets it. ``limit`` is capped at 100 by the server; H2 asks for
+        no more than that (the project default stays the contract's).
+        """
+
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if after is not None:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = int(limit)
+        if state is not None:
+            params["state"] = state
+        if thread_id is not None:
+            params["thread_id"] = thread_id
+        if sender_account_id is not None:
+            params["sender_account_id"] = sender_account_id
+        return await self._send("GET", "/messaging/inbox", params=params, access=access)
+
+    async def message(
+        self, message_id: str, *, tenant_id: str, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """One message + my delivery state (§6.1). Same item envelope as inbox."""
+
+        return await self._send(
+            "GET",
+            f"/messaging/messages/{message_id}",
+            params={"tenant_id": tenant_id},
+            access=access,
+        )
+
+    async def ack(
+        self,
+        message_id: str,
+        *,
+        tenant_id: str,
+        state: str,
+        screening: Mapping[str, Any],
+        client_ref: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Advance MY delivery state with a hash-bound screening verdict (§6.2).
+
+        ``tenant_id`` is a QUERY parameter, not a body property (the server
+        controller reads it there); ``screening`` is the EXACT tuple the caller
+        recorded as its intent — this method never re-derives, reorders into
+        a different shape, or replaces it. ``client_ref`` rides the body (the
+        bridge's deviation from the Idempotency-Key header, §6.2).
+        """
+
+        body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
+        return await self._send(
+            "POST",
+            f"/messaging/messages/{message_id}/ack",
+            params={"tenant_id": tenant_id},
+            body=body,
+            access=access,
+        )
+
+    async def events(
+        self,
+        *,
+        tenant_id: str,
+        after: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any] | None:
+        """The §6.7 delivery substrate: ONE read; ``None`` = the 204 timeout.
+
+        Deliberately NOT routed through ``_send``: a 204 carries no JSON
+        envelope, so it needs its own explicit branch (parsing an empty body
+        as JSON is exactly the bug the handoff warns about). The 401
+        refresh-once discipline is mirrored here so the one special case does
+        not lose it. Long-poll lifetime, reconnects and schedules are H4's;
+        this is a one-shot primitive.
+        """
+
+        pinned = access or await self.current_access()
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if after is not None:
+            params["after"] = int(after)
+        response = await self._dispatch(
+            "GET", "/messaging/events", pinned.access_token, params=params, body=None
+        )
+        if response.status_code == 401:
+            refreshed = await self._refreshed_access(pinned)
+            response = await self._dispatch(
+                "GET", "/messaging/events", refreshed.access_token, params=params, body=None
+            )
+            if response.status_code == 401:
+                raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        if response.status_code == 204:
+            return None
+        if response.status_code >= 400:
+            raise _refusal(response)
+        return _envelope_result(response)
+
     async def put_settings(
         self,
         *,
@@ -949,6 +1171,193 @@ class TeamBridgeClient:
         _require_body_within(body, ALLOWLIST_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         return await self._send("PUT", "/messaging/allowlist", body=body, access=access)
+
+    async def send(
+        self,
+        *,
+        tenant_id: str,
+        to: Mapping[str, str],
+        type: str,
+        text: str,
+        client_ref: str,
+        thread_id: str | None = None,
+        expires_at: str | None = None,
+        expected_account_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One send (§6.2, §13.5): the caller-owned idempotency key rides the body.
+
+        ``to`` is ALWAYS named and is required (``thread_id`` selects the
+        thread, it never stands alone — a thread_id-only body is a 400): it
+        is either ``{"endpoint_id": …}`` or ``{"account_id": …}``, exactly one
+        of the two, and the server resolves the account form without an
+        existence oracle. ``client_ref`` is caller-owned and REQUIRED — retries
+        reuse the same ref and the server answers the identical replay with the
+        original message (same key + different body → ``409
+        idempotency_key_reused``; the durable outbox is what makes the retry
+        carry the same ref across restarts).
+
+        Decision replies never travel this path as free text (§13.5): the
+        decide call carries the ``ask_ref`` receipt and the outcome message is
+        generated server-side. This method cannot detect "a reply to a request
+        thread" locally, so the rule lives with the callers (the H5b executor
+        and the H5d tool) — stated here so the seam is not silently assumed.
+        """
+        if type not in SEND_TYPES:
+            raise ValueError(f"type must be one of {SEND_TYPES!r}; got {type!r}")
+        if (
+            not isinstance(to, Mapping)
+            or len([key for key in ("endpoint_id", "account_id") if to.get(key)]) != 1
+        ):
+            raise ValueError(
+                "every send names `to` as exactly one of {endpoint_id} or {account_id} "
+                "(§6.2) — thread_id never stands alone"
+            )
+        ref = _require_client_ref(client_ref)
+        normalized = _require_send_text(type, text)
+        thread = str(thread_id or "").strip()
+        body: dict[str, Any] = {
+            "to": {key: str(to[key]) for key in ("endpoint_id", "account_id") if to.get(key)},
+            "type": type,
+            "body": {"text": normalized},
+            "client_ref": ref,
+        }
+        if thread:
+            body["thread_id"] = thread
+        if type == "request":
+            # The request block only exists for request-typed sends (S-24:
+            # no request_ref/origin fields exist on client sends — the
+            # courier is server-only). expires_at omitted → server default.
+            body["request"] = {"expires_at": str(expires_at)} if expires_at else {}
+        elif expires_at:
+            raise ValueError("expires_at belongs to a request-typed send only")
+        access = await self._guarded_access(expected_account_id)
+        return await self._send(
+            "POST", "/messaging/messages", params={"tenant_id": tenant_id}, body=body, access=access
+        )
+
+    async def decide(
+        self,
+        message_id: str,
+        *,
+        tenant_id: str,
+        decision: str,
+        ask_ref: Mapping[str, str],
+        decided_via: str = "bearer-only",
+        note: str | None = None,
+        expected_account_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One request's decision, carrying the human's ask receipt (§10.1, §10.2).
+
+        The executor's word "the human answered" is CLIENT-ASSERTED and
+        audited; what this method can enforce locally is the receipt's shape
+        and binding (see ``_require_ask_ref``) and the closed ``decided_via``
+        set. The call itself is made by harness code on the answer path —
+        never by the model (H5b).
+        """
+        decision, via = _require_decision(decision, decided_via)
+        receipt = _require_ask_ref(ask_ref, message_id=message_id)
+        body: dict[str, Any] = {"decision": decision, "ask_ref": receipt, "decided_via": via}
+        if note is not None:
+            bounded = _normalized_text(note)
+            if len(bounded.encode("utf-8")) > DECIDE_NOTE_MAX_BYTES:
+                raise ValueError(f"a decide note is at most {DECIDE_NOTE_MAX_BYTES} bytes")
+            body["note"] = bounded
+        access = await self._guarded_access(expected_account_id)
+        return await self._send(
+            "POST",
+            f"/messaging/messages/{message_id}/decide",
+            params={"tenant_id": tenant_id},
+            body=body,
+            access=access,
+        )
+
+    async def decide_batch(
+        self,
+        decisions: Iterable[Mapping[str, Any]],
+        *,
+        tenant_id: str,
+        expected_account_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The bounded select-and-approve (§10.2): ≤50, refused WHOLE pre-flight.
+
+        Shape failures (over-50, bad ask_ref, unknown decision/via) refuse the
+        entire call locally with ``ValueError`` — nothing commits, mirroring
+        the server's whole-refusal contract. Business outcomes are PER-ITEM in
+        the response and the successful items commit; this method passes those
+        through untouched. Each item is validated by the same per-item rules
+        as :meth:`decide` (one serializer, no duplicate encoder).
+        """
+        items = list(decisions)
+        if len(items) > BATCH_DECIDE_MAX:
+            raise ValueError(
+                f"a batch decide carries at most {BATCH_DECIDE_MAX} items; got {len(items)}"
+            )
+        if not items:
+            raise ValueError("a batch decide carries at least one item")
+        payload: list[dict[str, Any]] = []
+        for item in items:
+            message_id = str(item.get("message_id") or "")
+            if not message_id:
+                raise ValueError("every batch item names the request's message_id")
+            decision, via = _require_decision(item.get("decision"), item.get("decided_via"))
+            receipt = _require_ask_ref(item.get("ask_ref"), message_id=message_id)
+            entry: dict[str, Any] = {
+                "message_id": message_id,
+                "decision": decision,
+                "ask_ref": receipt,
+                "decided_via": via,
+            }
+            note = item.get("note")
+            if note is not None:
+                bounded = _normalized_text(note)
+                if len(bounded.encode("utf-8")) > DECIDE_NOTE_MAX_BYTES:
+                    raise ValueError(f"a decide note is at most {DECIDE_NOTE_MAX_BYTES} bytes")
+                entry["note"] = bounded
+            payload.append(entry)
+        access = await self._guarded_access(expected_account_id)
+        return await self._send(
+            "POST",
+            "/messaging/requests/decide",
+            params={"tenant_id": tenant_id},
+            body={"decisions": payload},
+            access=access,
+        )
+
+    async def decisions(
+        self,
+        *,
+        tenant_id: str,
+        role: str,
+        thread_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        after: str | None = None,
+        limit: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The decision ledger read (§10.4): decisions I made or requested.
+
+        ``role`` is the contract's vocabulary — ``made`` | ``requested``.
+        Read-only; the H5b executor records nothing here itself, the server
+        audits every decision it commits.
+        """
+        if role not in ("made", "requested"):
+            raise ValueError("role must be 'made' or 'requested' (§10.4)")
+        params: dict[str, Any] = {"tenant_id": tenant_id, "role": role}
+        if thread_id:
+            params["thread_id"] = thread_id
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        if after:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = int(limit)
+        return await self._send("GET", "/messaging/decisions", params=params, access=access)
 
 
 def _require_body_within(body: Mapping[str, Any], cap: int) -> None:

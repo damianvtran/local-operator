@@ -289,6 +289,14 @@ async def test_steer_while_busy_routes_through_the_steer_queue(tmp_path):
     receipts = [e for e in events if getattr(e, "type", None) == "peer_message_delivered"]
     assert len(receipts) == 1
     assert receipts[0].message_id == queued[0].id
+    # ...and the receipt carries the ROW's own details (round 13). The human
+    # card for a bridge carriage is a view of the provenance the row holds
+    # (``details["bridge"]``) and the replay fold reads this same dict, so a
+    # receipt that carried only the body left the live paint reading a field
+    # the TUI message did not have: an exception inside the handler and NO card
+    # at all for a bridge delivery that arrived live.
+    assert receipts[0].details["body"] == "redirect now"
+    assert receipts[0].details["sender"]["pid"] == 3
     user_starts = [
         e
         for e in events

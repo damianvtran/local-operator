@@ -1360,6 +1360,61 @@ class AskQuestion(BaseModel):
         return self
 
 
+# THE ROW SHAPE. The ask the TOOL takes and the ask a ROW stores are two shapes,
+# and the difference is the bridge carriage's seat. ``AskQuestion`` above is the
+# TOOL's schema: it rides the tools array of every request, and its
+# ``extra="forbid"`` is what keeps a MODEL from stamping provenance words on its
+# own ask — ``_is_bridge_ask_row`` reads ``bridge``/``question_id`` structurally
+# and ``asks/queue._question_shape`` folds them, so a declared field THERE would
+# be a forgeable label rather than a convenience (``team_bridge/decide_intents``
+# spells the same rule out: "a generic ``human_required`` flag is NOT
+# provenance"). A stored ROW legitimately carries the seat: the projection
+# emits ``human_required``, ``question_id``, ``bridge`` and each option's own
+# ``id``, and the doors key on them (``bridge_decision_target`` maps the picked
+# label back through the option ids). So the seat is declared here, on the model
+# a SURFACE reads a row with, and the tool's schema stays exactly as it was —
+# the same split ``tui/widgets/ask_picker.py`` names for its free-text row ("a
+# property of the SURFACE rather than of ``AskQuestion``, so the model-facing
+# tool schema is unchanged").
+class AskRowOption(AskOption):
+    """An ``AskOption`` as a stored ask ROW carries it.
+
+    ``id`` is the carriage's own option id (``approve``/``deny``). An answer
+    travels to the door as the option's LABEL, and the row's ids are what the
+    decide maps that label back through — so an id the row carries must survive
+    validation or the decision cannot be minted at all.
+    """
+
+    id: str = ""
+
+
+class AskRowQuestion(AskQuestion):
+    """An ``AskQuestion`` as a stored ask ROW carries it (``_question_shape``).
+
+    The three seat fields are the H5a/H5b carriage. ``question_id`` is the
+    request's message id, which the decide receipt binds to (§10.1);
+    ``human_required`` is the contract's requirement mark (§10.3, #125) the
+    clearance gate short-circuits on; ``bridge`` is the ORIGINAL authority block
+    frozen at issuance (S-3) that a recovery re-validates. Every one of them
+    defaults empty/false/None, so an ordinary row validates exactly as the
+    tool's own question does and the seat cannot be inferred from a default.
+    """
+
+    #: The carriage's question id — the request's message id (§10.1).
+    question_id: str = ""
+    #: §10.3's requirement mark: this ask is never eligible for clearance.
+    human_required: bool = False
+    #: The authority block frozen at issuance (S-3), present only when supplied.
+    bridge: dict[str, Any] | None = None
+    # The row's options are the strict option PLUS the carriage's id, so the
+    # field narrows to the seat-bearing subclass. A list is mutable and therefore
+    # invariant, which pyright reports even though every ``AskRowOption`` IS an
+    # ``AskOption``; the ignore is the one line that narrowing costs.
+    options: list[AskRowOption] = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
+        default_factory=list
+    )
+
+
 #: The host's interactive-question hook: put these questions to the user and
 #: return ``question id -> the strings they chose``. ``None`` means the user
 #: answered NOTHING (escaped out), which is a legitimate outcome rather than a
@@ -1451,6 +1506,12 @@ class ToolContext(BaseModel):
     dispatch_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = Field(
         default=None, exclude=True, repr=False
     )
+    # H5d: the Team Bridge runtime (client + enrollment owner + session id) a
+    # session stashes when it is signed in and designated. DECLARED rather
+    # than probed (see the class docstring): the `bridge` tool builder reads
+    # exactly this field, and its absence is what keeps the tool out of a
+    # session that has no bridge. Stays None until the session lane wires it.
+    bridge_runtime: Any | None = Field(default=None, exclude=True, repr=False)
     # The path a READER resolved, reported by the reader itself the instant it
     # resolved it: ``(resolved_path, resolvable)``. Installed by the loop for the
     # duration of ONE call -- the recorder it holds is bound to that call's own id
@@ -2503,6 +2564,12 @@ class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
     ``message_id`` lets a front end dedup this live receipt against the
     persisted ``peer_message`` row on a later history replay, so a resumed
     session does not double-paint the same delivery.
+
+    ``custom_type`` carries the DELIVERY's provenance kind (H4e-render): the
+    persisted ``CustomMessage``'s ``custom_type``, so a live front end paints
+    the same card the history replay will (a ``team_bridge_message`` is its own
+    card, never a generic peer one — §13.4). Empty on events a pre-carriage
+    build emitted, which reads as the legacy peer kind.
     """
 
     type: Literal["peer_message_delivered"] = "peer_message_delivered"
@@ -2512,6 +2579,23 @@ class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
     sender: dict[str, Any] = Field(default_factory=dict)
     #: Transcript entry id of the persisted peer message, for replay dedup.
     message_id: str = ""
+    #: The persisted row's ``custom_type`` (provenance kind), empty = peer.
+    custom_type: str = ""
+    #: The persisted row's ``details`` verbatim — the field a D1 bridge card is
+    #: built from (``details["bridge"]``: the member, their organization, the
+    #: screened excerpt, all of them the RECEIVER's validated provenance).
+    #:
+    #: WHY THE LIVE RECEIPT CARRIES IT (round 13). The live paint and the history
+    #: replay must select the SAME card (§13.4) — the replay fold reads the row's
+    #: ``details``, so a live receipt that carried only ``body`` left the live
+    #: branch with nothing to build the provenance view from: it read a
+    #: ``details`` attribute the TUI message did not have, raised
+    #: ``AttributeError`` inside the message handler, and painted NO card at all
+    #: for a bridge delivery that arrived live (measured: two of this file's
+    #: sibling tests timed out waiting for the live card). Empty on a plain peer
+    #: delivery and on an older/leaner sender, which paints the same degraded
+    #: card it painted before.
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class SteeringDeliveredEvent(AgentEvent[Literal["steering_delivered"]]):

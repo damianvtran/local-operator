@@ -694,8 +694,11 @@ SINK_NAMES = ("_approvals_slash", "_set_approve_all", "_resolve_pending")
 
 #: The handle methods that can reach an authority-increasing sink. Named
 #: positively so a new one has to be considered rather than silently scanned.
+#: ``bridge_decide`` joined with TB-02 (PR #2378): it is the verified door a
+#: bridge request is decided through — it settles the ask and, through the
+#: dispatcher's grant consume, is the only route that can POST a decision.
 _SINK_REACHING_METHODS = frozenset(
-    {"slash", "slash_images", "run_slash_authoritative", "approval_answer"}
+    {"slash", "slash_images", "run_slash_authoritative", "approval_answer", "bridge_decide"}
 )
 
 #: Modules allowed to call the sinks directly. Every one of them is downstream of
