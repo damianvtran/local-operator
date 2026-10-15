@@ -47,6 +47,50 @@ _t = tr("mobile.setup")
 _APPLY_GUARD = threading.Lock()
 
 
+class CorruptSetupIntent(ValueError):
+    """An existing create journal cannot safely identify its original request."""
+
+
+def _pending_intent(*, configured: bool) -> dict[str, Any]:
+    # A completed config outranks its unused old intent. Reading/validating that
+    # file on a healthy setup could turn harmless leftover corruption into a
+    # service repair or account-choice prompt. Never overwrite or repair either.
+    path = config.directory() / "create.json"
+    if configured or not path.exists():
+        return {}
+    try:
+        intent = json.loads(path.read_text())
+        if not isinstance(intent, dict):
+            raise ValueError
+        owner = intent.get("credential_id")
+        if not isinstance(owner, int) or isinstance(owner, bool) or owner < 1:
+            raise ValueError
+        if not isinstance(intent.get("key"), str) or not intent["key"]:
+            raise ValueError
+        payload = intent.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError
+        if any(
+            not isinstance(payload.get(k), str) or not payload[k] for k in ("name", "device_id")
+        ):
+            raise ValueError
+        config.port(payload.get("gateway_port"))
+        harnesses = payload.get("harnesses")
+        if not isinstance(harnesses, list) or not harnesses:
+            raise ValueError
+        for harness in harnesses:
+            if not isinstance(harness, dict) or not isinstance(harness.get("id"), str):
+                raise ValueError
+            if not harness["id"] or not isinstance(harness.get("enabled"), bool):
+                raise ValueError
+            config.port(harness.get("port"))
+    except (ValueError, TypeError):
+        # Fixed copy only: even a malformed journal may contain private fields.
+        # The caller gets a typed refusal, never AttributeError or raw JSON.
+        raise CorruptSetupIntent(_t(ms.corrupt_intent())) from None
+    return intent
+
+
 class SetupInProgress(ValueError):
     """Another owner still holds this machine's mutation journal."""
 
@@ -193,8 +237,7 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
     auth database or mutate WAL/schema while merely opening this affordance.
     """
     value = config.load() if (config.directory() / "config.json").exists() else {}
-    pending_path = config.directory() / "create.json"
-    pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
+    pending = _pending_intent(configured=bool(value))
     pin = value.get("credential_id") if value else pending.get("credential_id")
     choices = local_credential_choices()
     fields: dict[str, Any] = {
@@ -234,8 +277,7 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
     value: dict[str, Any] = {}
     if (config.directory() / "config.json").exists():
         value = config.load()
-    pending_path = config.directory() / "create.json"
-    pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
+    pending = _pending_intent(configured=bool(value))
     pin = value.get("credential_id") if value else pending.get("credential_id")
     if pin is not None and usable_credential_id(pin) is None:
         return _plan("owner_missing", _t(ms.owner_missing()))

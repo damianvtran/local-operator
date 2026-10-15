@@ -278,6 +278,89 @@ async def test_strict_explicit_owner_and_price_model(desktop, upstream, body):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[]",
+        "null",
+        "17",
+        "true",
+        '"PRIVATE_SENTINEL"',
+        "{}",
+        '{"credential_id":17,"key":"PRIVATE_SENTINEL","payload":[]}',
+    ],
+)
+@pytest.mark.parametrize("action", [None, "plan", "run"])
+async def test_corrupt_intent_is_structured_without_reads_or_writes(desktop, upstream, raw, action):
+    client, _app, root = desktop
+    config.directory().mkdir(parents=True, exist_ok=True)
+    intent = config.directory() / "create.json"
+    intent.write_text(raw)
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    response = (
+        await client.get(PATH)
+        if action is None
+        else await client.post(PATH, json={"action": action, "credential_id": 17})
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "setup_intent_corrupt"
+    assert "Leave create.json unchanged" in response.json()["detail"]["text"]
+    assert "PRIVATE_SENTINEL" not in response.text
+    assert not upstream.calls and not upstream.installs
+    assert before == {
+        str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+
+
+def test_cli_setup_corrupt_intent_fails_before_account_selection(desktop, upstream, capsys):
+    import argparse
+
+    from local_operator.tunnels.arguments import add_parser
+    from local_operator.tunnels.cli import main
+
+    _client, _app, root = desktop
+    config.directory().mkdir(parents=True, exist_ok=True)
+    (config.directory() / "create.json").write_text('"CLI_PRIVATE_SENTINEL"')
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    assert (
+        main(parser.parse_args(["tunnel", "setup", "apply", "--credential-id", "17", "--json"]))
+        == 1
+    )
+    output = capsys.readouterr()
+    assert "Leave create.json unchanged" in output.err
+    assert "CLI_PRIVATE_SENTINEL" not in output.out + output.err
+    assert not upstream.calls and not upstream.installs
+    assert before == {
+        str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+
+
+@pytest.mark.asyncio
+async def test_healthy_config_ignores_unused_corrupt_intent(desktop, upstream):
+    client, _app, root = desktop
+    assert (await client.post(PATH, json={"action": "run", "credential_id": 17})).json()["result"][
+        "verified"
+    ]
+    (config.directory() / "create.json").write_text('"UNUSED_PRIVATE_SENTINEL"')
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    posts = sum(c[0] == "POST" for c in upstream.calls)
+    installs = len(upstream.installs)
+    local = await client.get(PATH)
+    assert local.status_code == 200 and local.json()["result"]["quote"] is None
+    result = await client.post(PATH, json={"action": "run", "credential_id": 17})
+    assert result.status_code == 200 and result.json()["result"]["verified"]
+    assert "UNUSED_PRIVATE_SENTINEL" not in local.text + result.text
+    assert posts == sum(c[0] == "POST" for c in upstream.calls) and installs == len(
+        upstream.installs
+    )
+    assert before == {
+        str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
+
+
+@pytest.mark.asyncio
 async def test_fresh_plan_and_wrong_price_never_mutate(desktop, upstream):
     client, _app, _root = desktop
     upstream.quote["eligible"] = False

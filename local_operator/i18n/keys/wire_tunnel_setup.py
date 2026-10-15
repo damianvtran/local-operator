@@ -14,6 +14,10 @@ def checking() -> Msg:
     return Msg("wire.tunnel_setup.checking", {})
 
 
+def corrupt_intent() -> Msg:
+    return Msg("wire.tunnel_setup.corrupt_intent", {})
+
+
 def deadline() -> Msg:
     return Msg("wire.tunnel_setup.deadline", {})
 

@@ -493,7 +493,12 @@ is504 `setup_deadline` **after safe drain**; drain can exceed the nominal budget
 Never retry speculatively as a second owner—poll local state and retry the saved
 journal after work settles. HTTP401/403/503 admission and strict422 validation
 remain unchanged. Expected business blockers are200. A safe503
-`setup_unavailable` does not imply rollback.
+`setup_unavailable` does not imply rollback. With no completed configuration,
+invalid saved `create.json` shape/required fields return503
+`setup_intent_corrupt`: preserve the original file and recover its original
+request explicitly; never overwrite/repair it or choose another account as a
+fallback. An unused old intent is ignored when configuration already exists,
+so corrupt leftovers cannot block a healthy existing no-op.
 
 The backend contract is additive; desktop renderer consumption/design/real-device
 acceptance is a separate slice, not established merely by advertising this key.

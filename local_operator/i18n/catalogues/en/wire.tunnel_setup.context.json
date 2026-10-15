@@ -18,5 +18,10 @@
     "role": "Initial ephemeral progress",
     "tone": "Precise",
     "note": "No claim that billing/installation has started; run still checks fresh account/quote/prerequisites."
+  },
+  "wire.tunnel_setup.corrupt_intent": {
+    "role": "Corrupt saved setup request refusal",
+    "tone": "Actionable, cautious",
+    "note": "Keep original journal untouched; no account fallback/repair or raw private JSON/error detail. Validation precedes reads/writes upstream."
   }
 }

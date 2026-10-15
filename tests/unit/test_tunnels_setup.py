@@ -418,6 +418,7 @@ async def test_zero_credit_refuses_new_setup_but_preserves_pending_resume(rig, m
     assert (await setup.apply())["step"] == "balance"
     payload = {
         "name": "original-name",
+        "device_id": "original-device",
         "gateway_port": 4999,
         "harnesses": [{"id": "local-operator", "enabled": True, "port": 4998}],
     }
