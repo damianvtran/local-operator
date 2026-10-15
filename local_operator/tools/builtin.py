@@ -6579,6 +6579,12 @@ async def execute_read(
     context: ToolContext | None = None,
 ) -> ToolResult:
     """Read a file (with optional line range) or resolve an internal URL."""
+    # `memory:` (not just `memory://`): a single-slash typo must be REFUSED by parse_url,
+    # not fall through to the filesystem and create a `memory:/x` directory (QA Q7).
+    if isinstance(args.get("path"), str) and args["path"].strip().lower().startswith("memory:"):
+        from local_operator.tools.memory_tools import execute_memory
+
+        return await execute_memory(tool_call_id, "read", args, context)
     try:
         params = ReadParams(**args)
     except ValidationError as exc:
@@ -9770,6 +9776,12 @@ async def execute_edit(
     because silently editing the first occurrence is how edits corrupt the
     wrong site.
     """
+    # `memory:` (not just `memory://`): a single-slash typo must be REFUSED by parse_url,
+    # not fall through to the filesystem and create a `memory:/x` directory (QA Q7).
+    if isinstance(args.get("path"), str) and args["path"].strip().lower().startswith("memory:"):
+        from local_operator.tools.memory_tools import execute_memory
+
+        return await execute_memory(tool_call_id, "edit", args, context)
     try:
         params = EditParams(**args)
     except ValidationError as exc:
@@ -10214,6 +10226,12 @@ async def execute_write(
     context: ToolContext | None = None,
 ) -> ToolResult:
     """Create or overwrite a file, creating parent directories as needed."""
+    # `memory:` (not just `memory://`): a single-slash typo must be REFUSED by parse_url,
+    # not fall through to the filesystem and create a `memory:/x` directory (QA Q7).
+    if isinstance(args.get("path"), str) and args["path"].strip().lower().startswith("memory:"):
+        from local_operator.tools.memory_tools import execute_memory
+
+        return await execute_memory(tool_call_id, "write", args, context)
     try:
         params = WriteParams(**args)
     except ValidationError as exc:
