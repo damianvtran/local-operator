@@ -3329,6 +3329,62 @@ async def test_a_degrade_folded_into_an_in_flight_refresh_is_still_retried(
         registrant.close()
 
 
+def _publish_quiescent_history_takeover(handle: FakeHandle) -> None:
+    """Advance THIS fake owner's authoritative generation before publishing it.
+
+    The quiescent takeover is a generation-only simulation: real270 transcript
+    rows must survive unchanged. Transcript has no semantic generation-only API;
+    compaction/prune add records or change the replay, so neither models this
+    fixture transition. Mirror its in-memory owner generation/cache boundary
+    here, then publish that same value. Advertising frontend1 with window0
+    previously made the fixture demand a generation its owner could never serve.
+
+    Deliberately NOT a global _WindowedHandle response override: other tests
+    must retain their genuine compaction/stale-token generations. The real
+    display_window function still reads the transcript and mints its own tokens.
+    """
+    assert isinstance(handle, _WindowedHandle), "takeover requires a real window owner"
+    generation = handle.transcript._history_generation + 1
+    assert generation == handle._frontend.state.history_generation + 1
+    handle.transcript._history_generation = generation
+    handle.transcript._display_window_cache = None
+    handle._frontend.mutate(history_generation=generation, cwd="/tmp/generation-moved")
+
+
+@pytest.mark.asyncio
+async def test_quiescent_takeover_keeps_owner_generation_and_content_coherent(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Real transcript append I/O, deliberately limited to one owned worker.
+    # This test opens no server/socket and the pool is joined before returning.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="quiescent-transcript") as io:
+        asyncio.get_running_loop().set_default_executor(io)
+        handle = await _windowed_handle(tmp_path)
+        before_window = handle._window()
+        before_entries = list(handle.transcript.entries())
+        before_bytes = handle.transcript.path.read_bytes()
+        assert before_window.history_generation == handle._frontend.state.history_generation == 0
+        assert before_window.total_message_count == len(before_entries) == 270
+        _publish_quiescent_history_takeover(handle)
+        after_window = handle._window()
+        content_unchanged = (
+            list(handle.transcript.entries()) == before_entries
+            and handle.transcript.path.read_bytes() == before_bytes
+            and after_window.messages == before_window.messages
+        )
+        print(
+            "QUIESCENT_TAKEOVER_COHERENCE "
+            f"front={handle._frontend.state.history_generation} "
+            f"window={after_window.history_generation} rows={after_window.total_message_count} "
+            f"content_unchanged={content_unchanged}",
+            flush=True,
+        )
+        assert handle._frontend.state.history_generation == 1, "takeover bump was lost"
+        assert after_window.history_generation == handle._frontend.state.history_generation
+        assert after_window.total_message_count == 270
+        assert content_unchanged, "a generation-only takeover rewrote the real transcript"
+
+
 class _HeldResyncRetry:
     """An instance-owned backoff whose entry/expiry are explicit test events."""
 
@@ -3579,7 +3635,7 @@ async def test_a_quiescent_follower_recovers_without_waiting_for_more_traffic(
             # would be asserting against a path that does not exist. The legacy
             # leg below still proves quiescent recovery, just from the simpler
             # state where the retry is the only actor.
-            handle._frontend.mutate(history_generation=1, cwd="/tmp/generation-moved")
+            _publish_quiescent_history_takeover(handle)
             async with asyncio.timeout(8.0):
                 takeover = await gate.next_refresh()
                 assert takeover.task is not first.task, "generation move did not take over the slot"
