@@ -3814,47 +3814,82 @@ async def test_direct_constructor_serializes_wal_bootstrap_before_competing_sql(
         assert columns.count("login_incarnation") == 1
     finally:
         release_a.set()
-        # Constructor failure can occur before AuthStore.close is available;
-        # the observer retains only actual connections for deterministic cleanup.
-        for conn in connections:
-            conn.close()
-            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-                conn.execute("SELECT 1")
+        # Check retained OWNED handles BEFORE safety cleanup, so a missing
+        # product close cannot pass because the fixture closed it afterwards.
+        try:
+            assert len(connections) == 2, "the two real constructor handles were not observed"
+            for conn in connections:
+                with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                    conn.execute("SELECT 1")
+        finally:
+            # Constructor failure can precede AuthStore.close availability.
+            for conn in connections:
+                conn.close()
         alive = [thread.name for thread in owned_threads if thread.is_alive()]
         after_fds = len(os.listdir(fd_root)) if before_fds is not None else None
         print("AUTH_BOOTSTRAP_CLEANUP", "threads", alive, "fds", before_fds, after_fds, flush=True)
         assert not alive
-        if before_fds is not None:
-            assert after_fds == before_fds
+        if guard is not None:
+            assert not auth_module._BOOTSTRAP_ENTRIES and not auth_module._BOOTSTRAP_FDS
+        # Process-wide FD totals are diagnostic, not an ownership oracle:
+        # reverse-order execution identified a predecessor's two DB handles
+        # plus WAL/SHM disappearing here. Net totals also conceal owned leaks;
+        # retained raw handles, owned threads and guard bookkeeping above do not.
 
 
 async def test_native_lifecycle_concurrent_migration_serializes_check_and_alter(tmp_path):
     import concurrent.futures
+    import contextlib
     import sqlite3
     import threading
 
     path = tmp_path / "legacy.db"
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, "
-            "credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, "
-            "created_at INTEGER, updated_at INTEGER)"
-        )
-    barrier = threading.Barrier(2)
+    # Hold BOTH real fixture handles until their explicit-close checks. A
+    # transaction context manager commits/rolls back but does not close them;
+    # GC must not turn an omitted fixture close into a passing cleanup oracle.
+    fixture_connections: list[sqlite3.Connection] = []
+    try:
+        # Preserve commit/rollback inside the ownership context: Connection's
+        # transaction __exit__ runs BEFORE closing, including on failure.
+        with contextlib.closing(sqlite3.connect(path)) as conn, conn:
+            fixture_connections.append(conn)
+            conn.execute(
+                "CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, "
+                "credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, "
+                "created_at INTEGER, updated_at INTEGER)"
+            )
+        barrier = threading.Barrier(2)
 
-    def migrate():
-        barrier.wait(timeout=5)
-        auth = AuthStore(db_path=path)
-        auth.close()
+        def migrate():
+            barrier.wait(timeout=5)
+            auth = AuthStore(db_path=path)
+            auth.close()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(migrate) for _ in range(2)]
-        for future in futures:
-            future.result(timeout=10)
-    with sqlite3.connect(path) as conn:
-        assert [r[1] for r in conn.execute("PRAGMA table_info(auth_credentials)")].count(
-            "login_incarnation"
-        ) == 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(migrate) for _ in range(2)]
+            for future in futures:
+                future.result(timeout=10)
+        # Preserve commit/rollback inside the ownership context: Connection's
+        # transaction __exit__ runs BEFORE closing, including on failure.
+        with contextlib.closing(sqlite3.connect(path)) as conn, conn:
+            fixture_connections.append(conn)
+            assert [r[1] for r in conn.execute("PRAGMA table_info(auth_credentials)")].count(
+                "login_incarnation"
+            ) == 1
+
+        assert len(fixture_connections) == 2
+        for index, connection in enumerate(fixture_connections):
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                rows = connection.execute("SELECT 1").fetchall()
+                print("MIGRATION_FIXTURE_STILL_OPEN", index, rows, flush=True)
+            print("MIGRATION_FIXTURE_CLOSED_CONFIRMED", index, flush=True)
+    finally:
+        # RED must demonstrate the missing close without leaking its evidence.
+        for connection in fixture_connections:
+            connection.close()
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+        print("MIGRATION_FIXTURE_FINALLY_CLOSED", len(fixture_connections), flush=True)
 
 
 async def test_native_lifecycle_mcp_and_copied_rows_are_not_native(store):
@@ -4029,3 +4064,82 @@ async def test_private_memory_bootstrap_has_no_persistent_side_effects(tmp_path,
     finally:
         auth.close()
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_guard_exit_failure_closes_actual_connection_before_constructor_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful SQL body is not a successful constructor until guard exit.
+
+    Retain the REAL connection so GC cannot repair a missed explicit close.
+    The observer performs the genuine OS unlock before reporting a cleanup
+    failure; neither the SQL operations nor lock acquisition are simulated.
+    """
+    import os
+    import sqlite3
+    import threading
+    from types import SimpleNamespace
+
+    from local_operator.providers import auth_store as mod
+
+    path = tmp_path / "exit-failure.db"
+    fd_root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+    before_fds = len(os.listdir(fd_root))
+    before_threads = {thread.ident for thread in threading.enumerate()}
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+    real_unlock = mod._unlock
+    unlocks: list[int] = []
+
+    def observed_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+
+    def unlock_then_report_failure(fd):
+        real_unlock(fd)
+        unlocks.append(fd)
+        raise OSError("controlled error AFTER actual OS unlock")
+
+    monkeypatch.setattr(
+        mod, "sqlite3", SimpleNamespace(**{**vars(sqlite3), "connect": observed_connect})
+    )
+    monkeypatch.setattr(mod, "_unlock", unlock_then_report_failure)
+    try:
+        with pytest.raises(OSError, match="controlled error AFTER actual OS unlock"):
+            AuthStore(db_path=path, config_dir=tmp_path, config_overrides={}, usage_cache=None)
+        assert len(opened) == 1 and len(unlocks) == 1
+        assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            rows = opened[0].execute("SELECT 1").fetchall()
+            print("AUTH_EXIT_FAILURE_LIVE_RAW_CONNECTION", rows, flush=True)
+        print("AUTH_EXIT_FAILURE_RAW_CLOSED_CONFIRMED", flush=True)
+    finally:
+        # Baseline RED must not leak its demonstrated open handle. Restoring
+        # the real unlock also lets the finally path prove same-lock reuse.
+        monkeypatch.setattr(mod, "_unlock", real_unlock)
+        for connection in opened:
+            connection.close()
+        with mod._auth_bootstrap_guard(path):
+            pass
+        assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+        after_fds = len(os.listdir(fd_root))
+        after_threads = {thread.ident for thread in threading.enumerate()}
+        print(
+            "AUTH_EXIT_FAILURE_CLEANUP",
+            "fds",
+            before_fds,
+            after_fds,
+            "new_threads",
+            sorted(after_threads - before_threads),
+            "registry",
+            len(mod._BOOTSTRAP_ENTRIES),
+            "lockfds",
+            len(mod._BOOTSTRAP_FDS),
+            flush=True,
+        )
+        # Global FD totals may change as unrelated fixtures release resources.
+        # The retained raw connection was checked closed BEFORE this finally;
+        # same-lock reacquisition and empty guard bookkeeping check ownership.
+        assert after_threads == before_threads
