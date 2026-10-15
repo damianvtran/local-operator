@@ -272,14 +272,30 @@ async def test_find_bounds_are_the_declared_ones(harness: _Harness) -> None:
     assert over.status_code == 422, over.text
 
 
+async def _published_deploy_result(harness: _Harness, session_id: str) -> dict[str, Any]:
+    # D9 allows a cold first paint to be building/partial with no previous hits.
+    # The shape assertion needs a published generation, not a lucky <200ms scan.
+    # Await the actual single-flight publication task; never retry until a hit.
+    task, _started = transcript_index.start_refresh(harness.root, session_id)
+    async with asyncio.timeout(30):  # Deadlock guard, not a latency expectation.
+        built = await asyncio.shield(task)
+    assert built is not None and built.journal_generation
+    published = transcript_index.read_index(harness.root, session_id)
+    assert published is not None and published.journal_generation == built.journal_generation
+    response = await _find(harness, session_id, q="deploy")
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["state"] == "ready" and result["partial"] is False, result
+    assert result["hits"], "ready index missing requested deploy hit"
+    return result
+
+
 @pytest.mark.asyncio
 async def test_find_response_model_matches_the_d9_shape(harness: _Harness) -> None:
     """Every key D9 names is present, and nothing rides outside it."""
     session_id = await harness.create_session()
     await _seed(harness.root, session_id, [Message.user("deploy")])
-    response = await _find(harness, session_id, q="deploy")
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = await _published_deploy_result(harness, session_id)
     assert set(result) == {"query", "state", "partial", "hits", "truncated"}
     assert set(result["hits"][0]) == {"id", "role", "ts", "snippet", "ranges", "tier"}
 
@@ -328,3 +344,37 @@ async def test_hidden_cross_session_hides_peer_rows_from_the_route(
     hide_cross_session(False)
     result = (await _find(harness, session_id, q="green")).json()["result"]
     assert [hit["id"] for hit in result["hits"]] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_d9_shape_waits_for_publication_not_a_first_paint_hit(harness, monkeypatch):
+    import threading
+
+    session_id = await harness.create_session()
+    await _seed(harness.root, session_id, [Message.user("deploy")])
+    refresh = transcript_index.refresh_index
+    release = threading.Event()
+
+    def held_refresh(*args, **kwargs):
+        assert release.wait(30), "test publication gate never released"
+        return refresh(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_index, "refresh_index", held_refresh)
+    try:
+        response = await _find(harness, session_id, q="deploy")
+        result = response.json()["result"]
+        assert response.status_code == 200
+        assert result["state"] == "building" and result["partial"] is True
+        assert result["hits"] == []  # Original hits[0] assertion fails at this boundary.
+    finally:
+        release.set()
+    published = await _published_deploy_result(harness, session_id)
+    assert published["hits"][0]["snippet"] == "deploy"
+
+
+@pytest.mark.asyncio
+async def test_d9_shape_publication_wait_does_not_hide_a_missing_seed(harness):
+    session_id = await harness.create_session()
+    await _seed(harness.root, session_id, [Message.user("unrelated fixture")])
+    with pytest.raises(AssertionError, match="ready index missing requested deploy hit"):
+        await _published_deploy_result(harness, session_id)
