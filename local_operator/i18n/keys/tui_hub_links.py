@@ -30,20 +30,8 @@ def action_retry() -> Msg:
     return Msg("tui.hub_links.action.retry", {})
 
 
-def confirm_alt() -> Msg:
-    return Msg("tui.hub_links.confirm.alt", {})
-
-
 def confirm_concurrent() -> Msg:
     return Msg("tui.hub_links.confirm.concurrent", {})
-
-
-def confirm_id(*, id: str) -> Msg:
-    return Msg("tui.hub_links.confirm.id", {"id": id})
-
-
-def confirm_id_hint() -> Msg:
-    return Msg("tui.hub_links.confirm.id_hint", {})
 
 
 def confirm_keys(*, confirm: str, cancel: str) -> Msg:
@@ -88,6 +76,10 @@ def hint_confirm() -> Msg:
 
 def hint_engage() -> Msg:
     return Msg("tui.hub_links.hint.engage", {})
+
+
+def hint_failed(*, reason: str) -> Msg:
+    return Msg("tui.hub_links.hint.failed", {"reason": reason})
 
 
 def hint_range(*, first: str, last: str, total: str) -> Msg:
@@ -157,6 +149,26 @@ def policy_subscribe_label() -> Msg:
     return Msg("tui.hub_links.policy.subscribe.label", {})
 
 
+def reason_baseline_unknown() -> Msg:
+    return Msg("tui.hub_links.reason.baseline_unknown", {})
+
+
+def reason_mixed_lineage() -> Msg:
+    return Msg("tui.hub_links.reason.mixed_lineage", {})
+
+
+def reason_no_receipt() -> Msg:
+    return Msg("tui.hub_links.reason.no_receipt", {})
+
+
+def reason_unsafe_publication() -> Msg:
+    return Msg("tui.hub_links.reason.unsafe_publication", {})
+
+
+def reason_unsupported_precondition() -> Msg:
+    return Msg("tui.hub_links.reason.unsupported_precondition", {})
+
+
 def refusal_ineligible(*, reason: str) -> Msg:
     return Msg("tui.hub_links.refusal.ineligible", {"reason": reason})
 
@@ -211,6 +223,10 @@ def state_preview_changed() -> Msg:
 
 def state_published(*, source: str) -> Msg:
     return Msg("tui.hub_links.state.published", {"source": source})
+
+
+def state_unavailable() -> Msg:
+    return Msg("tui.hub_links.state.unavailable", {})
 
 
 def state_unsubscribed(*, source: str) -> Msg:

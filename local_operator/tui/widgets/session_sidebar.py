@@ -2853,24 +2853,37 @@ class SessionSidebar(Widget, can_focus=True):
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
-                candidates = expand(
-                    [
-                        f"{position} · {lead} · ctrl+b hide{{t}}",
-                        f"{position} · {lead}{{t}}",
-                    ]
-                )
+                # D2 (pre-release batch): the hub door OUTLIVES `ctrl+b hide` —
+                # see the unpaged branch below for the rule; the same order is
+                # applied to this two-template rung (hide-dropped full variants
+                # before the hub-free ones).
+                head_hide = f"{position} · {lead} · ctrl+b hide"
+                head_plain = f"{position} · {lead}"
+                candidates = [head_hide + tail_full, head_plain + tail_full]
+                if hub_note and tail_nohub != tail_full:
+                    candidates.extend([head_hide + tail_nohub, head_plain + tail_nohub])
             else:
-                candidates = expand([f"{base}{{t}}"])
                 # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round 2:
-                # U3). At 80x24 an unfocused sidebar has 29 content cells and
+                # U3), and since the pre-release batch so does the HUB DOOR
+                # (D2). At 80x24 an unfocused sidebar has 29 content cells and
                 # `f9 focus · ctrl+b hide · asks: 4` is 32, so the ladder used to
                 # fall all the way to `f9 focus · ctrl+b hide` — dropping the
                 # total, the only fleet surface on the frame, while keeping a
                 # hint about hiding a panel. `ctrl+b hide` is discovered by
                 # pressing ctrl+b and is also on the frame that toggles it; the
-                # count is discovered from nowhere else. Once the hub-free
-                # variants are spent, the lead keeps the tail it can.
-                candidates.extend(expand([f"{lead}{{t}}"]))
+                # count is discovered from nowhere else — and the hub door has
+                # NO key teacher at this width, so a hub note one cell over
+                # budget must not die while the hide hint survives.
+                #
+                # THE ORDER (D2): every template WITH the full tail (hub kept,
+                # `ctrl+b hide` dropped), then the hub-free tail. That is the
+                # only place the door outranks the hide hint; the door never
+                # displaces asks or the chip — those candidates come first and
+                # the hub-free variants drop the DOOR before either fact yields.
+                templates = [f"{base}", f"{lead}"]
+                candidates = [t + tail_full for t in templates]
+                if hub_note and tail_nohub != tail_full:
+                    candidates.extend(t + tail_nohub for t in templates)
             if chip:
                 candidates.append(f"{lead} · {chip}")
         hint = next(

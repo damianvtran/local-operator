@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 from pathlib import Path
 from typing import Any
 
@@ -374,7 +375,16 @@ async def test_esc_cancels_the_prompt_not_the_overlay(
 async def test_ineligible_refusal_is_named_on_the_card(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D7/D19: ineligible enable is refused with a humanized reason ON the card."""
+    """D7/D19 + U4: ineligible enable is refused with a catalogue sentence.
+
+    U4 (pre-release batch): the refusal used to be the raw code with hyphens
+    swapped for spaces (``unsupported precondition``), which told the user
+    nothing. Each known reason now has its own user-oriented sentence from the
+    catalogue; the developer vocabulary must not appear.
+    """
+
+    from local_operator.i18n.keys import tui_hub_links as _k
+    from local_operator.i18n.text import tr
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     identity = _seed_link(tmp_path, attest_revision_cas=False, auto_push=False)
@@ -386,9 +396,11 @@ async def test_ineligible_refusal_is_named_on_the_card(
         await pilot.pause()
         await pilot.pause()
         panel = _mounted_panel(app)
-        # The refusal is on the CARD (D19), humanized (D19), not a raw code.
+        # The refusal is on the CARD (D19), as a user-oriented sentence (U4).
         assert panel._notice, "a refusal must be shown on the card"
-        assert "unsupported precondition" in panel._notice.lower(), panel._notice
+        expected = tr("tui.hub_links")(_k.reason_unsupported_precondition())
+        assert panel._notice == expected, panel._notice
+        assert "unsupported precondition" not in panel._notice.lower(), panel._notice
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
 
 
@@ -450,36 +462,57 @@ async def test_tui_cannot_create_egress_grant_when_an_earlier_check_fails(
     assert identity.link_id not in grants, "no egress grant may be created"
 
 
-def test_footer_drops_the_hub_door_before_the_asks_or_chip() -> None:
-    """D9: the hub door is the FIRST tail fact the footer ladder drops.
+def test_footer_hub_door_outlives_the_hide_hint_but_never_asks_or_chip() -> None:
+    """D2 (pre-release batch): the door yields AFTER `ctrl+b hide`, never to it.
 
-    The door is a CONTROL with two surviving routes (the footer note's press and
-    ``/hub``); the ask count and the chip are FACTS discoverable from nowhere
-    else on the frame. Measured through the REAL ladder with all three tail
-    facts seeded.
+    The pre-batch ladder spent the base rung full-then-hub-free, so at the
+    sidebar's 29-cell floor (a 100-column terminal) `f9 focus · ctrl+b hide ·
+    hub: 1` being one cell over budget dropped the HUB while the hide hint
+    survived — and the door has no key teacher at this width. The order is now:
+    every fact with the full tail, then the hide-dropped full tail, then the
+    hub-free one. The door still never displaces the ask count or the chip:
+    those are facts discoverable from nowhere else on the frame, and the
+    hub-free variants drop the DOOR before either yields.
+
+    All strings here are MEASURED from the real ladder (the probe ran against
+    the fixed source; the quiet-29 line is the negative control — pre-fix it
+    read `f9 focus · ctrl+b hide`, this test fails).
     """
 
     from local_operator.tui.widgets.session_sidebar import SessionSidebar
 
-    def painted(width: int, *, focused: bool) -> str:
+    def painted(width: int, *, focused: bool, asks: int = 0, chip: int = 0, hub: int = 0) -> str:
         sidebar = SessionSidebar()
-        sidebar._asks_total = 4
-        sidebar._subagent_total = 4
-        sidebar._hub_total = 1
+        sidebar._asks_total = asks
+        sidebar._subagent_total = chip
+        sidebar._hub_total = hub
         sidebar.has_focus = focused
         return sidebar._footer_line(width)[0]
 
+    # The door outlives the hide hint: visible at the 29-cell floor when the
+    # tail is quiet, with `ctrl+b hide` dropped to pay for it; the full form
+    # returns once it fits (34 cells).
+    assert painted(29, focused=False, hub=1) == "f9 focus · hub: 1"
+    assert painted(30, focused=False, hub=1) == "f9 focus · hub: 1"
+    assert painted(34, focused=False, hub=1) == "f9 focus · ctrl+b hide · hub: 1"
+
+    # FACTS FIRST: with asks+chip seeded the door may drop at widths where the
+    # three facts cannot fit, and NEVER appears beside a dropped ask/chip.
+    assert painted(29, focused=False, asks=4, chip=4, hub=1) == "f9 focus · asks: 4 · ⌥4"
+    assert painted(34, focused=False, asks=4, chip=4, hub=1) == "f9 focus · asks: 4 · hub: 1 · ⌥4"
     for focused in (False, True):
-        fact_widths = (26, 29, 30, 41, 43) if focused else (24, 26, 29, 30, 41, 43)
-        for width in fact_widths:
-            line = painted(width, focused=focused)
+        for width in (24, 26, 29, 30, 34, 41, 43):
+            line = painted(width, focused=focused, asks=4, chip=4, hub=1)
             if "hub:" in line:
                 assert "asks: 4" in line and "⌥4" in line, (width, focused, line)
-        floor = fact_widths[0]
-        line = painted(floor, focused=focused)
-        assert "asks: 4" in line and "⌥4" in line, (floor, focused, line)
-        assert "hub:" not in line, (floor, focused, line)
-    assert painted(34, focused=False) == "f9 focus · asks: 4 · hub: 1 · ⌥4"
+
+    # No hub: the old ladder is untouched (the hide hint is still there).
+    assert painted(29, focused=False) == "f9 focus · ctrl+b hide"
+    assert painted(29, focused=False, asks=4, chip=4) == "f9 focus · asks: 4 · ⌥4"
+    assert painted(41, focused=False, asks=4, chip=4) == "f9 focus · ctrl+b hide · asks: 4 · ⌥4"
+
+    # Hub + chip: the chip never yields to the door either.
+    assert painted(29, focused=False, chip=4, hub=1) == "f9 focus · hub: 1 · ⌥4"
 
 
 @pytest.mark.asyncio
@@ -1006,7 +1039,20 @@ async def test_tui_second_write_after_the_grant_uses_the_served_revision(
         await pilot.pause()
         await pilot.press("ctrl+y")  # mint the grant
         await pilot.pause()
-        await pilot.pause()
+        panel = _mounted_panel(app)
+        # U3 (pre-release batch): a press while OUR OWN write is unsettled is
+        # INERT by design, so this test waits for the grant write to settle
+        # (the served revision installed) before the next press — exactly what
+        # a user does when they read the flip first. The main-CI failure this
+        # batch also fixes (run 38648922786) was the PRE-batch version of this
+        # test letting `s` fire mid-write: the exclusive hub-links worker
+        # cancelled the confirm worker's re-read and a write CAS'd against the
+        # stale revision (`link policy changed`).
+        for _ in range(12):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the grant write must settle"
         # The app re-read the inventory; `s` now uses the freshly served revision.
         await pilot.press("s")
         await pilot.pause()
@@ -1016,3 +1062,518 @@ async def test_tui_second_write_after_the_grant_uses_the_served_revision(
     values = _policy_values(tmp_path, identity.link_id)
     assert values["subscribe"] is False, "the subscribe flip must persist"
     assert values["auto_push"] is True
+
+
+@pytest.mark.asyncio
+async def test_second_press_during_the_grant_write_cannot_cancel_its_reread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The main-CI race (run 38648922786): `s` mid-grant-write must be inert.
+
+    PRE-batch: pressing `s` while the ctrl+y grant write was in flight started a
+    second worker in the SAME exclusive group, which cancelled the confirm
+    worker's re-read; the grant write committed with a revision the panel never
+    learned, and a write CAS'd against a stale revision — CI painted
+    `link policy changed`. POST-batch: the second press is inert while
+    `_refreshing` is set (U3), so nothing cancels the confirm worker; the grant
+    persists and a later `s` uses the SERVED revision. The grant write is gated
+    so the race window is deterministic, not a timing coincidence.
+    """
+
+    import threading
+
+    from local_operator.hub_sync import policies as policies_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
+    gate = threading.Event()
+    calls = {"n": 0}
+    real_update = policies_mod.update_policy
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:  # the ctrl+y grant write blocks in its worker
+            gate.wait(5)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(policies_mod, "update_policy", gated)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")  # arm
+        await pilot.pause()
+        await pilot.press("ctrl+y")  # the grant write blocks on the gate
+        await pilot.pause()
+        panel = _mounted_panel(app)
+        assert panel._refreshing, "premise: the grant write is in flight"
+        await pilot.press("s")  # the racing press: inert, must not cancel the worker
+        await pilot.pause()
+        gate.set()
+        for _ in range(12):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the grant write must settle"
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "link policy changed" not in painted, painted
+        # The early press wrote nothing; the grant persisted; the flag flips now.
+        mid = _policy_values(tmp_path, identity.link_id)
+        assert mid["auto_push"] is True, "the grant must persist (its re-read was not cancelled)"
+        assert mid["subscribe"] is True, "the mid-write press must not have written"
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.pause()
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["subscribe"] is False, "the settled press must use the served revision"
+    assert values["auto_push"] is True
+
+
+# ---------------------------------------------------------------------------
+# The pre-release batch (U1/U2/U3/U5/D3/U6). Each regression below FAILS on
+# the pre-batch head 3cd57aaa5a; the U1/U2 repros were first executed against
+# that head by hand (read-only dir -> app dead; error body -> blind write).
+
+
+@pytest.mark.asyncio
+async def test_a_failed_policy_write_keeps_the_session_and_reports_on_the_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U1a: a read-only config dir must NOT kill the TUI (the write fails).
+
+    Pre-fix: `s` raised PermissionError out of `update_policy`, the policy
+    worker's default `exit_on_error` ended the app (the repro printed
+    `app_alive=False`, a WorkerFailed out of run_test), and the conversation
+    went with it. Now the write failure is caught, the card shows the
+    catalogue's save-failed line naming policy + item, the app keeps running,
+    and the config is untouched.
+    """
+
+    from local_operator.i18n.keys import tui_hub_links as _k
+    from local_operator.i18n.text import tr
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await _open_panel(app, pilot)
+            os.chmod(tmp_path, 0o500)  # the write must raise, the session must not die
+            await pilot.press("s")
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            assert app.is_running, "the session must survive a failed write (U1)"
+            panel = _mounted_panel(app)
+            assert panel.is_open, "the card stays up"
+            expected = tr("tui.hub_links")(
+                _k.policy_save_failed(
+                    policy=tr("tui.hub_links")(_k.policy_subscribe_label()), source="coder"
+                )
+            )
+            assert panel._notice == expected, panel._notice
+    finally:
+        os.chmod(tmp_path, 0o700)
+    assert _policy_values(tmp_path, identity.link_id)["subscribe"] is True, "nothing was saved"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_post_write_reread_keeps_the_session_and_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U1b: the re-read AFTER the write fails — the write stands, session lives.
+
+    Pre-fix the injected RuntimeError from the post-write snapshot read ended
+    the app too (the repro printed `app_alive=False`), silently, after the
+    write had landed.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+
+        def flaky() -> Any:
+            raise RuntimeError("config dir unreadable (injected)")
+
+        app._hub_links_snapshot_sync = flaky  # type: ignore[method-assign]
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        assert app.is_running, "a failed re-read must not kill the session (U1)"
+        panel = _mounted_panel(app)
+        assert panel.is_open
+        assert "Could not save" in panel._notice, panel._notice
+    assert _policy_values(tmp_path, identity.link_id)["subscribe"] is False, "the write stands"
+
+
+@pytest.mark.asyncio
+async def test_policy_actions_are_inert_while_the_error_body_shows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U2: an error body hides the rows — `s`/`a` must not write blind.
+
+    Pre-fix the repro flipped `subscribe true→false` while the card showed
+    `hub links unavailable: ...` and no rows. Now the actions are inert, the
+    hint teaches only what is live (r refresh / esc close), and the taught
+    refresh restores the rows so the SAME key works again after recovery.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        panel.show_error("hub links unavailable: boom")
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.is_running
+        assert _policy_values(tmp_path, identity.link_id)["subscribe"] is True, "blind write (U2)"
+        hint = str(panel._hint_row(True))
+        assert "s subscribe" not in hint and "a auto-push" not in hint, hint
+        assert "r refresh" in hint and "esc close" in hint, hint
+        # Recovery is the taught key: `r` re-reads and reinstalls the rows.
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.pause()
+        assert panel._error == "" and panel._rows, "the refresh must restore the rows"
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.pause()
+    assert _policy_values(tmp_path, identity.link_id)["subscribe"] is False
+
+
+@pytest.mark.asyncio
+async def test_double_press_is_inert_until_the_write_settles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U3: a second press while our own write is in flight must not write again.
+
+    Pre-fix the second press CAS'd against the first one's new revision and the
+    card reported the false `link policy changed` self-conflict (and `Saving…`
+    was unreachable: `_refreshing` was never set). The write is gated here (a
+    threading.Event) so the double press lands INSIDE the window
+    deterministically; exactly one flip must persist, with no refusal line.
+    """
+
+    import threading
+
+    from local_operator.hub_sync import policies as policies_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    gate = threading.Event()
+    real_update = policies_mod.update_policy
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        gate.wait(5)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(policies_mod, "update_policy", gated)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("s")
+        await pilot.pause()
+        panel = _mounted_panel(app)
+        assert panel._refreshing, "premise: the card must report the write in flight"
+        await pilot.press("s")  # the double press: inert while unsettled
+        await pilot.pause()
+        gate.set()
+        for _ in range(8):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the write must settle"
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "link policy changed" not in painted, painted
+    assert _policy_values(tmp_path, identity.link_id)["subscribe"] is False, "exactly one flip"
+
+
+@pytest.mark.asyncio
+async def test_the_hint_row_is_state_aware_and_names_a_failed_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U5/D4/D3: hints teach only live keys; a failed row names its reason.
+
+    Loading, the error body and the empty inventory have no fresh selectable
+    rows, so `s`/`a`/↑↓ would be dead keys in those states — the row teaches
+    the subset that is live. A failed selected row carries its reason (D3),
+    with `r refresh` as the live recovery key beside it.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = _mounted_panel(app)
+        panel.display = True
+        # LOADING (first open, no rows yet): only the exit is live.
+        panel.start_fetch()
+        assert str(panel._hint_row(True)) == "esc close"
+        # EMPTY: same — there is nothing to select.
+        panel.show_links({"capability": "hub_links:1", "links": []})
+        assert str(panel._hint_row(True)) == "esc close"
+        # ERROR body: the re-read is live.
+        panel.show_error("hub links unavailable: boom")
+        assert str(panel._hint_row(True)) == "r refresh · esc close"
+        # FAILED row: the reason is NAMED (D3) and `r` remains reachable — the
+        # failed-row yield order drops the policy hints BEFORE `r refresh`.
+        panel.show_links(
+            _snap(_link(pull={"state": "failed", "enabled": True, "error_class": "provider-error"}))
+        )
+        assert str(panel._hint_row(True)) == (
+            "↑↓ to begin · check failed: provider error · s subscribe · r refresh · esc close"
+        ), str(panel._hint_row(True))
+
+
+@pytest.mark.asyncio
+async def test_the_consent_block_carries_no_cli_machinery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U6: the armed prompt is the decision only — no `or:` command, no raw id.
+
+    The block named a literal `<id>` beside a real 64-hex id and read as a
+    developer tool, the largest thing on the card. The prompt is now exactly
+    the lead, the consequence and the two named keys.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "Publish publicly?" in painted, painted
+        assert "ctrl+y" in painted and "esc to cancel" in painted, painted
+        assert "lop hub link set" not in painted, painted
+        assert "link id" not in painted, painted
+        assert "<id>" not in painted, painted
+
+
+# ---------------------------------------------------------------------------
+# Round-2 reviews on #2410 (R1/R2 MAJOR, U7): the write+reread lifetime must
+# stay OWNED until an installed snapshot (or the terminal save-failed line)
+# settles it — a painted refusal does not. `r` must not cancel it either.
+
+
+@pytest.mark.asyncio
+async def test_a_cas_refusal_keeps_the_actions_blocked_until_the_reread_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1/U7: a refusal notice does NOT settle the write+reread lifetime.
+
+    A stale revision makes the write refuse; the notice paints BEFORE the
+    re-read that installs the moved revision. Through that window `s`/`a`
+    must stay inert and post ZERO new intents — pre-fix the notice cleared
+    `_refreshing`, a second `s` posted a write with the stale revision, and
+    the new same-group exclusive worker cancelled the re-read (the U3 race,
+    one state later). After the re-read installs, the SAME key writes against
+    the fresh revision.
+    """
+
+    import threading
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    intents: list[object] = []
+    real_handler = app.on_hub_links_panel_policy_toggle_requested
+
+    def counting(message: Any) -> None:
+        intents.append(message)
+        real_handler(message)
+
+    app.on_hub_links_panel_policy_toggle_requested = counting  # type: ignore[method-assign]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        # Gate the RE-READ only, and only AFTER the open settled: the re-read
+        # must block so the refusal window stays observable (the initial fetch
+        # above already used the real snapshot).
+        release = threading.Event()
+        real_snapshot = app._hub_links_snapshot_sync
+
+        def gated_snapshot() -> Any:
+            release.wait(10)
+            return real_snapshot()
+
+        app._hub_links_snapshot_sync = gated_snapshot  # type: ignore[method-assign]
+        # A concurrent edit moved the revision: the write will be REFUSED.
+        panel._rows = [
+            dataclasses.replace(row, policy_revision="stale-revision") for row in panel._rows
+        ]
+        await pilot.press("s")
+        for _ in range(40):
+            await pilot.pause()
+            if panel._notice:
+                break
+        assert panel._notice, "the CAS refusal must be on the card"
+        assert "changed" in panel._notice.lower(), panel._notice
+        # R1/U7 premise: the refusal painted while the re-read is still blocked.
+        assert panel._refreshing, "a refusal must not settle the write+reread lifetime"
+        assert panel._policy_actions_allowed() is False
+        intents.clear()  # the first intent belongs to the press above
+        await pilot.press("s")
+        await pilot.press("a")
+        await pilot.press("ctrl+y")
+        await pilot.pause()
+        assert intents == [], "no new intent may post while the re-read is pending"
+        release.set()
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the installed re-read settles the lifetime"
+        # The installed revision is live: the same key now writes, no stale CAS.
+        await pilot.press("s")
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["subscribe"] is False, "the post-settle flip must land on the moved revision"
+
+
+@pytest.mark.asyncio
+async def test_refresh_defers_while_the_write_is_pending_and_the_fresh_revision_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: `r` cannot cancel a pending policy worker's re-read.
+
+    While OUR write+reread is unsettled, both the panel action AND a
+    programmatic `RefreshRequested` must be deferred — a refresh would start a
+    second exclusive worker in the same group and cancel the re-read, while
+    the write keeps running in its thread. The pending worker installs the
+    fresh snapshot itself and the NEXT flip accepts the served revision.
+    """
+
+    import threading
+
+    from local_operator.hub_sync import policies as policies_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    gate = threading.Event()
+    real_update = policies_mod.update_policy
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        gate.wait(10)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(policies_mod, "update_policy", gated)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        started: list[str] = []
+        real_fetch = app._fetch_hub_links_worker
+
+        async def counting_fetch() -> None:
+            started.append("fetch")
+            await real_fetch()
+
+        app._fetch_hub_links_worker = counting_fetch  # type: ignore[method-assign]
+        await pilot.press("s")
+        await pilot.pause()
+        assert panel._refreshing, "premise: the write is in flight"
+        await pilot.press("r")  # the panel action: deferred
+        await pilot.pause()
+        app.post_message(HubLinksPanel.RefreshRequested())  # the handler must hold too
+        await pilot.pause()
+        await pilot.pause()
+        assert started == [], "no refresh worker may start while the write+reread is pending"
+        assert panel._refreshing, "the pending worker is untouched"
+        gate.set()
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the pending worker must settle via its own re-read"
+        await pilot.press("s")  # the served revision accepts the next flip
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["subscribe"] is True, "two clean flips: False on the gated write, True after"
+
+
+@pytest.mark.asyncio
+async def test_reopening_during_a_pending_write_does_not_resurrect_a_stale_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 lifecycle: close+reopen mid-write settles on a FRESH fetch.
+
+    The dismiss cancels the group and drops the armed state, so a reopen must
+    not inherit `Saving…` or an armed intent; the orphaned thread write lands
+    on its own and the next read shows it. Nothing stale survives.
+    """
+
+    import threading
+
+    from local_operator.hub_sync import policies as policies_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    gate = threading.Event()
+    real_update = policies_mod.update_policy
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        gate.wait(10)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(policies_mod, "update_policy", gated)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        await pilot.press("s")
+        await pilot.pause()
+        assert panel._refreshing, "premise: the write is in flight"
+        await pilot.press("escape")  # dismiss: the group is cancelled
+        await pilot.pause()
+        await pilot.pause()
+        app.action_hub_links()  # reopen starts a NEW lifecycle
+        for _ in range(10):
+            await pilot.pause()
+            if not _mounted_panel(app)._refreshing and _mounted_panel(app)._rows:
+                break
+        panel = _mounted_panel(app)
+        assert not panel._refreshing, "the reopen must not inherit the stale Saving… state"
+        assert panel._consent_link_id is None, "no stale intent survives a reopen"
+        # The reopen starts UNENGAGED (typed-ahead protection): one navigation
+        # key engages it, as the user would before pressing `r`.
+        await pilot.press("down")
+        await pilot.pause()
+        gate.set()  # the orphaned thread write lands now
+        for _ in range(40):
+            await pilot.pause()
+            if _policy_values(tmp_path, identity.link_id).get("subscribe") is False:
+                break
+        await pilot.press("r")  # the next read shows the landed write
+        for _ in range(40):
+            await pilot.pause()
+            if panel._rows and panel._rows[0].subscribe is False:
+                break
+        assert (
+            panel._rows and panel._rows[0].subscribe is False
+        ), "the reopened panel must settle on the landed state"
