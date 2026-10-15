@@ -78,6 +78,7 @@ def test_promoted_session_uses_real_origin_and_syncs_over_sockets(devices, monke
     )
     directory = b.root / "sessions" / "promoted-session"
     directory.mkdir(parents=True)
+    assert original.session_dir is not None
     shutil.copyfile(original.session_dir / SESSION_EXPORT_NAME, directory / SESSION_EXPORT_NAME)
     promoted = MemoryStore(
         b.root, MemoryIdentity("promoted-session"), directory, origin=b.identity.device_id
@@ -284,3 +285,58 @@ def test_nonadmin_receiver_refuses_over_real_link(devices, monkeypatch):
     print("NONADMIN actual receiver refusal:", reply)
     assert memory.push_to_peer(b, a.identity.device_id)["code"] == "skipped:no_admin"
     assert not bank(a).path.exists()
+
+
+def test_offline_return_restarts_real_relay_same_roots_and_catches_up(devices, monkeypatch):
+    """A stopped receiver comes back from its existing disk, not just a fresh store handle.
+
+    The paired keys, network grant and memory vectors survive. Offline writes and forgets
+    must converge after the replacement relay returns, including a stale local body on B.
+    Every member exchanges its complete permitted operation set with each admin peer;
+    this is full-member replication, not an A->B->C forwarding guarantee.
+    """
+    from local_operator.network import store as network_store
+
+    a, b = linked(devices, monkeypatch)
+    left, right = bank(a), bank(b)
+    victim = left.put("session", {"title": "Retire locator", "body": "docs/old-runbook.md"})
+    assert memory.push_to_peer(a, b.identity.device_id)["code"] == "in_sync"
+    assert right.search("old-runbook", "session"), "positive control: B really has the old body"
+    records = network_store.list_networks(a.root)
+    assert len(records) == 1
+    record = records[0]
+    b_id, b_root, b_keys = b.identity.device_id, b.root, b.identity
+    b.stop()
+    fresh = left.put("team", {"title": "Offline note", "body": "docs/offline-catchup.md"})
+    left.put("session", {}, entity=victim["id"], expected_version=victim["version"], forget=True)
+    offline = memory.push_to_peer(a, b_id)
+    assert not offline["ok"], offline
+    assert right.show("session", victim["id"])["status"] == "active"
+    returned = serve_shaped_relay(
+        b_root, monkeypatch, identity=b_keys, audit=audit.AuditLog(b_root)
+    )
+    try:
+        live = _bind_and_start(returned, record)
+        _set_peer_endpoints(a, record, b_id, [live])
+        result = memory.push_to_peer(a, b_id)
+        assert result["code"] == "in_sync", result
+        assert bank(returned).show("team", fresh["id"])["fact"]["body"] == "docs/offline-catchup.md"
+        assert bank(returned).show("session", victim["id"])["status"] == "forgotten"
+        # Reverse exchange and replay cannot resurrect the old put from B's disk.
+        assert memory.push_to_peer(returned, a.identity.device_id)["code"] == "in_sync"
+
+        def digest(memory_store):
+            import hashlib
+
+            with memory_store.connection() as db:
+                rows = [row[0] for row in db.execute("SELECT data FROM ops ORDER BY op_id")]
+            return hashlib.sha256("\n".join(rows).encode()).hexdigest()
+
+        assert digest(left) == digest(bank(returned))
+        assert not left.search("old-runbook") and not bank(returned).search("old-runbook")
+        print(
+            "OFFLINE RETURN actual relay stop/new listener same roots; "
+            "catchup, equal op digests, no resurrection PASS"
+        )
+    finally:
+        returned.stop()

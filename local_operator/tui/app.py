@@ -20108,6 +20108,8 @@ class OperatorApp(App[None]):
         enqueue a model turn or wake an idle owner; correction uses a displayed
         revision and forgetting requires the explicit --yes token.
         """
+        from pathlib import Path
+
         from local_operator.memory import MemoryIdentity
         from local_operator.memory_cli import run
         from local_operator.paths import config_dir
