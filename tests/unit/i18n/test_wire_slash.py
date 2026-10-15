@@ -101,8 +101,9 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # The migrated SITES: the registry field the picker, /help, the desktop
     # catalogue and the phone sheet all read. A missing/extra command raises a
     # KeyError here rather than passing silently.
-    # 50 at S2, +1 with C's `/language`, +1 with `/memory`, which lives in the English-only `wire.memory` namespace so the audited wire.slash hash stays valid (see the table note); a missing or
-    # extra command raises a KeyError either way rather than passing silently.
+    # 50 at S2, +1 with C's `/language`, +1 with `/memory`. `/memory` lives in the
+    # English-only `wire.memory` namespace so the audited wire.slash hash stays valid;
+    # a missing or extra command raises a KeyError either way rather than passing silently.
     assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 1 == 53
     for command in SLASH_COMMANDS:
         if command.name == MEMORY_COMMAND:
