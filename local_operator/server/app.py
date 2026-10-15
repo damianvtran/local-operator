@@ -508,6 +508,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             hub_sync_task.cancel()
             await asyncio.gather(hub_sync_task, return_exceptions=True)
         app.state.hub_sync = None
+        # Remote onboarding keeps SSH workers/target leases across UI close.
+        await desktop_approvals.drain(app)
         # Setup owns blocking service work; join it before closing auth or
         # allowing event-loop teardown to cancel the worker under its lease.
         try:

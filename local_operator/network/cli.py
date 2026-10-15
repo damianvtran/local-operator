@@ -339,6 +339,11 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     approval_request.add_argument("--network", default="", help="the network to join (name or id)")
     approval_request.add_argument(
+        "--network-only",
+        action="store_true",
+        help="New signed network enrollment only; do not provision logins, tools or account access",
+    )
+    approval_request.add_argument(
         "--role",
         default="drive",
         choices=("read", "drive", "admin"),
@@ -378,6 +383,13 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     approval_approve.add_argument("approval")
     approval_approve.add_argument("--json", action="store_true")
+    enrollment_approve = approval_actions.add_parser(
+        "approve-network-enrollment",
+        help="Review and sign the exact restricted enrollment snapshot (no account sharing)",
+    )
+    enrollment_approve.add_argument("approval")
+    enrollment_approve.add_argument("--request-digest", required=True)
+    enrollment_approve.add_argument("--json", action="store_true")
     approval_deny = approval_actions.add_parser(
         "deny", help="Answer no (settles in the safe direction)"
     )
@@ -8353,6 +8365,20 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             f"  {'provision':<{_CARD_LABEL_WIDTH}}: definitions, MCP servers, "
             "git identity, and this device's logins"
         )
+    if record.get("kind") == "device_onboard_network_only":
+        lines.append("  network enrollment only; account logins are not shared")
+        lines.append("  observed SSH key (TOFU), not independently verified identity")
+        anchor = what.get("anchor") or {}
+        for label, field in (
+            ("anchor key", "key_id"),
+            ("anchor fp", "spki_fp"),
+            ("anchor digest", "statement_digest"),
+        ):
+            lines.append(f"  {label:<{_CARD_LABEL_WIDTH}}: {anchor.get(field, '')}")
+        lines.append("  control grants: " + (", ".join(what.get("grant") or []) or "none"))
+        lines.append(
+            "  unattended sessions: " + ("trusted" if what.get("unattended") else "not trusted")
+        )
     expires = record.get("expires_at")
     decided = record.get("decided_at")
     if state == "withdrawn" and isinstance(decided, (int, float)) and decided:
@@ -8446,66 +8472,25 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
 
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
     """File the onboarding request: the card an operator will be asked to sign."""
-    from local_operator.network import approvals as approval_store
-    from local_operator.network.identity import load_or_mint
-    from local_operator.network.types import MeshRefusal
+    from local_operator.network.onboard_approvals import request_device
 
-    trio = approval_store.local_anchor_trio()
-    if trio is None:
-        raise MeshRefusal(
-            "approval_anchor_unavailable",
-            "operator authority is not set up on this machine yet, and the card has to "
-            "name the key it will install: ask Local Operator to set up operator authority "
-            "for this machine (one approval and one admin password prompt), then file the "
-            "request",
-        )
-    network_id = ""
-    if args.network:
-        network_id = _resolve(args.network).network_id
-    try:
-        asked_by_device = load_or_mint().device_id
-    except (OSError, ValueError):
-        asked_by_device = ""
-    created_at = time.time()
-    what: dict[str, Any] = {
-        "connect": True,
-        "install": True,
-        "anchor": {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")},
-        "unattended": not args.no_unattended,
-        "grant": list(args.grant) or ["approve"],
-    }
-    if network_id:
-        what["network_id"] = network_id
-        what["role"] = args.role
-    # THE KEY IS OBSERVED HERE WHEN NOT SUPPLIED (drill finding, 2026-10-03): the
-    # card the operator is asked to sign must be a card that can run — see the
-    # helper for why filing without it reproduced a failure instead of fixing it.
-    host_key_fp = _host_key_for_request(
-        args.host, str(args.user or ""), str(args.host_key_fp or "")
-    )
-    record = approval_store.create_request(
-        kind=approval_store.KIND_DEVICE_ONBOARD,
-        request_id=args.request_id or approval_store.new_request_id(),
-        requested_by={
-            "session_id": args.session,
-            "device_id": asked_by_device,
-            "surface": "cli",
-        },
-        device={
-            "device_id": args.device,
-            "name": args.name or args.host,
-            "fingerprint": args.fingerprint,
-            "host": args.host,
-            "user": args.user,
-            "transport": "ssh",
-            "host_key_fp": host_key_fp,
-        },
-        what=what,
-        credential_ref=(
-            {"kind": "ssh", "ref": args.credential_ref} if args.credential_ref else None
-        ),
-        created_at=created_at,
-        expires_at=created_at + float(args.expires),
+    record = request_device(
+        host=args.host,
+        user=args.user,
+        name=args.name,
+        device_id=args.device,
+        fingerprint=args.fingerprint,
+        host_key_fp=args.host_key_fp,
+        network=args.network,
+        role=args.role,
+        credential_ref=args.credential_ref,
+        request_id=args.request_id,
+        session_id=args.session,
+        surface="cli",
+        unattended=not args.no_unattended,
+        grants=(tuple(args.grant) if args.grant else None),
+        network_only=bool(getattr(args, "network_only", False)),
+        expires=args.expires,
     )
     payload = {
         "ok": True,
@@ -8521,8 +8506,15 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
 def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     """Answer yes: sign the decision over the record's canonical payload."""
     from local_operator.network import approvals as approval_store
+    from local_operator.network.types import MeshRefusal
 
+    if str(args.approval).startswith("apn_"):
+        from local_operator.network import enrollment
+
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
     record = approval_store.load_record(args.approval)
+    if record.get("kind") not in approval_store.KINDS:
+        raise MeshRefusal("approval_invalid", "This build cannot approve this authority kind")
     from local_operator.network.credentials import finite_share
 
     finite_summary = finite_share.summary(record)
@@ -8605,6 +8597,31 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
     from local_operator.network.types import MeshRefusal
 
     verb = getattr(args, "approvals_command", None)
+    if verb == "approve-network-enrollment":
+        # Printing JSON is not disclosure/presence: validate the snapshot first,
+        # show the same scope/card, then let the existing signer ask the human.
+        record = approval_store.enrollment_snapshot(
+            args.approval, authority_version=1, scope="network_only", digest=args.request_digest
+        )
+        for line in [
+            "Network enrollment only; account logins are not shared",
+            *_approval_lines(record),
+        ]:
+            print(line, file=sys.stderr)
+        decided = approval_store.approve_network_enrollment(
+            args.approval, authority_version=1, scope="network_only", digest=args.request_digest
+        )
+        return _emit(
+            args,
+            {
+                "ok": True,
+                "approval_id": decided["approval_id"],
+                "state": decided["state"],
+                "signature": _approval_signature_payload(decided),
+            },
+            _approval_lines(decided),
+        )
+
     if verb == "list":
         rows = approval_store.list_records()
         payload = {"ok": True, "approvals": [approval_store.badge_row(row) for row in rows]}
@@ -8713,7 +8730,16 @@ def _guard_approvals_subcommand(args: argparse.Namespace) -> int:
     act in this family.
     """
     verb = getattr(args, "approvals_command", None)
-    if verb in ("list", "show", "request", "approve", "deny", "withdraw", "run"):
+    if verb in (
+        "list",
+        "show",
+        "request",
+        "approve",
+        "approve-network-enrollment",
+        "deny",
+        "withdraw",
+        "run",
+    ):
         return _cmd_approvals(args)
     print(
         "usage: lop network approvals request --host <host> [--user U] [--json]\n"

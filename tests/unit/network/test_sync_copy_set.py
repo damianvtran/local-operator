@@ -540,6 +540,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
         "``network/audit`` — a store file, never a session entry",
     ),
+    "local_operator/network/enrollment.py": (
+        1,
+        "DIRECTORY_NAME is the device-local network/enrollment-approvals authority "
+        "namespace, never a session entry or movable session credential",
+    ),
     "local_operator/network/approvals.py": (
         2,
         "the approval store under ``<config>/network/approvals`` (``APPROVALS_DIRNAME``, "

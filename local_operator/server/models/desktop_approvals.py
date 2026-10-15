@@ -16,9 +16,9 @@ body would only invite a caller to think it could carry one.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ApprovalRow(BaseModel):
@@ -47,6 +47,9 @@ class ApprovalRow(BaseModel):
     details: list[str] | None = Field(default=None, exclude_if=lambda value: value is None)
     can_approve_here: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     approve_remedy: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    typed_approval: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ApprovalList(BaseModel):
@@ -60,3 +63,93 @@ class ApprovalDecision(BaseModel):
     state: str
     #: ``{"key_id": ...}``; ``""`` when the decision carries no signature (a deny).
     signature: dict[str, Any]
+
+
+class OnboardProbe(BaseModel):
+    """Public SSH identity observation only; never credential resolution or login."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    host: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$")
+    user: str = Field(default="", max_length=64, pattern=r"^(?:[A-Za-z0-9_.][A-Za-z0-9_.-]*)?$")
+    port: int | None = Field(default=None, ge=1, le=65535)
+
+    @field_validator("host")
+    @classmethod
+    def existing_host_parser(cls, value: str) -> str:
+        from local_operator.network.enrollment import ssh_target
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            return ssh_target(value)
+        except MeshRefusal:
+            raise ValueError("Use an unambiguous SSH host and optional port") from None
+
+
+class OnboardRequest(BaseModel):
+    """An existing signed card, not commands or a caller-authored authority blob.
+
+    The surface chooses explicit scopes but cannot supply requester provenance,
+    admin role, root, shell args, private key bytes, or install/build overrides.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    request_id: str = Field(min_length=5, max_length=128, pattern=r"^req_[A-Za-z0-9_-]+$")
+    host: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9_.:][A-Za-z0-9_.:-]*$")
+    user: str = Field(default="", max_length=64, pattern=r"^(?:[A-Za-z0-9_.][A-Za-z0-9_.-]*)?$")
+    name: str = Field(default="", max_length=128)
+    network_id: str = Field(min_length=1, max_length=128)
+    credential_ref: str = Field(min_length=1, max_length=512, pattern=r"^[^\r\n]+$")
+    host_key_fp: str = Field(min_length=1, max_length=128, pattern=r"^SHA256:[A-Za-z0-9+/=]+$")
+    unattended: bool = True
+    grant: list[str] = Field(default_factory=lambda: ["approve"], max_length=32)
+
+    @field_validator("host")
+    @classmethod
+    def existing_host_parser(cls, value: str) -> str:
+        return OnboardProbe.existing_host_parser(value)
+
+    @field_validator("credential_ref")
+    @classmethod
+    def reference_not_material(cls, value: str) -> str:
+        from local_operator.network.enrollment import credential_reference
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            return credential_reference(value)
+        except MeshRefusal:
+            # The app's protected422 handler strips rejected input entirely.
+            raise ValueError("Use a credential reference, not private key material") from None
+
+    @field_validator("grant")
+    @classmethod
+    def existing_grants(cls, value: list[str]) -> list[str]:
+        from local_operator.network.types import GRANTABLE_CAPABILITIES
+
+        if any(item != "approve" or item not in GRANTABLE_CAPABILITIES for item in value):
+            raise ValueError("Choose an existing mesh capability")
+        return list(dict.fromkeys(value))
+
+
+class NetworkEnrollmentAcknowledgment(BaseModel):
+    """Closed compatibility admission; booleans must never coerce to version one."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    authority_version: int
+    scope: Literal["network_only"]
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @field_validator("authority_version", mode="before")
+    @classmethod
+    def exact_version(cls, value: Any) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("Unknown network enrollment authority version")
+        return value
+
+    @field_validator("request_digest")
+    @classmethod
+    def exact_digest(cls, value: str) -> str:
+        from local_operator.network.enrollment import DIGEST
+
+        if DIGEST.fullmatch(value) is None:
+            raise ValueError("Use the exact displayed enrollment request commitment")
+        return value
