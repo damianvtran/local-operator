@@ -4985,6 +4985,7 @@ async def wire_mcp_into_session(
     has_ui: bool = False,
     _deferred_boot: bool = False,
     boundary: Path | None = None,
+    mcp_servers: Mapping[str, Any] | None = None,
 ) -> McpManager | None:
     """Discover MCPs but expose their schemas only after explicit reads.
 
@@ -5058,6 +5059,10 @@ async def wire_mcp_into_session(
                 # themselves (the manager carries it), so a caller that cannot
                 # receive it cannot be a session's real loader.
                 boundary=boundary,
+                # Session-only servers (``SessionSpec.mcp_servers``): only sent
+                # when there are some, so a reduced loader double that predates
+                # the seam is called exactly as before.
+                **({"extra_configs": mcp_servers} if mcp_servers else {}),
             ),
         )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
@@ -5816,6 +5821,7 @@ async def create_session(
     _force_local_takeover: bool = False,
     defer_mcp_wiring: bool = False,
     mcp_publication_gate: "PublicationGate | None" = None,
+    mcp_servers: "Mapping[str, Any] | None" = None,
 ) -> "SessionProtocol":
     """Build a fully-wired harness session from parsed CLI args.
 
@@ -6113,6 +6119,7 @@ async def create_session(
                     has_ui=has_ui,
                     _deferred_boot=True,
                     boundary=world_root,
+                    mcp_servers=mcp_servers,
                 )
                 if manager is not None:
                     attach_mcp_dispose(session, manager)
@@ -6145,6 +6152,7 @@ async def create_session(
         auth_store=plan.auth_store,
         has_ui=has_ui,
         boundary=world_root,
+        mcp_servers=mcp_servers,
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)

@@ -36,7 +36,14 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +79,7 @@ from local_operator.mcp.config import (
     MCPServerConfig,
     MCPSseServerConfig,
     MCPStdioServerConfig,
+    coerce_server_config,
     load_all_mcp_configs,
     server_own_turn_only,
     tool_enabled_by_config,
@@ -102,6 +110,10 @@ if TYPE_CHECKING:
     from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
 
 logger = logging.getLogger(__name__)
+
+#: The ``sources`` entry a session-only server reports: it came from the
+#: session's opener, not from a file, and nothing may try to write it back.
+SESSION_MCP_SOURCE = "<session>"
 
 # Result of one tool call raced against an abort; ``_race_abort`` is
 # transparent to whatever the call itself resolves to.
@@ -1821,8 +1833,20 @@ class McpManager:
         secret_base: os.PathLike[str] | None = None,
         register_secret: Callable[[str], object] | None = None,
         boundary: Path | None = None,
+        extra_configs: Mapping[str, Any] | None = None,
     ) -> None:
         self.cwd = str(cwd)
+        # Session-only servers (``SessionSpec.mcp_servers``; ``lop acp`` passes
+        # the client's ``session/new`` servers here). Parsed ONCE with the same
+        # coercion the file loader uses and merged into every load below, so a
+        # reload keeps them; they live only in this manager, never on disk.
+        self._extra_configs: dict[str, MCPServerConfig] = {}
+        for name, raw in (extra_configs or {}).items():
+            cfg = coerce_server_config(dict(raw))
+            if cfg is None:
+                logger.warning("session MCP server %r is malformed; ignored", name)
+                continue
+            self._extra_configs[str(name)] = cfg
         self.secret_base = secret_base
         self._register_secret = register_secret
         # The world boundary a bounded session validated, or ``None`` for the
@@ -2083,7 +2107,7 @@ class McpManager:
         reconnects go through ``_connect_round``/``_reconnect``, which stay
         non-interactive.
         """
-        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
+        configs, sources = self._load_configs()
         cfg = configs.get(name)
         if cfg is None:
             raise McpConnectionError(f"MCP server {name!r} is not configured")
@@ -2145,7 +2169,7 @@ class McpManager:
         become deferred tools; pending without cache contribute nothing until
         the background continuation swaps them in and fires on_tools_changed.
         """
-        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
+        configs, sources = self._load_configs()
         self._drop_removed_servers(configs)
         return await self._connect_round(configs, sources)
 
@@ -2166,7 +2190,7 @@ class McpManager:
             continuation.cancel()
             gate_task.cancel()
         self._pending_continuations.clear()
-        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
+        configs, sources = self._load_configs()
         self._drop_removed_servers(configs)
         loop = asyncio.get_running_loop()
         for name in list(self._connections):
@@ -2176,6 +2200,26 @@ class McpManager:
                 self._connect_futures[name] = loop.create_future()
             await self._teardown_connection(name)
         return await self._connect_round(configs, sources)
+
+    def _load_configs(self) -> tuple[dict[str, MCPServerConfig], dict[str, str]]:
+        """The file-loaded configs plus this session's own servers, merged.
+
+        The files are read first and WIN a name collision: a session-only server
+        can add a name but never replace what the operator configured, and the
+        skip is logged so the shadowed server is not a silent absence.
+        """
+        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
+        for name, cfg in self._extra_configs.items():
+            if name in configs:
+                logger.warning(
+                    "session MCP server %r is shadowed by the configured one from %s",
+                    name,
+                    sources.get(name, "?"),
+                )
+                continue
+            configs[name] = cfg
+            sources[name] = SESSION_MCP_SOURCE
+        return configs, sources
 
     def _drop_removed_servers(self, configs: dict[str, MCPServerConfig]) -> None:
         """Drop all state for servers that left the config (MCP-17)."""

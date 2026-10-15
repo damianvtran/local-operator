@@ -12,6 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Mapping
     from pathlib import Path
 
 from local_operator.harness.types import AgentTool
@@ -101,6 +102,7 @@ async def discover_and_load_mcp_tools(
     secret_base=None,
     register_secret=None,
     boundary: Path | None = None,
+    extra_configs: Mapping[str, Any] | None = None,
 ) -> tuple[McpManager, list[AgentTool], list[dict[str, str]]]:
     """Convenience loader that discovers and loads MCP tools in one pass.
 
@@ -139,6 +141,10 @@ async def discover_and_load_mcp_tools(
     resolves against the wrong store and registers nothing for the MCP sinks to
     sanitize — the two ways a resolved credential has leaked before
     (``mcp/secret_refs.py``, ``mcp/redaction.py``).
+
+    ``extra_configs`` are session-only servers (``SessionSpec.mcp_servers``),
+    handed to the manager rather than written anywhere; see
+    :class:`McpManager` for how they merge.
     """
     from local_operator import mcp as mcp_package
 
@@ -149,6 +155,7 @@ async def discover_and_load_mcp_tools(
         secret_base=secret_base,
         register_secret=register_secret,
         boundary=boundary,
+        **({"extra_configs": extra_configs} if extra_configs else {}),
     )
     try:
         result = await manager.discover_and_connect()

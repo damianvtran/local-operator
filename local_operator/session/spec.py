@@ -49,10 +49,10 @@ from __future__ import annotations
 
 import argparse
 import os
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from local_operator.paths import (
     AGENT_HOME_DIRNAME,
@@ -496,6 +496,15 @@ class SessionSpec:
     #: ``local_operator.tools.confinement`` for the filesystem mechanism and
     #: its stated limits, and ``open_session`` for the preflight.
     world_root: str | Path | None = None
+    #: Extra MCP servers for THIS session only, ``{name: raw server entry}`` in
+    #: the same shape an ``mcp.json`` ``mcpServers`` block carries (``type``,
+    #: ``url``, ``headers``...). They are merged AFTER the file-loaded configs
+    #: by the session's own ``McpManager`` — a file-configured server of the
+    #: same name wins — and are never written to disk, so another session (or
+    #: a delegated child) never sees them. The first caller is ``lop acp``,
+    #: whose client hands its coordination server over in ``session/new``.
+    #: ``None`` (default) leaves discovery byte-identical.
+    mcp_servers: Mapping[str, Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.agent_name and self.agent_id:
