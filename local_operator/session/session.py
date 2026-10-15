@@ -322,6 +322,8 @@ from local_operator.supplements.trigger import (
     USER_TEXT_MAX_CHARS,
     RunProvenance,
     TurnItem,
+    ask_answer_is_person,
+    ask_answer_text,
     items_text_size,
     snapshot_messages,
 )
@@ -3036,6 +3038,16 @@ class Session:
         self._run_typed_user: bool = False
         self._run_last_trigger: str | None = None
         self._run_user_text: str = ""
+        #: Wall-clock start of the current pipeline (the logical turn), frozen onto the
+        #: provenance: the pre-filter's touched-directory sweep only lists files modified
+        #: at or after it.
+        self._run_started_at: float = 0.0
+        #: The session's last REAL typed request, kept across runs (NOT reset at the
+        #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
+        #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
+        #: so the supplement decision would otherwise be asked "which files?" with no
+        #: request in the state. Bounded at write; see ``supplements.trigger.ask_answer_text``.
+        self._last_typed_user_text: str = ""
         #: The LOGICAL turn's messages across EVERY loop run of the pipeline (first run plus
         #: each ``_drain_continuation`` run), snapshotted as they end. The held end is
         #: replaced per run, so the emitted end alone would carry only the LAST run's
@@ -14335,6 +14347,19 @@ class Session:
             # cannot tell a peer message from a job result. ``""`` is the
             # fail-loud sentinel for a custom-type-less internal row.
             self._run_input_types.add(str(custom_type) if custom_type is not None else "")
+            # Turn supplements: a person ANSWERING an ask is a real user turn for the
+            # Highlights decision. The row stays "internal" for the notify/trigger record
+            # above (that classification is load-bearing for attention and untouched); only
+            # the supplement facts are set. The discriminator is the row's own
+            # ``attribution="user"`` AND ``details.status == "answered"``: a timeout notice
+            # (``ask_timeout``), a ``declined`` or ``late`` response, and every
+            # harness-minted row (``attribution`` system/agent) stay refused.
+            if ask_answer_is_person(message):
+                self._run_typed_user = True
+                self._run_last_trigger = TRIGGER_TYPED
+                self._run_user_text = ask_answer_text(
+                    self._last_typed_user_text, getattr(message, "details", None)
+                )
         else:
             self._run_triggers.add("user")
             # Turn supplements (§2.2 rules 1-2): a user-role row is "typed" only if the
@@ -14346,6 +14371,7 @@ class Session:
                 self._run_typed_user = True
                 self._run_last_trigger = TRIGGER_TYPED
                 self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
+                self._last_typed_user_text = self._run_user_text
 
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
@@ -15498,6 +15524,7 @@ class Session:
                 headless=self._headless_host,
                 settled_mark=self._turns_settled,
                 triggers=frozenset(self._run_triggers),
+                started_at=self._run_started_at,
             )
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
@@ -15987,6 +16014,7 @@ class Session:
         self._run_typed_user = False
         self._run_last_trigger = None
         self._run_user_text = ""
+        self._run_started_at = time.time()
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
