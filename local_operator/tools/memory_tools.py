@@ -16,12 +16,16 @@ from urllib.parse import quote
 
 from local_operator.harness.types import TextContent, ToolContext, ToolResult
 from local_operator.memory import (
+    MEMORY_TOOL_OPS,
+    MEMORY_TOOL_REQUIRED,
+    MEMORY_TOOL_SCOPES,
     MemoryError,
     MemoryIdentity,
     MemoryStore,
     guard,
     parse_url,
     safe_segment,
+    valid_memory_tool_arguments,
 )
 from local_operator.paths import config_dir
 
@@ -209,13 +213,7 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
 
     try:
         guard_encoded(args)
-        if (
-            not isinstance(args, dict)
-            or set(args) - {"op", "scope", "text", "i"}
-            or args.get("op") not in ("store", "recall")
-            or args.get("scope") not in ("session", "team", "agent", "global")
-            or not isinstance(args.get("text"), str)
-        ):
+        if not valid_memory_tool_arguments(args):
             raise MemoryError(
                 "Use memory op=store|recall, scope=session|team|agent|global, text=fact/query."
             )
@@ -268,18 +266,18 @@ def build_memory_tool():
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "op": {"type": "string", "enum": ["store", "recall"]},
+                "op": {"type": "string", "enum": list(MEMORY_TOOL_OPS)},
                 "scope": {
                     "type": "string",
-                    "enum": ["session", "team", "agent", "global"],
+                    "enum": list(MEMORY_TOOL_SCOPES),
                     "description": (
-                        "session=this conversation; global=future sessions; "
-                        "team/agent=shared work/profile"
+                        "session=work state; global=user facts/future sessions; "
+                        "team/agent=role knowledge"
                     ),
                 },
                 "text": {"type": "string", "description": "Fact or query"},
             },
-            "required": ["op", "scope", "text"],
+            "required": list(MEMORY_TOOL_REQUIRED),
         },
         approval_tier="write",
         call_approval_tier=lambda args: "read" if args.get("op") == "recall" else "write",

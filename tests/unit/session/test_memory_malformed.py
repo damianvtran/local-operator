@@ -30,6 +30,22 @@ CASES = [
     ("incomplete-opaque", '{"op":"store","scope":"global","text":"' + "ab3f" * 10),
     ("plain-control", '{"text":"SSN 123-45-6789'),
 ]
+# Valid JSON but invalid protocol shapes are equally untrusted raw carriers.
+CASES += [
+    ("json-string", json.dumps("ab3f" * 10)),
+    ("json-list", json.dumps(["ab3f" * 10])),
+    ("unknown-value", json.dumps({"op": "invalid", "scope": "invalid", "unknown": "ab3f" * 10})),
+    (
+        "unknown-key",
+        json.dumps({"op": "store", "scope": "global", "text": "benign", "ab3f" * 10: "benign"}),
+    ),
+    ("opaque-op", json.dumps({"op": "ab3f" * 10, "scope": "global", "text": "benign"})),
+    ("opaque-scope", json.dumps({"op": "store", "scope": "ab3f" * 10, "text": "benign"})),
+    (
+        "bad-intent-type",
+        json.dumps({"op": "store", "scope": "global", "text": "benign", "i": ["ab3f" * 10]}),
+    ),
+]
 
 
 def test_undecodable_memory_raw_is_fail_closed_but_private_and_nonmemory_bytes_stay_original():
@@ -107,7 +123,10 @@ async def test_real_session_malformed_raw_has_no_journal_event_database_or_warni
     try:
         await session.prompt("Retain the synthetic test fact")
         assert n == 2
-        assert "does not parse" in buffer.getvalue(), "loghandler must observe the parser warning"
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError:
+            assert "does not parse" in buffer.getvalue(), "loghandler must observe parser warnings"
         retained = json.dumps([entry.payload for entry in transcript.entries()])
         published = json.dumps([event.model_dump(mode="json") for event in events], default=str)
         all_text = retained + published + buffer.getvalue()

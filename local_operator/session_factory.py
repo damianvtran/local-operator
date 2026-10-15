@@ -3158,6 +3158,16 @@ _MEMORY_SAVE_INTENT = re.compile(
     r"preferences?|future sessions?|after (?:context )?compaction)\b",
     re.I | re.S,
 )
+# Personal first saves contain no work nouns and have no bank to match yet.
+# Pair an explicit retention verb with first-person facts, not an arbitrary name
+# or fixture value; technical RAM/profile/code questions must remain quiet.
+_MEMORY_PERSONAL_SAVE_INTENT = re.compile(
+    r"\b(?:remember|retain|save|store)\b.{0,160}"
+    r"\b(?:my (?:name|e-?mail|phone|address|location)\b"
+    r"(?!\s+(?:parser|field|schema|validator|validation|implementation|code)\b)|where I live\b|"
+    r"I live\b|(?:things? )?about me\b)",
+    re.I | re.S,
+)
 _MEMORY_RECALL_INTENT = re.compile(
     r"\b(?:retained (?:knowledge|facts?)|remembered|previously (?:saved|stored)|"
     r"what (?:did|do) (?:we|you) (?:decide|remember)|saved (?:facts?|goals?|contacts?))\b",
@@ -3174,7 +3184,11 @@ def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
     technical memory (RAM/SQLite/store implementations) and ordinary tasks quiet.
     """
     text = query[:2048]
-    if not (_MEMORY_SAVE_INTENT.search(text) or _MEMORY_RECALL_INTENT.search(text)):
+    if not (
+        _MEMORY_SAVE_INTENT.search(text)
+        or _MEMORY_PERSONAL_SAVE_INTENT.search(text)
+        or _MEMORY_RECALL_INTENT.search(text)
+    ):
         return None
     return _ClassificationCandidate(
         "guide", "memory", "Deliberate scoped retain/recall protocol.", "guide://memory"
