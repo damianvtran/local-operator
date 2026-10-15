@@ -1884,3 +1884,310 @@ def test_a_record_without_lane_chains_behaves_as_the_shared_chain(tmp_path: Path
         assert resumed.lane_generations(lane) == resumed.record["bridge_generations"]
         assert "g-old" in resumed.lane_generations(lane)
     assert "lane_generations" not in resumed.record
+
+
+# --- A finished scope's obligation on one host, then an explicit open on the other ---------
+#
+# Reproduced against the installed 0.71.3 (not only against these fakes): run B works on
+# one host and ends with `finish("disposed")`, so the record is `host=<B>, terminal=disposed,
+# surface_id=""`. Run C is the SAME durable session under a NEW lease and opens with
+# `backend=<other host>`. The record's obligation-only `host` pinned the lane to B, the
+# explicit hint was therefore ignored by the lane gate (but honoured by the dispatcher), B was
+# reconciled, and the other host got a bare `open` stamped with a generation it had never been
+# told about -> `owner_refused: browser owner generation is stale or unresolved`.
+
+
+def _trace_rpcs(ui: FakeUiClient, bridge: FakeBridgeClient) -> list[str]:
+    """One ORDERED log across both hosts, e.g. `ui.owner_recover`, `ext.open`.
+
+    The defect is about which host heard what, and in which order; two separate call
+    lists cannot show that `owner_recover` reached a host BEFORE its `open`.
+    """
+    order: list[str] = []
+
+    def wrap(client: Any, label: str) -> None:
+        original = client.call
+
+        async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            order.append(f"{label}.{method}")
+            return await original(method, params)
+
+        client.call = call
+
+    wrap(ui, "ui")
+    wrap(bridge, "ext")
+    return order
+
+
+async def _finished_scope_on(
+    directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    first: str,
+    second: str,
+    legacy: bool = False,
+) -> Any:
+    """Run A on `first`, run B on `second` ending in `finish("disposed")`; return lease B.
+
+    Written by the product's own `BrowserResource` and `execute_browser`, so the record
+    (host, terminal, chain) is what the code really leaves behind. `legacy` strips the
+    per-lane chains afterwards, which is the shape a record written before they existed has.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    for name in (first, second):
+        lease = acquire_session_lease(directory)
+        _hosts(monkeypatch, ui=name == "ui", bridge=name == "bridge")
+        context, resource = _context(directory)
+        opened = await builtin.execute_browser(
+            "t", {"action": "open", "url": "https://example.com"}, None, None, context
+        )
+        assert not opened.is_error, opened.text
+        closed = await builtin.execute_browser("t", {"action": "close"}, None, None, context)
+        assert not closed.is_error, closed.text
+        if name == second:
+            ended = await resource.finish(resource.generation, "disposed")
+            assert ended.state == "closed", ended
+        lease.release()
+    path = directory / ".browser-resource.json"
+    record = json.loads(path.read_text())
+    assert record["terminal"] == "disposed" and record["host"] == (
+        "ui" if second == "ui" else "bridge"
+    )
+    if legacy:
+        record.pop("lane_generations", None)
+        path.write_text(json.dumps(record))
+    return record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ui_answer", ["closed", "unresolved"])
+@pytest.mark.parametrize("legacy", [False, True], ids=["current-record", "legacy-no-lane-chains"])
+async def test_explicit_extension_open_after_a_finished_app_scope_reconciles_app_then_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+    ui_answer: str,
+    legacy: bool,
+) -> None:
+    """The consumer shape: `host=ui, terminal=disposed`, same SID, new lease, explicit extension.
+
+    The old app obligation is discharged FIRST (it is never dropped), the fresh open is
+    then re-decided from the caller's `backend`, the destination is reconciled BEFORE it
+    allocates, and each host is asked to recover exactly once.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    await _finished_scope_on(directory, monkeypatch, first="bridge", second="ui", legacy=legacy)
+    assert (
+        "lane_generations" not in json.loads((directory / ".browser-resource.json").read_text())
+        or not legacy
+    )
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    ui_client.recover_state = ui_answer
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, resource = _context(directory)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://console.cloud.google.com"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert order == ["ui.owner_recover", "ext.owner_recover", "ext.open"], order
+    assert resource.record["surface_id"].startswith("bridge:")
+    assert resource.record["host"] == "bridge"
+    assert "terminal" not in resource.record
+    lease.release()
+
+
+@pytest.mark.asyncio
+async def test_explicit_app_open_after_a_finished_extension_scope_reconciles_extension_then_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """Mirror direction: `host=bridge, terminal=disposed`, then an explicit `backend=ui`."""
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    await _finished_scope_on(directory, monkeypatch, first="ui", second="bridge")
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    ui_client.recover_state = "closed"
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, resource = _context(directory)
+    result = await builtin.execute_browser(
+        "t", {"action": "open", "backend": "ui", "url": "https://example.com"}, None, None, context
+    )
+    assert not result.is_error, result.text
+    assert order == ["ext.owner_recover", "ui.owner_recover", "ui.open"], order
+    assert resource.record["surface_id"].startswith("ui:")
+    lease.release()
+
+
+def _inject(directory: Path, **fields: Any) -> None:
+    """Hand-write obligation fields into a record (labelled: NOT written by product code)."""
+    path = directory / ".browser-resource.json"
+    record = json.loads(path.read_text())
+    record.update(fields)
+    path.write_text(json.dumps(record))
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_release_pause_is_released_before_the_explicit_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """A paused-scope retention on the old host: released there, then the open proceeds."""
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    await _finished_scope_on(directory, monkeypatch, first="bridge", second="ui")
+    _inject(directory, retention="paused scope", release_pause=True)
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    ui_client.recover_state = "closed"
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, resource = _context(directory)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert not result.is_error, result.text
+    assert order == ["ui.owner_recover", "ui.owner_release", "ext.owner_recover", "ext.open"], order
+    assert "release_pause" not in resource.record
+    lease.release()
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_old_host_obligation_refuses_instead_of_allocating_elsewhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """The app answers `unresolved`, so its release-pause is NOT discharged.
+
+    Dropping the obligation to honour the hint would strand the app's paused scope, and
+    dispatching to the extension anyway is the mismatched-host defect. The call is refused
+    with the typed conflict code and the extension hears NOTHING (no recover, no open).
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    await _finished_scope_on(directory, monkeypatch, first="bridge", second="ui")
+    _inject(directory, retention="paused scope", release_pause=True)
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    scopes_before = json.dumps(fenced_bridge.scopes, sort_keys=True)
+    ui_client.recover_state = "unresolved"
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, resource = _context(directory)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert result.is_error
+    assert (result.details or {}).get("error_code") == "backend_conflict", result.text
+    assert order == ["ui.owner_recover"], order
+    assert resource.record.get("release_pause"), "the obligation must still be owed"
+    assert (
+        json.dumps(fenced_bridge.scopes, sort_keys=True) == scopes_before
+    ), "destination untouched"
+    lease.release()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_old_host_recovery_does_not_reach_the_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """If the old host cannot even answer `owner_recover`, the destination hears nothing."""
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    await _finished_scope_on(directory, monkeypatch, first="bridge", second="ui")
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    scopes_before = json.dumps(fenced_bridge.scopes, sort_keys=True)
+    real = ui_client.call
+
+    async def failing(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "owner_recover":
+            raise BridgeError(ErrorCode.OWNER_REFUSED, "stale", {"refusal": "stale"})
+        return await real(method, params)
+
+    ui_client.call = failing  # type: ignore[method-assign]
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, _resource = _context(directory)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert result.is_error
+    assert not any(step.startswith("ext.") for step in order), order
+    assert (
+        json.dumps(fenced_bridge.scopes, sort_keys=True) == scopes_before
+    ), "destination untouched"
+    lease.release()
+
+
+@pytest.mark.asyncio
+async def test_a_held_handle_still_outranks_an_explicit_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """Precedence is unchanged: a HELD app tab refuses `backend=extension`, extension untouched."""
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, _resource = _context(tmp_path)
+    first = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert not first.is_error, first.text
+    held = context.browser.surface_id if context.browser else ""
+    assert held.startswith("ui:")
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    refused = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert refused.is_error
+    assert (refused.details or {}).get("error_code") == "backend_conflict"
+    assert not any(step.startswith("ext.") for step in order), order
+    assert context.browser and context.browser.surface_id == held
