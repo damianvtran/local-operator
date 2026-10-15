@@ -731,6 +731,13 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # happened while these three had no row and fell to the refuse-closed
     # default (review round 1, BLOCKER 1).
     "ask_respond": "prompt",
+    # ``bridge_decide`` is the queued ask's answering verb for a screened org
+    # request (Team Bridge H5c): the human's approve/deny, sent by the surface
+    # that owns the card. Same act as ``ask_respond`` and the same capability —
+    # the relayed viewer that may answer an ask is the one that may answer this
+    # one, and without a row it refused-closed (which is how this table was
+    # found to be missing it: tests/unit/network/test_stream_op_gate.py).
+    "bridge_decide": "prompt",
     # ``ask_revise`` rides the SAME capability as its three siblings: a surface
     # that may answer an ask one way must not be refused the amend window for it.
     # That is the argument that put the other three rows here, and it applies

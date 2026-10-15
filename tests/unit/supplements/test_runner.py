@@ -326,6 +326,9 @@ async def test_the_settings_snapshot_is_read_at_build_not_per_turn(tmp_path: Pat
     config_dir_path.mkdir()
     manager = ConfigManager(config_dir_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["supplements.files"], False)
+    # Graphics default ON, so "inactive" needs both halves off (the snapshot's ``active`` is
+    # the master AND either half).
+    settings_io.write_setting(manager, settings_io.BY_KEY["supplements.graphics"], False)
     calls: list[str] = []
     stream = _report_stream("reports/snap.md")
     session = _make_session(
@@ -356,6 +359,7 @@ async def test_the_settings_snapshot_is_read_at_build_not_per_turn(tmp_path: Pat
         # A runner built AFTER the edit reads it: the edit lands on the next session.
         fresh = SupplementRunner(session, cwd=str(tmp_path), config_dir=config_dir_path)
         assert fresh._settings.files is True and fresh._settings.active
+        assert fresh._settings.graphics is False, "an explicit off survives the default flip"
     finally:
         await handle.dispose()
         await session.dispose()
@@ -396,7 +400,7 @@ async def test_a_files_only_finish_beats_done_with_its_files(tmp_path: Path) -> 
     Every surface's LIVE half learns rows from the ``supplement_progress`` family, and
     ``files`` rides only ``decided``/``done`` (memo §2.7) — while the graphics path beats
     ``decided`` before it runs, the files path used to journal its ``done`` row and emit
-    NOTHING, so with graphics shipped OFF (the default) a live viewer saw a files-only
+    NOTHING, so with graphics off (or no graphic drawn) a live viewer saw a files-only
     callout only after a reload. Asserted on the EVENT, not the journal: the row was
     always correct, the beat is what was missing, and it must carry the files it is about
     (an empty-files ``done`` repaints an empty block on a viewer that merged it).

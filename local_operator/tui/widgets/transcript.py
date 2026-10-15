@@ -3331,6 +3331,69 @@ class PeerMessageBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+class TeamBridgeBlock(PeerMessageBlock):
+    """A screened TEAM BRIDGE wake from a Radient org member, as its own card.
+
+    Contract §13.4: a bridge wake is a NEW provenance kind and "must not
+    overload the wake/peer types". It therefore REUSES the peer card's receipt
+    mechanics wholesale — fold width, sender sanitizing, body preview, the
+    expanded family — and differs only in what a reader (and any stylesheet or
+    front-end matcher) keys on: its own classes and its own name column
+    (``org`` instead of ``peer``). Structurally correct and deliberately not
+    gold-plated: a designer round follows at review time for the visual pass.
+
+    The transport guarantees the provenance: the custom type rides the peer
+    delivery frame, is validated against the client-local allowlist at every
+    hop, and reaches this branch only as ``TEAM_BRIDGE_MESSAGE_TYPE`` — an
+    unknown kind is refused before a row exists, so this class never has to
+    guess between "bridge" and "peer".
+    """
+
+    EXPANDED_CLASS = "bridge-expanded"
+    tool_name = "org"
+
+    def __init__(
+        self, body: str, sender: dict[str, object] | None = None, *, fold_width: int = 0
+    ) -> None:
+        super().__init__(body, sender, fold_width=fold_width)
+        # The peer class is the base's, not ours: a matcher keying on
+        # ``peer-message-block`` must not paint an org card, and vice versa.
+        self.remove_class("peer-message-block")
+        self.add_class("team-bridge-block")
+
+    def _sender_name(self) -> tuple[str, bool]:
+        """The MEMBER the receiver validated, then their organization (§2).
+
+        WHY THIS OVERRIDE EXISTS. ``team_bridge/card.bridge_card_sender``
+        enriches the wake's sender dict from the provenance the RECEIVER holds
+        (the member's display name and organization), but the inherited ladder
+        reads only ``conversation_name`` / ``cwd`` / ``session_id`` — and a
+        bridge wake carries none of them: the connector stamps the LOCAL owner's
+        account id, which names the receiving side, never the human asking. So
+        every org card fell through to the ``sender_unknown`` fallback and the
+        row read "another session" — on the one card whose entire subject is
+        that a HUMAN at another organization is asking, the identity column
+        named no human at all (design round 1, D1: the identity-column half of
+        that fix, landed as the enrichment without this reader).
+
+        The organization rides the same slot as the name, in the form the design
+        round asked for: §2 makes the human-organization distinction
+        first-class, and a display name alone cannot say whose human this is.
+        ``quoted`` is False here even though a member's name is not the app's
+        guess — the flag marks a name a peer AUTHORED (see :meth:`_header`), and
+        half of this string is the receiver's own validated provenance, so
+        quoting it would read as one name a member had chosen.
+
+        A sender dict with no display name keeps the inherited ladder exactly as
+        it was, which is the carriage whose meta lacked the member fields.
+        """
+        name = _sanitize_sender_field(self._sender.get("name"))
+        if not name:
+            return super()._sender_name()
+        organization = _sanitize_sender_field(self._sender.get("organization"))
+        return (f"{name} ({organization})" if organization else name), False
+
+
 class HubMessageBlock(PeerMessageBlock):
     """An incoming parent/child message using the existing receipt ledger seat.
 
@@ -3785,6 +3848,13 @@ def quiet_group_record_of(
     anchor = getattr(block, "navigation_anchor_id", "") or ""
     part = getattr(block, "navigation_anchor_part", 0)
     record_id = f"{anchor}:{part}" if anchor else f"b{id(block):x}"
+    if isinstance(block, TeamBridgeBlock):
+        # D2 (§13.4): a bridge receipt keeps its OWN kind. The derivation
+        # treats every kind outside its trigger/member list as a SPLITTER, so
+        # two bridge receipts are never folded under the peer family's word
+        # ("peer messages · 2" for org mail) — the card stays individually
+        # visible beside any fold. No new copy anywhere.
+        return QuietGroupRecord(kind="bridge", id=record_id)
     if isinstance(block, HubMessageBlock):
         label, _ = block._sender_name()
         reply = block.hub_details.get("expects_reply")

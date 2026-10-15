@@ -442,8 +442,18 @@ class PlacementDocument:
         *,
         scope: str = "session",
         by: str = "",
+        provenance: str = "",
     ) -> CredentialPlacementEntry:
-        """Add ``device`` to ``key``'s holders. OWNER-DEVICE-ONLY."""
+        """Add ``device`` to ``key``'s holders. OWNER-DEVICE-ONLY.
+
+        ``provenance`` (default: the owner, i.e. an explicit share) marks a holder the
+        owner DERIVED from a signed approval (``consent:<approval ref>``, written only
+        by ``reconcile``). It lives in the existing ``Holder.granted_by`` field, so
+        there is no schema change, and it is authority only on the OWNER, read from
+        the owner's own file: a recipient's copy of the string is informational. A
+        re-grant of an existing holder resets it to the owner — an explicit share
+        supersedes a derived grant.
+        """
         from local_operator.network.credentials import github
         from local_operator.network.types import MeshRefusal
 
@@ -483,7 +493,7 @@ class PlacementDocument:
                     device=device,
                     scope=scope,
                     granted_at=time.time(),
-                    granted_by=entry.owner_device,
+                    granted_by=provenance or entry.owner_device,
                 )
             )
         else:
@@ -786,6 +796,7 @@ def grant_key_set(
     config: Path,
     self_device: str,
     owner_name: str = "",
+    provenance: str = "",
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Grant ``device`` a holder row for each of ``keys``, through :meth:`grant`.
 
@@ -838,7 +849,7 @@ def grant_key_set(
                     by=self_device,
                 )
             scope = "device" if github_mod.is_github_key(key) else "session"
-            document.grant(key, device, scope=scope, by=self_device)
+            document.grant(key, device, scope=scope, by=self_device, provenance=provenance)
             granted.append(key)
         except MeshRefusal as refusal:
             skipped.append({"key": key, "reason": refusal.code or "refused"})

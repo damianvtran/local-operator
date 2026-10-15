@@ -1708,6 +1708,37 @@ class AuthStore:
             if conn is not None:
                 conn.close()
 
+    @staticmethod
+    def native_oauth_inventory(db_path: Path) -> list[tuple[Any, ...]] | None:
+        """``(provider, id, login_incarnation, account, email, org, mesh_origin_type,
+        credential_type)`` for every ENABLED row, with NO credential material read and
+        no ``updated_at``.
+
+        The mesh consent reconciler asks "which providers could a signed future-login
+        approval cover, and did that set change" on a timer. ``list_credentials`` would
+        decrypt every row; ``updated_at`` is left out on purpose because it moves on
+        every token refresh and the reconciler's memo must not be invalidated by
+        rotation. Same read-only WAL snapshot as :meth:`native_lifecycle_snapshot`;
+        ``None`` means unknown (missing/legacy/unreadable), never empty.
+        """
+        if not db_path.is_file():
+            return None
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+            return conn.execute(
+                "SELECT provider, id, login_incarnation, json_extract(data, '$.account_id'),"
+                " json_extract(data, '$.email'), json_extract(data, '$.org_id'),"
+                " json_type(data, '$.mesh_origin'), credential_type"
+                " FROM auth_credentials WHERE disabled_cause IS NULL"
+                " ORDER BY provider, id"
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
     def native_login_incarnation(self, credential_id: int) -> str | None:
         """Authoritative login identity without loading or deriving from secrets.
 

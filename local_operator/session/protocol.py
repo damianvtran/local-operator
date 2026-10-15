@@ -746,7 +746,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 146 public members and a POSITIVE
+    than stylistic. This protocol carries 147 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -816,7 +816,12 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     (``supplement_cancel``/``supplement_steer``/``supplement_restart``), one rung
     adding four because they are one contract's surface: a facade that could be
     read for rows but not act on them would answer the command with a probe miss
-    on this class alone), so recompute it
+    on this class alone), 147 once the dock's decision door needed
+    ``bridge_decide`` on the viewer contract — the dock looks that name up on
+    whichever session holds the ask, so a paired device without it could not
+    decide an agent-messages request at all (U1, the round that wired the owner
+    half of the same door), one more member on
+    the queued-ask rung), so recompute it
     rather
     than adjusting it by the size of your own change.
 
@@ -952,6 +957,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     async def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
     async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
+
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
+        """Decide an agent-messages request — the OWNER's name, on the viewer's async side.
+
+        :meth:`respond_ask`'s sibling for the verified decision door, declared
+        for the same reason: the dock looks the name up on whichever session
+        holds the ask (``tui/app.py::_deliver_owner_answer``) and handles both
+        kinds of holder, while the two holders answer differently — an owner's
+        op (``Session.bridge_decide``) consumes its one-shot grant synchronously
+        and returns the verdict, and a viewer's crosses the wire and is awaited.
+        """
+        ...
 
     async def revise_ask(
         self,

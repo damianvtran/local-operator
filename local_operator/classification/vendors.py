@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -104,6 +105,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 import httpx
 from pydantic import SecretStr
 
+from local_operator.classification.accounting import note_post
 from local_operator.classification.types import (
     Answer,
     DecisionRequest,
@@ -788,11 +790,24 @@ class _HttpDecisionVendor:
         the same shape — which is correct: from the cascade's point of view both
         mean "ask the next leg".
         """
+        # The ONE place a decision request leaves the process, so it is the one place
+        # that counts it for the channel ledger (``classification.accounting``): a
+        # 401/403 re-send inside a single ``decide`` is a second billable request that
+        # no return value would otherwise report.
+        note_post()
         try:
             return await client.post(self.endpoint, json=body, headers=headers, timeout=timeout_s)
         except httpx.HTTPError as exc:
             raise DecisionVendorError(
-                f"{self.name} transport failure: {type(exc).__name__}", kind="transport"
+                f"{self.name} transport failure: {type(exc).__name__}",
+                kind="transport",
+                # A failure BEFORE the request reached the vendor (no connection, no
+                # pool slot) cannot have been billed. Every other transport failure —
+                # a read timeout, a reset mid-response — leaves the outcome unknown,
+                # and the ledger must say so instead of presuming the call free.
+                outcome_lost=not isinstance(
+                    exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+                ),
             ) from exc
 
 
@@ -836,9 +851,26 @@ def _parse_response(
         # a configured price row — has no row to read for a decision model in
         # this repo, and inventing a number would put a fabricated figure in the
         # PR's cost arithmetic.
-        cost_usd=float(raw_cost) if isinstance(raw_cost, (int, float)) else None,
+        cost_usd=_reported_cost(raw_cost),
         latency_s=latency_s,
     )
+
+
+def _reported_cost(value: Any) -> float | None:
+    """A decision charge, not a general credit/refund entry: malformed means unknown.
+
+    Booleans are numbers in Python but not monetary receipts. Non-finite/negative
+    values cannot describe this route's per-request charge; an enormous integer can
+    also overflow coercion. None of these may turn a valid answer into an error or
+    claim a fabricated charge. The channel emitter separately checks storage range.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return amount if math.isfinite(amount) and amount >= 0 else None
 
 
 def _count(value: Any) -> int | None:
