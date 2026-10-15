@@ -315,24 +315,42 @@ def _unit_paragraph(text: str) -> bool:
 
 # Operational summaries often mix counts of different entities. Admit a narrow,
 # explicit noun-labelled set, not arbitrary numbers in prose: at least four distinct
-# entity units, in an answer with actual list structure. Preserve the first stated
-# count per unit (later verification paragraphs repeat it). A table is meaningful;
-# bars comparing comments against profiles are not.
+# entity units, taken only from actual bullet lines. Repeated identical counts agree;
+# conflicting counts fail closed rather than mixing historical/current values. A table
+# is meaningful; bars comparing comments against profiles are not.
+# Only unsigned point counts are evidence here, never a suffix of a delta/range,
+# date or identifier. Case-fold only our explicit vocabulary: a global IGNORECASE
+# would turn the acronym modifier into arbitrary words ("101 covers comments").
 _SUMMARY_COUNT: Final = re.compile(
-    r"(?<![\w.,])(?P<value>\d{1,3}(?:,\d{3})+|\d+)\s+"
-    r"(?:(?:supplementary|production|run-closed|[A-Z][A-Z]+)\s+){0,3}"
-    r"(?P<unit>comments|profiles|links|matches)\b",
-    re.IGNORECASE,
+    r"(?<![\w.,+\-−–—/:#=@~≈<>≤≥])(?P<value>\d{1,3}(?:,\d{3})+|\d+)[ \t]+"
+    r"(?:(?:(?i:supplementary|production|run-closed)|[A-Z]{2,12})[ \t]+){0,3}"
+    r"(?P<unit>(?i:comments|profiles|links|matches))\b"
+)
+_SUMMARY_AMBIGUOUS_PREFIX: Final = re.compile(
+    r"[+\-−–—][ \t]*$|\d[\d,]*[ \t]+(?:to|through)[ \t]*$", re.IGNORECASE
 )
 
 
 def _labelled_summary(answer: str) -> Dataset | None:
-    if not re.search(r"(?m)^\s*[-*]\s+", answer):
-        return None
     counts: dict[str, str] = {}
-    for match in _SUMMARY_COUNT.finditer(answer[:65_536]):
-        unit = match.group("unit").lower()
-        counts.setdefault(unit, match.group("value").replace(",", ""))
+    # Do not let a single list marker elsewhere license arbitrary historical prose.
+    # Scan the actual bullet lines only (the real replay repeats all four counts in
+    # its operational/check bullets). Strip the marker before checking numeric signs,
+    # so "- 296 comments" is a positive count rather than a negative delta.
+    for bullet in re.finditer(r"(?m)^[ \t]*[-*][ \t]+([^\n]+)", answer[:65_536]):
+        text = bullet.group(1)
+        for match in _SUMMARY_COUNT.finditer(text):
+            # Only the immediate prefix can qualify a number; bound this check
+            # so a long bullet with many numeric mentions stays linear in size.
+            if _SUMMARY_AMBIGUOUS_PREFIX.search(text[max(0, match.start() - 128) : match.start()]):
+                continue
+            unit = match.group("unit").lower()
+            value = match.group("value").replace(",", "")
+            # Conflicting point counts for the same entity are ambiguous history,
+            # not permission to silently pick whichever one the regex saw first.
+            if unit in counts and counts[unit] != value:
+                return None
+            counts[unit] = value
     if len(counts) < 4:
         return None
     rows = tuple((unit, value) for unit, value in counts.items())
