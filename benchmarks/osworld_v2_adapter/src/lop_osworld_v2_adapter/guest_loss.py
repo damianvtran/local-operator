@@ -71,6 +71,7 @@ import binascii
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -141,7 +142,29 @@ def _walk(error: BaseException) -> list[BaseException]:
     return found
 
 
-def classify_transport_failure(error: BaseException) -> TransportVerdict:
+def _targets_only(chain: list[BaseException], origin: str) -> bool:
+    """True when at least one link's request targets ``origin`` and none targets elsewhere.
+
+    Compared on parsed scheme and ``host:port``, not as a string prefix, so
+    ``http://h:5000`` does not match ``http://h:50001``.
+    """
+
+    from urllib.parse import urlsplit
+
+    expected = urlsplit(origin)
+    seen = False
+    for link in chain:
+        url = getattr(getattr(link, "request", None), "url", None)
+        if not isinstance(url, str):
+            continue
+        target = urlsplit(url)
+        if (target.scheme, target.netloc) != (expected.scheme, expected.netloc):
+            return False
+        seen = True
+    return seen
+
+
+def classify_transport_failure(error: BaseException, *, origin: str | None) -> TransportVerdict:
     """Decide whether a failed guest request was certainly never sent.
 
     ``not_sent`` requires POSITIVE evidence that the connect phase failed (a
@@ -153,6 +176,27 @@ def classify_transport_failure(error: BaseException) -> TransportVerdict:
     ``ConnectionError`` with no urllib3 chain. A bare ``ConnectionRefusedError``
     is deliberately NOT enough on its own -- an OS can report it on a ``send``
     to a connection that had already been established.
+
+    REDIRECTS ARE PROOF OF DELIVERY, NOT OF ITS ABSENCE. ``requests`` follows a
+    3xx by default, and when the redirect TARGET refuses the connection the
+    exception that escapes carries only that final attempt: the original request
+    -- which the first server received and may have acted on -- is invisible in
+    the chain. A real loopback server that read the full POST and answered 307 to
+    a closed port produced exactly ``not_sent/refused`` here (review round 1,
+    C1). Two independent guards, because neither alone is sufficient:
+
+    * the guest transport no longer follows redirects (``aws.build_clients``), so
+      this shape cannot arise from production code; and
+    * this function refuses ``not_sent`` when ANY link carries a response (the
+      server answered, so the request was delivered), when any failing request
+      targets a different scheme/host/port than ``origin`` (an earlier hop may
+      have been delivered), and -- fail closed -- when NO link shows the failing
+      request targeting ``origin`` at all. Every exception ``requests`` raises
+      for a connect failure carries its ``PreparedRequest``, so a genuine
+      refusal always supplies that evidence; an exception that does not is not
+      one this function can vouch for. ``origin`` is ``scheme://host:port`` of
+      the guest and is REQUIRED so a new caller has to decide; None (before
+      allocate) fails closed as well.
 
     This relies on the guest transport opening a FRESH connection per request
     (``requests.post`` at module level: no pool, no keep-alive). A pooled
@@ -194,6 +238,13 @@ def classify_transport_failure(error: BaseException) -> TransportVerdict:
         if any(isinstance(link, post_send) for link in chain):
             return TransportVerdict(DELIVERY_AMBIGUOUS)
         if not any(isinstance(link, connect) for link in chain):
+            return TransportVerdict(DELIVERY_AMBIGUOUS)
+        if any(
+            getattr(link, "response", None) is not None or getattr(link, "history", None)
+            for link in chain
+        ):
+            return TransportVerdict(DELIVERY_AMBIGUOUS)
+        if origin is None or not _targets_only(chain, origin):
             return TransportVerdict(DELIVERY_AMBIGUOUS)
 
         name_resolution = getattr(u3_exc, "NameResolutionError", None)
@@ -333,13 +384,127 @@ def _failure_status(error: BaseException) -> dict[str, Any]:
     }
 
 
+#: Console text longer than this is withheld outright rather than scanned. EC2
+#: returns at most 64 KiB, so this is a guard against a changed service limit
+#: that keeps the blob pass's cost bounded by construction.
+_MAX_SCAN_CHARS = 1024 * 1024
+
+#: A base64-looking run, possibly WRAPPED over several lines (MIME/`base64`
+#: default is 76 columns, and a secret can straddle the break). An initial
+#: >= 8 alphabet characters followed by wrapped alphabet lines, including a short
+#: FINAL line: dropping that short tail can leave a decodable credential fragment.
+_B64_RUN = re.compile(
+    r"[A-Za-z0-9+/_\-]{8,}(?:=*[ \t]*\r?\n[ \t]*" r"[A-Za-z0-9+/_\-]+(?==*[ \t]*(?:\r?\n|$)))*=*"
+)
+#: A contiguous hex run. Hex is byte-aligned, so a known value's own hex spelling
+#: is already caught by the shared exact-value pass; this catches mixed-case or
+#: otherwise unregistered hex-encoded blobs, which cannot be vouched for.
+_HEX_RUN = re.compile(r"\b[0-9a-fA-F]{32,}\b")
+#: A base64 run at least this long is opaque and withheld even when nothing
+#: recognisable decodes out of it. Conservative by design: an occasional long
+#: identifier or path can be withheld too. Keeping an unvouched encoded value
+#: is worse than losing that identifier; unit names/status sentences survive.
+_OPAQUE_B64_MIN = 40
+#: Shape rules only run on decodes of runs at least this long: shorter runs are
+#: ordinary words, and the shape table needs more context than that to fire.
+_SHAPE_CHECK_MIN = 24
+
+
+def _decoded_views(run: str) -> list[bytes]:
+    """Every byte-alignment decode of a base64-looking ``run``.
+
+    A secret inside a LARGER encoded object is spelled differently depending on
+    where it falls in the 3-byte groups, so standalone ``base64(secret)`` (what
+    the shared exact-value pass matches) misses it (review round 1, C2).
+    Decoding from char offsets 0-3 reaches all three byte alignments; both the
+    standard and URL-safe alphabets are tried by normalising to standard.
+    """
+
+    stripped = re.sub(r"[ \t\r\n=]", "", run).replace("-", "+").replace("_", "/")
+    views: list[bytes] = []
+    for offset in range(4):
+        chunk = stripped[offset:]
+        # PAD the final partial group instead of dropping it: truncating to a
+        # multiple of 4 clips the tail of a secret that ends the blob. One
+        # leftover character (len % 4 == 1) carries no whole byte and is dropped.
+        if len(chunk) % 4 == 1:
+            chunk = chunk[:-1]
+        chunk += "=" * (-len(chunk) % 4)
+        if len(chunk) <= 4:
+            continue
+        try:
+            views.append(base64.b64decode(chunk, validate=False))
+        except (binascii.Error, ValueError):
+            continue
+    return views
+
+
+def _withhold_encoded_blobs(text: str, known_values: tuple[str, ...]) -> str | None:
+    """``text`` with encoded blobs that hold, or cannot be vouched not to hold, a secret removed.
+
+    The shared scrubber matches a known value's own spellings, which is blind to
+    the value inside a larger encoding. Rather than extend a spelling list that
+    can never be complete, this refuses to persist what it cannot read:
+
+    * a base64 run whose decode, at any alignment, contains a known value or
+      trips the credential-shape table is replaced by a marker;
+    * a base64 run of >= ``_OPAQUE_B64_MIN`` characters, and a hex run of >=
+      32 digits, is replaced by a marker whatever it decodes to --
+      an encoded blob of that size in a console is user-data or a key, and the
+      diagnostic value of its bytes is nil next to the cost of persisting a
+      credential.
+
+    Only a payload that survives these checks reaches the shared scrub. Returns
+    None (withhold the whole text) when the text is too large to scan.
+    A secret under a layer this does not decode (gzip, a second base64 level, a
+    cipher) is NOT covered; the long-run rule is what bounds that residual.
+    """
+
+    if len(text) > _MAX_SCAN_CHARS:
+        return None
+    try:
+        from local_operator.redaction_shapes import scrub_secrets
+    except ImportError:
+        return None
+    needles = [value.encode("utf-8") for value in known_values if value]
+    # A base64 run carrying an N-byte secret has at least ceil(4N/3) characters.
+    shortest = min((len(n) for n in needles), default=0)
+    known_min = max(8, -(-4 * shortest // 3)) if shortest else 0
+
+    def marker(match: re.Match[str]) -> str:
+        return f"[encoded blob withheld: {len(match.group(0))} chars]"
+
+    def replace_b64(match: re.Match[str]) -> str:
+        run = match.group(0)
+        compact = re.sub(r"[ \t\r\n=]", "", run)
+        if (
+            len(compact) >= _OPAQUE_B64_MIN
+            and any(c.islower() for c in compact)
+            and any(c.isupper() for c in compact)
+        ):
+            return marker(match)
+        if known_min and len(compact) >= known_min:
+            for view in _decoded_views(run):
+                if any(needle in view for needle in needles):
+                    return marker(match)
+                if len(compact) >= _SHAPE_CHECK_MIN:
+                    decoded = view.decode("latin-1")
+                    if scrub_secrets(decoded) != decoded:
+                        return marker(match)
+        return run
+
+    text = _B64_RUN.sub(replace_b64, text)
+    return _HEX_RUN.sub(marker, text)
+
+
 def _scrub(text: str, known_values: tuple[str, ...]) -> str | None:
     """``text`` with credentials removed, or None when it cannot be vouched for.
 
     None means WITHHOLD: the shared scrubber is not importable (an older
-    harness) or a known value survived it. Persisting unscrubbed console text
-    would write whatever the guest printed -- possibly a credential -- to a
-    durable directory, which is strictly worse than recording its absence.
+    harness), the text is too large to scan, or a known value survived it.
+    Persisting unscrubbed console text would write whatever the guest printed --
+    possibly a credential -- to a durable directory, which is strictly worse than
+    recording its absence.
     """
 
     try:
@@ -347,7 +512,10 @@ def _scrub(text: str, known_values: tuple[str, ...]) -> str | None:
     except ImportError:
         return None
     try:
-        scrubbed = scrub_secrets(text, known_values)
+        blobless = _withhold_encoded_blobs(text, known_values)
+        if blobless is None:
+            return None
+        scrubbed = scrub_secrets(blobless, known_values)
     except Exception:
         return None
     # The scrub is exact-value plus shape; a belt-and-braces re-check turns a

@@ -232,12 +232,24 @@ def build_clients(credentials: AwsCredentials, region: str) -> _Clients:
         return int(requests.get(url, timeout=timeout).status_code)
 
     def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        # ``allow_redirects=False``: a guest command is a non-idempotent POST.
+        # Following a 3xx would re-send it to a host the guest chose, and when
+        # THAT hop refused the connection ``requests`` raised a bare connect
+        # error that hid the first, delivered request (``guest_loss``, review
+        # round 1 C1). The control server never redirects, so a 3xx is already
+        # an anomaly; it is surfaced as an HTTP error, which classifies as
+        # ``ambiguous`` because the server answered.
         response = requests.post(
             url,
             json=payload,
             timeout=timeout,
             headers={"Content-Type": "application/json"},
+            allow_redirects=False,
         )
+        if 300 <= response.status_code < 400:
+            # ``raise_for_status`` passes 3xx; without this the body would be
+            # parsed as if it were an answer.
+            raise requests.HTTPError("guest control server answered a redirect", response=response)
         response.raise_for_status()
         decoded = response.json()
         if not isinstance(decoded, dict):
@@ -522,8 +534,14 @@ class _ScreenshotFailureCapture(logging.Handler):
     words are surfaced by the HARNESS instead, as the worker's stderr tail.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, origin: str | None = None) -> None:
         super().__init__(level=logging.ERROR)
+        #: ``scheme://host:port`` of the guest, handed to the classifier so a
+        #: failure on a REDIRECT target is not read as "never connected". The
+        #: screenshot GET is upstream's own call (it follows redirects and is
+        #: idempotent), so its semantics are deliberately left alone; only the
+        #: diagnostic claim is kept honest.
+        self.origin = origin
         #: (kind, status_or_None, monotonic_seconds) per failed attempt.
         self.records: list[tuple[str, int | None, float]] = []
         #: For each ``transport`` record whose exception PROVES the connection was
@@ -557,7 +575,7 @@ class _ScreenshotFailureCapture(logging.Handler):
             if kind == "transport" and isinstance(arguments, tuple) and arguments:
                 cause = arguments[0]
                 if isinstance(cause, BaseException):
-                    verdict = guest_loss.classify_transport_failure(cause)
+                    verdict = guest_loss.classify_transport_failure(cause, origin=self.origin)
                     if verdict.delivery == guest_loss.DELIVERY_NOT_SENT:
                         self.not_sent_kinds.append(verdict.kind)
             self.records.append((kind, status, time.monotonic()))
@@ -1413,7 +1431,7 @@ class AwsProvider:
         # ``evaluate`` captures judge errors. The records are the ONLY trace of
         # why a capture failed (``get_screenshot`` logs and returns None), and
         # this call is the last place they exist.
-        capture = _ScreenshotFailureCapture()
+        capture = _ScreenshotFailureCapture(self._guest_origin())
         screenshot_logger = logging.getLogger(_SCREENSHOT_LOGGER)
         screenshot_logger.addHandler(capture)
         started = time.monotonic()
@@ -1445,6 +1463,13 @@ class AwsProvider:
                 self._capture_guest_console, guest_loss.STAGE_OBSERVE, "observe-frameless"
             )
         return observation
+
+    def _guest_origin(self) -> str | None:
+        """``scheme://host:port`` the guest transport targets, or None before allocate."""
+
+        if self._public_ip is None:
+            return None
+        return f"http://{self._public_ip}:{GUEST_PORT}"
 
     def _capture_guest_console(self, stage: str, trigger: str) -> None:
         """Persist the guest's console tail and screenshot, once per stage. Never raises.
@@ -1498,7 +1523,9 @@ class AwsProvider:
                     # on a ``not_sent`` verdict: the preserved loss refused every
                     # request for the rest of the episode, so a retry could only
                     # lengthen the dead time (see ``guest_loss``).
-                    verdict = guest_loss.classify_transport_failure(error)
+                    verdict = guest_loss.classify_transport_failure(
+                        error, origin=self._guest_origin()
+                    )
                     # Before anything can terminate the guest: the control server
                     # is the thing that died, EC2 is still answering.
                     self._capture_guest_console(

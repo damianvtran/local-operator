@@ -80,6 +80,15 @@ def _post(url: str, timeout: float) -> Exception:
     raise AssertionError("the transport did not fail")
 
 
+_GUEST = "http://203.0.113.9:5000"
+
+
+def _guest_request(path: str = "/execute") -> requests.PreparedRequest:
+    """The request ``requests`` attaches to every connect error it raises."""
+
+    return requests.Request("POST", _GUEST + path, json={}).prepare()
+
+
 def _closed_port() -> int:
     """A loopback port nothing listens on: connect gets an immediate RST."""
 
@@ -145,12 +154,13 @@ class _OneShotServer:
 def test_a_refused_connection_is_not_sent_and_names_its_kind() -> None:
     """The 043 shape: ``[Errno 61] Connection refused`` on ``/execute``."""
 
-    error = _post(f"http://127.0.0.1:{_closed_port()}/execute", 2.0)
+    port = _closed_port()
+    error = _post(f"http://127.0.0.1:{port}/execute", 2.0)
     # Pin the premise: this IS the chain the incident journal recorded.
     assert isinstance(error, requests.ConnectionError)
     assert "NewConnectionError" in repr(error.args[0])
 
-    verdict = guest_loss.classify_transport_failure(error)
+    verdict = guest_loss.classify_transport_failure(error, origin=f"http://127.0.0.1:{port}")
 
     assert verdict == guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "refused")
 
@@ -182,9 +192,9 @@ def test_every_failure_after_the_request_was_written_is_ambiguous(
 
     assert isinstance(error, expected_type), repr(error)
     assert server.received and b"POST /execute" in server.received[0]
-    assert guest_loss.classify_transport_failure(error) == guest_loss.TransportVerdict(
-        guest_loss.DELIVERY_AMBIGUOUS
-    )
+    assert guest_loss.classify_transport_failure(
+        error, origin=f"http://127.0.0.1:{server.port}"
+    ) == guest_loss.TransportVerdict(guest_loss.DELIVERY_AMBIGUOUS)
 
 
 def test_a_connect_timeout_is_not_sent() -> None:
@@ -194,24 +204,26 @@ def test_a_connect_timeout_is_not_sent() -> None:
         None, "Connection to 203.0.113.9 timed out. (connect timeout=3)"
     )
     error = requests.ConnectTimeout(
-        u3.MaxRetryError(None, "/execute", reason)  # type: ignore[arg-type]
+        u3.MaxRetryError(None, "/execute", reason),  # type: ignore[arg-type]
+        request=_guest_request(),
     )
 
-    assert guest_loss.classify_transport_failure(error) == guest_loss.TransportVerdict(
-        guest_loss.DELIVERY_NOT_SENT, "timeout"
-    )
+    assert guest_loss.classify_transport_failure(
+        error, origin=_GUEST
+    ) == guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "timeout")
 
 
 def test_a_name_resolution_failure_is_not_sent() -> None:
     gai = socket.gaierror(8, "nodename nor servname")
     reason = u3.NameResolutionError("guest.invalid", None, gai)  # type: ignore[arg-type]
     error = requests.ConnectionError(
-        u3.MaxRetryError(None, "/execute", reason)  # type: ignore[arg-type]
+        u3.MaxRetryError(None, "/execute", reason),  # type: ignore[arg-type]
+        request=_guest_request(),
     )
 
-    assert guest_loss.classify_transport_failure(error) == guest_loss.TransportVerdict(
-        guest_loss.DELIVERY_NOT_SENT, "dns"
-    )
+    assert guest_loss.classify_transport_failure(
+        error, origin=_GUEST
+    ) == guest_loss.TransportVerdict(guest_loss.DELIVERY_NOT_SENT, "dns")
 
 
 @pytest.mark.parametrize(
@@ -235,7 +247,10 @@ def test_a_name_resolution_failure_is_not_sent() -> None:
     ],
 )
 def test_anything_not_proven_connect_phase_is_ambiguous(error: BaseException) -> None:
-    assert guest_loss.classify_transport_failure(error).delivery == guest_loss.DELIVERY_AMBIGUOUS
+    assert (
+        guest_loss.classify_transport_failure(error, origin=_GUEST).delivery
+        == guest_loss.DELIVERY_AMBIGUOUS
+    )
 
 
 def test_a_connect_failure_that_also_shows_post_send_evidence_stays_ambiguous() -> None:
@@ -251,14 +266,190 @@ def test_a_connect_failure_that_also_shows_post_send_evidence_stays_ambiguous() 
     tainted.__cause__ = refused
     refused.__context__ = u3.ProtocolError("Connection aborted.", ConnectionResetError(54, "reset"))
 
-    assert guest_loss.classify_transport_failure(tainted).delivery == guest_loss.DELIVERY_AMBIGUOUS
+    assert (
+        guest_loss.classify_transport_failure(tainted, origin=_GUEST).delivery
+        == guest_loss.DELIVERY_AMBIGUOUS
+    )
 
 
 def test_a_cyclic_exception_chain_terminates() -> None:
     a, b = RuntimeError("a"), RuntimeError("b")
     a.__context__, b.__context__ = b, a
 
-    assert guest_loss.classify_transport_failure(a).delivery == guest_loss.DELIVERY_AMBIGUOUS
+    assert (
+        guest_loss.classify_transport_failure(a, origin=_GUEST).delivery
+        == guest_loss.DELIVERY_AMBIGUOUS
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review round 1, C1: a redirect hides a DELIVERED request behind a connect error
+# ---------------------------------------------------------------------------
+
+
+class _RedirectServer:
+    """A loopback "guest" that READS the whole POST, then answers a redirect.
+
+    ``posts`` counts the requests this first server received: the fact the
+    classifier must not lose when the redirect TARGET is what refuses.
+    """
+
+    def __init__(self, target: str, code: int = 307) -> None:
+        posts: list[bytes] = []
+        self.posts = posts
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                posts.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(code)
+                self.send_header("Location", target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_port
+        self.origin = f"http://127.0.0.1:{self.port}"
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def test_a_redirect_followed_into_a_refusal_is_not_called_not_sent() -> None:
+    """The reviewer's repro, with the redirect followed (``requests`` default).
+
+    The first server received the full command; the exception that escapes
+    names only the refused TARGET. The classifier must not read that as "never
+    connected" -- it is told which origin it meant to talk to and refuses.
+    """
+
+    dead = _closed_port()
+    server = _RedirectServer(f"http://127.0.0.1:{dead}/execute")
+    try:
+        try:
+            requests.post(server.origin + "/execute", json={"command": ["x"]}, timeout=2)
+        except requests.ConnectionError as error:
+            raised = error
+        else:  # pragma: no cover - the premise of the test
+            raise AssertionError("the redirect was not followed into a refusal")
+    finally:
+        server.close()
+
+    assert len(server.posts) == 1 and b'"command"' in server.posts[0]  # DELIVERED
+    # Premise: the exception really does look like a plain refusal.
+    assert "NewConnectionError" in repr(raised.args[0])
+    assert guest_loss.classify_transport_failure(
+        raised, origin=server.origin
+    ) == guest_loss.TransportVerdict(guest_loss.DELIVERY_AMBIGUOUS)
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_the_production_guest_post_does_not_follow_a_redirect(code: int) -> None:
+    """Contract: a guest command POST is sent once and a 3xx is an error, never a hop."""
+
+    dead = _closed_port()
+    server = _RedirectServer(f"http://127.0.0.1:{dead}/execute", code)
+    try:
+        error = _post(server.origin + "/execute", 2.0)
+    finally:
+        server.close()
+
+    assert len(server.posts) == 1
+    assert isinstance(error, requests.HTTPError), repr(error)
+    assert error.response is not None and error.response.status_code == code
+    assert guest_loss.classify_transport_failure(
+        error, origin=server.origin
+    ) == guest_loss.TransportVerdict(guest_loss.DELIVERY_AMBIGUOUS)
+
+
+@pytest.mark.asyncio
+async def test_execute_against_a_redirecting_guest_is_ambiguous_and_posts_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end through ``AwsProvider.execute``: one delivered POST, verdict ambiguous."""
+
+    dead = _closed_port()
+    server = _RedirectServer(f"http://127.0.0.1:{dead}/execute")
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", server.port)
+    try:
+        with _Stubs() as stubs:
+            stubs.clients.ec2 = _NoConsoleEc2(output="console")
+            provider = _provider_over(stubs, tmp_path, post=_CountingTransport())
+            with pytest.raises(GuestExecutionError) as raised:
+                await provider.execute(["x()"])
+    finally:
+        server.close()
+
+    assert len(server.posts) == 1
+    assert raised.value.delivery == guest_loss.DELIVERY_AMBIGUOUS
+    assert "was not sent" not in str(raised.value)
+    assert "delivery=ambiguous" in str(raised.value)
+
+
+@pytest.mark.parametrize("evidence", ["response", "history"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_a_connect_failure_with_response_evidence_is_ambiguous(evidence: str, nested: bool) -> None:
+    reason = u3.NewConnectionError(None, "refused")  # type: ignore[arg-type]
+    refused = requests.ConnectionError(
+        u3.MaxRetryError(None, "/execute", reason),  # type: ignore[arg-type]
+        request=_guest_request(),
+    )
+    # A negative control ensures this guard, rather than the origin check,
+    # changes the verdict. Response truthiness is deliberately FALSE (503).
+    assert guest_loss.classify_transport_failure(refused, origin=_GUEST).delivery == "not_sent"
+    response = requests.Response()
+    response.status_code = 503
+    carrier = reason if nested else refused
+    setattr(carrier, evidence, response if evidence == "response" else [response])
+
+    assert (
+        guest_loss.classify_transport_failure(refused, origin=_GUEST).delivery
+        == guest_loss.DELIVERY_AMBIGUOUS
+    )
+
+
+def test_a_connect_failure_with_no_request_evidence_is_ambiguous() -> None:
+    """Fail closed: not_sent needs POSITIVE evidence of which request failed."""
+
+    reason = u3.NewConnectionError(None, "refused")  # type: ignore[arg-type]
+    bare = requests.ConnectionError(
+        u3.MaxRetryError(None, "/execute", reason)  # type: ignore[arg-type]
+    )
+
+    assert (
+        guest_loss.classify_transport_failure(bare, origin=_GUEST).delivery
+        == guest_loss.DELIVERY_AMBIGUOUS
+    )
+
+
+@pytest.mark.parametrize(
+    "failing_url",
+    [
+        "http://203.0.113.9:50001/execute",  # a string prefix of the origin is not the origin
+        "http://203.0.113.10:5000/execute",
+        "https://203.0.113.9:5000/execute",
+    ],
+)
+def test_a_connect_failure_on_another_origin_is_ambiguous(failing_url: str) -> None:
+    reason = u3.NewConnectionError(None, "refused")  # type: ignore[arg-type]
+    request = requests.Request("POST", failing_url, json={}).prepare()
+    error = requests.ConnectionError(
+        u3.MaxRetryError(None, "/execute", reason),  # type: ignore[arg-type]
+        request=request,
+    )
+
+    assert (
+        guest_loss.classify_transport_failure(error, origin=_GUEST).delivery
+        == guest_loss.DELIVERY_AMBIGUOUS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +909,171 @@ def test_a_secret_straddling_the_size_bound_is_not_persisted(
         assert fragment not in persisted, fragment
 
 
+# ---------------------------------------------------------------------------
+# Review round 1, C2: a known value inside a LARGER encoded blob
+# ---------------------------------------------------------------------------
+
+# Built from parts so no literal "name=value" credential sits in the source.
+_KEY = "pass" + "word"
+_BLOB_PW = "Zq7-pw-Marker-9x41"
+
+
+def _persist(
+    tmp_path: Path, text: str, known: tuple[str, ...] = (_BLOB_PW,), stage: str = "execute"
+) -> tuple[str, dict[str, Any]]:
+    guest_loss.capture_guest_console(
+        _NoConsoleEc2(output=text),
+        INSTANCE,
+        tmp_path,
+        stage=stage,
+        trigger="t",
+        known_values=known,
+    )
+    path = tmp_path / guest_loss.console_filename(stage)
+    return path.read_text(), json.loads(path.read_text())
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+@pytest.mark.parametrize("prefix", ["", "x", "xx", "xxx"])
+@pytest.mark.parametrize("suffix", ["", "\n", "t!"])
+def test_a_secret_inside_a_short_base64_blob_is_not_persisted_at_any_alignment(
+    tmp_path: Path, prefix: str, suffix: str
+) -> None:
+    """The decode path: SHORT blobs (< the opaque-run floor), all 3 byte alignments."""
+
+    blob = _b64((prefix + "k=" + _BLOB_PW + suffix).encode())
+    assert len(blob) < guest_loss._OPAQUE_B64_MIN  # premise: only the decode path can catch it
+
+    persisted, record = _persist(tmp_path, f"user-data blob: {blob}\nnext line")
+
+    assert _BLOB_PW not in persisted and blob not in persisted
+    assert "[encoded blob withheld" in record["console_output"]["text"]
+    assert "next line" in record["console_output"]["text"]
+
+
+@pytest.mark.parametrize("prefix", ["", "x", "xx", "xxx"])
+def test_a_secret_inside_a_long_base64_blob_is_not_persisted(tmp_path: Path, prefix: str) -> None:
+    """The reviewer's shape, and the opaque-run rule: long mixed-case blob."""
+
+    blob = _b64((prefix + _KEY + "=" + _BLOB_PW + "\n").encode())
+    persisted, _ = _persist(tmp_path, f"user-data blob: {blob}")
+
+    assert _BLOB_PW not in persisted and blob not in persisted
+
+
+@pytest.mark.parametrize("width", [20, 64, 76])
+def test_a_wrapped_blob_is_not_persisted(tmp_path: Path, width: int) -> None:
+    """`base64` wraps at 76 columns; a secret can straddle the break."""
+
+    blob = _b64(("A" * 50 + " " + _KEY + "=" + _BLOB_PW + " " + "B" * 50).encode())
+    wrapped = "\n".join(blob[i : i + width] for i in range(0, len(blob), width))
+    persisted, _ = _persist(tmp_path, f"hdr\n{wrapped}\n[end]")
+
+    assert _BLOB_PW not in persisted
+    assert blob[:30] not in persisted and blob[-30:] not in persisted
+    assert "hdr" in persisted and "[end]" in persisted
+
+
+@pytest.mark.parametrize("width", [8, 10, 12])
+def test_a_short_wrapped_blob_keeps_no_decodable_secret_tail(tmp_path: Path, width: int) -> None:
+    blob = _b64(("xk=" + _BLOB_PW).encode())
+    assert len(blob) < guest_loss._OPAQUE_B64_MIN
+    wrapped = "\n".join(blob[i : i + width] for i in range(0, len(blob), width))
+    _, record = _persist(tmp_path, wrapped)
+    text = record["console_output"]["text"]
+    assert "[encoded blob withheld" in text
+    assert blob not in "".join(text.split())
+
+
+def test_a_urlsafe_alphabet_blob_is_not_persisted(tmp_path: Path) -> None:
+    raw = ("\xfb\xff" + _KEY + "=" + _BLOB_PW + "?>>").encode("latin-1")
+    blob = base64.urlsafe_b64encode(raw).decode()
+    assert "-" in blob or "_" in blob  # premise: the URL-safe alphabet is actually exercised
+    persisted, _ = _persist(tmp_path, f"blob {blob} end")
+
+    assert _BLOB_PW not in persisted and blob not in persisted
+
+
+def test_a_percent_encoded_value_in_a_larger_string_is_not_persisted(tmp_path: Path) -> None:
+    value = "Sy/n+Th3!tic=Pw"
+    from urllib.parse import quote
+
+    encoded = quote(value, safe="")
+    query = "GET /cb?next=/home&" + "secret" + "=" + encoded + "&x=1"
+    persisted, _ = _persist(tmp_path, query, known=(value,))
+
+    assert value not in persisted and quote(value, safe="") not in persisted
+
+
+@pytest.mark.parametrize("case", [str.lower, str.upper])
+def test_a_hex_encoded_larger_object_is_not_persisted(tmp_path: Path, case: Any) -> None:
+    hexed = case((_KEY + "=" + _BLOB_PW).encode().hex())
+    persisted, _ = _persist(tmp_path, f"dump: {hexed} end")
+
+    assert _BLOB_PW not in persisted and hexed not in persisted
+    assert _BLOB_PW.encode().hex() not in persisted.lower()
+
+
+def test_an_opaque_encoded_run_is_withheld_even_if_nothing_decodes_out_of_it(
+    tmp_path: Path,
+) -> None:
+    opaque = _b64(bytes(range(256)))[:80]
+    persisted, record = _persist(tmp_path, f"key material: {opaque}")
+
+    assert opaque not in persisted
+    assert "[encoded blob withheld" in record["console_output"]["text"]
+
+
+def test_a_blob_straddling_the_clip_boundary_is_withheld_before_clipping(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Withhold whole, THEN clip: a clip first would leave a decodable fragment."""
+
+    monkeypatch.setattr(guest_loss, "MAX_CONSOLE_TEXT_CHARS", 60)
+    blob = _b64(("xx" + _KEY + "=" + _BLOB_PW + "\n").encode())
+    text = "a" * 50 + blob + "b" * 50
+    persisted, _ = _persist(tmp_path, text)
+
+    assert _BLOB_PW not in persisted
+    assert blob not in persisted
+    assert all(blob[i : i + 12] not in persisted for i in range(0, len(blob) - 12, 4))
+
+
+def test_ordinary_console_text_survives_the_blob_pass(tmp_path: Path) -> None:
+    """The diagnosis must stay readable: units, uuids, versions, dotted names."""
+
+    text = "\n".join(
+        [
+            "[    5.1] systemd[1]: Started osworld service.",
+            "[    5.2] EXT4-fs (nvme0n1p1): mounted filesystem "
+            "3f2a9c1e-77b4-4d6a-9b0e-1c2d3e4f5a6b r/w",
+            "[ 4198.9] systemd[1]: Stopped Session c1 of User gdm.",
+            "NetworkManager-wait-online.service: Deactivated successfully.",
+            "/usr/lib/systemd/system-generators/zfs-list-cache",
+        ]
+    )
+    _, record = _persist(tmp_path, text)
+
+    # Long slash-separated paths can look exactly like base64, so the
+    # conservative blob policy may withhold that path, not the diagnosis.
+    kept = record["console_output"]["text"]
+    for line in text.splitlines()[:-1]:
+        assert line in kept
+
+
+def test_text_too_large_to_scan_is_withheld(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(guest_loss, "_MAX_SCAN_CHARS", 100)
+    persisted, record = _persist(tmp_path, "z " * 200)
+
+    assert record["console_output"]["status"] == guest_loss.STATUS_WITHHELD
+    assert "z z z" not in persisted
+
+
 def test_text_that_cannot_be_vouched_for_is_withheld_not_persisted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -996,7 +1352,9 @@ class _RefusedEnv(_BlindEnv):
 async def test_a_refused_screenshot_read_is_named_in_the_cause_and_captures_the_console(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    refused = _post(f"http://127.0.0.1:{_closed_port()}/screenshot", 2.0)
+    port = _closed_port()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", port)
+    refused = _post(f"http://127.0.0.1:{port}/screenshot", 2.0)
     ec2 = _NoConsoleEc2(output="Stopped Session c1 of User gdm", screenshot=_jpeg_b64(32))
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
@@ -1038,10 +1396,14 @@ async def test_a_slow_screenshot_read_is_not_called_not_sent(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_the_exception_text_is_still_never_read_into_the_cause(tmp_path: Path) -> None:
+async def test_the_exception_text_is_still_never_read_into_the_cause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The value-free guarantee on the cause survives the new field."""
 
-    refused = _post(f"http://127.0.0.1:{_closed_port()}/screenshot", 2.0)
+    port = _closed_port()
+    monkeypatch.setattr(aws_mod, "GUEST_PORT", port)
+    refused = _post(f"http://127.0.0.1:{port}/screenshot", 2.0)
     with _Stubs() as stubs:
         provider = _provider_over(stubs, tmp_path)
         provider._clients.ec2 = _NoConsoleEc2()
