@@ -294,7 +294,10 @@ def guard(value: Any, *, opaque: bool = False) -> None:
         # A drive letter starts a token, not the suffix of a URL scheme: matching
         # `s://example...` in https:// made benign URLs resolve relative to the
         # session cwd and fail whenever that cwd was under a protected root.
-        for word in re.findall(r"(?<![\w])(?:~?/|[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
+        # The boundary belongs ONLY to the drive-letter arm. Unix separators
+        # inside relative locators must still expose sensitive components such
+        # as docs/.env or deploy/kubeconfig-prod (R7).
+        for word in re.findall(r"(?:~?/|(?<![\w])[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
             if is_sensitive(word):
                 raise MemoryError(
                     "Sensitive path refused; retain a safe locator or secret NAME instead."
