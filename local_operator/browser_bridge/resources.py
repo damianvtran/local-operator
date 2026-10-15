@@ -36,6 +36,18 @@ RESOURCE_NAME = ".browser-resource.json"
 HOST_BRIDGE = "bridge"
 HOST_UI = "ui"
 
+#: Longest crash-replay chain kept per lane. The chain exists so a host whose
+#: scope is stamped with an OLDER generation can still be reconciled
+#: (`previous_generations`). It is trimmed to the NEWEST entries only because a
+#: lane that never acknowledges (an extension that stays unpaired across many
+#: resumes) would otherwise grow the durable record without bound. Overflow fails
+#: CLOSED: a lane unreachable for more resumes than this is refused as stale
+#: through the existing "resume the scope" copy, never silently accepted.
+MAX_REPLAY_GENERATIONS = 16
+
+#: The lanes that can hold a scope for a session; each acknowledges on its own.
+_REPLAY_LANES = (HOST_UI, HOST_BRIDGE)
+
 
 def surface_host(surface_id: str) -> str:
     """The host named by a surface token's prefix, or "" when it names none.
@@ -222,7 +234,13 @@ class BrowserResource:
         self.record: dict[str, Any] = {}
         self.generation = ""
         self.previous_generation = ""
-        self.recovered = False
+        #: Lanes whose peer has been reconciled in THIS run (see `recovered`).
+        #: Reconciliation is per HOST — the app and the extension each keep their
+        #: own scope and fence — so one boolean for the whole resource let the
+        #: app's acknowledgement stand in for the extension's. Initialised
+        #: directly (not through the `recovered` setter) because the setter
+        #: resolves the current lane, which needs `host`, assigned below.
+        self._recovered_lanes: set[str] = set()
         #: WHICH host owns this session's surface: "" (not learned yet), "ui" or
         #: "bridge". Written into the record on the first successful `open`, so a
         #: resumed session selects the lane it opened on. Everything the lane
@@ -305,6 +323,34 @@ class BrowserResource:
             if host:
                 return host
         return ""
+
+    @property
+    def recovered(self) -> bool:
+        """Whether the CURRENT lane's peer has been reconciled in this run.
+
+        Why this is per lane and not one flag: an execution-lease change (a resume
+        of the same durable session) leaves every host holding a scope stamped
+        with the OLD generation. Each host must be told, once, via `owner_recover`
+        carrying `previous_generation(s)` — the only verb that advances a scope.
+        The extension fences every other verb with strict generation equality, so
+        a plain `open` against an unreconciled extension is refused as stale. With
+        a single boolean, reconciling the app first marked the extension
+        reconciled too; a later explicit `backend=extension` open then skipped its
+        recovery and was refused on a perfectly legitimate resume.
+
+        Kept as a property so every existing reader and writer (`recover`,
+        `_degraded_recover`, `refresh_identity`, the tool's allocation reset)
+        keeps its spelling and now acts on the lane it is talking to.
+        """
+        return self._lane().name in self._recovered_lanes
+
+    @recovered.setter
+    def recovered(self, value: bool) -> None:
+        lane = self._lane().name
+        if value:
+            self._recovered_lanes.add(lane)
+        else:
+            self._recovered_lanes.discard(lane)
 
     def _retarget_lane(self, host: str) -> None:
         """Move the lane to `host` and drop every verdict cached for the old one.
@@ -489,10 +535,18 @@ class BrowserResource:
             self._lease_at_creation or self.previous_generation or secrets.token_urlsafe(24)
         )
         self._identity_from_lease = bool(self._lease_at_creation)
-        generations = list(self.record.get("bridge_generations", []))
-        for candidate in (self.previous_generation, self.generation):
-            if candidate and candidate not in generations:
-                generations.append(candidate)
+        generations = self._extend_chain(
+            self.record.get("bridge_generations", []), (self.previous_generation, self.generation)
+        )
+        # A lane that has acknowledged before keeps its OWN chain, which must hear
+        # of this run's generations too; a lane that never has falls back to the
+        # shared chain above (see `lane_generations`).
+        lanes = {
+            lane: self._extend_chain(chain, (self.previous_generation, self.generation))
+            for lane, chain in dict(self.record.get("lane_generations", {})).items()
+        }
+        if lanes:
+            self.record["lane_generations"] = lanes
         self.record.update(
             bridge_generations=generations,
             session_id=self.session_id,
@@ -584,6 +638,46 @@ class BrowserResource:
             if os.path.exists(name):
                 os.unlink(name)
 
+    @staticmethod
+    def _extend_chain(chain: Any, candidates: tuple[str, ...]) -> list[str]:
+        """`chain` plus any new `candidates`, newest-last, bounded to the newest."""
+        extended = [str(item) for item in chain]
+        for candidate in candidates:
+            if candidate and candidate not in extended:
+                extended.append(candidate)
+        return extended[-MAX_REPLAY_GENERATIONS:]
+
+    def lane_generations(self, lane: str | None = None) -> list[str]:
+        """The crash-replay chain owed to ONE lane's peer.
+
+        Reconciliation is per host, so the generations a host still needs are too:
+        `owner_recover` is the only verb that consults them, and the strict fence
+        accepts a stale scope only if it equals the current generation, the
+        immediate predecessor or a member of this list. A lane that has
+        acknowledged keeps only what it was told; a lane that never has (no entry,
+        or a record written before per-lane chains existed) is owed the full
+        shared chain. Without that split, one host's ACK collapsed the chain and
+        the other host, still stamped with an older generation, was refused as
+        stale on a legitimate resume.
+        """
+        name = lane or self._lane().name
+        per_lane = self.record.get("lane_generations", {})
+        chain = per_lane[name] if name in per_lane else self.record.get("bridge_generations", [])
+        return list(chain)
+
+    def _acknowledge_lane_chain(self) -> None:
+        """Record that the CURRENT lane's peer is now stamped with this generation.
+
+        Trims only this lane's view. The shared chain (what a never-acknowledged
+        lane is owed) collapses only once EVERY lane has acknowledged, which is
+        the point at which nothing older can still be held by any host.
+        """
+        per_lane = dict(self.record.get("lane_generations", {}))
+        per_lane[self._lane().name] = [self.generation]
+        self.record["lane_generations"] = per_lane
+        if all(per_lane.get(lane) == [self.generation] for lane in _REPLAY_LANES):
+            self.record["bridge_generations"] = [self.generation]
+
     def params(self) -> dict[str, Any]:
         self.initialize()
         return {
@@ -591,7 +685,7 @@ class BrowserResource:
             "owner_proof": str(self.record["proof"]),
             "owner_generation": self.generation,
             "previous_generation": self.previous_generation,
-            "previous_generations": self.record["bridge_generations"],
+            "previous_generations": self.lane_generations(),
             "allocation_id": str(self.record["allocation_id"]),
             # This owner is a NEW RUN over a scope that already settled. The
             # generation is reused (B1), so it is the only evidence the
@@ -673,9 +767,9 @@ class BrowserResource:
         are intended and are the opposite of "no churn": this method still CLEARS
         ``recovered`` (forcing a reconcile) on a resolved same-lane peer change,
         which is exactly the CR1 defect's cure; and it drops the cached
-        ``ownership`` verdict on a LANE move without resetting ``recovered`` (see
-        the lane-scope branch below). "Does not churn on None" governs the
-        same-lane unresolvable case only.
+        ``ownership`` verdict on a LANE move without touching any lane's
+        reconciliation state (see the lane-scope branch below). "Does not churn
+        on None" governs the same-lane unresolvable case only.
 
         The cache is LANE-SCOPED. ``_peer_identity`` reads the CURRENT lane's
         discovery while ``_ownership_peer`` may have been learned on the other
@@ -685,8 +779,13 @@ class BrowserResource:
         and issue a spurious ``owner_recover`` before an ordinary finish. So when
         the resolved lane differs from the one the cache was learned on, the
         verdict is dropped and the peer is RE-SCOPED to the new lane WITHOUT
-        being treated as a change (no recover is owed; re-learn lazily). Only a
-        change WITHIN the same lane resets ``recovered``.
+        being treated as a change (re-learn lazily). Only a change WITHIN the same
+        lane resets that lane's ``recovered``.
+
+        Whether a lane move owes a recovery is decided by the per-lane
+        ``recovered`` state, not by this branch: a lane already reconciled (or
+        that just served this run's successful allocation, see ``remember``) owes
+        nothing, and a lane never reconciled in this run owes exactly one.
         """
         lane = self._lane().name
         if lane != self._ownership_peer_lane:
@@ -905,9 +1004,10 @@ class BrowserResource:
             else str(result.get("state", "unresolved"))
         )
         if result.get("state") != "unresolved":
-            # Acknowledged CAS collapses the crash-replay chain. Before this
-            # receipt every attempted generation remains a possible peer state.
-            self.record["bridge_generations"] = [self.generation]
+            # Acknowledged CAS collapses THIS lane's crash-replay chain. Before
+            # this receipt every attempted generation remains a possible peer
+            # state, and the OTHER lane's receipt is still outstanding.
+            self._acknowledge_lane_chain()
         # The extension has now retired its copy, so the obligation is
         # discharged. Held until the ACK rather than cleared when it was
         # written: an unacknowledged resume must be replayed, and leaving it
@@ -972,6 +1072,12 @@ class BrowserResource:
             # a capability held on another host keeps it too (see `select_host`).
             if surface_id:
                 self._retarget_lane(host)
+                # The host that just SERVED an open under this run's generation
+                # holds a scope stamped with it (a strict-fence peer refuses the
+                # open otherwise), so it owes no reconciliation before the
+                # finish. Without this, per-lane state would make the lane move
+                # after a fresh allocation send a spurious `owner_recover`.
+                self.recovered = True
             else:
                 self.select_host(host)
         if self.host:
