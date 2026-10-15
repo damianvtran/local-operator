@@ -410,6 +410,18 @@ _OPAQUE_B64_MIN = 40
 _SHAPE_CHECK_MIN = 24
 
 
+#: Four encoded bytes already form an opaque object, not an isolated URL-space
+#: or one Unicode symbol. Fully percent-encoded containing objects evade a
+#: standalone-value spelling list because quote() leaves alphanumerics literal
+#: (QA round 2); JSON's all-character unicode escapes have the same neighbour
+#: hazard. Withhold the ENTIRE console text when this spelling occurs instead
+#: of decoding layers or leaving a potentially reversible fragment at a clip.
+#: The scan strips whitespace first so wrapping inside a %HH/\uHHHH token does
+#: not evade it. This intentionally sacrifices ordinary encoded URLs/blobs; it
+#: does not claim to recognise every possible encoding or encryption scheme.
+_OPAQUE_ESCAPES = re.compile(r"(?:%[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}){4,}")
+
+
 def _decoded_views(run: str) -> list[bytes]:
     """Every byte-alignment decode of a base64-looking ``run``.
 
@@ -446,6 +458,9 @@ def _withhold_encoded_blobs(text: str, known_values: tuple[str, ...]) -> str | N
     the value inside a larger encoding. Rather than extend a spelling list that
     can never be complete, this refuses to persist what it cannot read:
 
+    * an opaque percent/JSON-unicode escaped object withholds the entire text,
+      including whitespace-wrapped spellings, rather than retaining bytes a
+      later reader can trivially decode;
     * a base64 run whose decode, at any alignment, contains a known value or
       trips the credential-shape table is replaced by a marker;
     * a base64 run of >= ``_OPAQUE_B64_MIN`` characters, and a hex run of >=
@@ -455,12 +470,15 @@ def _withhold_encoded_blobs(text: str, known_values: tuple[str, ...]) -> str | N
       credential.
 
     Only a payload that survives these checks reaches the shared scrub. Returns
-    None (withhold the whole text) when the text is too large to scan.
+    None (withhold the whole text) when it contains opaque escape encodings or
+    is too large to scan.
     A secret under a layer this does not decode (gzip, a second base64 level, a
     cipher) is NOT covered; the long-run rule is what bounds that residual.
     """
 
     if len(text) > _MAX_SCAN_CHARS:
+        return None
+    if _OPAQUE_ESCAPES.search("".join(text.split())):
         return None
     try:
         from local_operator.redaction_shapes import scrub_secrets

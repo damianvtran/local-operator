@@ -1008,6 +1008,95 @@ def test_a_percent_encoded_value_in_a_larger_string_is_not_persisted(tmp_path: P
     assert value not in persisted and quote(value, safe="") not in persisted
 
 
+# Review round 2: quote(..., safe="") leaves alphanumerics literal. Encoding
+# EVERY byte of a containing object is a different spelling, and the shared
+# value scrub cannot establish safety of that opaque object.
+def _percent_all_bytes(raw: bytes, case: str = "upper") -> str:
+    return "".join(
+        f"%{byte:02x}" if case == "lower" or (case == "mixed" and index % 2) else f"%{byte:02X}"
+        for index, byte in enumerate(raw)
+    )
+
+
+def test_a_fully_percent_encoded_containing_object_is_withheld(tmp_path: Path) -> None:
+    """QA's exact shape: all bytes encoded, including the password's alphanumerics."""
+
+    from urllib.parse import unquote
+
+    opaque = _percent_all_bytes(("xx" + _KEY + "=" + _BLOB_PW + "\n").encode())
+    _, record = _persist(tmp_path, "user-data: " + opaque)
+    text = record["console_output"].get("text", "")
+    # The old literal-only assertion passed while unquote recovered the value.
+    assert _BLOB_PW not in text
+    assert _BLOB_PW not in unquote(text), "percent decoding recovered the registered value"
+    assert record["console_output"]["status"] == guest_loss.STATUS_WITHHELD
+
+
+@pytest.mark.parametrize("prefix", ["", "x", "xx"])
+@pytest.mark.parametrize("case", ["upper", "lower", "mixed"])
+@pytest.mark.parametrize("wrap", [0, 13])
+def test_percent_objects_are_withheld_across_case_prefix_and_wrapping(
+    tmp_path: Path, prefix: str, case: str, wrap: int
+) -> None:
+    from urllib.parse import unquote
+
+    opaque = _percent_all_bytes((prefix + _KEY + "=" + _BLOB_PW + "\n").encode(), case)
+    if wrap:
+        # Deliberately split INSIDE %HH too, not just between encoded bytes.
+        opaque = "\n  ".join(opaque[i : i + wrap] for i in range(0, len(opaque), wrap))
+    _, record = _persist(tmp_path, "user-data: " + opaque)
+    text = record["console_output"].get("text", "")
+    assert _BLOB_PW not in unquote(
+        "".join(text.split())
+    ), "wrapped percent blob remained recoverable"
+    assert record["console_output"]["status"] == guest_loss.STATUS_WITHHELD
+
+
+def test_percent_blob_withholding_precedes_tail_clipping(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(guest_loss, "MAX_CONSOLE_TEXT_CHARS", 9)
+    opaque = _percent_all_bytes(("xx" + _KEY + "=" + _BLOB_PW + "\n").encode())
+    _, record = _persist(tmp_path, opaque)
+    # A clip-first pass leaves <4 %HH bytes, below the opaque-object threshold.
+    # The whole input must be refused, not just a credential-free short suffix.
+    assert record["console_output"]["status"] == guest_loss.STATUS_WITHHELD
+    assert "text" not in record["console_output"]
+
+
+@pytest.mark.parametrize("case", ["04x", "04X"])
+def test_fully_unicode_escaped_containing_objects_are_withheld(tmp_path: Path, case: str) -> None:
+    """Direct neighbour: every ASCII byte can also be spelled as a JSON unicode escape."""
+
+    raw = "xx" + _KEY + "=" + _BLOB_PW + "\n"
+    opaque = "".join(chr(92) + "u" + format(ord(char), case) for char in raw)
+    _, record = _persist(tmp_path, opaque)
+    text = record["console_output"].get("text", "")
+    assert _BLOB_PW not in json.loads(
+        '"' + text + '"'
+    ), "JSON escapes recovered the registered value"
+    assert record["console_output"]["status"] == guest_loss.STATUS_WITHHELD
+
+
+def test_shell_hex_escaped_containing_objects_keep_no_registered_value(tmp_path: Path) -> None:
+    """Inspection control: the existing shared scrub already contains this spelling."""
+
+    import codecs
+
+    raw = "xx" + _KEY + "=" + _BLOB_PW + "\n"
+    opaque = "".join(chr(92) + "x" + format(ord(char), "02x") for char in raw)
+    _, record = _persist(tmp_path, opaque)
+    text = record["console_output"].get("text", "")
+    assert _BLOB_PW not in codecs.decode(text, "unicode_escape")
+
+
+def test_isolated_percent_escapes_do_not_withhold_ordinary_diagnostics(tmp_path: Path) -> None:
+    text = "[1] Boot complete: 100%. Next path /a%20b ; progress 50% ; no blob."
+    _, record = _persist(tmp_path, text)
+    assert record["console_output"]["status"] == guest_loss.STATUS_CAPTURED
+    assert record["console_output"]["text"] == text
+
+
 @pytest.mark.parametrize("case", [str.lower, str.upper])
 def test_a_hex_encoded_larger_object_is_not_persisted(tmp_path: Path, case: Any) -> None:
     hexed = case((_KEY + "=" + _BLOB_PW).encode().hex())
