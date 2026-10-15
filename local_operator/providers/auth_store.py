@@ -1621,7 +1621,14 @@ class AuthStore:
         # reuses the stored account/org fields) would otherwise carry a dead
         # grant's tombstone, or another token's unconfirmed-send marker, onto
         # the credential the user just proved is alive.
-        payload.pop(GRANT_DEAD_AT_KEY, None)
+        # Native provider upserts are new logins; MCP also uses this entrypoint
+        # for continuation/marker writes. Its TokenStorage owns that distinction
+        # and explicitly clears the tombstone in set_tokens for a NEW grant.
+        # Clearing here would erase a just-written MCP tombstone, permitting a
+        # later process to replay a rejected token. MCP's send marker uses its
+        # own distinct key, so the provider send-marker reset stays unchanged.
+        if provider != "mcp-oauth":
+            payload.pop(GRANT_DEAD_AT_KEY, None)
         payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
         # Unlike updated_at this is a login event, not a refresh timestamp.
         # MCP refresh also uses upsert, so it cannot attest an incarnation yet.
