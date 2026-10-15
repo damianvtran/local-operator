@@ -1109,8 +1109,17 @@ async def test_disabling_auto_links_leaves_the_painted_frame_identical():
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
-            assert app._sidebar_timer is not None
-            app._sidebar_timer.pause()
+            # QUIESCE BOTH refresh paths, not just the timer. `ctrl+b` also
+            # launches a ONE-SHOT catalog read whose `set_entries` is gated only
+            # on `_sidebar_refresh_generation`; pausing the timer alone left
+            # that read free to land the real (here: empty) catalog ON TOP of
+            # `_mixed_entries()` under fleet load, so the row lookup below found
+            # no entry on any row and `next(...)` raised `StopIteration` inside
+            # this coroutine — which PEP 479 turns into `RuntimeError: coroutine
+            # raised StopIteration` (CI shard 2, run 38662369900). That is the
+            # failure class this file's own helper docstring names; the bump is
+            # what retires the read already in flight.
+            _quiesce_sidebar_refresh(app)
             sidebar = app._session_sidebar
             sidebar.auto_links = auto_links
             sidebar.set_entries(_mixed_entries())
@@ -1125,9 +1134,16 @@ async def test_disabling_auto_links_leaves_the_painted_frame_identical():
             # link would be highlighted in at all — that is what keeps this
             # able to fail if a link is ever rendered here.
             await pilot.pause()
-            first_row = next(
+            # A LOUD assertion, not a bare `next(...)`: the lookup below is a
+            # premise (the list painted rows to hover), and when it is false the
+            # bare form reports it as `RuntimeError: coroutine raised
+            # StopIteration` — a PEP 479 wrapper that names neither the sidebar
+            # nor the missing rows. This says what happened.
+            entry_rows = [
                 y for y in range(1, sidebar.size.height) if sidebar._entry_at(y) is not None
-            )
+            ]
+            assert entry_rows, "the sidebar painted no entry rows to hover"
+            first_row = entry_rows[0]
             sidebar._set_hover(first_row)
             await pilot.pause()
             painted: list[tuple[str, str]] = []

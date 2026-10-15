@@ -44,6 +44,14 @@ def _first_line(value: Any) -> str:
 def bridge_card_subject(details: Mapping[str, Any] | None) -> str:
     """Who a reader is looking at: the VALIDATED member, else the generic line.
 
+    NOT reached with a named member by the card's own body line:
+    ``bridge_card_text`` asks the same question first (``bridge_card_sender``'s
+    name, which reads this meta's ``sender_name`` too) and takes the
+    excerpt-alone branch when a member resolved, so every call from that path
+    lands on :data:`GENERIC_CARD_SUBJECT`. The enriched branches below stay
+    because this is the module's one "who" answer — a direct caller handed a
+    meta that names a member must not be told the generic line.
+
     Only ``details["bridge"]`` — the meta the receiver checked against its own
     stored provenance — can name a member here. It used to fall back to
     ``details["sender"]["account_id"]``, and that dict is the WAKE's own sender,
@@ -86,9 +94,17 @@ def bridge_card_text(details: Mapping[str, Any] | None) -> str:
     know (that the sender sent nothing), and the row's own budget has room for
     the absence (52 cells against the 82-cell collapsed budget at 100 columns).
 
-    When NO name resolved the subject is the only place a human is named at all
-    (the generic sentence, or a name that arrived without an organization), so
-    that carriage keeps the old ``<subject> — <excerpt>`` subject-prefixed form.
+    When NO name resolved the subject IS the generic line — the only place a
+    human is named at all on that carriage — so it keeps the old
+    ``<subject> — <excerpt>`` / ``<subject> — (no preview available)`` form.
+    This branch is reached exactly when ``bridge_card_sender`` resolved nothing,
+    so ``bridge_card_subject`` returns :data:`GENERIC_CARD_SUBJECT` here: it
+    consults the same meta name the predicate above does, which is why a
+    "name that arrived without an organization" cannot reach this path (a name
+    in either the wire sender or the meta takes the branch above). Its
+    enriched branches stay for direct callers — the helper is the module's one
+    "who" answer and must not report the generic line for a meta that DOES name
+    a member.
     """
     meta = (details or {}).get("bridge") or {}
     excerpt = _first_line(meta.get("excerpt"))
