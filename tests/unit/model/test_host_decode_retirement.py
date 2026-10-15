@@ -79,6 +79,21 @@ class _TimeProxy:
         return getattr(_real_time, name)
 
 
+@pytest.fixture(autouse=True)
+def _no_analytics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the funnel's analytics hand-off out of these cases.
+
+    ``_record_stream`` enqueues every call on a process-wide recorder whose
+    background thread prices it by resolving the model catalogue OVER HTTP. These
+    tests score routing, not spend, and that thread outlives the test: it made a
+    later test in the same worker see a stray ``/v1/models`` request. Analytics
+    has its own suite (``tests/unit/analytics``).
+    """
+    import local_operator.analytics as analytics
+
+    monkeypatch.setattr(analytics, "record_call", lambda snapshot: None)
+
+
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     fake = FakeClock()
