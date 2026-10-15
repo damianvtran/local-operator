@@ -434,6 +434,16 @@ async def test_real_session_bash_never_promotes_stale_directory_decoys(
 @pytest.mark.parametrize(
     "answer,eligible",
     [
+        (
+            "- Between 10 and 20 comments, between 30 and 40 profiles, "
+            "between 50 and 60 links, between 70 and 80 matches.",
+            False,
+        ),
+        (
+            "- Up to 296 comments, at least 225 profiles, about 325 links "
+            "and approximately 3194 matches.",
+            False,
+        ),
         ("- Delta: -10 comments, -20 profiles, -30 links, -40 matches.", False),
         ("- Forecast: 10-20 comments, 30-40 profiles, 50-60 links and 70-80 matches.", False),
         (

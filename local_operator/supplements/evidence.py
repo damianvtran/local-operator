@@ -331,6 +331,19 @@ _SUMMARY_AMBIGUOUS_PREFIX: Final = re.compile(
 )
 
 
+# This optional dataset is for exact counts, not a general natural-language parser.
+# If a count-containing bullet signals a bound/range/estimate, refuse the ENTIRE
+# summary rather than repeatedly teaching an endpoint regex English range synonyms.
+# False negatives are safe: the answer still carries the original qualified numbers.
+_SUMMARY_UNCERTAINTY: Final = re.compile(
+    r"\b(?:between|up\s+to|at\s+(?:least|most)|about|roughly|approximately|approx|"
+    r"around|over|under|more\s+than|less\s+than|fewer\s+than|greater\s+than|"
+    r"nearly|almost|estimated?|estimates|forecast|ranges?|from[ \t]+\d[\d,]*[ \t]+to)\b",
+    re.IGNORECASE,
+)
+_SUMMARY_ENTITY: Final = re.compile(r"\b(?:comments|profiles|links|matches)\b", re.IGNORECASE)
+
+
 def _labelled_summary(answer: str) -> Dataset | None:
     counts: dict[str, str] = {}
     # Do not let a single list marker elsewhere license arbitrary historical prose.
@@ -339,6 +352,12 @@ def _labelled_summary(answer: str) -> Dataset | None:
     # so "- 296 comments" is a positive count rather than a negative delta.
     for bullet in re.finditer(r"(?m)^[ \t]*[-*][ \t]+([^\n]+)", answer[:65_536]):
         text = bullet.group(1)
+        if (
+            _SUMMARY_ENTITY.search(text)
+            and re.search(r"\d", text)
+            and _SUMMARY_UNCERTAINTY.search(text)
+        ):
+            return None
         for match in _SUMMARY_COUNT.finditer(text):
             # Only the immediate prefix can qualify a number; bound this check
             # so a long bullet with many numeric mentions stays linear in size.
