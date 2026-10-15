@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from typing import Any
 
 import pytest
 
@@ -26,6 +27,7 @@ root = isolated_root
 def fields(root, **changes):
     _make_key(root)
     trio = a.local_anchor_trio(root)
+    assert trio is not None
     result = {
         "kind": e.KIND,
         "request_id": "req_closed_fixture",
@@ -218,7 +220,10 @@ def test_generic_never_signs_typed_ack_once_and_write_race_is_rechecked(root, mo
             aid, authority_version=1, scope="network_only", digest="sha256:" + "0" * 64, root=root
         )
     assert err.value.code == "network_enrollment_snapshot_changed" and not calls
-    for version in (True, "1", 2):
+    # Deliberately malformed external input crosses an Any boundary; the
+    # production function keeps its precise int annotation and runtime checks.
+    invalid_versions: tuple[Any, ...] = (True, "1", 2)
+    for version in invalid_versions:
         with pytest.raises(MeshRefusal):
             a.approve_network_enrollment(
                 aid,
@@ -300,7 +305,9 @@ def test_frozen_old_wire_copy_guard_and_real_signature_positive_controls(root):
             with pytest.raises(ValueError, match="unknown_approval"):
                 old.presign(directory, name, lambda r: signs.append(True))
             assert not old.rows(directory) and not signs
-    spki = a.local_anchor_trio(root)["spki"]
+    trio = a.local_anchor_trio(root)
+    assert trio is not None
+    spki = trio["spki"]
     for kind in (a.KIND_DEVICE_ONBOARD, "unknown_new_kind_positive_control"):
         legacy = {**copy.deepcopy(approved), "kind": kind, "approval_id": "ap_control"}
         legacy["request_digest"] = old.digest(legacy)
@@ -328,7 +335,9 @@ def test_new_and_old_decision_domains_are_independently_disjoint(root):
 
     record = approve(root, create(root))
     aid = record["approval_id"]
-    spki = a.local_anchor_trio(root)["spki"]
+    trio = a.local_anchor_trio(root)
+    assert trio is not None
+    spki = trio["spki"]
     a.verify_for_run(aid, root=root)  # authentic new-domain positive first
     raw = assert_wrapped(root, aid)
     raw["record"]["signature"]["sig"] = _sign(root, old.payload(record))
@@ -415,25 +424,27 @@ with onboard.approval_run(sys.argv[2],root=root):
         text=True,
         start_new_session=True,
     )
+    stdin, stdout, stderr = child.stdin, child.stdout, child.stderr
+    assert stdin is not None and stdout is not None and stderr is not None
     try:
         with selectors.DefaultSelector() as poll:
-            poll.register(child.stdout, selectors.EVENT_READ)
+            poll.register(stdout, selectors.EVENT_READ)
             assert poll.select(10), "signed target-lease child did not become ready"
-        assert child.stdout.readline().strip() == "OWNED"
+        assert stdout.readline().strip() == "OWNED"
         with pytest.raises(MeshRefusal) as err:
             with onboard.approval_run(old["approval_id"], root=root):
                 pytest.fail("second target owner admitted across namespace/process boundary")
         assert err.value.code == "approval_target_in_flight"
     finally:
         if child.poll() is None:
-            child.stdin.write("\n")
-            child.stdin.flush()
+            stdin.write("\n")
+            stdin.flush()
             try:
                 child.wait(5)
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGTERM)
                 child.wait(5)
-        for pipe in (child.stdin, child.stdout, child.stderr):
+        for pipe in (stdin, stdout, stderr):
             pipe.close()
     assert child.returncode == 0
     # The target claim was not split across authority namespaces or unlinked.

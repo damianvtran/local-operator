@@ -355,7 +355,6 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
                     {
                         "capability": capability,
                         "code": str(row.get("code") or ""),
-                        "detail": str(row.get("detail") or "")[:500],
                     }
                 )
     require(

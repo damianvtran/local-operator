@@ -15,13 +15,24 @@ import os
 import sys
 from pathlib import Path
 
-from local_operator.network import identity, relay
-from local_operator.network.credentials import github
-from local_operator.operator import trust
-from tests.unit.network.test_relay_e2e import _init_network
+# pytest's pythonpath is process-local. Standalone helper entrypoints must pin
+# this checkout BEFORE imports: an editable finder may expose local_operator but
+# not tests, and a wheel must never silently substitute another source revision.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def main() -> None:
+    from local_operator.network import identity, relay
+    from local_operator.network.credentials import github
+    from local_operator.operator import trust
+    from tests.unit.network.test_relay_e2e import _init_network
+
+    SOURCE_ROOT = Path(__file__).resolve().parents[2]
+    assert Path(relay.__file__).resolve() == SOURCE_ROOT / "local_operator/network/relay.py"
+    HELPER_SOURCE = sys.modules[_init_network.__module__].__file__
+    assert HELPER_SOURCE is not None
+    assert Path(HELPER_SOURCE).resolve() == SOURCE_ROOT / "tests/unit/network/test_relay_e2e.py"
+
     root = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
     public_anchor = root / "fixture-owned-anchor.json"
 
