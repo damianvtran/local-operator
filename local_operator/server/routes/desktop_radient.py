@@ -295,6 +295,20 @@ class RadientRequest(Input):
         "org_agents.list",
         "org_team.get",
         "org_teams.list",
+        # Organization SKILL reads (skills lane M1): the org catalogue's list and
+        # one published skill's detail. ADDITIVE exactly like the operations
+        # above -- an older server refuses the unknown operation at validation,
+        # so a UI newer than its server loses the skill surface, never
+        # correctness -- and each spends the account's stored bearer on THIS
+        # side, never a renderer token. The names and shapes are a three-way
+        # contract with the desktop's `RadientOperation` union and
+        # `skills-api.ts` (checked against local-operator-ui main):
+        #   org_skills.list  {tenant_id}                 -> GET /tenants/{id}/skills
+        #   org_skill.get    {tenant_id, skill_id}       -> GET /tenants/{id}/skills/{sid}
+        # There is deliberately NO anonymous fallback: a denied org read must
+        # never retry as a public catalogue read (the org family's rule).
+        "org_skills.list",
+        "org_skill.get",
         # Ask Radient to email a fresh signup-credit claim link to the account's
         # OWN address (`POST /auth/signup/resend`). ADDITIVE like the org ops: an
         # older server refuses the unknown operation at validation, so the
@@ -317,6 +331,10 @@ class RadientRequest(Input):
     #: registry row's id: the pull names the published document (§8.3), and the
     #: local team it reconstructs gets its own fresh id.
     team_id: Identifier | None = None
+    #: The published HUB skill id an ``org_skill.get`` read names. A published
+    #: document's identity, never the local alias or a filesystem path -- the
+    #: same rule the team pull's ``team_id`` follows.
+    skill_id: Identifier | None = None
     query: dict[str, str | int] = Field(default_factory=dict)
     payload: dict[str, Any] = Field(default_factory=dict)
     confirmed: StrictBool = False
@@ -502,6 +520,19 @@ def endpoint(body: RadientRequest) -> tuple[str, str]:
         # The org-agnostic pull path: the id names the document, exactly as the
         # CLI's `teams pull` addresses it (§4.5).
         return "GET", f"/teams/{body.team_id}"
+    if op == "org_skills.list":
+        if not body.tenant_id:
+            raise ValueError("Choose an organization")
+        return "GET", f"/tenants/{body.tenant_id}/skills"
+    if op == "org_skill.get":
+        if not body.tenant_id:
+            raise ValueError("Choose an organization")
+        if not body.skill_id:
+            raise ValueError("Choose a skill")
+        # Scope travels in the PATH and is validated before any request: a
+        # membership the account does not hold is answered 404 upstream, and the
+        # refusal reader carries that answer through undisclosed.
+        return "GET", f"/tenants/{body.tenant_id}/skills/{body.skill_id}"
     if op in {"agents.list", "agents.create"}:
         return ("GET" if op == "agents.list" else "POST"), "/agents"
     if not body.agent_id:
@@ -633,12 +664,21 @@ def _upstream_refusal(status: int, **details: Any) -> HTTPException:
 
 
 #: The organization operations (design §4.7): the closed set whose refusals
-#: carry the hub's own membership codes. Spelled beside the Literal's four
-#: entries on purpose -- this is the dispatch that decides which refusals get
-#: the code-preserving reading below -- and pinned by the request tests so the
-#: two lists cannot silently diverge.
+#: carry the hub's own membership codes. Spelled beside the Literal's entries
+#: on purpose -- this is the dispatch that decides which refusals get the
+#: code-preserving reading below -- and pinned by the request tests so the two
+#: lists cannot silently diverge. The two skill reads joined with the skills
+#: lane: an org catalogue refusal is subject to the SAME membership wording
+#: (not_a_member / insufficient_role / team_plan_required) as the other reads.
 ORG_OPERATIONS = frozenset(
-    {"memberships.list", "org_agents.list", "org_teams.list", "org_team.get"}
+    {
+        "memberships.list",
+        "org_agents.list",
+        "org_teams.list",
+        "org_team.get",
+        "org_skills.list",
+        "org_skill.get",
+    }
 )
 
 #: The hub's frozen membership refusals (§4.4/§4.5), carried through verbatim:
