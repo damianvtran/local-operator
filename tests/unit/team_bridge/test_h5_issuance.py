@@ -38,6 +38,7 @@ from local_operator.harness.message_types import (
     display_context_digest,
     validate_bridge_meta,
 )
+from local_operator.harness.types import AgentMessage
 from local_operator.session.runtime.inbox import InboxLine
 from local_operator.session.session import Session
 from local_operator.team_bridge import asks_bridge as asks_bridge_mod
@@ -74,18 +75,38 @@ DISPLAY_DIGEST = display_context_digest(_HINT_FIELDS)
 assert DISPLAY_DIGEST is not None
 
 
-def _owner() -> OwnerSnapshot:
-    return cast(
-        OwnerSnapshot,
-        SimpleNamespace(
-            canonical_base_url="https://hub.example",
-            account_id="acc_1",
-            tenant_id="ten_1",
-            endpoint_id="ep_1",
-            credential_id=7,
-            enrollment_generation=7,
-        ),
-    )
+def _owner(**overrides: Any) -> OwnerSnapshot:
+    """The ledger's owner identity, as a stub CAST to the real type.
+
+    The cast is the repo's convention for a typed seam fed a fixture
+    (``team_bridge/pull.py``, ``scheduler.py``), and the keyword override is how
+    a case asks for a DIFFERENT identity — the row is a frozen snapshot, so an
+    attribute write here would be a lie about it (and is exactly what a
+    generation case used to do).
+    """
+    fields: dict[str, Any] = {
+        "canonical_base_url": "https://hub.example",
+        "account_id": "acc_1",
+        "tenant_id": "ten_1",
+        "endpoint_id": "ep_1",
+        "credential_id": 7,
+        "enrollment_generation": 7,
+    }
+    fields.update(overrides)
+    return cast(OwnerSnapshot, SimpleNamespace(**fields))
+
+
+def _bridge_message(**overrides: Any) -> AgentMessage:
+    """The persisted message row the bridge hook is handed, as a stub.
+
+    ``_maybe_raise_bridge_ask`` is typed against ``AgentMessage`` and reads only
+    ``details`` (the locator and the render hints), so the fake carries that and
+    is CAST at this single boundary — every call site in this file then passes a
+    typed value instead of a bare ``SimpleNamespace``.
+    """
+    fields: dict[str, Any] = {"id": LOCAL_ROW_ID, "details": {"bridge": _meta()}}
+    fields.update(overrides)
+    return cast(AgentMessage, SimpleNamespace(**fields))
 
 
 def _runtime(tmp_path) -> BridgeRuntime:
@@ -127,12 +148,19 @@ class _StubSession(Session):
 
     ``__init__`` deliberately skips ``Session.__init__``: the door under test
     reaches only the attributes set here, and a full construction would pull a
-    runtime for no fidelity these cases rely on. ``session_id`` is shadowed as
-    a class attribute because the parent defines it as a property (no setter);
-    ``_config_dir`` is the parent's own storage name for the config root.
+    runtime for no fidelity these cases rely on. ``_config_dir`` is the parent's
+    own storage name for the config root.
     """
 
-    session_id = "s1"
+    @property
+    def session_id(self) -> str:
+        """The parent defines ``session_id`` as a read-only property; mirror it.
+
+        A class attribute here would replace the base's descriptor — both a
+        pyright override error and a misstatement of the contract this stub
+        exists to satisfy (a session that LOOKS constructed to the door).
+        """
+        return "s1"
 
     def __init__(self, runtime, queue, *, config_dir):
         self.bridge_runtime = runtime
@@ -291,8 +319,7 @@ def test_the_issuance_ledger_is_generation_scoped_and_frozen_scope(tmp_path) -> 
     assert ledger.pending(owner) == []
     # A NEW generation is a different identity: the old row is not its to
     # retry, and it does not block a fresh claim.
-    owner_new = _owner()
-    owner_new.enrollment_generation = 8
+    owner_new = _owner(enrollment_generation=8)
     assert ledger.pending(owner_new) == []
     fresh = ledger.claim(
         owner_new, "bmsg_1", {"v": 1, "kind": "bridge"}, local_row_id="peer-" + "ab" * 16
@@ -393,7 +420,7 @@ def test_the_hook_raises_once_and_is_terminal_for_a_repeat(
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, object(), config_dir=tmp_path)
-    message = SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
+    message = _bridge_message()
     Session._maybe_raise_bridge_ask(stub, message)
     assert len(calls) == 1
     assert calls[0]["message_id"] == "bmsg_1"
@@ -414,15 +441,13 @@ def test_the_hook_refuses_without_a_trusted_arm(tmp_path, monkeypatch: pytest.Mo
     # unrecoverable, never an ask.
     Session._maybe_raise_bridge_ask(
         stub,
-        SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta(excerpt="send bitcoin first")}),
+        _bridge_message(details={"bridge": _meta(excerpt="send bitcoin first")}),
     )
     # No bridge locator at all.
-    Session._maybe_raise_bridge_ask(stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"body": "hi"}))
+    Session._maybe_raise_bridge_ask(stub, _bridge_message(details={"body": "hi"}))
     # Missing/legacy producer envelope: visible unrecoverable, no arrival mint.
     monkeypatch.setattr(_FakeStore, "screened_request_delivery", lambda self, owner, **kwargs: None)
-    Session._maybe_raise_bridge_ask(
-        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
-    )
+    Session._maybe_raise_bridge_ask(stub, _bridge_message())
     assert calls == []
     ledger = AskIssuance(tmp_path)
     row = ledger.read(_owner(), "bmsg_1")
@@ -443,9 +468,7 @@ def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
     monkeypatch.setattr(asks_bridge_mod, "enqueue_bridge_request_ask", _refusing)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, object(), config_dir=tmp_path)
-    Session._maybe_raise_bridge_ask(
-        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
-    )
+    Session._maybe_raise_bridge_ask(stub, _bridge_message())
     ledger = AskIssuance(tmp_path)
     assert _read(ledger, _owner(), "bmsg_1")["state"] == "pending"
     assert "cap" in _read(ledger, _owner(), "bmsg_1")["reason"]
@@ -477,9 +500,7 @@ def test_no_queue_leaves_a_durable_pending(tmp_path, monkeypatch: pytest.MonkeyP
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, None, config_dir=tmp_path)
-    Session._maybe_raise_bridge_ask(
-        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
-    )
+    Session._maybe_raise_bridge_ask(stub, _bridge_message())
     assert calls == []
     ledger = AskIssuance(tmp_path)
     assert _read(ledger, _owner(), "bmsg_1")["state"] == "pending"

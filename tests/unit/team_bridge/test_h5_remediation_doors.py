@@ -26,6 +26,7 @@ import pytest
 from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import decide as decide_mod
 from local_operator.team_bridge import host as host_mod
+from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.decide_intents import (
     DecideIntents,
     DecideIntentsRefused,
@@ -183,6 +184,7 @@ async def test_settlement_interleavings_are_terminal_safe(
         # rewritten. A transient first leaves state ``pending`` with NO receipt
         # (that is the settled shape of a transport failure), so the receipt
         # that must survive is the one the SUCCESS settle recorded.
+        assert after.receipt_json is not None
         assert json.loads(after.receipt_json)["id"] == "req_original"
         if settled.receipt_json is not None:
             assert after.receipt_json == settled.receipt_json
@@ -192,7 +194,11 @@ async def test_tool_has_no_decide_or_retry_authority(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     runtime = BridgeRuntime(
-        client=object(),
+        # The op under test reads NO client (this is the authority refusal), so
+        # the stand-in is cast at the boundary; ``BridgeRuntime`` is typed
+        # against the real client and the repo does not weaken that for a
+        # fixture (team_bridge/pull.py, scheduler.py).
+        client=cast(TeamBridgeClient, object()),
         config_dir=tmp_path,
         tenant_id="ten_1",
         owner=SimpleNamespace(account_id="acc_1", tenant_id="ten_1"),
@@ -222,7 +228,7 @@ async def test_take_up_read_passes_gates_without_minting_a_decide(tmp_path, monk
             return {"message": {"body": {"text": text}}}
 
     runtime = BridgeRuntime(
-        client=_Client(),
+        client=cast(TeamBridgeClient, _Client()),
         config_dir=tmp_path,
         tenant_id="ten_1",
         owner=SimpleNamespace(account_id="acc_1", tenant_id="ten_1"),

@@ -340,6 +340,11 @@ async def test_a_refused_decision_leaves_no_grant_behind(
     )
     refused = session.bridge_decide(ask_id, MESSAGE_ID, "maybe")
     assert refused.get("ok") is False
+    # D7 (round 14): the surface gets the rule in the user's language, and the
+    # developer's text ("not a human decision word: 'maybe' (closed set: approve
+    # | deny)") stays on the exception, where the log and the tests read it.
+    assert "choose Approve or Deny" in str(refused.get("error") or ""), refused
+    assert "closed set" not in str(refused.get("error") or ""), refused
     assert not consume_bridge_decide_grant(
         session_id=session.session_id,
         ask_id=ask_id,
@@ -754,6 +759,7 @@ async def test_the_card_target_decides_through_the_real_session(
     target = bridge_decision_target(
         ask_rows([dict(record)])[0], {f"bridge-{MESSAGE_ID}": ["Approve"]}
     )
+    assert target is not None, "the row's own ids must mint a decide target"
     assert target == (ask_id, MESSAGE_ID, "approve")
     _, question_id, word = target
     mint_bridge_decide_grant(
@@ -1432,6 +1438,9 @@ async def test_a_decision_past_the_late_window_is_refused_not_split(
     assert decided.get("ok") is False, decided
     # S7-1: typed, actionably — "answer again" — not the generic sentence.
     assert decided.get("code") == "decision_expired", decided
+    # D5 (round 14): the EXPIRY cause keeps the retry sentence — this is the arm
+    # where answering again can actually work.
+    assert "answer again" in str(decided.get("error") or ""), decided
     assert posted == []
     assert not _decide_rows(tmp_path), "nothing may reach the wire for an expired carriage"
     await session.dispose()
@@ -1490,6 +1499,11 @@ async def test_a_declined_carriage_past_the_late_window_is_refused_typed(
     decided = session.bridge_decide(ask_id, MESSAGE_ID, "approve")
     assert decided.get("ok") is False, decided
     assert decided.get("code") == "decision_expired", decided
+    # D5 (round 14): true of the CARRIAGE — this row folds ``declined``, which is
+    # the chip the member is looking at, and the window is shut — and NOT the
+    # expiry sentence, which promises a retry that cannot work here.
+    assert "window has closed" in str(decided.get("error") or ""), decided
+    assert "expired before it could be sent" not in str(decided.get("error") or ""), decided
     assert posted == []
     assert not _decide_rows(tmp_path)
     # The refusal spends the grant: nothing is left live-but-unreachable.

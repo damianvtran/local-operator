@@ -11267,7 +11267,13 @@ class Session:
         try:
             decision = human_decision(message_id=str(question_id), ask_id=ask_id, word=word)
         except NotAHumanDecision as failure:
-            return _refuse(str(failure))
+            # D7 (round 14): the exception's text belongs to the LOG and the
+            # tests ("not a human decision word: 'x' (closed set: approve |
+            # deny)") — a closed set is the door's vocabulary and the human
+            # reading this toast has never seen it. The surface gets the rule in
+            # the user's language; the exception still carries the developer's.
+            logger.debug("bridge decide refused at the word: %s", failure)
+            return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
         question_slot = str(question.get("id") or "")
         existing = record.get("answers") or {}
         picks = [str(value) for value in (existing.get(question_slot) or ())]
@@ -11314,7 +11320,14 @@ class Session:
             question_id=str(question_id),
             word=decision.word,
         ):
-            return _refuse("that decision does not match what this session admitted for this ask.")
+            # D7 (round 14): "what this session admitted" is the authority
+            # seam's vocabulary for what it VERIFIED, and nothing a human sees
+            # uses it. What they can act on: this is not the decision the
+            # request was verified with, and the card offers the one that was.
+            return _refuse(
+                "that is not the decision this request was verified with — "
+                "answer again from the request's own card."
+            )
         if decision_too_late:
             # S7-1: the F5-1 admission carries the ask's own deadline. Past the
             # late window the carriage folds ``expired`` (or still says
@@ -11324,6 +11337,26 @@ class Session:
             # unreachable, with a retry reading "expired" where the first tap
             # read "declined". Refused HERE, typed, with the grant withdrawn, so
             # the surface is told the one thing that helps: answer again.
+            #
+            # D5 (round 14): that ONE sentence is only true of the first of the
+            # arm's two causes. The other is the CARRIAGE: its own window closed
+            # before any admitted answer existed, and it folds ``expired`` — or
+            # still reads ``declined``/``dismissed`` with no answer at all
+            # (F5-1 above), which is the state whose chip (``declined``) the
+            # member was looking at, and about which another surface of the same
+            # ask says "you already declined this". Telling them their answer
+            # "expired before it could be sent" contradicts the row they can see
+            # and asks them to answer again for a window that is closed; the
+            # sentence below is true of the carriage however its decline got
+            # there. Same code, deliberately: the refusal is the same class
+            # (nothing was recorded, the window is the cause), and no surface
+            # reads the code yet, so a distinct one would be an affordance
+            # nothing implements.
+            if status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED):
+                return _refuse_with_code(
+                    "decision_expired",
+                    "this request's window has closed — your decision was not sent.",
+                )
             return _refuse_with_code(
                 "decision_expired",
                 "that answer expired before it could be sent — please answer again",

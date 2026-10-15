@@ -150,6 +150,7 @@ async def test_sent_is_terminal_and_receipt_is_byte_identical(tmp_path) -> None:
     assert after is not None
     assert after.state == "sent"
     assert after.receipt_json == before.receipt_json  # byte-identical, m8
+    assert after.receipt_json is not None
     assert json.loads(after.receipt_json)["id"] == "req_original"
 
 
@@ -311,6 +312,7 @@ async def test_recovery_positive_uses_original_values_and_posts_once(tmp_path, m
     assert stored == "sent"
     row = intents.get(_stored_id(intents, "a-1"))
     assert row is not None
+    assert row.receipt_json is not None
     assert json.loads(row.receipt_json)["id"] == "req_original"
     assert row.generation == "7"  # ORIGINAL generation, not a current-gen rebind
     # The row key derives from the DURABLE scope, so a changed org finds NOTHING.

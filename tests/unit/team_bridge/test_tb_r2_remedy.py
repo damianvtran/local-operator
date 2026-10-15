@@ -28,7 +28,7 @@ from local_operator.harness.message_types import (
     validate_bridge_meta,
 )
 from local_operator.team_bridge.store import OwnerReceipt, Store
-from local_operator.team_bridge.types import OwnerSnapshot
+from local_operator.team_bridge.types import OwnerSnapshot, feed_seq
 from tests.unit.team_bridge.test_connector import _access
 
 OWNER = OwnerSnapshot(
@@ -58,7 +58,7 @@ def test_drained_refs_are_consumed_once_only(tmp_path) -> None:
         "message_available:message_id=bmsg_1",
         "message_available:message_id=bmsg_2",
     ]
-    store.record_feed_batch(OWNER, 5, refs, resync_required=False)
+    store.record_feed_batch(OWNER, feed_seq(5), refs, resync_required=False)
     first = store.drain_feed_refs(OWNER, 5)
     assert first == sorted(refs)
     assert store.delete_feed_refs(OWNER, first) == 2
@@ -93,7 +93,7 @@ def _patch_loop(monkeypatch, *, refs, handle):
 def test_run_iteration_wakes_each_message_once(tmp_path, monkeypatch) -> None:
     store = _enrolled_store(tmp_path)
     refs = ["message_available:message_id=bmsg_1"]
-    store.record_feed_batch(OWNER, 1, refs, resync_required=False)
+    store.record_feed_batch(OWNER, feed_seq(1), refs, resync_required=False)
 
     wakes: list[str] = []
 
@@ -121,7 +121,7 @@ def test_run_iteration_wakes_each_message_once(tmp_path, monkeypatch) -> None:
 def test_a_held_outcome_leaves_a_durable_retry_row(tmp_path, monkeypatch) -> None:
     store = _enrolled_store(tmp_path)
     refs = ["message_available:message_id=bmsg_hold"]
-    store.record_feed_batch(OWNER, 1, refs, resync_required=False)
+    store.record_feed_batch(OWNER, feed_seq(1), refs, resync_required=False)
 
     async def _handle(owner, message_id, **kwargs):
         return {"action": "hold", "message_id": message_id, "code": "delivery_failed"}

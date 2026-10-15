@@ -30,7 +30,10 @@ pytestmark = pytest.mark.asyncio
 
 
 def _owner(**over: object) -> OwnerSnapshot:
-    base = dict(
+    # ``dict[str, object]`` and not the literal's inferred ``str | int``: the
+    # overrides arrive as ``object`` (a caller may set any field), and a dict
+    # held as a narrower value type would make ``update`` a type error.
+    base: dict[str, object] = dict(
         canonical_base_url="https://hub.example",
         account_id="acc_1",
         tenant_id="ten_1",
