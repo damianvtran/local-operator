@@ -621,3 +621,83 @@ not design"):
 §2's exemption list is otherwise unchanged: the eval kernel and the detached
 `exec_worker` remain unguarded, and the seam for them is still this `Guard`.
 
+
+## Cooperative detached gate runners
+
+The bash tool guards its command's process group, not every descendant that
+creates a new session. `scripts/run_bounded.py` deliberately creates a new child
+PG for timeout/signal cleanup, so the tool's outer PG accounting cannot charge
+that child's memory. A measured 64MiB payload escaped an outer 48MiB tool budget
+through the old runner; the identical same-PG control was stopped. SELF RSS
+from that experiment is not a measured aggregate group peak.
+
+The tool first latches and filters shell policy, then resolves its existing budget
+**before spawn** and uses that same Budget for its own Guard. This ordering matters:
+the budget's ConfigManager read can quarantine malformed YAML; probing shell policy
+after that recovery sees an absent file and would silently inherit credentials.
+The existing policy reader must observe the unreadable file first and fail closed.
+The tool sets the nonsecret reserved
+`LOCAL_OPERATOR_RESOLVED_MEMORY_MB` after shell-policy filtering/user extras.
+A policy exclusion cannot silently remove this one resource control. This does
+not change which credential/environment grants ordinary shell policy allows.
+
+The runner uses the canonical `memory_guard.Guard.sample_sync`/`should_kill` for
+its own new child PG, including the existing footprint/RSS membership logic.
+There is no new ps-only engine or macOS virtual-address-space limit. A soft
+notice is advisory only. A measured hard breach kills/reaps the exact owned PG,
+returns 137, and names MEMORY LIMIT EXCEEDED. Status 137 alone also covers an
+external SIGKILL, so the diagnostic identifies a measured memory breach. Timeout
+remains 124; not-started or refused budget is 125. Ordinary child status/stdout and
+forwarded signals (128 + signal) are unchanged. Signals remain forwarded until
+cleanup ends. Unknown measurements are disclosed and never fabricated into a kill
+or a claim of enforcement.
+
+### Budget resolution and isolated callers
+
+Units are MiB (1024 squared bytes), despite the established `_mb` option naming.
+Absent an inherited resolved value and explicit flag, the runner reuses the
+existing auto-budget calculation. If auto cannot resolve a ceiling, it refuses
+before starting the payload; an explicit supported ceiling or an intentional
+`--memory-mb 0` is required. A positive owned-PG ceiling requires POSIX groups.
+An inherited zero preserves and reports the tool's resolved disabled state unless
+an explicit positive flag adds a ceiling; adding protection is still allowed.
+
+`--memory-mb N` may tighten or equal a positive inherited ceiling; it cannot
+widen it, and zero cannot disable it. Such attempts, malformed/negative inherited
+values, and invalid/negative flags refuse before command spawn. Zero explicitly
+disables only when no positive inherited ceiling exists; stderr names budget
+source/ceiling or disable reason. The effective ceiling propagates to nested
+cooperative runners. These are per-PG ceilings, NOT a shared aggregate pool.
+
+`env -i` drops the field. Our isolated gate invocations must carry a granted
+ceiling explicitly, not assume `memory_mb` on the outer tool reaches a detached
+child. For example, expand the trusted field BEFORE clearing the environment:
+
+```sh
+# Outside updated Toolbash, set MEMORY_MB explicitly to the ceiling you grant.
+MEMORY_MB=${LOCAL_OPERATOR_RESOLVED_MEMORY_MB:-${MEMORY_MB:?set MEMORY_MB explicitly outside Toolbash}}
+ISO=$(mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/bounded.XXXXXX")
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/config" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python scripts/run_bounded.py \
+  --memory-mb "$MEMORY_MB" --timeout 30 --grace 2 -- \
+  .venv/bin/python -m pytest -n0 path/to/the_selected_test.py
+```
+
+The explicit flag is not the root fix by itself: pre-spawn Tool propagation and
+active canonical Guard sampling of the new PG are both required. Existing
+untracked helper artifacts such as `machine_lease.py` are not repaired by a core
+commit; their owners must adopt this runner with an explicit isolated ceiling
+or their established nonspawning path.
+
+### Limits that remain
+
+This is live-wrapper, sampled owned-PG protection, not a hard allocation limit.
+A burst can outrun sampling. It does not aggregate wrapper/ancestor memory with
+all independent child groups, and arbitrary descendant `setsid` can leave the
+observed group. A command can deliberately clear environment; this metadata is
+not an authentication token or adversarial sandbox. Uncatchable outer SIGKILL
+can kill the wrapper before it reaps its detached child; a later startup reaper
+is not immediate cleanup. No parent registration/death watchdog, whole-tree
+cgroup containment, or cross-platform security rewrite is claimed here. Keep
+independent tiny real enforcement/control evidence distinct from injected unit
+samples, requested tool limits, SELF peaks, and exact-process cleanup receipts.

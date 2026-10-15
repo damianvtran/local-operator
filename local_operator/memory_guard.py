@@ -110,6 +110,12 @@ BASH_MEMORY_MODE_DEFAULT = "auto"
 BASH_MEMORY_LIMIT_MB_DEFAULT = 0
 BASH_MEMORY_SOFT_FRACTION_DEFAULT = 0.8
 
+#: Nonsecret, resolved Toolbash budget inherited by cooperative detached runners.
+#: Set AFTER shell-environment filtering so user extras/excludes cannot silently
+#: remove the resource control. `env -i` still removes it: isolated callers must
+#: explicitly pass their ceiling to the runner. This is not a containment token.
+RESOLVED_MEMORY_MB_ENV = "LOCAL_OPERATOR_RESOLVED_MEMORY_MB"
+
 #: A runner is the same shape ``mobile.resources`` uses: argv -> (rc, stdout). A
 #: test injects a fake so no guard test forks a real ``ps``.
 Runner = Callable[[list[str]], "tuple[int, str]"]

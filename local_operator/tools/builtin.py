@@ -4069,6 +4069,19 @@ async def execute_bash(
         injections=injections,
     )
 
+    # Latch/filter shell policy FIRST: ConfigManager's budget read can quarantine
+    # malformed YAML, making a later policy probe see an absent file and silently
+    # inherit credentials. This preserves the existing fail-closed first read.
+    # Still resolve BEFORE spawn: a cooperative runner can immediately start a
+    # separate PG outside our group accounting. Reuse this Budget for both guards.
+    memory_budget = _configured_memory_budget(params.memory_mb)
+
+    # Resource metadata is reserved, not a credential grant: caller extras or
+    # shell policy exclusion must not silently drop/widen the resolved ceiling.
+    # A command can still deliberately use env -i; this is cooperative PG
+    # accounting, not arbitrary-descendant or adversarial containment.
+    env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(memory_budget.ceiling_mb)
+
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
     # time — and because this tool is NAMED bash, models write bash: 37 of 43
@@ -4195,7 +4208,6 @@ async def execute_bash(
     # host) is the pre-guard behaviour. The guard can only ever read and kill
     # THIS pgid: it never discovers a group of its own, so it cannot touch the
     # runtime or a sibling session (F5).
-    memory_budget = _configured_memory_budget(params.memory_mb)
     guard: memory_guard.Guard | None = None
     if spawned_pgid is not None and memory_budget.source != "disabled":
         guard = memory_guard.Guard(spawned_pgid, memory_budget)
