@@ -41,6 +41,11 @@ def add_parser(subparsers: Any) -> None:
             "--accept-monthly-price",
             help="Accept the exact USD monthly price from lop tunnel billing",
         )
+    setup = actions.add_parser("setup", help="Observe mobile setup; only apply makes changes")
+    setup.add_argument("setup_action", nargs="?", choices=("plan", "apply"), default="plan")
+    setup.add_argument("--credential-id", type=int)
+    setup.add_argument("--accept-monthly-price", help="Accept the exact fresh activation quote")
+    setup.add_argument("--json", action="store_true")
     billing = actions.add_parser("billing", help="Show the server's current monthly cost and price")
     billing.add_argument("--credential-id", type=int)
     billing.add_argument(
