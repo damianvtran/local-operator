@@ -722,7 +722,11 @@ jobs:
     # unmeasured test file at the 30.786s fallback, taking the heaviest shard
     # to 6001.689s -- 1500.42s, 0.42s past the budget. 27 is the guard's own
     # minimum, ceil((1500.42 + 60)/60); measured walls are still far below it.
-    timeout-minutes: 27
+    # Leave growth margin: the 2026-10-15 merge refs project up to 1562.952s
+    # plus 60s setup overhead, exceeding the former 27-minute ceiling.
+    # Thirty minutes leaves 177s of headroom; weights, worker count, shard
+    # formula and watchdogs are unchanged. This is not a test-failure waiver.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
