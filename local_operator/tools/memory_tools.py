@@ -1,4 +1,4 @@
-"""The structured memory:// branches of read/write/edit; no new tool schema.
+"""One scoped engine behind the tiny memory tool and memory:// read/write/edit.
 
 File edit hunks are not a safe optimistic memory protocol. For this scheme only,
 old_text is the revision token and new_text is a JSON replacement/forget command.
@@ -12,6 +12,7 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from local_operator.harness.types import TextContent, ToolContext, ToolResult
 from local_operator.memory import (
@@ -196,3 +197,89 @@ async def execute_memory(
         return ToolResult(
             tool_call_id=call_id, tool_name=name, content=[TextContent(text=content)], is_error=True
         )
+
+
+async def execute_fact_memory(call_id, args, signal=None, on_update=None, context=None):
+    """Plain-text affordance over the SAME structured engine; never a parallel store.
+
+    Validate the entire fact before deriving a title. Clipping a long body into a
+    permitted prefix would silently turn rejected input into a different stored fact.
+    """
+    from local_operator.memory_privacy import guard_encoded
+
+    try:
+        guard_encoded(args)
+        if (
+            not isinstance(args, dict)
+            or set(args) - {"op", "scope", "text", "i"}
+            or args.get("op") not in ("store", "recall")
+            or args.get("scope") not in ("session", "team", "agent", "global")
+            or not isinstance(args.get("text"), str)
+        ):
+            raise MemoryError(
+                "Use memory op=store|recall, scope=session|team|agent|global, text=fact/query."
+            )
+        text = args["text"]
+        path = "memory://" + args["scope"]
+        if args["op"] == "store":
+            guard(text, opaque=True)
+            payload = {
+                "title": text.strip().splitlines()[0][:100] if text.strip() else "",
+                "body": text,
+            }
+            store_for(context).prepare_fact(payload)
+            result = await execute_memory(
+                call_id, "write", {"path": path, "content": json.dumps(payload)}, context
+            )
+        else:
+            result = await execute_memory(
+                call_id, "read", {"path": path + "?q=" + quote(text)}, context
+            )
+        return result.model_copy(update={"tool_name": "memory"})
+    except (MemoryError, ValueError, TypeError, OSError, sqlite3.Error) as exc:
+        return ToolResult(
+            tool_call_id=call_id,
+            tool_name="memory",
+            is_error=True,
+            content=[
+                TextContent(
+                    text=(
+                        str(exc)
+                        if isinstance(exc, MemoryError)
+                        else "Memory request refused; no value retained."
+                    )
+                )
+            ],
+        )
+
+
+def build_memory_tool():
+    """Always available by default, but never override an explicit role tool allowlist."""
+    from local_operator.harness.types import AgentTool
+
+    return AgentTool(
+        name="memory",
+        label="Memory",
+        description=(
+            "Store/recall nonsecret facts, goals and locations. Sensitive values belong in secret; "
+            "memory holds NAMES only. Inspect/correct via read/edit memory://."
+        ),
+        parameters={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "op": {"type": "string", "enum": ["store", "recall"]},
+                "scope": {"type": "string", "enum": ["session", "team", "agent", "global"]},
+                "text": {"type": "string", "description": "Fact to store or recall query"},
+            },
+            "required": ["op", "scope", "text"],
+        },
+        approval_tier="write",
+        call_approval_tier=lambda args: "read" if args.get("op") == "recall" else "write",
+        describe_approval=lambda args, _context: (
+            "Store a scoped memory fact" if args.get("op") == "store" else "Recall scoped memory"
+        ),
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_fact_memory,
+    )
