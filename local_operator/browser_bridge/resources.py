@@ -497,6 +497,24 @@ class BrowserResource:
             return host
         return ""
 
+    def pending_access_pin(self) -> str:
+        """The host a no-tab site approval is still waiting on, or "".
+
+        Routing metadata only (see `pinned_host`): it never grants a tab, an origin or
+        permission to adopt anything. Exposed so the dispatcher can refuse an explicit
+        `backend` that contradicts it, instead of opening on the other host while
+        `request_access`/`await_access`/`cancel_access` keep going to this one.
+        Reads the loaded record, or the file when the lane has not run yet.
+        """
+        record = self.record
+        if not record:
+            try:
+                record = self._load()
+            except (BrowserOwnershipError, OSError, ValueError):
+                return ""
+        pending = str(record.get("pending_access_host", ""))
+        return pending if pending in (HOST_UI, HOST_BRIDGE) else ""
+
     def obligation_pin_host(self) -> str:
         """The host pinning this session by an obligation alone, or "".
 
@@ -525,15 +543,25 @@ class BrowserResource:
         win straight away, would strand that host's cleanup. This runs after that
         recovery, under the caller's lock, and answers whether the open may go on:
 
-        * a HELD handle still names a host -> True without moving: the dispatcher
-          owns that refusal (a hint cannot contradict a held tab), as before;
+        * a LIVE handle (`surface_id`) still names a host -> True without moving: the
+          dispatcher owns that refusal (a hint cannot contradict a held tab), as before;
         * a debt is STILL owed -> False: the old host did not discharge it, and
           sending the destination an `open` anyway would dispatch to a host that
           is mismatched with the session's own record;
         * otherwise the lane moves to `host` and that peer is reconciled exactly
           once (`ensure_recovered` is per lane) BEFORE anything allocates there.
+
+        Only `surface_id` counts as "held" here, NOT `_obligation_host()`: that one
+        also answers for `unresolved_surface_id`, which is private EVIDENCE the old
+        host could not prove after an authority loss, never a capability this session
+        holds. The dispatcher only ever sees the live handle, so treating evidence as
+        held made this return True and delegate a refusal the dispatcher cannot make:
+        the explicit open then reached an unreconciled destination (review R1 / QA Q1,
+        written entirely by product paths). The evidence is preserved, not cleared:
+        nothing but the old host's own proof can discharge it, so a hint that needs
+        the other host keeps refusing until `backend` is dropped.
         """
-        if self._obligation_host():
+        if surface_host(str(self.record.get("surface_id", ""))):
             return True
         if self.obligation_pin_host():
             return False
