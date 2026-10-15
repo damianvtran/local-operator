@@ -5,7 +5,7 @@ description: What the Highlights block under an answer is — the file callouts 
 
 # Highlights
 
-After a turn that produced something real — a file, a block of numbers — Local Operator can add a short **Highlights** block under the final answer: callouts for the files the turn made, and a small generated graphic when the numbers justify one. The block draws no heading or label — no title, badge or separator announces it — and appears seamlessly directly under the answer's text: its position, not any caption, tells the reader it belongs to the turn. It is added only under a real user turn (never for wakes, monitors, peer messages or `lop exec`), always after the answer, and never in the model's context: the block sits in the transcript beside the answer, not in it.
+After a turn that produced something real — a file, a block of numbers — Local Operator can add a short **Highlights** block under the final answer: callouts for the files the turn made, and a small generated graphic when the numbers justify one. The block draws no heading or label — no title, badge or separator announces it — and appears seamlessly directly under the answer's text: its position, not any caption, tells the reader it belongs to the turn. It is added only under a real user turn — a message you typed, or your answer to an ask the agent raised (never for wakes, monitors, peer messages, a timed-out or declined ask, or `lop exec`), always after the answer, and never in the model's context: the block sits in the transcript beside the answer, not in it.
 
 ## Where it shows
 
@@ -16,12 +16,12 @@ Each surface paints the block from the row a turn journaled, and they do not syn
 
 Not yet: the **relay / phone web** renderer is in review (core PR #2222), so a phone shows nothing until that lands; the **phone app's own native renderer** is a separate lane and is not shipped. Where a surface cannot render something, it shows nothing rather than an apology.
 
-**Most turns have nothing to report.** With no file in the turn at all — and, once graphics are on, no numbers to draw from — the turn stops before anything leaves the machine, and a settled row with nothing in it paints no block at all. A source file the turn wrote is still offered to the decision: only the decision can tell "write me a script" from "this is the deliverable".
+**Most turns have nothing to report.** With no file in the turn at all — and no numbers to draw from — the turn stops before anything leaves the machine, and a settled row with nothing in it paints no block at all. A source file the turn wrote is still offered to the decision: only the decision can tell "write me a script" from "this is the deliverable".
 
 ## What appears
 
 - **File callouts** — up to four files the turn wrote or named (`reports/latency.md`, `data/bench.csv`, …), one row each with its name, the path as the row carries it (session- or `~/`-relative) and its size: openable in the desktop UI, and in the TUI clickable wherever the terminal renders links (plain, copyable text otherwise). Past the featured four, the rest fold into an `N more files` line that expands in place (bounded at the 20 stored). A finish with two files or fewer and no component is ONE line instead — `2 files: latency.md, bench.csv`. The path is never absolute — session-relative when the file sits under the session's cwd, `~/`-relative otherwise. Spends no model tokens.
-- **Graphics** — a chart or table drawn from the turn's own numbers. Spends model tokens, and is **off by default**, so a stock install asks no graphics question and no surface draws one. Turn it on with `supplements.graphics` (below): the desktop UI then renders it, and the TUI still skips it.
+- **Graphics** — a chart or table drawn from the turn's own numbers. Spends model tokens, and is **on by default**: the desktop UI renders it and the TUI skips it. It still costs nothing on most turns — the graphics question is not even asked unless the turn holds numbers to draw (see Cost). Turn it off with `supplements.graphics` (below).
 - **The state line** — one quiet line while a job runs, and on the arms that never settle: `Preparing highlights…`, `Highlights cancelled`, `Couldn't prepare highlights`. The desktop UI draws those arms' controls too (`Adjust…`, `Cancel`, `Retry`); the TUI's actions are the `/highlights cancel | retry | adjust <text>` slash commands instead, because a terminal line advertising a click it cannot honour is a lie.
 
 ## Turning it on and off
@@ -31,7 +31,7 @@ Edits are scoped to new sessions — start one after a change (the TUI's `/setti
 ```bash
 lop config edit supplements.enabled false     # the master switch
 lop config edit supplements.files false       # file callouts only
-lop config edit supplements.graphics true     # draw graphics (spends tokens)
+lop config edit supplements.graphics false    # no generated graphics (they spend tokens)
 ```
 
 In the file every key is `values.supplements.<key>`; the CLI spells it `supplements.<key>`, which is what `lop config list` prints:
@@ -40,7 +40,7 @@ In the file every key is `values.supplements.<key>`; the CLI spells it `suppleme
 | --- | --- | --- |
 | `enabled` | `true` | master switch |
 | `files` | `true` | file callouts |
-| `graphics` | `false` | generated graphics (spends tokens) |
+| `graphics` | `true` | generated graphics (spends tokens) |
 | `model` | `auto` | the generator's model ladder; `session` forces this session's model |
 | `maxTurns` | `2` | generator turns per job (1–4) |
 | `maxOutputTokens` | `6000` | output budget per generator turn |
@@ -58,13 +58,13 @@ In the file every key is `values.supplements.<key>`; the CLI spells it `suppleme
 
 ## Cost
 
-The decision is one small classification call per question — one for the files, plus a second, concurrent one once graphics are on (`decide_many`, one call for both, is a follow-up). Each is logged with its cost in the session log. A generator job is bounded by `supplements.maxCostUsd` (default `$1.00` — a soft between-turns cap sized to cover roughly one Opus-class turn, deliberately not derived from the measured Sonnet-class envelope of $0.04–0.08 per job) and its spend is recorded under a `supplement_render` purpose, so `/session`'s by-purpose rows can show it.
+The decision is one small classification call per question — one for the files, plus a second, concurrent one only when the turn's evidence holds structured numbers (a table, delimited block, JSON array, or four numbers sharing a unit in one paragraph of the answer); a turn without them asks the files question alone (`decide_many`, one call for both, is a follow-up). Neither delays the answer: the decision and any generator job run after it. Each is logged with its cost in the session log. A generator job is bounded by `supplements.maxCostUsd` (default `$1.00` — a soft between-turns cap sized to cover roughly one Opus-class turn, deliberately not derived from the measured Sonnet-class envelope of $0.04–0.08 per job) and its spend is recorded under a `supplement_render` purpose, so `/session`'s by-purpose rows can show it.
 
 ## Troubleshooting
 
 1. **Nothing appeared.** Most turns legitimately show nothing (above), and a settled row with no files and no components paints no block at all — that is the normal case, not a failure. Two surfaces show nothing by design rather than because something broke: the TUI never draws a component, and the phone draws nothing until the relay lane lands. If it is never anything on the TUI or in the desktop UI, check `supplements.enabled` (and start a new session after an edit) and read the journal — a turn that actually produced something carries the decision's `vendor=` in its row, while a turn with nothing to show writes no row at all: a prefilter skip's reason (`supplements: prefilter … skipped=…`) and a decision that found nothing are only on DEBUG lines, so run with `LOG_LEVEL=DEBUG` to see either.
-2. **Graphics skipped.** Off by default; even when on, a graphic is drawn only when the turn's evidence contains numbers — a model "yes" without evidence is overruled — and the TUI skips components whether or not one was drawn.
-3. **A file is missing.** Only files the turn itself wrote or named can be called out; excluded folders (above), paths already linked in the answer, and files beyond the featured set ("N more") do not appear.
+2. **Graphics skipped.** A graphic is drawn only when the turn's evidence contains structured numbers — a model "yes" without evidence is overruled, and the question is not asked at all without it — and the TUI skips components whether or not one was drawn. Check `supplements.graphics` has not been switched off (it is on by default).
+3. **A file is missing.** Only files the turn itself wrote or named can be called out: a file written by `write`, or named by a shell/python step (redirect, `tee`, `cp`/`mv` destination, `open(..., 'w')`, `to_csv(...)`, in the directory the command `cd`'d to) — a path the command builds in a variable is found by a one-level look at the directory it worked in, for files modified during the turn. A deliverable the answer itself links is still called out (the row carries `linked_in_answer`); a file the answer merely names without the turn having written it, excluded folders (above), source code the turn wrote, and files beyond the featured set ("N more") do not appear.
 
 ## Not in this release
 

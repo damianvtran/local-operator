@@ -21,8 +21,9 @@ session's one shared ``ClassificationService`` (``decide`` takes its guards from
   whether the data exists; the harness can).
 
 FAIL-OPEN, AND WHAT OPEN MEANS HERE. A ``None`` answer (disabled, circuit open, timeout, no
-leg, schema rejection) degrades to the no-vendor heuristic, not to an error: tier-1 files (a
-``write`` call the turn made) of a deliverable kind, by recency, capped. Graphics NEVER run
+leg, schema rejection) degrades to the no-vendor heuristic, not to an error: tier-1/2 files
+(a ``write`` call or a command's output the turn made) of a deliverable kind, direct writes
+first, then by recency, capped. Graphics NEVER run
 without a vendor -- a session-model fallback for that question is ~100x the decision cost and
 exactly the "default-on spends money" surprise the welcome copy warns about (memo §2.3 Step 3).
 
@@ -455,9 +456,17 @@ def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
 
 
 def heuristic_files(candidates: Sequence[Candidate]) -> list[Candidate]:
-    """The no-vendor fallback: tier-1 (written this turn) deliverable files, newest first."""
-    chosen = [c for c in candidates if c.tier == 1 and c.deliverable]
-    chosen.sort(key=lambda c: (-c.order, c.path))
+    """The no-vendor fallback: deliverable files the turn wrote, direct writes first.
+
+    Tier 1 (a ``write`` call) outranks tier 2 (a command's output: redirect, ``cp``, a python
+    ``open(..., 'w')``, the touched-directory sweep), each newest first. Tier 2 is admitted
+    because the operator's real deliverables are often made by a shell/python step, not the
+    ``write`` tool, and the vendor being down is exactly when nothing else would surface them;
+    the cost is bounded by ``max_featured`` and by the pre-filter's own exclusions. Tier 3
+    (merely NAMED in the answer) and source-code kinds stay out: no write evidence.
+    """
+    chosen = [c for c in candidates if c.tier <= 2 and c.deliverable]
+    chosen.sort(key=lambda c: (c.tier, -c.order, c.path))
     return chosen
 
 

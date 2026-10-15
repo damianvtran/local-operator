@@ -3425,7 +3425,9 @@ SETTINGS: tuple[Setting, ...] = (
     #
     # docs/design/turn-supplements.md §2.12. Defaults live beside their consumer in
     # ``supplements/policy.py``; ``_consumer_defaults()`` in tests/unit/test_settings_io.py
-    # binds the two. ``graphics`` is OFF by default until a surface can render it (§6).
+    # binds the two. ``graphics`` is ON by default (the desktop UI renders components; the
+    # evidence gate, the 0.7 classifier threshold and ``maxCostUsd`` bound the spend, see
+    # ``policy.DEFAULT_GRAPHICS``).
     Setting(
         key="supplements.enabled",
         path=("supplements", "enabled"),
@@ -3459,7 +3461,7 @@ SETTINGS: tuple[Setting, ...] = (
         section="supplements",
         label=_t(_ws.supplements_graphics_label()),
         kind=Kind.BOOL,
-        default=False,
+        default=True,
         help=_t(_ws.supplements_graphics_help()),
         choices=_bool_choices(
             _t(_ws.supplements_graphics_choice_true_description()),

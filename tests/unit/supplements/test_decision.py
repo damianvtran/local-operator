@@ -251,13 +251,17 @@ async def test_no_answer_degrades_to_the_heuristic_never_an_error(service) -> No
         _cand("new.csv", kind="csv", order=5),
         _cand("tool.py", kind="code", order=9),  # source: never a deliverable
         _cand("named.pdf", tier=3, kind="pdf", order=99),  # prose-only: not written this turn
-        _cand("made.csv", tier=2, kind="csv", order=7),  # a shell flag is not "written by write"
+        _cand(
+            "made.csv", tier=2, kind="csv", order=7
+        ),  # a command's output: written, ranks below tier 1
+        _cand("made.py", tier=2, kind="code", order=8),  # tier 2 source: still never a deliverable
     ]
     out = await _decide(service, files, STRUCTURED)
     assert [c.name for c in out.featured] == [
         "new.csv",
         "old.md",
-    ], "tier-1 deliverables, newest first"
+        "made.csv",
+    ], "tier-1 newest first, then tier-2 outputs (a down vendor still surfaces shell files)"
     assert out.graphics is False, "graphics never run without a vendor"
     assert (
         out.vendor == dec.HEURISTIC_VENDOR or service is None and out.vendor == dec.HEURISTIC_VENDOR
