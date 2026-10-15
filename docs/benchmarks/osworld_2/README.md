@@ -1453,7 +1453,10 @@ the shell exports it. (A legacy `credentials.env` is still read as a transition
 fallback until it is migrated with `lop secret migrate-env`.) Use a scoped key: `ec2:RunInstances, DescribeInstances,
 DescribeImages, DescribeVolumes, TerminateInstances, CreateTags`,
 `scheduler:CreateSchedule, DeleteSchedule, ListSchedules`, and `iam:PassRole`
-on the TTL role. Presence-only check, never printing a value:
+on the TTL role. Optionally `ec2:GetConsoleOutput, GetConsoleScreenshot`
+(read-only; lets a lost guest leave its console behind — see the adapter
+README's "Lost-guest evidence"; absent permissions degrade to a `denied`
+record, never a failed episode). Presence-only check, never printing a value:
 
 ```sh
 lop secret list | grep -cE '(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)'  # expect 2
