@@ -40,7 +40,7 @@ import re
 import secrets
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -242,6 +242,22 @@ class InboxLine:
     #: the drain then delivers it exactly as it always did. It only ever rides a
     #: peer row — the owner-prompt paths own no message id.
     message_id: str = ""
+    #: The PEER sender's declared PROVENANCE kind (H4e-render), carried so a
+    #: wake that raced an update window keeps its own card instead of being
+    #: replayed as a generic peer message. Additive and defaulted for the same
+    #: reason ``message_id`` is: a row an older build wrote has no key, reads
+    #: as ``""``, and the drain validates/ignores it exactly as before. It only
+    #: ever rides a peer row — the owner-prompt paths own none — and a value
+    #: outside the client-local allowlist is REFUSED at the delivery boundary,
+    #: never stamped.
+    custom_type: str = ""
+    #: The internal bridge LOCATOR (H5 F3), carried so a bridge wake that
+    #: raced an update window keeps the receiver able to find ITS OWN trusted
+    #: records instead of replaying as an unlocatable bridge card. Additive and
+    #: defaulted: a row an older build wrote has no key, reads as ``{}``, and
+    #: the drain re-validates whatever it finds before forwarding — a locator
+    #: hint, never authority.
+    bridge_meta: dict[str, Any] = field(default_factory=dict)
     #: WHICH wake schedule a spooled fire belongs to (``WakeSchedule.id``). A
     #: draining runtime spools one row PER occurrence, and a schedule that
     #: repeats fast — ``every: 20m`` across a long handover — used to spool one
@@ -263,6 +279,7 @@ class InboxLine:
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
         sender = payload.get("sender")
+        bridge = payload.get("bridge_meta")
         return cls(
             text=str(payload.get("text", "") or ""),
             sender=dict(sender) if isinstance(sender, dict) else {},
@@ -284,6 +301,8 @@ class InboxLine:
             command_id=str(payload.get("command_id", "") or ""),
             harness_injected=bool(payload.get("harness_injected", False)),
             message_id=str(payload.get("message_id", "") or ""),
+            custom_type=str(payload.get("custom_type", "") or ""),
+            bridge_meta=dict(bridge) if isinstance(bridge, dict) else {},
             wake_id=str(payload.get("wake_id", "") or ""),
             wake_fires=_fire_count(payload.get("wake_fires", 1)),
         )
@@ -299,6 +318,8 @@ class InboxLine:
             "command_id": self.command_id,
             "harness_injected": self.harness_injected,
             "message_id": self.message_id,
+            "custom_type": self.custom_type,
+            "bridge_meta": self.bridge_meta,
             "wake_id": self.wake_id,
             "wake_fires": self.wake_fires,
         }

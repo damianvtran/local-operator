@@ -122,6 +122,11 @@ def _engine_context(**kwargs) -> ToolContext:
         # exactly as the two above — the session binds it per turn and it is
         # the ONE fact ``build_no_reply_tool``'s createIf gate reads.
         quiet_end=_allow_quiet,
+        # H5d's ``bridge`` tool is createIf-gated on the bridge runtime the
+        # session stashes when signed in and designated — presence-only here,
+        # same rule as the doors above, so the fully-capable surface is the
+        # one DEFAULT_TOOL_NAMES describes.
+        bridge_runtime=object(),
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -275,13 +280,17 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     claimed the end, which shifted those two; it now truly ends both
     tables — and wave 4 slice A's ``setting`` (the unconditionally published
     settings write path) appended after the pair, so THE PIN MOVES WITH THE
-    NEWEST APPEND, which is this test's contract."""
-    assert DEFAULT_TOOL_NAMES[-2:] == ["video_status", "setting"]
-    assert list(TOOL_BUILDERS)[-2:] == ["video_status", "setting"]
-    assert DEFAULT_TOOL_NAMES[-3] == "generate_video"
-    assert list(TOOL_BUILDERS)[-3] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-4] == "no_reply"
-    assert list(TOOL_BUILDERS)[-4] == "no_reply"
+    NEWEST APPEND, which is this test's contract. H5d's ``bridge`` (the Team
+    Bridge CoS tool, createIf-gated on the session's bridge runtime) is the
+    newest append and now ends both tables."""
+    assert DEFAULT_TOOL_NAMES[-2:] == ["setting", "bridge"]
+    assert list(TOOL_BUILDERS)[-2:] == ["setting", "bridge"]
+    assert DEFAULT_TOOL_NAMES[-3] == "video_status"
+    assert list(TOOL_BUILDERS)[-3] == "video_status"
+    assert DEFAULT_TOOL_NAMES[-4] == "generate_video"
+    assert list(TOOL_BUILDERS)[-4] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-5] == "no_reply"
+    assert list(TOOL_BUILDERS)[-5] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:
@@ -454,6 +463,18 @@ def test_the_console_tool_is_absent_without_the_app(monkeypatch) -> None:
     names = [tool.name for tool in create_tools(_engine_context())]
     assert "console" not in names
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "console"]
+
+
+def test_the_bridge_tool_is_absent_without_a_runtime() -> None:
+    """createIf: no bridge runtime, no tool — never a tool that can only error.
+
+    The gate is the session's own fact (signed in and designated stash a
+    runtime on the context, H5d); a session without one must not pay schema
+    for the bridge, and must not advertise a capability it cannot serve.
+    """
+    names = [tool.name for tool in create_tools(_engine_context(bridge_runtime=None))]
+    assert "bridge" not in names
+    assert names == [name for name in DEFAULT_TOOL_NAMES if name != "bridge"]
 
 
 def test_the_console_tool_is_not_hidden(monkeypatch) -> None:

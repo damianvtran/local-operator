@@ -63,6 +63,8 @@ from local_operator.session.runtime.server import (
     has_durable_history,
     image_blocks,
     image_blocks_in_thread,
+    receives_bridge_meta,
+    receives_custom_type,
     receives_message_id,
 )
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
@@ -645,6 +647,8 @@ class TuiSessionHandle(SessionHandle):
         wake: bool = False,
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
+        custom_type: str | None = None,
+        bridge_meta: dict[str, Any] | None = None,
     ) -> AckDetail:
         # Session.receive_peer_message is a COROUTINE that must run on the host's
         # event loop (it touches _context.messages, the transcript, and may
@@ -669,6 +673,14 @@ class TuiSessionHandle(SessionHandle):
             kwargs: dict[str, Any] = {"mode": mode, "wake": wake, "sender": sender}
             if receives_message_id(session):
                 kwargs["message_id"] = message_id
+            # R1-2 (PR #2378): the provenance carriage is forwarded the same
+            # probed way — the dispatch/drain decide by THIS handle's literal
+            # signature, and dropping the fields here would silently defang a
+            # bridge wake routed to a TUI-hosted CoS (no ask, no §11.1 wrap).
+            if custom_type is not None and receives_custom_type(session):
+                kwargs["custom_type"] = custom_type
+            if bridge_meta is not None and receives_bridge_meta(session):
+                kwargs["bridge_meta"] = bridge_meta
             return asyncio.run_coroutine_threadsafe(
                 session.receive_peer_message(text, **kwargs), owner_loop
             )

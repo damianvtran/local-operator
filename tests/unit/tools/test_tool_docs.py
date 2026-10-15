@@ -232,6 +232,20 @@ MEASURED_TOKENS: dict[str, int] = {
     "ask": 1005,
     "ask_withdraw": 318,
     "bash": 304,
+    # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
+    # claim lifecycle, and why "decide" is not an op. First measured at 572
+    # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every
+    # pre-existing entry was re-checked against the same ruler in the same
+    # pass (no other entry moved). The tool's schema itself is new, so
+    # ``scripts/bench_context_budget.py``'s arms move with it — that bench is
+    # the pairing check, run with this change's verification bundle.
+    # RE-MEASURED (round 17, PR #2378 CI): 572 -> 563 is the ONLY entry that
+    # moved. The tool's wire DESCRIPTION was reworded later on the branch
+    # ("organization bridge messages" -> "organization messages"; the take-up
+    # and ack clauses tightened) while this entry kept its H5d value. Measured
+    # by this test's own printed table (the ``count_text_tokens`` ledger path)
+    # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
+    "bridge": 563,
     "browser": 1312,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.

@@ -167,6 +167,14 @@ def response_text(
             else ASK_UNANSWERED_TEXT
         )
     else:
+        # TB-05 (PR #2378): a bridge request's report must not frame the
+        # sender's words as the human's — the flag is derived from the RAW
+        # record carriage (a non-empty question_id), the same predicate the
+        # queue's doors use.
+        bridge_request = any(
+            isinstance(question, Mapping) and str(question.get("question_id") or "")
+            for question in questions
+        )
         # ``image_counts``/``images_missing`` are passed through only when the
         # answer carried pictures; for every text-only ask the call is the one it
         # always was, so the text the model reads is unchanged.
@@ -175,6 +183,7 @@ def response_text(
             answers,
             image_counts=image_counts,
             images_missing=images_missing,
+            bridge_request=bridge_request,
         )
     if secret_lost:
         # The key name is not repeated here and the QUESTION TEXT is not quoted:
@@ -184,6 +193,23 @@ def response_text(
     if status == "late":
         return LATE_LEAD.format(deadline=_stamp(record.get("expires_at"))) + text
     return text
+
+
+def _timeout_listing_line(question: Mapping[str, Any]) -> str:
+    """One question as the timeout notice names it.
+
+    A BRIDGE question's text carries another organization's words (framed by
+    §11.1 in the ask itself). This notice is a plain sentence about OUR ask, so
+    for a request it names the request and the house untrusted-data clause
+    instead of repeating the sender's words outside their own framing — quoting
+    them here would be exactly the un-framed re-serve §11.1 forbids.
+    """
+
+    if str(question.get("question_id") or ""):
+        from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+        return f"{question.get('id')} — {BRIDGE_UNTRUSTED_CLAUSE}"
+    return _clip(str(question.get("question") or ""), 200)
 
 
 def timeout_text(
@@ -211,7 +237,7 @@ def timeout_text(
             ask_id=record.get("ask_id", ""), waited=waited, asked=asked, keys=keys
         )
     else:
-        listing = "; ".join(_clip(str(q.get("question") or ""), 200) for q in questions)
+        listing = "; ".join(_timeout_listing_line(q) for q in questions)
         text = TIMEOUT_NOTICE.format(
             ask_id=record.get("ask_id", ""),
             waited=waited,
@@ -233,6 +259,20 @@ def timeout_text(
 #: path is the only caller that may say it, so the revision path emits it (see
 #: ``AskQueue.revise``): the sentence belongs to the OP, not to the state table.
 REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
+
+
+#: The ``by`` words that name a ROLE rather than a surface (D4, round 14).
+#:
+#: Every ordinary caller of ``AskQueue.respond``/``revise`` passes the SURFACE the
+#: human answered from ("terminal" from the TUI, "remote" from the phone), and
+#: the sentence below is in the user's voice — so naming the surface tells them
+#: where the answer came from. The bridge decide DOOR has no surface to name: it
+#: is reached over the runtime's authority op, which the terminal, the desktop
+#: app and the phone can all drive, and it stamps "operator" (`session.py`).
+#: That word appears nowhere else a member can see, so it renders as the
+#: UNATTRIBUTED form — a true sentence rather than a third-person label about a
+#: role they were never shown.
+ROLE_BY_WORDS = frozenset({"operator"})
 
 
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
@@ -269,7 +309,9 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         )
     if status == store.STATUS_ANSWERED:
         by = (record.get("answered_by") or {}).get("surface")
-        return f"already answered by {by}." if by else "already answered."
+        if not by or by in ROLE_BY_WORDS:
+            return "already answered."
+        return f"already answered by {by}."
     return "this ask is no longer open."
 
 
