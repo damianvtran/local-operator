@@ -1507,32 +1507,35 @@ class AuthStore:
         memory = str(self._db_path) == ":memory:"
         if not memory:
             self._db_path = self._db_path.resolve()
-        with _auth_bootstrap_guard(self._db_path):
-            if not memory:
-                self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            # Create the file 0600 BEFORE sqlite opens it: the plain
-            # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
-            if not memory and not self._db_path.exists():
-                fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
-                os.close(fd)
-            # `check_same_thread=False` + an explicit mutex, rather than sqlite's
-            # default thread affinity. The store is built once on whatever thread
-            # first asks for it (for the desktop routes, the event loop) and is then
-            # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
-            # hop, a thread-pool executor, a background scheduler -- raised
-            # `ProgrammingError`. That is how a credential-free machine came to
-            # report every model as connected (D18): the raise was swallowed by a
-            # broad catch and reported as "the store is unreadable", which the model
-            # catalogue deliberately degrades to "show everything".
-            #
-            # Removing the one bad hop fixed that route; this fixes the CLASS, so
-            # the next caller to touch the store from another thread gets correct
-            # serialized access instead of a plausible-looking wrong answer. The
-            # lock is required because sqlite connection objects are not internally
-            # synchronised: `check_same_thread=False` alone would trade a loud error
-            # for silent interleaving.
-            conn: sqlite3.Connection | None = None
-            try:
+        # A return expression inside `with` is evaluated BEFORE guard exit.
+        # Keep raw ownership until exit succeeds: a release error must close
+        # the connection even when WAL/schema initialization already succeeded.
+        conn: sqlite3.Connection | None = None
+        try:
+            with _auth_bootstrap_guard(self._db_path):
+                if not memory:
+                    self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                # Create the file 0600 BEFORE sqlite opens it: the plain
+                # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
+                if not memory and not self._db_path.exists():
+                    fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
+                    os.close(fd)
+                # `check_same_thread=False` + an explicit mutex, rather than sqlite's
+                # default thread affinity. The store is built once on whatever thread
+                # first asks for it (for the desktop routes, the event loop) and is then
+                # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
+                # hop, a thread-pool executor, a background scheduler -- raised
+                # `ProgrammingError`. That is how a credential-free machine came to
+                # report every model as connected (D18): the raise was swallowed by a
+                # broad catch and reported as "the store is unreadable", which the model
+                # catalogue deliberately degrades to "show everything".
+                #
+                # Removing the one bad hop fixed that route; this fixes the CLASS, so
+                # the next caller to touch the store from another thread gets correct
+                # serialized access instead of a plausible-looking wrong answer. The
+                # lock is required because sqlite connection objects are not internally
+                # synchronised: `check_same_thread=False` alone would trade a loud error
+                # for silent interleaving.
                 conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
@@ -1571,16 +1574,17 @@ class AuthStore:
                         os.chmod(path, 0o600)
                     except OSError:
                         pass
-                return _SerializedConnection(conn)
-            except BaseException:
-                # A partially opened constructor has no AuthStore.close yet.
-                # Rollback/close must not obscure the genuine bootstrap error.
-                if conn is not None:
-                    with suppress(Exception):
-                        conn.rollback()
-                    with suppress(Exception):
-                        conn.close()
-                raise
+            assert conn is not None, "bootstrap completed without a SQLite connection"
+            return _SerializedConnection(conn)
+        except BaseException:
+            # A partially opened constructor has no AuthStore.close yet.
+            # Rollback/close must not obscure the genuine bootstrap error.
+            if conn is not None:
+                with suppress(Exception):
+                    conn.rollback()
+                with suppress(Exception):
+                    conn.close()
+            raise
 
     def close(self) -> None:
         # The flag is set FIRST so a reader that races this close sees either a
