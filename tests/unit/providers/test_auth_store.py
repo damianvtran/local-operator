@@ -1631,24 +1631,25 @@ class TestLoginFlavourAliases:
         store.block_credential(row.id, "xai")
         assert store.is_blocked(row.id, "xai-oauth") is True
 
-    async def test_the_alias_and_its_base_share_one_sticky_account(self, store: AuthStore) -> None:
-        """Stickiness pins an ACCOUNT, so it cannot depend on the spelling used.
+    async def test_the_alias_and_base_share_tentative_pointer_and_policy_namespace(
+        self, store: AuthStore
+    ) -> None:
+        """Normalize both spellings without inventing an xAI cache lifetime.
 
-        Two DISTINCT identities: rows sharing one identity key collapse into a
-        single row on upsert, and with only one row to choose from every
-        selection path returns the same token whether stickiness was honoured or
-        not -- a test that cannot fail. ``session-1`` also hashes to index 0, so
-        the unsticky fallback would return the FIRST row, making the assertion
-        below sensitive to the pin rather than to luck.
+        Two identities discriminate pointer sharing from a one-row coincidence;
+        a tentative pointer alone no longer overrides the next policy pick.
         """
-        store.upsert_credential(
+        first = store.upsert_credential(
             "xai", {**_oauth(refresh="r1", access="a1"), "account_id": "acct-a"}
         )
         second = store.upsert_credential(
             "xai", {**_oauth(refresh="r2", access="a2"), "account_id": "acct-b"}
         )
         store._set_sticky("xai-oauth", "session-1", second.id)
-        assert await store.get_api_key("xai", "session-1") == "a2"
+        assert store.session_credential_id("xai", "session-1") == second.id
+        assert await store.get_api_key("xai", "session-1") == "a1"
+        assert await store.get_api_key("xai-oauth", "session-1") == "a1"
+        assert store.session_credential_id("xai-oauth", "session-1") == first.id
 
     async def test_the_base_providers_env_key_authenticates_the_flavour(
         self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
@@ -1692,8 +1693,11 @@ class TestLoginFlavourAliases:
         assert await store.get_api_key("xai-oauth") == "flavour-write"
 
 
-class TestADemotionNeverMovesASessionOffItsStickyAccount:
-    """A demotion is a preference for NEW picks, never an eviction.
+class TestADemotionNeverMovesASessionOffItsValidLease:
+    """A demotion cannot evict a compatible, unexpired success-derived lease.
+
+    Tentative pointers alone no longer earn this exemption. This fixture
+    supplies a valid receipt; public synthetic HTTP tests prove its creation.
 
     The provider's prompt cache is per account. Before this, a reserve
     demotion written by the quota preflight — process-wide and shared by every
@@ -1706,6 +1710,44 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
     already kept the sticky (``rotate_sibling``: "sticky preserved"); this
     class pins the same rule for the preference marks.
     """
+
+    @pytest.fixture(autouse=True)
+    def _request_scope(self):
+        from local_operator.harness.types import ChatRequest, ModelSpec
+        from local_operator.providers.account_affinity import selection_context
+
+        self._affinity_request = ChatRequest(
+            model=ModelSpec(provider="anthropic", model_id="claude-test")
+        )
+        with selection_context(self._affinity_request):
+            yield
+
+    def _anchor(self, store, provider, session_id, row):
+        import time
+
+        from local_operator.providers.account_affinity import (
+            CacheAffinityHint,
+            request_compatibility,
+        )
+
+        # Unit tests supply a valid successful receipt; public synthetic HTTP
+        # tests separately prove the wire and recognized completion boundary.
+        store.pin_session_credential(provider, session_id, row.id)
+        store._account_affinity_store().record(
+            session_id,
+            provider,
+            row.id,
+            row.created_at,
+            "claude-test",
+            CacheAffinityHint(
+                "anthropic:messages",
+                request_compatibility(self._affinity_request),
+                300_000,
+                "explicit-wire",
+            ),
+            sent_at_ms=store._now_ms(),
+            sent_monotonic=time.monotonic(),
+        )
 
     @staticmethod
     def _pool(tmp_path: Any) -> tuple[AuthStore, Any, Any]:
@@ -1725,11 +1767,11 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
     ) -> None:
         """(a) The regression: sticky on A, A demoted, B healthy → still A."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
 
         store.deprioritize_credential("anthropic", a.id)
 
-        access = await store.get_oauth_access("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
         assert access is not None and access.credential_id == a.id
         # The mark is untouched: it still steers OTHER picks (below).
         assert store._active_demotions("anthropic") == {a.id}
@@ -1743,28 +1785,28 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
 
         # Every session id, whatever its hash, avoids A while B is usable.
         for session in ("s1", "s2", "s3", "session-abc", "another"):
-            access = await store.get_oauth_access("anthropic", session)
+            access = await store.get_oauth_access("anthropic", session, model_id="claude-test")
             assert access is not None and access.credential_id == b.id, session
 
     async def test_a_blocked_sticky_still_moves(self, tmp_path: Any) -> None:
         """(c) Unchanged: a BLOCK is a verdict that the account cannot serve, and
         the block filter runs ahead of the sticky exemption."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
 
         store.block_credential(a.id, "anthropic", block_ms=60_000)
 
-        access = await store.get_oauth_access("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
         assert access is not None and access.credential_id == b.id
 
     async def test_a_blocked_and_demoted_sticky_still_moves(self, tmp_path: Any) -> None:
         """Both marks at once (the depleted-then-demoted shape) still moves."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
         store.deprioritize_credential("anthropic", a.id)
         store.block_credential(a.id, "anthropic", block_ms=60_000)
 
-        access = await store.get_oauth_access("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
         assert access is not None and access.credential_id == b.id
 
     async def test_the_usage_limit_path_still_preserves_the_sticky(self, tmp_path: Any) -> None:
@@ -1772,7 +1814,7 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         from local_operator.providers.failover import ProviderError
 
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
 
         usage_limit = ProviderError(429, "rate limit reached", retryable=True)
         assert store.rotate_sibling("anthropic", "s1", usage_limit, api_key="tok-a") is True
@@ -1786,11 +1828,11 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         """Another session's warm account is not this session's: a demotion
         written by (or for) one session still steers every OTHER session."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "warm", a.id)
+        self._anchor(store, "anthropic", "warm", a)
         store.deprioritize_credential("anthropic", a.id)
 
-        warm = await store.get_oauth_access("anthropic", "warm")
-        cold = await store.get_oauth_access("anthropic", "cold")
+        warm = await store.get_oauth_access("anthropic", "warm", model_id="claude-test")
+        cold = await store.get_oauth_access("anthropic", "cold", model_id="claude-test")
         assert warm is not None and warm.credential_id == a.id
         assert cold is not None and cold.credential_id == b.id
 
@@ -1802,10 +1844,20 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         store.deprioritize_credential("anthropic", a.id)
         store.release_session_credential("anthropic", "s1")
 
-        access = await store.get_oauth_access("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
         assert access is not None and access.credential_id == b.id
         # ...and the session is now pinned to the account that served.
         assert store.session_credential_id("anthropic", "s1") == b.id
+
+    async def test_releasing_a_tentative_pointer_does_not_invalidate_a_valid_lease(
+        self, tmp_path: Any
+    ) -> None:
+        store, a, b = self._pool(tmp_path)
+        self._anchor(store, "anthropic", "s1", a)
+        store.deprioritize_credential("anthropic", a.id)
+        store.release_session_credential("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
+        assert access.credential_id == a.id
 
     async def test_a_read_only_resolve_also_stays_on_the_demoted_sticky(
         self, tmp_path: Any
@@ -1813,10 +1865,12 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         """An isolated request beside the turn lands on the SAME credential the
         turn is transacting on — the point of ``read_only`` reading stickiness."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
         store.deprioritize_credential("anthropic", a.id)
 
-        access = await store.get_oauth_access("anthropic", "s1", read_only=True)
+        access = await store.get_oauth_access(
+            "anthropic", "s1", read_only=True, model_id="claude-test"
+        )
         assert access is not None and access.credential_id == a.id
         assert store._active_demotions("anthropic") == {a.id}
 
@@ -1824,11 +1878,13 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         """ "Every row in the tier is demoted" is judged on the raw marks, so the
         stale-marks clear in ``_selection_order`` fires exactly as before."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
         store.deprioritize_credential("anthropic", a.id)
         store.deprioritize_credential("anthropic", b.id)
 
-        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
+        order = store._selection_order(
+            store.list_credentials("anthropic"), "anthropic", "s1", model_id="claude-test"
+        )
         assert [r.id for r in order] == [a.id, b.id]
         assert store._active_demotions("anthropic") == set()
 
@@ -1845,11 +1901,11 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         together, exactly as they did before the exemption existed, and the
         sticky session still lands on A."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
         store.deprioritize_credential("anthropic", a.id)
         store.deprioritize_credential("anthropic", b.id)
 
-        access = await store.get_oauth_access("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
         assert access is not None and access.credential_id == a.id
         assert store._active_demotions("anthropic") == set()
 
@@ -1857,7 +1913,9 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         # rather than being funnelled onto the sticky's account.
         picks = set()
         for session in ("s2", "s3", "s4", "s5", "s6", "s7"):
-            other = await store.get_oauth_access("anthropic", session, read_only=True)
+            other = await store.get_oauth_access(
+                "anthropic", session, read_only=True, model_id="claude-test"
+            )
             assert other is not None
             picks.add(other.credential_id)
         assert picks == {a.id, b.id}
@@ -1867,13 +1925,17 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         is not sorted last either, or the two would disagree on the second
         (``ignore_demotions``) pass."""
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
         store.deprioritize_credential("anthropic", a.id)
 
-        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s1")
+        order = store._selection_order(
+            store.list_credentials("anthropic"), "anthropic", "s1", model_id="claude-test"
+        )
         assert [r.id for r in order] == [a.id, b.id]
         # A session with no sticky still sees A last.
-        order = store._selection_order(store.list_credentials("anthropic"), "anthropic", "s2")
+        order = store._selection_order(
+            store.list_credentials("anthropic"), "anthropic", "s2", model_id="claude-test"
+        )
         assert order[-1].id == a.id
 
     async def test_a_server_fault_on_the_sticky_still_moves_the_session(
@@ -1886,12 +1948,12 @@ class TestADemotionNeverMovesASessionOffItsStickyAccount:
         from local_operator.providers.failover import ProviderError
 
         store, a, b = self._pool(tmp_path)
-        store.pin_session_credential("anthropic", "s1", a.id)
+        self._anchor(store, "anthropic", "s1", a)
 
         overloaded = ProviderError(529, "overloaded_error: Overloaded", retryable=True)
         assert store.rotate_sibling("anthropic", "s1", overloaded, api_key="tok-a") is True
 
-        access = await store.get_oauth_access("anthropic", "s1")
+        access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
         assert access is not None and access.credential_id == b.id
 
 
@@ -1926,6 +1988,9 @@ class TestUsageAwareFirstPick:
 
         cache = UsageCacheStore(tmp_path / "usage_cache.db")
         store = AuthStore(db_path=tmp_path / "auth.db", usage_cache=cache)
+        # This suite exercises the explicit compatibility policy, not the new
+        # reset-soonest default. Successful lease behavior has public-wire tests.
+        store.configure_account_selection_policy("headroom")
         self._opened.append(store)
         rows = [
             store.upsert_credential(
@@ -2233,10 +2298,14 @@ class TestUsageAwareFirstPick:
         for i in range(40):
             assert self._order(store, f"session-{i}")[-1] == rows[1].id
 
-    async def test_sticky_is_respected_regardless_of_usage(self, tmp_path: Any) -> None:
-        """(d) Once a session is on an account it stays there even when the
-        cache later says a sibling has more headroom -- the provider's prompt
-        cache is per account, and moving would rewrite the whole prefix."""
+    async def test_tentative_resolve_is_not_an_indefinite_success_lease(
+        self, tmp_path: Any
+    ) -> None:
+        """A resolve alone never proves that this account cached a request.
+
+        Keep the original indefinite-pointer reproduction as its discriminating
+        negative: new cached evidence re-ranks even the same existing session.
+        """
         store, rows, cache = self._store(tmp_path, 3)
         for row in rows:
             self._cache_report(cache, row, five_hour=0.5)
@@ -2247,8 +2316,8 @@ class TestUsageAwareFirstPick:
         for row in rows:
             self._cache_report(cache, row, five_hour=0.99 if row.id == chosen else 0.01)
         again = await store.get_oauth_access("anthropic", "s-sticky", model_id="claude-opus-5")
-        assert again is not None and again.credential_id == chosen
-        # A NEW session, with no sticky, does move away from it.
+        assert again is not None and again.credential_id != chosen
+        # Both old and new sessions re-rank without successful wire evidence.
         fresh = await store.get_oauth_access("anthropic", "s-new", model_id="claude-opus-5")
         assert fresh is not None and fresh.credential_id != chosen
 
@@ -2268,13 +2337,17 @@ class TestUsageAwareFirstPick:
 
     def test_opt_out_restores_the_hash_order(self, tmp_path: Any) -> None:
         """``retry.usageAwareAccountPick: false`` reaches the store through
-        ``configure_usage_aware_pick`` and the ranking steps aside entirely."""
+        ``configure_usage_aware_pick``: fair spread still applies eligibility
+        and reserve last-resort ordering before its stable hash preference."""
         store, rows, cache = self._store(tmp_path)
         for row, fraction in zip(rows, [0.65, 0.92, 0.99, 0.06, 0.29]):
             self._cache_report(cache, row, five_hour=fraction)
         store.configure_usage_aware_pick(False)
         for i in range(20):
-            assert self._order(store, f"session-{i}") == self._hash_order(store, f"session-{i}")
+            session = f"session-{i}"
+            healthy = store._hash_order([rows[0], rows[3], rows[4]], session)
+            reserve = store._hash_order([rows[1], rows[2]], session)
+            assert self._order(store, session) == [row.id for row in healthy + reserve]
         store.configure_usage_aware_pick(True)
         assert self._order(store, "session-0")[0] == rows[3].id
 
@@ -2291,14 +2364,15 @@ class TestUsageAwareFirstPick:
 
     def test_the_session_stream_forwards_the_opt_out(self, tmp_path: Any) -> None:
         """The setting is parsed in exactly one place -- ``SessionStreamFn`` --
-        and must reach the store; a default settings mapping leaves it on."""
+        and must reach the store; an absent setting restores reset-soonest."""
         from local_operator.model.configure import SessionStreamFn
 
         store, _rows, _cache = self._store(tmp_path, 2)
         stream = SessionStreamFn(store, {"retry": {"usageAwareAccountPick": False}}, "s1")
         assert store._usage_aware_pick is False
         stream2 = SessionStreamFn(store, {}, "s2")
-        assert store._usage_aware_pick is True
+        assert store._account_selection_policy == "reset-soonest"
+        assert store._usage_aware_pick is False
 
         # And it must be RE-pushed when a live config change rebinds the
         # settings mapping (review round 2 B1, guarded here per round 3 M1).
@@ -2315,10 +2389,10 @@ class TestUsageAwareFirstPick:
         assert store._usage_aware_pick is False, "apply_settings did not re-push the opt-out"
         stream2.apply_settings({"retry": {"usageAwareAccountPick": True}})
         assert store._usage_aware_pick is True, "the re-push is one-way"
-        # ``None`` is "no settings", which restores the store's ON default
-        # rather than freezing the last value.
+        # ``None`` restores the shipped canonical default, not the last flag.
         stream2.apply_settings(None)
-        assert store._usage_aware_pick is True
+        assert store._account_selection_policy == "reset-soonest"
+        assert store._usage_aware_pick is False
         # Close the streams' http clients without awaiting: no loop is running.
         del stream, stream2
 

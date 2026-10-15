@@ -68,6 +68,7 @@ from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
+from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
@@ -76,6 +77,10 @@ from local_operator.model.effort import (
     FALLBACK_EFFORTS,
     TIER_EFFORTS,
     parse_tier_mapping,
+)
+from local_operator.providers.account_policy import (
+    DEFAULT_ACCOUNT_SELECTION_POLICY,
+    effective_account_selection_policy,
 )
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
@@ -142,6 +147,8 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
+    # The new child keeps translated wire.settings source hashes unchanged.
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.settings.account_policy"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -2135,13 +2142,29 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
+        key="retry.accountSelectionPolicy",
+        path=("retry", "accountSelectionPolicy"),
+        section="failover",
+        label=_t(_ap.label()),
+        kind=Kind.ENUM,
+        default=DEFAULT_ACCOUNT_SELECTION_POLICY,
+        help=_t(_ap.help()),
+        choices=(
+            Choice(
+                "reset-soonest", _t(_ap.reset_soonest_label()), _t(_ap.reset_soonest_description())
+            ),
+            Choice("headroom", _t(_ap.headroom_label()), _t(_ap.headroom_description())),
+            Choice("fair", _t(_ap.fair_label()), _t(_ap.fair_description())),
+        ),
+    ),
+    Setting(
         key="retry.usageAwareAccountPick",
         path=("retry", "usageAwareAccountPick"),
         section="failover",
-        label=_t(_ws.retry_usageawareaccountpick_label()),
+        label=_t(_ap.legacy_label()),
         kind=Kind.BOOL,
         default=True,
-        help=(_t(_ws.retry_usageawareaccountpick_help())),
+        help=_t(_ap.legacy_help()),
         choices=_bool_choices(
             _t(_ws.retry_usageawareaccountpick_choice_true_description()),
             _t(_ws.retry_usageawareaccountpick_choice_false_description()),
@@ -5522,6 +5545,10 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
     ``"false"`` reads as the consumer reads it (off), and ``is_default`` /
     the value ink / the toggle all agree with the policy about the state.
     """
+    if setting.key == "retry.accountSelectionPolicy":
+        # Registry projections and the request parser must agree even for an
+        # old file carrying only an explicit legacy boolean.
+        return effective_account_selection_policy(manager.get_config().values)
     raw = _walk(manager.get_config().values, setting.path)
     if raw is _MISSING:
         return setting.default
@@ -5915,7 +5942,10 @@ def reset_setting(manager: "ConfigManager", setting: Setting, *, notify: bool = 
     """
     if setting.kind is Kind.READONLY:
         raise ValueError("this setting is retired and cannot be changed")
-    _delete(manager, setting.path)
+    if setting.key == "retry.accountSelectionPolicy":
+        _reset_account_policy(manager)
+    else:
+        _delete(manager, setting.path)
     _invalidate_caches()
     if notify:
         _notify_watcher(manager)
@@ -5991,7 +6021,15 @@ def _require_readable_config(manager: "ConfigManager") -> None:
     A MISSING file is not unreadable — that is a first run, the reload
     correctly yields defaults, and there is no prior config to destroy.
     """
-    config_file = getattr(manager, "config_file", None)
+    require_readable_config_path(getattr(manager, "config_file", None))
+
+
+def require_readable_config_path(config_file: Path | None) -> None:
+    """Guard a relocated root BEFORE constructing a reload-capable manager.
+
+    Relay requests construct their manager lazily; checking only afterwards
+    would allow ConfigManager's recovery rename to disguise unreadable bytes.
+    """
     if config_file is None:
         return
     try:
@@ -6048,6 +6086,27 @@ def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
         cursor = cursor[part]
     cursor[path[-1]] = value
     manager.set_config_value(top, root)
+
+
+@serialized_config_write
+def _reset_account_policy(manager: "ConfigManager") -> None:
+    # Resolve reset semantics in one locked write. Sequential alias deletions
+    # could expose a legacy preference or half-reset state when a later write
+    # fails, and must not overwrite unrelated settings from another writer.
+    _reload_before_write(manager)
+    existing = manager.get_config_value("retry", None)
+    if not isinstance(existing, Mapping):
+        return
+    root = dict(existing)
+    for key in (
+        "accountSelectionPolicy",
+        "account_selection_policy",
+        "usageAwareAccountPick",
+        "usage_aware_account_pick",
+    ):
+        root.pop(key, None)
+    if root != existing:
+        manager.set_config_value("retry", root)
 
 
 @serialized_config_write

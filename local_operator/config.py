@@ -19,6 +19,7 @@ from typing import Any, Dict
 import yaml
 
 from local_operator.config_writer import config_write_lock, serialized_config_write
+from local_operator.providers.account_policy import DEFAULT_ACCOUNT_SELECTION_POLICY
 from local_operator.ui_console.policy import (
     DEFAULT_LIVE_LIMIT,
     DEFAULT_OWNER_LIMIT,
@@ -589,7 +590,7 @@ DEFAULT_CONFIG = Config(
                 "modelFallback": True,
                 "usageAwareFallback": False,
                 "usageReservePercent": 10,
-                "usageAwareAccountPick": True,
+                "accountSelectionPolicy": DEFAULT_ACCOUNT_SELECTION_POLICY,
                 "fallbackChains": {},
             },
             # Search is useful on first run without a credential: DuckDuckGo
@@ -1225,5 +1226,10 @@ class ConfigManager:
 
         settings_io._reload_before_write(self)
 
-        self.config.set_value(key, value)
-        self._write_config(vars(self.config))
+        # Stage the candidate after the locked disk reload. A rejected atomic
+        # write must not leave the process believing a value it never saved;
+        # restore-by-writing would also clobber another writer's later change.
+        candidate = deepcopy(self.config)
+        candidate.set_value(key, value)
+        self._write_config(vars(candidate))
+        self.config = candidate

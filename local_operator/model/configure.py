@@ -29,7 +29,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
+    from local_operator.providers.account_affinity import AccountRequestBoundary
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
@@ -4530,11 +4531,20 @@ class SessionStreamFn:
         this key. Constructor and re-push share this method precisely so the
         two cannot drift apart again.
         """
-        configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
-        if callable(configure_pick):
-            from local_operator.providers.failover import RetrySettings
+        from local_operator.providers.account_policy import (
+            effective_account_selection_policy,
+        )
 
-            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
+        policy = effective_account_selection_policy(settings)
+        configure_policy = getattr(self._auth_store, "configure_account_selection_policy", None)
+        if callable(configure_policy):
+            # Rebind the preference without clearing a still-useful success
+            # lease or unrelated provider/model/effort route pins.
+            configure_policy(policy)
+        else:
+            configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
+            if callable(configure_pick):
+                configure_pick(policy == "headroom")
 
     def apply_settings(self, values: Mapping[str, Any] | None) -> None:
         """Rebind the settings mapping every routing decision reads.
@@ -6462,6 +6472,32 @@ class SessionStreamFn:
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
+        # A quota/preflight pick must stay coherent until THIS request finishes,
+        # without granting an unsuccessful pick a durable cache lease. Store-
+        # owned identity cleanup also works when an old generator is closed
+        # after a newer boundary replaced it; no ContextVar spans a yield.
+        begin = getattr(self._auth_store, "begin_account_request", None)
+        end = getattr(self._auth_store, "end_account_request", None)
+        boundary = (
+            begin(self._session_id, request) if callable(begin) and not request.isolated else None
+        )
+        stream = self._stream_account_request(request, signal, boundary)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                if boundary is not None and callable(end):
+                    end(self._session_id, boundary)
+
+    async def _stream_account_request(
+        self,
+        request: ChatRequest,
+        signal: AbortSignal | None,
+        boundary: "AccountRequestBoundary | None" = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         # A session's old hint describes its preceding request, not this one.
         # Only the counted boundary held by this conversation can reconcile it
         # with appended assistant/tool/user content. Cold tokenization stays off
@@ -6626,6 +6662,9 @@ class SessionStreamFn:
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
         request = self._apply_cache_affinity(request)
+        update_boundary = getattr(self._auth_store, "update_account_request", None)
+        if boundary is not None and callable(update_boundary):
+            update_boundary(self._session_id, boundary, request)
 
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message

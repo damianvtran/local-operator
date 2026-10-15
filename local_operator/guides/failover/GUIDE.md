@@ -29,31 +29,63 @@ leave when all four are spent.
 
 ## Rotation within one provider
 
-Every credential for a provider is a candidate for every request. Selection
-order (`AuthStore._base_selection_order`) is: the session's sticky account
-first; then, for a session's **first** pick on a provider, a usage-ranked order
-(`usageAwareAccountPick`, default on) that reads each account's last cached
-quota report and puts the accounts with the most remaining headroom first —
-accounts within ten points of the best form one bucket that the per-session hash
-rotates, so concurrent starts still fan out instead of herding onto the single
-emptiest row, and accounts with no usable report rank as neutral (in the bucket)
-rather than last; then the plain per-session hash of the session id when usage
-says nothing; then round-robin for callers with no session. The ranking reads
-only what is already on disk — the per-account rows the message-boundary
-preflight writes when `usageAwareFallback` is on, and otherwise the per-provider
-payload `/usage` and the TUI's background warmer keep fresh — so it costs no
-network, and an empty cache leaves the pure hash order untouched. Once a session
-has an account it stays there (sticky) whatever the cache later says. An account
-that just failed on a provider-side fault is *demoted* (sorted last), never
-removed — a 500 is not the account's fault, so it stays available as a last
-resort. A demotion never applies to the account a session is already sticky to:
-it steers *new* picks — including the usage-ranked first pick, which only ever
-orders the rows that survive the demotion filter — and a session's warm prompt
-cache lives on its current account (see "Quota reserve" below). Because the
-marks are process-wide, this also means *another* session's 500 on account A no
-longer moves a session that is sticky to A — only that session's **own** 500
-does, since `rotate_sibling` clears its sticky for a server fault before the
-mark is consulted.
+Account selection stays within the current provider and its existing credential
+tier. It never activates a paid API-key tier, changes a model/effort pin, or buys
+credits to obtain a better reset time. Hard blocks, revoked/disabled credentials,
+cooldowns and per-attempt exclusions still apply; every measured relevant shared
+and model-family quota window gates eligibility.
+
+`retry.accountSelectionPolicy` chooses the preference after those checks:
+
+- `reset-soonest` (new default): prefer the nearest included-plan weekly refill.
+  Accounts within **60,000ms inclusive** of the fixed earliest deadline tie; use
+  their five-hour deadlines with the same fixed-minimum tolerance, then stable
+  session hashing. This is not transitive neighbour chaining. All relevant caps
+  must still have capacity: one window reopening is only an opportunity to
+  recheck another spent cap, not proof the account is healthy.
+- `headroom`: retain the cached-quota preference, spreading accounts within ten
+  percentage points of the most remaining headroom.
+- `fair`: use a stable per-session spread, without ranking reset or headroom
+  forecasts. Eligibility and reserve last-resort ordering still apply.
+
+No extra blocking usage probes are made for ranking. Reset forecasts use reports
+at most 30 minutes old; missing, stale, malformed, past, unsupported or
+future-fetched reset evidence does not invent a deadline. Weekly-unknown accounts
+join a neutral tie pool rather than starving behind known accounts. Without
+comparable weekly data use actual five-hour data, otherwise the stable hash.
+No-session callers keep round-robin. Cached reports are observations, not quota
+reservations; concurrent requests can still need normal reactive recovery.
+
+**Every policy first honors a compatible, unexpired local account-affinity
+lease derived from a successful request.** Resolving, inspecting or preflighting
+an account is not success and never renews a lease. Failed/cancelled streams,
+empty iterators and isolated errands do not renew it. A recognized successful
+terminal event must finish cleanly; expiry is request-start plus its effective
+wire lifetime, not response-completion plus a fresh TTL. The exact expiry
+boundary is invalid. Own failed attempts and hard depletion override affinity;
+another session's advisory demotion does not discard a valid warm lease.
+
+A lease is a conservative routing hint, **not a guaranteed cache hit**. Built-in
+Anthropic requests use the actual 5m/1h cache markers. Exact modern public OpenAI
+Responses endpoints use the documented 30m default; legacy public retention and
+Codex OAuth use explicitly bounded heuristics (30m/5m for legacy Responses, 5m
+for Codex/chat). Unknown compatible gateways and unsupported adapters get no
+persistent lease. Endpoint/model/cache-prefix or known cache-affecting setting
+changes and compaction require compatible evidence again. Request content is
+always built anew; an account lease never replays an old language prefix/body.
+
+Receipts live in a machine-local sidecar, namespaced by session, auth-store path
+and immutable account row creation identity, not in transported transcripts or
+credential DB schema. Resume keeps the original expiry; corrupt/future/rollback
+receipts are ignored. Persistence failure retains process memory only and loses
+restart continuity. Changing policy leaves a still-valid lease and unrelated
+provider/model/effort route pins intact; the preference applies after expiry.
+
+For compatibility only, an explicitly stored legacy `usageAwareAccountPick`
+strict boolean selects `headroom` when true and `fair` when false, **only when
+the canonical policy is absent**. A valid canonical enum wins; malformed canonical
+values fall back to `reset-soonest` with a diagnostic. Fresh configs emit only
+the canonical enum. Resetting its settings row clears legacy overrides too.
 
 When a request fails on quota, `_recover_quota_blocked` (in
 `providers/failover.py`) probes the *other* accounts' own usage before the chain
@@ -119,23 +151,13 @@ provider before it fails.
 `usageReservePercent` (default 10) is the headroom below which an account
 counts as **low**. Three rules that are easy to get backwards:
 
-- **Low is a preference for new picks, never an eviction.** The provider's
-  prompt cache is per account, so a session already transacting on a low
-  account **stays there** — it is told once (`quota low (N% remaining) —
-  staying on this account to keep the prompt cache warm`) and keeps spending
-  that account down to zero, at its current effort (a same-provider
-  lower-effort hop would invalidate the cached conversation too). Moving it
-  would rewrite its whole conversation prefix at cache-write price on an
-  account that has never seen it; on a multi-account host that rewrite was
-  measured at ~38% of all cache writes. The reactive 429 path keeps the same
-  promise (`rotate_sibling`: "sticky preserved"). Only a **depleted** verdict
-  (0% remaining) moves a running session, because then the rewrite is
-  unavoidable. A *new* session that lands on the low account with nothing
-  cached still moves off it: its own boundary walk demotes the row and
-  re-picks. That is per session, not a standing preference — the demotion
-  written by the walk is short-lived, and the stay branch writes none — so
-  new sessions do not yet *avoid* a low account up front; that needs the
-  usage-ranked first pick (`retry.usageAwareAccountPick`), a separate change.
+- **Low is a preference for unanchored picks, not an eviction from a valid
+  success-derived lease.** A compatible warm account stays usable below the
+  reserve threshold until depletion, a hard block/own failure, incompatibility
+  or lease expiry. After expiry the selected policy can prefer a healthy
+  sibling, even in the same old conversation. Low-but-usable rows remain a
+  last resort when healthy/unknown siblings cannot serve. A tentative
+  resolve/preflight pointer alone does not earn this warm-account exemption.
 - Low quota can select a **lower-effort route on the same provider** without
   blocking the account. Dropping from high to low effort on the model the user
   chose is cheaper than leaving for another vendor, so the reserve buys a
@@ -200,7 +222,7 @@ values:
     modelFallback: true     # shipped default
     usageAwareFallback: true   # NOT the default (ships false); see below
     usageReservePercent: 10 # shipped default
-    usageAwareAccountPick: true  # shipped default; see "Rotation within one provider"
+    accountSelectionPolicy: reset-soonest  # headroom | fair; see above
     # `false` restores the pure per-session hash spread for SESSIONS (the
     # setting is applied where a session's stream is built; store instances
     # the login/credential CLI or MCP auth build on their own never pass a

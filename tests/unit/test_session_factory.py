@@ -2865,6 +2865,65 @@ async def test_a_real_session_carries_the_language_line(
 
 
 @pytest.mark.asyncio
+async def test_account_affinity_never_replays_an_old_language_prefix(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lease selects a credential, never a previously built request body.
+
+    Drive the real session_factory prefix capture, not fabricated language
+    strings: the active session stays stable while a newly spawned one uses
+    the updated language, even with the same account/model/cache key.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import ChatRequest, Message, ModelSpec
+    from local_operator.providers.account_affinity import request_compatibility
+    from local_operator.providers.clients import AnthropicClient
+
+    # The shared fixture's manager root is a child of its env override; align
+    # them so the engine resolver reads the file whose setting we actually edit.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_config_dir))
+    manager = ConfigManager(tmp_config_dir)
+    manager.set_config_value("language", "en")
+    sessions = []
+    client = AnthropicClient()
+    try:
+        first = await create_session(
+            _args(hosting="test", model="test", yolo=True), manager, AgentRegistry(tmp_config_dir)
+        )
+        sessions.append(first)
+        produced = first._system_blocks_provider()
+        english = await produced if inspect.isawaitable(produced) else produced
+        manager.set_config_value("language", "fr")
+        produced = first._system_blocks_provider()
+        active = await produced if inspect.isawaitable(produced) else produced
+        assert active[0] == english[0]
+        second = await create_session(
+            _args(hosting="test", model="test", yolo=True), manager, AgentRegistry(tmp_config_dir)
+        )
+        sessions.append(second)
+        produced = second._system_blocks_provider()
+        french = await produced if inspect.isawaitable(produced) else produced
+        assert "preferred language is French (fr)" in french[0]
+        spec = ModelSpec(provider="anthropic", model_id="claude-sonnet-5")
+        en_request = ChatRequest(
+            model=spec,
+            system_blocks=english,
+            messages=[Message.user("synthetic")],
+            prompt_cache_key="synthetic-language-session",
+        )
+        fr_request = en_request.model_copy(update={"system_blocks": french})
+        assert request_compatibility(en_request) != request_compatibility(fr_request)
+        body = client._build_body(fr_request)
+        assert "preferred language is French (fr)" in str(body["system"])
+        assert "preferred language is English (en)" not in str(body["system"])
+    finally:
+        await client.aclose()
+        for session in sessions:
+            await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_subagent_carries_the_language_line(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

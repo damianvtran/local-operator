@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.i18n.keys import wire_errors_settings as _we
+from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -263,6 +264,10 @@ async def edit_setting(
             # (translated at its source in a later slice); `text` carries it
             # VERBATIM so readers that only show the string see no change.
             raise HTTPException(422, _we.invalid_value(error=str(error)).envelope()) from None
+        except OSError:
+            raise HTTPException(
+                503, _ap.error_write_failed().envelope(code="setting_write_failed")
+            ) from None
         return CRUDResponse(status=200, message="Setting saved.", result=_view(manager, setting))
 
 
@@ -279,4 +284,8 @@ async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_ma
             # (translated at its source in a later slice); `text` carries it
             # VERBATIM so readers that only show the string see no change.
             raise HTTPException(422, _we.invalid_value(error=str(error)).envelope()) from None
+        except OSError:
+            raise HTTPException(
+                503, _ap.error_write_failed().envelope(code="setting_write_failed")
+            ) from None
         return CRUDResponse(status=200, message="Setting reset.", result=_view(manager, setting))

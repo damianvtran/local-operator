@@ -1,0 +1,67 @@
+{
+  "relay.account_policy.title": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.back": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.loading": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.save": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.saving": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.saved": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.retry": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.unavailable": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.error": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "Transport failure or malformed save receipt: commit status is UNKNOWN, so do not assert that the server did not save. English-only fallback."
+  },
+  "relay.account_policy.scope": {
+    "role": "Account routing screen shared phone-client copy",
+    "tone": "plain, neutral",
+    "note": "English-only fallback, no ICU arguments."
+  },
+  "relay.account_policy.entry": {
+    "role": "Phone home header settings navigation",
+    "tone": "concise, neutral",
+    "note": "English-only child namespace; truthful fallback. No arguments."
+  },
+  "relay.account_policy.rejected": {
+    "role": "Phone account routing error state",
+    "tone": "plain, actionable",
+    "note": "Rejected HTTP4xx is known not saved; initial load failure is distinct from an unconfirmed write. English-only fallback."
+  },
+  "relay.account_policy.load_error": {
+    "role": "Phone account routing error state",
+    "tone": "plain, actionable",
+    "note": "Rejected HTTP4xx is known not saved; initial load failure is distinct from an unconfirmed write. English-only fallback."
+  }
+}
