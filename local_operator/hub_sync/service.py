@@ -2245,23 +2245,58 @@ def install_skill(
             # refuses to touch a NEWER revision (CAS); a cleanup that cannot
             # run leaves an orphan the next attempt's orphan handling clears.
             #
-            # The DESTINATION fingerprint, not the exception and not the
-            # journal phase, is the arbiter: the journal stays 'prepared'
-            # through the whole rename sequence, so a phase test cannot tell a
-            # staging fault (nothing landed; recovery restores/aborts, and the
-            # staged entry is an orphan for a link that never installed) from a
-            # crash after the new tree landed (recovery finalizes; the staged
-            # grant MUST survive or the recovered install would silently lose
-            # it). Recovery finalizes exactly when the destination already
-            # matches the rendered document, so that is the test.
+            # LANDED-NESS NEEDS POSITIVE OWNERSHIP (Q1d). Content equality
+            # alone misreads a pre-existing unknown authored folder that
+            # happens to be byte-identical to the attempted manifest as "our
+            # transaction landed" (that refusal leaves no journal at all), so
+            # only an unfinished journal record OF THIS ATTEMPT -- tied by
+            # local id, alias, the staged policy revision and the rendered
+            # document fingerprint -- may keep the staged grant:
+            #
+            #   no own journal      -> nothing of ours ran; revert (the CAS
+            #                          guard leaves newer writers alone).
+            #   own journal, destination != rendered
+            #                       -> the rename boundary was never crossed
+            #                          (staging fault); recovery restores or
+            #                          aborts; revert.
+            #   own journal, destination == rendered
+            #                       -> OUR rename put it there (the journal
+            #                          stays 'prepared' through the rename
+            #                          sequence, so the phase is deliberately
+            #                          NOT the test); recovery finalizes and
+            #                          the grant MUST survive, else the
+            #                          recovered install would silently lose
+            #                          it.
+            #   baseline already present -> the install committed; keep.
+            #
+            # blocked/aborted records are attempts the storage already
+            # declared dead and never count as ownership. The full state
+            # table lives with the PR remediation receipt.
             if staged_revision is None:
                 return
-            try:
-                landed = storage._fingerprint_path(storage.path(alias)) == local_write.fingerprint
-            except Exception:  # noqa: BLE001 - an unreadable destination is not proof of commit
-                landed = False
-            if landed:
+            if prov.read_baseline(ctx.config_dir, "skill", local_id) is not None:
                 return
+            owned = False
+            for record in storage.journal.pending(kind="skill", local_id=local_id):
+                if record.phase in ("blocked", "aborted"):
+                    continue
+                payload = record.payload
+                if (
+                    payload.get("local_alias") == alias
+                    and payload.get("policy_revision") == staged_revision
+                    and record.after_fingerprint == local_write.fingerprint
+                ):
+                    owned = True
+                    break
+            if owned:
+                try:
+                    landed = (
+                        storage._fingerprint_path(storage.path(alias)) == local_write.fingerprint
+                    )
+                except Exception:  # noqa: BLE001 - an unreadable destination is not a landing
+                    landed = False
+                if landed:
+                    return
             try:
                 pol.revert_policy_if_unchanged(
                     ctx.config_manager, identity, expected_revision=staged_revision

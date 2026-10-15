@@ -921,3 +921,83 @@ async def test_a_content_committed_failure_keeps_the_staged_grant(api, monkeypat
     assert record is not None and record.lineage == "clean"
     kept = pol.stored_link_policy(read_config_values(root) or {}, identity.link_id)
     assert kept is not None and kept.auto_push is True
+
+
+async def test_a_matching_authored_folder_is_never_adopted_and_never_leaks(api) -> None:
+    client, root, holder = api
+    # An unknown authored folder whose files are BYTE-IDENTICAL to the manifest
+    # this install renders. Content equality is not ownership: the storage
+    # refuses the takeover and NOTHING may be adopted -- no baseline, no
+    # policy, no grant -- because the refused attempt never owned that folder.
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    attest_skill_capability(root)
+    rendered = SkillDocument.from_json(manifest()).with_name(ALIAS)
+    authored = root / "skills" / ALIAS
+    authored.mkdir(parents=True)
+    for file in rendered.files:
+        path = authored / file.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(file.content)
+
+    # Sanity: the authored tree IS byte-identical to what the install renders.
+    assert SkillDocument.from_directory(authored).fingerprint == rendered.fingerprint
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "origin-conflict"
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+    values = read_config_values(root) or {}
+    assert pol.stored_link_policy(values, identity.link_id) is None
+    assert pol.read_policy(values, identity).public_egress_grant is None
+    assert list(prov.iter_baselines(root)) == []
+    # The authored tree is intact and untouched.
+    assert SkillDocument.from_directory(authored).fingerprint == rendered.fingerprint
+
+
+async def test_a_crash_in_the_rename_window_keeps_the_grant_and_recovers(api, monkeypatch) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    attest_skill_capability(root)
+
+    from local_operator.hub_sync import skill_storage
+
+    real = skill_storage.TransactionJournal.transition
+    calls: list[int] = []
+
+    def failing(self, record, phase, **kw):
+        if phase == "content-committed" and not calls:
+            calls.append(1)
+            raise RuntimeError("simulated crash in the rename window")
+        return real(self, record, phase, **kw)
+
+    monkeypatch.setattr(skill_storage.TransactionJournal, "transition", failing)
+    first = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert first.status_code != 200, first.text
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+    values = read_config_values(root) or {}
+    # The new tree IS in place and the journal is still ours (phase
+    # 'prepared'): the rename boundary was crossed, so the staged grant must
+    # survive for recovery even though the phase alone is coarse.
+    stored = pol.stored_link_policy(values, identity.link_id)
+    assert stored is not None and stored.auto_push is True
+    assert (root / "skills" / ALIAS / "SKILL.md").exists()
+    assert prov.read_baseline(root, "skill", local_id) is None
+
+    monkeypatch.setattr(skill_storage.TransactionJournal, "transition", real)
+    retry = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert retry.status_code == 200, retry.text
+    record = prov.read_baseline(root, "skill", local_id)
+    assert record is not None and record.lineage == "clean"
+    kept = pol.stored_link_policy(read_config_values(root) or {}, identity.link_id)
+    assert kept is not None and kept.auto_push is True
