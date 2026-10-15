@@ -127,3 +127,52 @@ def test_labelled_summary_generator_payload_requires_table_not_comparable_axes()
     payload = evidence_block(evidence.datasets, user_text="summarise", answer_text=answer)
     assert "table-only" in payload and "distinct entity units" in payload
     assert all(value in payload for value in ("296", "225", "325", "3194"))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "- Delta: -10 comments, -20 profiles, -30 links, -40 matches.",
+        "- Delta: +10 comments, +20 profiles, +30 links, +40 matches.",
+        "- Delta: −10 comments, −20 profiles, −30 links, −40 matches.",
+        "- Forecast: 10-20 comments, 30-40 profiles, 50-60 links and 70-80 matches.",
+        "- Forecast: 10 - 20 comments, 30 – 40 profiles, 50 — 60 links, 70 to 80 matches.",
+        "- Dates: 2026-10-14 comments, 2026-10-15 profiles, 2026-10-16 links, 2026-10-17 matches.",
+        "- IDs: case-296 comments, case-225 profiles, case-325 links and case-3194 matches.",
+        (
+            "- Ticket 101 covers comments; ticket 202 covers profiles; ticket "
+            "303 covers links; ticket 404 covers matches."
+        ),
+        (
+            "- Ticket 101 Covers comments; ticket 202 Covers profiles; ticket "
+            "303 Covers links; ticket 404 Covers matches."
+        ),
+        "- Delta: - 10 comments, - 20 profiles, - 30 links and - 40 matches.",
+        "Historical 296 comments, 225 profiles, 325 links, 3194 matches.\n- No counts here.",
+        "- Earlier 100 comments, 225 profiles, 325 links, 3194 matches.\n- Now 296 comments.",
+    ],
+)
+def test_labelled_summary_rejects_ambiguous_numeric_semantics(answer):
+    from local_operator.supplements.decision import drawable
+
+    found = ev.extract([], answer)
+    assert ev._labelled_summary(answer) is None
+    assert found.datasets == ()
+    # A pre-existing unit signal can fire on repeated 'covers'; no dataset means
+    # no paid graphics call. Do not conflate the signal with authoritative rows.
+    assert not drawable(found)
+
+
+@pytest.mark.parametrize("qualifier", ["supplementary", "SUPPLEMENTARY", "ACME Production"])
+def test_labelled_summary_keeps_explicit_vocabulary_and_real_uppercase_acronyms(qualifier):
+    answer = (
+        f"- Added 296 {qualifier} comments to 225 profiles, covering 325 links and 3,194 matches."
+    )
+    found = ev._labelled_summary(answer)
+    assert found is not None
+    assert {r[0]: r[1] for r in found.rows} == {
+        "comments": "296",
+        "profiles": "225",
+        "links": "325",
+        "matches": "3194",
+    }
