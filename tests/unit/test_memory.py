@@ -291,7 +291,9 @@ def test_related_is_one_hop_scope_bound_and_newest_first(store):
 
 def test_actual_read_write_edit_routes(store):
     store.root.parent.mkdir(parents=True, exist_ok=True)
-    (store.root.parent / "config.yml").write_text(json.dumps({"values": {"memory": {"enabled": True}}}))
+    (store.root.parent / "config.yml").write_text(
+        json.dumps({"values": {"memory": {"enabled": True}}})
+    )
     from local_operator.tools.builtin import execute_edit, execute_read, execute_write
 
     context = ToolContext(

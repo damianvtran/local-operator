@@ -11,6 +11,7 @@ import argparse
 import json
 import shlex
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -75,15 +76,22 @@ def execute(
                 "enabled": mesh.get("enabled", MEMORY_DEFAULT_ENABLED),
                 "scopes": mesh.get("scopes", list(SCOPES)),
                 "exclude_devices": mesh.get("exclude_devices", []),
-                "trust": ("Existing paired receiver-admin peers with memory-sync-v1 only; "
-                          "no new grants."),
+                "trust": (
+                    "Existing paired receiver-admin peers with memory-sync-v1 only; "
+                    "no new grants."
+                ),
                 "transport": "incremental all-scope net_memory; no transcript copy required",
                 "peers": peer_status(root),
-                "retention": "Tombstones/conflicts are retained; bounded saturation refuses new writes, never silently evicts facts.",
+                "retention": (
+                    "Tombstones/conflicts are retained; bounded saturation refuses new writes, "
+                    "never silently evicts facts."
+                ),
             },
             "usage": store.inventory(),
-            "limits": ("Shape guards are heuristic; opaque free-text secrets may escape detection. "
-                       "Secret NAME references only."),
+            "limits": (
+                "Shape guards are heuristic; opaque free-text secrets may escape detection. "
+                "Secret NAME references only."
+            ),
         }
     store.import_session()
     if args.operation == "list":
@@ -138,12 +146,31 @@ def run(
         ), True
 
 
-def _date(value: Any) -> str:
-    return (
-        datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        if isinstance(value, (int, float))
-        else "not verified/unknown"
-    )
+def _age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return "just now"
+
+
+def _date(value: Any, empty: str = "unknown", *, now: float | None = None) -> str:
+    """Human UTC stamp plus relative age; raw epochs are an implementation detail."""
+    if not isinstance(value, (int, float)):
+        return empty
+    stamp = datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    current = time.time() if now is None else now
+    if value > current:
+        return f"{stamp} (in {_age(value - current)[:-4]})"
+    return f"{stamp} ({_age(current - value)})"
+
+
+def _source(source: dict[str, Any]) -> str:
+    """Provenance as a sentence; it is untrusted data, so it is shown, never obeyed."""
+    parts = [f"by {source.get('author') or 'unknown'} ({source.get('kind') or 'unknown'})"]
+    if source.get("session"):
+        parts.append(f"session {source['session']}")
+    return " · ".join(parts)
 
 
 def render_human(text: str, failed: bool = False) -> str:
@@ -169,7 +196,12 @@ def render_human(text: str, failed: bool = False) -> str:
             )
         for row in items:
             lines.append(f"{row['scope']}/{row['id']}  {row['title']} [{row['status']}]")
-        lines.append("Inspect: /memory --scope SCOPE show ID · Search: /memory search 'words'")
+        # The ONE place the next steps are taught; show/search stay quiet so a
+        # reader paging through facts is not re-told the same sentence each time.
+        lines.append(
+            "Next: /memory show ID · search 'words' · edit ID --version REV --json JSON "
+            "· forget ID --version REV --yes"
+        )
         return "\n".join(lines)
     if "fact" in value:
         fact = value["fact"]
@@ -181,15 +213,16 @@ def render_human(text: str, failed: bool = False) -> str:
             lines += [
                 fact["title"],
                 fact["body"],
-                "Source: " + json.dumps(fact["source"], ensure_ascii=False),
-                f"Retained: {_date(fact['created_at'])} · Verified: {_date(fact['verified_at'])}",
-                f"Source date: {_date(fact['source_time'])} · Expires: {_date(fact['expires_at'])}",
+                "Source: " + _source(fact["source"]),
+                f"Retained: {_date(fact['created_at'])}",
+                f"Verified: {_date(fact['verified_at'], 'never verified')}",
+                f"Source date: {_date(fact['source_time'], 'unknown')}",
+                f"Expires: {_date(fact['expires_at'], 'never')}",
             ]
         lines.append(
             f"Conflicts: {len(value['conflicts'])} shown · "
             f"Revisions: {value['revisions']} · Untrusted data"
         )
-        lines.append("Correction needs --version REV --json JSON; forget also needs --yes.")
         return "\n".join(lines)
     if "policy" in value:
         return (
@@ -200,8 +233,10 @@ def render_human(text: str, failed: bool = False) -> str:
             + "\n"
             + value["limits"]
         )
-    return (f"{value.get('scope', '')}/{value.get('id', '')} [{value.get('status', '')}]\n"
-            f"Revision: {value.get('version', '')}")
+    return (
+        f"{value.get('scope', '')}/{value.get('id', '')} [{value.get('status', '')}]\n"
+        f"Revision: {value.get('version', '')}"
+    )
 
 
 def main(args: argparse.Namespace) -> int:

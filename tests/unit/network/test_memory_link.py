@@ -68,16 +68,20 @@ def linked(devices, monkeypatch, *, role="admin"):
 
 def test_promoted_session_uses_real_origin_and_syncs_over_sockets(devices, monkeypatch):
     import shutil
+
     from local_operator.memory import SESSION_EXPORT_NAME
 
     a, b = linked(devices, monkeypatch)
     original = bank(a)
-    item = original.put("session", {"title":"Promotion proof", "body":"Promotion evidence docs/promoted.md"})
+    item = original.put(
+        "session", {"title": "Promotion proof", "body": "Promotion evidence docs/promoted.md"}
+    )
     directory = b.root / "sessions" / "promoted-session"
     directory.mkdir(parents=True)
     shutil.copyfile(original.session_dir / SESSION_EXPORT_NAME, directory / SESSION_EXPORT_NAME)
-    promoted = MemoryStore(b.root, MemoryIdentity("promoted-session"), directory,
-                           origin=b.identity.device_id)
+    promoted = MemoryStore(
+        b.root, MemoryIdentity("promoted-session"), directory, origin=b.identity.device_id
+    )
     promoted.import_session()
     rows = [json.loads(line) for line in (directory / SESSION_EXPORT_NAME).read_text().splitlines()]
     assert rows[0]["origin_device"] == b.identity.device_id
@@ -96,8 +100,10 @@ def test_promoted_session_uses_real_origin_and_syncs_over_sockets(devices, monke
 def test_late_gap_fill_replays_previously_skipped_history_over_sockets(devices, monkeypatch):
     a, b = linked(devices, monkeypatch)
     left, right = bank(a), bank(b)
-    first = left.put("global", {"title":"Predecessor proof", "body":"Predecessor global evidence"})
-    second = left.put("session", {"title":"Partial session", "body":"Partial offline evidence"})
+    first = left.put(
+        "global", {"title": "Predecessor proof", "body": "Predecessor global evidence"}
+    )
+    second = left.put("session", {"title": "Partial session", "body": "Partial offline evidence"})
     with left.connection() as db:
         records = [json.loads(row[0]) for row in db.execute("SELECT data FROM ops ORDER BY seq")]
         # Synthetic cold receiver: preserve its scoped session export but not
@@ -122,16 +128,21 @@ def test_late_gap_fill_replays_previously_skipped_history_over_sockets(devices, 
 
 def test_sender_withholds_by_id_and_receiver_refuses_without_secret_residue(devices, monkeypatch):
     import hashlib
+
     from local_operator.memory import _dump
 
     a, b = linked(devices, monkeypatch)
     left, right = bank(a), bank(b)
-    item = left.put("global", {"title":"Guard proof", "body":"Originally valid synthetic evidence"})
+    item = left.put(
+        "global", {"title": "Guard proof", "body": "Originally valid synthetic evidence"}
+    )
     # Deliberately bypass the store boundary to test the sender's independent
     # guard. This synthetic corruption is NOT an admitted memory API write.
     bad = "passport number AB" + "1234567"
     with left.connection() as db:
-        op = json.loads(db.execute("SELECT data FROM ops WHERE op_id=?", (item["version"],)).fetchone()[0])
+        op = json.loads(
+            db.execute("SELECT data FROM ops WHERE op_id=?", (item["version"],)).fetchone()[0]
+        )
         op["fact"]["body"] = bad
         op["body_sha"] = hashlib.sha256(_dump(op["fact"]).encode()).hexdigest()
         db.execute("UPDATE ops SET data=? WHERE op_id=?", (_dump(op), item["version"]))
@@ -140,12 +151,31 @@ def test_sender_withholds_by_id_and_receiver_refuses_without_secret_residue(devi
     assert result["code"] == "withheld", result
     assert result["withheld"] == [item["version"]]
     assert right.search("Guard proof") == []
-    assert not any(bad.encode() in path.read_bytes() for path in right.root.glob("*") if path.is_file())
+    assert not any(
+        bad.encode() in path.read_bytes() for path in right.root.glob("*") if path.is_file()
+    )
     link = a._ensure_link(b.identity.device_id)
-    payload = {"v":1, "generation":0, "scopes":["global"], "after":{a.identity.device_id:1},
-               "ops":[op], "skips":[], "proofs":[]}
-    reply = link.request({"op":"net_memory", "phase":"push", "generation":0,
-        "scopes":["global"], "payload":payload, "req":a._next_relay_req(), "locality":"remote"}, timeout=5)
+    payload = {
+        "v": 1,
+        "generation": 0,
+        "scopes": ["global"],
+        "after": {a.identity.device_id: 1},
+        "ops": [op],
+        "skips": [],
+        "proofs": [],
+    }
+    reply = link.request(
+        {
+            "op": "net_memory",
+            "phase": "push",
+            "generation": 0,
+            "scopes": ["global"],
+            "payload": payload,
+            "req": a._next_relay_req(),
+            "locality": "remote",
+        },
+        timeout=5,
+    )
     assert reply["op"] == "error"
     # The receiver guard refuses the whole payload before field-level parsing,
     # so the sentence names no operation and certainly not the rejected value.
@@ -153,7 +183,10 @@ def test_sender_withholds_by_id_and_receiver_refuses_without_secret_residue(devi
     assert bad not in json.dumps(reply)
     with right.connection() as db:
         assert db.execute("SELECT count(*) FROM ops").fetchone()[0] == 0
-    print("MESH unsafe sender op withheld by ID; direct receiver rejects by ID; no peer body/index/history residue PASS")
+    print(
+        "MESH unsafe sender op withheld by ID; direct receiver refuses payload; "
+        "no peer body/index/history residue PASS"
+    )
 
 
 def test_all_scopes_real_transport_restart_and_tombstone_convergence(devices, monkeypatch):
