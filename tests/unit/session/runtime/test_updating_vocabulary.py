@@ -217,26 +217,33 @@ def test_the_failure_has_a_renderable_incident_cause_of_its_own() -> None:
     ), "a bound ending an update is not something the user asked for"
     sentence = incidents.render_cut_off_reason(cause)
     assert "update" in sentence, sentence
-    # THE SENTENCE NAMES NO BOUND, deliberately (design review round 1, D2): the
-    # update WINDOW and the build DRAIN both publish this token, with bounds three
-    # orders of magnitude apart, so a number rendered from either constant is wrong
-    # for the other arm by construction. What the reader needs is the bound the
-    # runtime ACTUALLY spent, so it rides the incident's detail — pinned below.
+    # THE SENTENCE NAMES NO BOUND, deliberately (design review round 1, D2). When it
+    # was written TWO arms published this token with bounds three orders of magnitude
+    # apart (the update WINDOW's seconds and the build DRAIN's fifteen minutes), so a
+    # number rendered from either constant was wrong for the other arm by construction;
+    # THE OPERATOR'S ASK OF 2026-10-15 LEFT ONE ARM (the drain abandon is a deferral now
+    # — it keeps its departing commitment and publishes nothing — so the WINDOW is the
+    # only publisher), and the no-number rule outlives it: the sentence is shared
+    # vocabulary and the bound belongs to the caller. What the reader needs is the bound
+    # the runtime ACTUALLY spent, so it rides the incident's detail — pinned below.
     assert types.bound_text(buildwatch.UPDATE_LOCK_S) not in sentence, (
-        "the shared sentence must not claim one arm's bound for both: " f"{sentence!r}"
+        "the shared sentence must not claim one arm's bound: " f"{sentence!r}"
     )
     assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) not in sentence, sentence
-    # ...and the detail names it, per arm, which is the only place it can be known.
+    # ...and the detail names the bound the CALLER passed, which is the only place it
+    # can be known. The helper is still exercised with both constants even though only
+    # the window arm reaches it now: it takes its number from the argument, so a helper
+    # that ignored the argument and rendered a constant would fail here.
     window_detail = incidents.update_failed_detail("0.62.2 -> 0.63.0", buildwatch.UPDATE_LOCK_S)
     drain_detail = incidents.update_failed_detail("0.62.2 -> 0.63.0", types.BUILD_DRAIN_PROGRESS_S)
     assert types.bound_text(buildwatch.UPDATE_LOCK_S) in window_detail, window_detail
     assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) in drain_detail, drain_detail
-    assert window_detail != drain_detail, "the two arms must not report one bound"
+    assert window_detail != drain_detail, "the helper must report the bound it was given"
     rendered = incidents.render_cut_off_reason(cause, detail=drain_detail)
     assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) in rendered, rendered
     assert (
         types.bound_text(buildwatch.UPDATE_LOCK_S) not in rendered
-    ), f"the drain rung reported the window's bound: {rendered!r}"
+    ), f"the rendered sentence claimed a bound the caller did not pass: {rendered!r}"
 
 
 def test_the_fleet_row_carries_the_window_and_the_failure() -> None:
@@ -348,12 +355,13 @@ def test_the_failed_window_does_not_wear_the_idle_row_ink() -> None:
 def test_a_failure_under_a_latched_drain_keeps_the_drain_ink() -> None:
     """Both facts at once: one ink per row, and the drain is the one that takes it.
 
-    ``update_failed`` is cleared only by the NEXT window, so a record that failed an
-    update and has since latched a drain carries both facts — and before this ordering
+    ``update_failed`` is written by the WINDOW arm alone, so the pair this cell pins
+    is a record whose window gave up and which has since latched a drain (see
+    ``ServingSessionHandle.note_leaving`` for the supersede) — and before this ordering
     the failure arm came first, which took the accent marker off a row that is leaving
     and left the departure inked by nothing while the words beside it still named it
     (agent review round 3, NIT). The failure is not lost in the exchange: it stays on
-    the record, on the fleet row's ``update_failed``, and in the incident the abandon
+    the record, on the fleet row's ``update_failed``, and in the incident the WINDOW
     arm wrote — what changes is which ink carries the fact a reader acts on NOW.
     """
     failed_and_leaving = SessionLine(
