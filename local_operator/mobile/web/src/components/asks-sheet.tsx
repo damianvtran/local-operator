@@ -1,16 +1,19 @@
 /**
- * Asks sheet — every queued ask, across conversations (design §5.3, R7's
- * EXPANDED state).
+ * Asks sheet — the queued asks of the conversation it was opened from (design
+ * §5.3, R7's EXPANDED state).
  *
- * WHY A SHEET AND NOT A LIST ON THE SESSION SCREEN. An ask is durable: it
- * outlives the runtime that queued it, and it belongs to a CONVERSATION rather
- * than to the screen you happen to be on. The phone's session screen can only
- * show the asks of the session it is addressing, which is exactly the case that
- * matters least — the ask you have not seen is the one in the conversation you
- * are not looking at (a session woken by a wake, a monitor, or a peer's
- * message). This sheet reads the aggregate (`GET /api/asks`), which is
- * index-backed, needs no runtime, and therefore answers the same way whether
- * the owning runtime is alive or long gone.
+ * ONE CONVERSATION, ON PURPOSE. The sheet used to list every conversation's
+ * asks, so opening one session's questions showed every session's (Ben's
+ * report, 2026-10-15): the entry sits on a conversation's own screen and reads
+ * as that conversation's questions, and other conversations' rows under it
+ * were noise at best and a wrong answer at worst. It now shows only the rows whose `session_id` is the opening conversation's.
+ * Other conversations' asks stay visible where they belong: on the session
+ * list, as each row's own ask chip.
+ *
+ * IT STILL READS THE AGGREGATE (`GET /api/asks`) and filters client-side,
+ * because the aggregate is index-backed and needs no runtime: it answers the
+ * same way whether the owning runtime is alive or long gone, which a read of
+ * the live projection cannot.
  *
  * THE ANSWER SURFACE IS HERE. While this sheet is open, the phone's ask
  * composer is the sheet's own controls — each ask's form, with its own send —
@@ -36,7 +39,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
-import { isAnswerable, isDeadConversation, orderedForDisplay, outstandingAsks } from "../lib/asks";
+import {
+	isAnswerable,
+	isDeadConversation,
+	isLapsed,
+	orderedForDisplay,
+	outstandingAsks,
+} from "../lib/asks";
 import { useAsksRevision, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
@@ -70,18 +79,14 @@ export function AsksSheet({
 	open,
 	onClose,
 	currentSessionId,
-	onOpenConversation,
 }: {
 	open: boolean;
 	onClose: () => void;
-	/** The conversation this sheet was opened from, if any. Rows belonging to it
-	    are not labelled with a conversation name — the reader is already there. */
-	currentSessionId?: string;
-	/** Navigate to a row's conversation (and close the sheet). Absent on screens
-	    that cannot navigate — the row then simply carries no such control. */
-	onOpenConversation?: (sessionId: string) => void;
+	/** The conversation this sheet was opened from: the only one whose asks it
+	    lists (see the module note). */
+	currentSessionId: string;
 }) {
-	const [rows, setRows] = useState<PendingAsk[]>([]);
+	const [allRows, setRows] = useState<PendingAsk[]>([]);
 	const [loaded, setLoaded] = useState(false);
 	const [error, setError] = useState("");
 	const [nowMs, setNowMs] = useState(() => Date.now());
@@ -142,16 +147,19 @@ export function AsksSheet({
 		return () => clearInterval(timer);
 	}, [open]);
 
-	const names = useMemo(() => {
-		const map = new Map<string, { name: string; ended: boolean }>();
-		for (const session of sessions) {
-			map.set(session.session_id, {
-				name: session.conversation_name || session.session_id,
-				ended: session.ended === true,
-			});
-		}
-		return map;
-	}, [sessions]);
+	/* Only the ended/not-running strip reads the session list now: whether the
+	   opening conversation has ended changes the strip's wording. */
+	const ended = useMemo(
+		() => sessions.some((session) => session.session_id === currentSessionId && session.ended === true),
+		[sessions, currentSessionId],
+	);
+
+	/* THIS CONVERSATION'S ROWS ONLY, before anything orders or counts them, so
+	   the title, the empty state and the list all describe the same set. */
+	const rows = useMemo(
+		() => allRows.filter((row) => String(row.session_id) === currentSessionId),
+		[allRows, currentSessionId],
+	);
 
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
@@ -209,38 +217,9 @@ export function AsksSheet({
 					</p>
 				) : null}
 				{listed.map((row) => {
-					const sessionId = String(row.session_id || currentSessionId || "");
-					const foreign = Boolean(sessionId) && sessionId !== currentSessionId;
-					const named = names.get(sessionId);
+					const sessionId = currentSessionId;
 					return (
 						<div key={`${sessionId}:${row.ask_id}`} className="flex flex-col gap-1">
-							{foreign ? (
-								<span className="flex items-baseline gap-2 text-meta text-ink-dim">
-									<span className="min-w-0 truncate">
-										{named?.name ?? sessionId}
-									</span>
-									{onOpenConversation && !isDeadConversation(row) ? (
-										/* THE PARENT OWNS THE WHOLE TRANSITION (agent review round 2,
-										   M1). This control used to navigate and THEN close itself, and
-										   closing gives the sheet's history entry back with
-										   `history.back()` — which, on an entry the navigation had
-										   just pushed, popped the target and left the hash back at
-										   `#/s/asks`. `onOpenConversation` now clears the sheet AND
-										   replaces its entry, in that order, in one place. */
-										<button
-											type="button"
-											onClick={() => onOpenConversation(sessionId)}
-											/* 44 px, like every other control on this sheet (design
-											   D7 = UX U9): it was a bare `underline` link at 28x17 css
-											   — the smallest target here and the only route from the
-											   sheet to a foreign ask's conversation. */
-											className="flex min-h-11 shrink-0 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated"
-										>
-											open
-										</button>
-									) : null}
-								</span>
-							) : null}
 							{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
 							    (design round 1, D4 = UX U4; the two gates are the round-2 corrections).
 
@@ -260,12 +239,17 @@ export function AsksSheet({
 							    each other one element apart. It is `isDeadConversation`, the
 							    CONJUNCTION of the two fields — not `durable` alone, which would
 							    silence the strip on a live conversation that answers fine
-							    (design round 3, D7). */}
+							    (design round 3, D7).
+
+							    NOT LAPSED, because a lapsed card offers no answer (`isLapsed`),
+							    so "answering will bring it up" would promise a tap the card one
+							    element below does not have. */}
 							{isAnswerable(String(row.status || "open")) &&
+							!isLapsed(row, nowMs) &&
 							!isDeadConversation(row) &&
-							(named?.ended || row.runtime_live === false) ? (
+							(ended || row.runtime_live === false) ? (
 								<p className="text-meta text-ink-dim">
-									{named?.ended
+									{ended
 										? "this conversation has ended — answering will reopen it (this can take up to ~30 s)"
 										: "this conversation is not running — answering will bring it up (this can take up to ~30 s)"}
 								</p>

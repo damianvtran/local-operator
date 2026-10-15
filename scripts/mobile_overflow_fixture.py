@@ -521,8 +521,8 @@ def _queued_ask_projection() -> SessionProjection:
       card's multi-question form are both visible;
     * ``qa-second`` — a newer open ask, so the count and the list have more than
       one row;
-    * ``qa-deadline`` — TIMED OUT and still answerable, which is the state the
-      fixed copy exists for ("the agent moved on; you can still answer");
+    * ``qa-deadline`` — TIMED OUT: the phone shows it LAPSED ("the agent took its
+      default and moved on"), question read-only, dismiss and no options;
     * ``qa-settled`` / ``qa-declined`` — terminal, so the card's receipt shape
       and the honest "no reply was sent" line are in the same frame.
 
@@ -857,7 +857,9 @@ class QueuedAskHarness:
     #: settled it first, the phone's screen is one repaint behind, and the copy
     #: the loser reads is the queue's rather than the client's. It is the one
     #: refusal a capture can reach deterministically.
-    already_answered_elsewhere = "qa-deadline"
+    #: ``qa-second`` rather than the timed-out row, because a lapsed card offers no
+    #: answer to race with.
+    already_answered_elsewhere = "qa-second"
 
     async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
         if str(ask_id) == self.already_answered_elsewhere:
@@ -948,14 +950,13 @@ def _empty_index_requested() -> bool:
 
 
 def _foreign_ask_projection() -> SessionProjection:
-    """A session with ONE ask of its own, so the asks sheet opened from here
-    shows its own row beside rows belonging to other conversations.
+    """A session with ONE ask of its own, while the aggregate index carries every
+    other fixture session's asks too.
 
-    WHY THIS SESSION EXISTS (design round 1, D6). The sheet's reason for existing
-    is the ask you are NOT looking at, and no frame showed it: every row in the
-    shipped set belonged to the conversation on screen, so the foreign-row
-    treatment (conversation name + "this conversation has ended…") appeared
-    nowhere. Opening the sheet needs a bar, and a bar needs an outstanding ask —
+    WHY THIS SESSION EXISTS. The sheet opened from here must list ONLY ``fa-mine``
+    (Ben's report, 2026-10-15: it used to list every conversation's asks), and a
+    frame of that needs a conversation whose aggregate neighbours are not its
+    own. Opening the sheet needs a bar, and a bar needs an outstanding ask —
     hence one of its own rather than none.
     """
     projection = SessionProjection(
@@ -988,12 +989,11 @@ def _foreign_ask_projection() -> SessionProjection:
 def _ended_ask_projection() -> SessionProjection:
     """A conversation whose runtime is GONE, with an ask still outstanding.
 
-    WHY IT IS ITS OWN SESSION (QA round 3, Q-1). The ended state needs a session
-    the frames do not otherwise OPEN — the `-foreign` frame photographs the sheet
-    as seen FROM a conversation, so making that conversation ended turned its own
-    route into a durable row with no asks and the frame stopped showing a sheet
-    at all. A dedicated session keeps both frames true: this one exists only to be
-    somebody else's foreign row.
+    WHY IT IS ITS OWN SESSION (QA round 3, Q-1). Making `asks-foreign` ended
+    turned its own route into a durable row with no asks and its frame stopped
+    showing a sheet at all. A dedicated session keeps both frames true; the
+    `-ended` frame opens this conversation's OWN sheet, since the sheet no longer
+    lists another conversation's rows.
     """
     projection = SessionProjection(
         session_id="asks-ended",
@@ -1470,13 +1470,12 @@ async def main() -> None:
         # THE ZERO-ASKS STATE of the same surface (the bar must be absent, and
         # the settling rows are still in the transcript).
         _settled_ask_projection(),
-        # The two frames design round 1 (D6) asked for: a sheet whose rows are
-        # FOREIGN (the sheet's reason for existing) and the busiest stack, where
-        # the chip shares its slot with todos, a roster and an approval card.
+        # A conversation whose sheet must list only its own row while the index
+        # carries others' (the `-scoped` frame), and the busiest stack, where the
+        # chip shares its slot with todos, a roster and an approval card.
         _foreign_ask_projection(),
         _asks_stacked_projection(),
-        # The ENDED conversation (D6/D8): a session nobody opens, so the frames
-        # that show the sheet FROM a conversation keep working (Q-1, round 3).
+        # The ENDED conversation (D6/D8): its own sheet carries the ended strip.
         _ended_ask_projection(),
         # PR-2's session-status spend states: the published object populated,
         # an untracked conversation, and an unknown total — the three readings

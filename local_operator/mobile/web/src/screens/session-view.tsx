@@ -578,26 +578,6 @@ export function SessionScreen({
 		   the next Back is not eaten by a sheet that is already closed. */
 		if (window.history.state?.askSheet) window.history.back();
 	}, [noteAsksDismissed]);
-	/* LEAVING THE SHEET FOR A FOREIGN CONVERSATION REPLACES ITS ENTRY.
-	 *
-	 * The sheet's own entry is the current one when this fires, so replacing it
-	 * puts the target route exactly where the sheet was: no extra history stop,
-	 * and Back from the target returns to where the reader was before opening the
-	 * sheet. Closing by hand (above) still gives the entry back with `back()`,
-	 * which is the right thing for a dismissal — but NOT for a navigation, which
-	 * is why this is a separate path and not `closeAsks()` plus a push: the pop
-	 * and the push raced (agent review round 2, M1), and the entry the push had
-	 * created was the one the pop then discarded.
-	 *
-	 * THE FLAG IS CLEARED WITH THE ENTRY. `navigate` spreads the current state
-	 * into the route it pushes, so an `askSheet` left set here would ride into
-	 * the target's entry and let a later dismissal pop a route the reader is
-	 * standing on. */
-	const openForeignConversation = useCallback((target: string) => {
-		setAsksOpen(false);
-		window.history.replaceState({ ...window.history.state, askSheet: false }, "");
-		navigate(`/s/${target}`, { replace: true, hasInAppPredecessor: true });
-	}, []);
 	useEffect(() => {
 		if (!asksOpen) return;
 		const onPop = () => {
@@ -605,11 +585,8 @@ export function SessionScreen({
 			   gesture is the primary escape from a modal (U2), and the sheet's entry
 			   carries no URL change, so a Back out of the sheet lands on THIS
 			   conversation's own route: the user turned the sheet away. A pop that lands
-			   anywhere else is a navigation, and it fires `popstate` too: the router's
-			   synthetic one when the sheet's own `open` control leaves for another
-			   conversation (dispatched while this listener is still attached, because the
-			   state update that detaches it has not rendered yet), and the browser's when
-			   a notification tap or a deep link changes the hash behind an open sheet.
+			   anywhere else is a navigation, and it fires `popstate` too: the browser's
+			   when a notification tap or a deep link changes the hash behind an open sheet.
 			   None of those is the user waving this conversation's asks off, and recording
 			   one would switch the open-by-default policy off for a conversation whose
 			   sheet nobody closed. The sheet still closes in every case, as it always did. */
@@ -1053,7 +1030,6 @@ export function SessionScreen({
 				open={asksOpen}
 				onClose={closeAsks}
 				currentSessionId={sessionId}
-				onOpenConversation={openForeignConversation}
 			/>
 			</>}
 		</div>

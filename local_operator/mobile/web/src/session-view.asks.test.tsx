@@ -251,39 +251,6 @@ describe("SessionScreen and queued asks", () => {
 		expect(dialog.querySelector('[data-ask-id="mine-1"]')).not.toBeNull();
 	});
 
-	it("takes a foreign row's `open` to that conversation, and does not pop back", async () => {
-		/* r2-M1 (agent review round 2), a reproduced functional regression inside
-		   the U2 back-handling: the sheet used to navigate and THEN close itself,
-		   and closing gives the sheet's entry back with `history.back()` — so the
-		   entry the navigation had just pushed was the one the pop discarded and
-		   the hash landed back on `#/s/asks`. Two facts are asserted, because they
-		   fail separately: the route the reader ends on, and the state the route's
-		   entry carries (the flag leaking is the mechanism, and a router that
-		   spreads the current state is what let it leak). */
-		const { getAsks } = await import("./api");
-		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ ask_id: "other-1", session_id: "other" })],
-		});
-		window.location.hash = "#/s/mine";
-		render(<SessionScreen sessionId="mine" />);
-		slot = { projection: projection({ asks: [ask()], asks_open: 1 }), connected: true };
-		render(<SessionScreen sessionId="mine" />);
-		fireEvent.click(screen.getByTestId("ask-dock"));
-		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
-		const entriesBefore = window.history.length;
-		fireEvent.click(screen.getByRole("button", { name: "open" }));
-		await waitFor(() => expect(window.location.hash).toBe("#/s/other"));
-		expect(Boolean(window.history.state?.askSheet)).toBe(false);
-		/* REPLACE, not push (agent review round 3, NIT): a push would satisfy the
-		   two assertions above while leaving the sheet's own entry — and its
-		   stale `askSheet` — in the stack, so the next Back would land on a
-		   closed sheet. The entry count is what tells the two apart. */
-		expect(window.history.length).toBe(entriesBefore);
-		/* Give a queued traversal every chance to undo it. */
-		await new Promise((resolve) => setTimeout(resolve, 40));
-		expect(window.location.hash).toBe("#/s/other");
-	});
-
 	it("collapses the sheet on Back instead of leaving the conversation", async () => {
 		/* U2 (UX round 1): the phone's back gesture popped the ROUTE and took the
 		   draft with it; the sheet claims one history entry while it is open, so a

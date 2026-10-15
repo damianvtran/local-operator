@@ -3,7 +3,7 @@
 // The queued-ask card: the ATOMIC submit (one complete map, every question id
 // present — the queue refuses a partial one), the deliberate skip (sent as an
 // empty list, which is the contract's own spelling for "no answer"), the
-// answerable-after-deadline state, and the rule that a refusal is rendered in
+// read-only lapsed state after a deadline, and the rule that a refusal is rendered in
 // the DAEMON's own words rather than humanised here.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -128,12 +128,6 @@ describe("AskCard", () => {
 		renderCard(ask({ questions: [question({ options: [], secret: true, persist: true })] }));
 		expect(screen.getByPlaceholderText("paste secret").getAttribute("type")).toBe("password");
 		expect(screen.getByText(/not shown in the transcript/)).toBeTruthy();
-	});
-
-	it("keeps a timed-out ask answerable, with the deadline stated", () => {
-		renderCard(ask({ status: "timed_out" }));
-		expect(screen.getByText(/you can still answer/)).toBeTruthy();
-		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
 	});
 
 	it("shows a timed-out ask as lapsed: the question, no answer controls, Dismiss kept", () => {
