@@ -78,6 +78,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -192,7 +193,19 @@ def run(
 
     child_env = os.environ.copy()
     node_options = child_env.get("NODE_OPTIONS", "")
-    heaps = re.findall(r"(?:^|\s)--max[-_]old[-_]space[-_]size(?:=|\s+)(\d+)(?=\s|$)", node_options)
+    # Match whole options after unquoting: a raw regex misses quoted heap flags
+    # and can mistake a heap-looking substring in --title's value for a flag.
+    try:
+        option_tokens = shlex.split(node_options)
+    except ValueError:
+        # Leave malformed caller text for the child to diagnose, but don't let
+        # an unmatched quote trick us into recognising a larger heap option.
+        option_tokens = []
+    heaps = [
+        match.group(1)
+        for token in option_tokens
+        if (match := re.fullmatch(r"--max[-_]old[-_]space[-_]size=(\+?\d+)", token))
+    ]
     # V8 resolves repeated flags last-wins: append after a smaller effective
     # value, preserving unrelated options and leaving a larger caller cap alone.
     if not heaps or int(heaps[-1]) < NODE_HEAP_MB:
