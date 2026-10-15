@@ -4209,6 +4209,11 @@ class Session:
         from local_operator.paths import config_dir as _resolve_session_root
 
         self._config_dir = _resolve_session_root()
+        #: Memory-capture bookkeeping (local_operator.memory_capture): the last compaction
+        #: marker a recovery pass claimed, and its (marker, 'ok'|'failed') terminal state.
+        #: Instance state, not durable: the durable truth is the capture watermark row.
+        self._memory_recovery_marker: str | None = None
+        self._memory_terminal: tuple[str, str] | None = None
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             # Deliveries route through the indirection hook: at resume the

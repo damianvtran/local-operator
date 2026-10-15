@@ -535,6 +535,7 @@ class MemoryStore:
                         "status": "active",
                         "deduplicated": True,
                     }
+            heads: list[dict[str, Any]] = []
             if ops:
                 if any(op["scope"] != scope or op["owner_key"] != owner for op in ops):
                     raise MemoryError("Memory not found in the authorized scope.")
@@ -599,7 +600,7 @@ class MemoryStore:
                 "fact": clean,
                 "body_sha": (
                     heads[0]["body_sha"]
-                    if forget
+                    if forget and heads
                     else hashlib.sha256(_dump(clean).encode()).hexdigest()
                 ),
             }
@@ -624,7 +625,7 @@ class MemoryStore:
             "id": entity,
             "version": op["op_id"],
             "scope": scope,
-            "status": "forgotten" if forget else clean["status"],
+            "status": "forgotten" if clean is None else clean["status"],
         }
 
     def _session_directory(self, owner: str, db: sqlite3.Connection | None = None) -> Path | None:

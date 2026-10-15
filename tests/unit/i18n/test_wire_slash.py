@@ -27,6 +27,9 @@ from local_operator.slash_commands import SLASH_COMMANDS
 #: the pre-slice registry (name, description, aliases, desktop_destination);
 #: only the description column is pinned here, the machine fields are pinned
 #: by the registry's own tests.
+#: Not in wire.slash on purpose: any edit to that catalogue voids the audited locale ledger hashes.
+MEMORY_COMMAND = "memory"
+
 PREVIOUS_ENGLISH: dict[str, str] = {
     "help": "List all commands",
     "keys": "Show the keyboard legend",
@@ -98,10 +101,12 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # The migrated SITES: the registry field the picker, /help, the desktop
     # catalogue and the phone sheet all read. A missing/extra command raises a
     # KeyError here rather than passing silently.
-    # 50 at S2, +1 with C's `/language` (see the table note); a missing or
+    # 50 at S2, +1 with C's `/language`, +1 with `/memory`, which lives in the English-only `wire.memory` namespace so the audited wire.slash hash stays valid (see the table note); a missing or
     # extra command raises a KeyError either way rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 52
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 1 == 53
     for command in SLASH_COMMANDS:
+        if command.name == MEMORY_COMMAND:
+            continue
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 
 
@@ -118,6 +123,8 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
     # function, rendered through the runtime — asserted under the pinned `en`
     # locale (RFC §7).
     for command in SLASH_COMMANDS:
+        if command.name == MEMORY_COMMAND:
+            continue
         function = getattr(wire_slash, command.name)
         message = function()
         assert message.code == f"wire.slash.{command.name}"

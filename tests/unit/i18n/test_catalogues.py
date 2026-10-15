@@ -62,6 +62,8 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.console",
         # The desktop phone-setup refusals (this PR's own namespace).
         "wire.tunnel_setup",
+        # Memory settings copy (LOH-25): the registry rows resolve through it.
+        "wire.memory",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

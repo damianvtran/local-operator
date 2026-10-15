@@ -14,7 +14,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from local_operator.memory import SCOPES, MemoryError, MemoryIdentity, MemoryStore
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
@@ -22,7 +22,7 @@ from local_operator.paths import config_dir
 
 
 class MemoryParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         raise MemoryError(
             "Invalid memory command. Use list/show/search/edit/forget/status; "
             "edit needs ID --version REV --json JSON; forget needs ID --version REV --yes."
