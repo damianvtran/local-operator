@@ -44,6 +44,13 @@ What `timeout(1)` cannot do is the third case: by then it HAS exited, so no
 spelling of it can reap anything. `setsid` does not exist on macOS, which is the
 platform this bites hardest.
 
+Node heap headroom belongs here too: whole-tree pyright OOMed at node's ~4 GB
+old-space cap under fleet load (rc=250 from its Python wrapper). Both the scoped
+runner and Makefile use this wrapper, so sizing only the Makefile leaves the
+scoped fallback to whole-tree analysis exposed. Match ci.yml's heap floor without
+lowering a larger operator value. NODE_OPTIONS is inert for non-node children,
+so passing it to every wrapped command is harmless.
+
 USAGE
 -----
     python scripts/run_bounded.py --timeout 1800 -- <command> [args…]
@@ -70,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -78,6 +86,10 @@ from typing import IO, Sequence
 
 #: Exit status for a fired bound. `timeout(1)` uses the same number.
 EXIT_TIMEOUT = 124
+
+#: Keep in sync with .github/workflows/ci.yml's type-check NODE_OPTIONS: both
+#: local gate spellings need the analyzer headroom, not just the Makefile recipe.
+NODE_HEAP_MB = 6144
 
 #: The command never started (missing interpreter, bad path). Distinguished from
 #: any status the command itself can produce, so a gate that did not run cannot
@@ -178,9 +190,19 @@ def run(
         if pgid:
             _signal_group(pgid, signum)
 
+    child_env = os.environ.copy()
+    node_options = child_env.get("NODE_OPTIONS", "")
+    heaps = re.findall(r"(?:^|\s)--max[-_]old[-_]space[-_]size(?:=|\s+)(\d+)(?=\s|$)", node_options)
+    # V8 resolves repeated flags last-wins: append after a smaller effective
+    # value, preserving unrelated options and leaving a larger caller cap alone.
+    if not heaps or int(heaps[-1]) < NODE_HEAP_MB:
+        child_env["NODE_OPTIONS"] = (
+            f"{node_options} " if node_options else ""
+        ) + f"--max-old-space-size={NODE_HEAP_MB}"
+
     previous = {sig: signal.signal(sig, _forward) for sig in FORWARDED_SIGNALS}
     try:
-        proc = subprocess.Popen(list(argv), start_new_session=True)
+        proc = subprocess.Popen(list(argv), start_new_session=True, env=child_env)
     except OSError as exc:
         # A gate that never ran must never look green (#423's lesson).
         for sig, handler in previous.items():
