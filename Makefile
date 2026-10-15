@@ -166,19 +166,13 @@ check-changed: ## Run the CI gates this branch's diff can affect
 # bare local run can cross it under fleet load — measured: OOMed ~116 s in,
 # `rc=250` out of the pyright wrapper. ci.yml's type-check job sets
 # `NODE_OPTIONS=--max-old-space-size=6144` for the same reason (its 16 GB runner
-# OOMed at heap 3885 MB), so the recipe raises the value to 6144 when the
-# caller's NODE_OPTIONS has no `--max-old-space-size` or a smaller one; a larger
-# operator-set value is left untouched. Appending after a smaller caller value
-# is deliberate: V8 resolves the flag last-wins (measured: 512 then 2048 ->
-# 2144 MB limit), so the raised value wins without rewriting the caller's.
+# OOMed at heap 3885 MB). run_bounded sizes node's heap for BOTH this recipe
+# and the scoped runner, raising a smaller caller cap without lowering a larger
+# operator-set value; its constant is guarded against ci.yml's value by tests.
 BOUND_TIMEOUT ?= 1800
 
 type-check: ## Run type checking with pyright
-	node_opts="$${NODE_OPTIONS:-}"; \
-	heap="$$(printf '%s\n' "$$node_opts" | sed -nE 's/.*--max-old-space-size=([0-9]+).*/\1/p')"; \
-	if [ -z "$$heap" ] || [ "$$heap" -lt 6144 ]; then node_opts="$${node_opts:+$$node_opts }--max-old-space-size=6144"; fi; \
-	NODE_OPTIONS="$$node_opts" .venv/bin/python scripts/run_bounded.py --timeout $(BOUND_TIMEOUT) -- \
-		.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+	.venv/bin/python scripts/run_bounded.py --timeout $(BOUND_TIMEOUT) -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace
 # materialisation command. Deliberately NOT wired into CI's default job — the
