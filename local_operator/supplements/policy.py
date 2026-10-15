@@ -67,7 +67,8 @@ DEFAULT_FILES: Final = True
 #: is the gate in front of it, not the default: a graphic needs (a) a real user turn
 #: (``trigger.refusal``: no wake/monitor/peer/exec/subagent), (b) the deterministic
 #: structured-data signal (``evidence.extract``; the graphics question is not even ASKED
-#: without it, ``decision.decide``), (c) a classifier probability >= ``GRAPHICS_THRESHOLD``,
+#: without it, ``decision.decide``), (c) classifier probability >=0.7 for charts
+#: (``GRAPHICS_THRESHOLD``) or >=0.6 for a validated exact summary table only,
 #: and (d) the per-job ``maxCostUsd``/``timeoutS`` caps. The generator runs AFTER the answer
 #: is emitted, so the default never delays a turn. Off switches are unchanged:
 #: ``supplements.graphics: false``, ``supplements.enabled: false`` or ``LOP_SUPPLEMENTS=0``.

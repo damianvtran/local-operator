@@ -608,3 +608,47 @@ async def test_the_turn_own_paths_never_reach_the_vendor_payload() -> None:
     payload = _vendor_payload(service.asked)
     assert "secret-client-dir" not in payload
     assert "q3 summary.pdf" in payload
+
+
+@pytest.mark.parametrize("probability,allowed", [(0.59, False), (0.60, True)])
+def test_exact_summary_tables_use_explicit_lower_recall_threshold(probability, allowed):
+    from local_operator.supplements.evidence import extract
+
+    evidence = extract(
+        [], "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    )
+    assert dec.SUMMARY_TABLE_THRESHOLD == 0.6
+    assert dec.apply_graphics(_graphics_answer(probability), evidence) == (probability, allowed)
+
+
+@pytest.mark.parametrize("probability,allowed", [(0.69, False), (0.70, True)])
+def test_comparable_chart_precision_threshold_is_unchanged(probability, allowed):
+    assert dec.GRAPHICS_THRESHOLD == 0.7
+    assert dec.apply_graphics(_graphics_answer(probability), STRUCTURED) == (probability, allowed)
+    assert dec.apply_graphics(_graphics_answer(probability), Evidence(structured=False))[1] is False
+
+
+def test_table_hint_or_mixed_datasets_do_not_lower_chart_threshold():
+    from dataclasses import replace
+    from local_operator.supplements.evidence import extract
+
+    table = extract(
+        [], "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    )
+    for invalid in (
+        replace(table, forms=()),
+        replace(table, datasets=table.datasets + STRUCTURED.datasets),
+        replace(STRUCTURED, forms=("labelled-summary",)),
+        replace(table, datasets=(replace(table.datasets[0], rows=(("comments", "296"),)),)),
+    ):
+        assert dec.apply_graphics(_graphics_answer(0.60), invalid) == (0.6, False)
+
+
+@pytest.mark.asyncio
+async def test_no_vendor_still_cannot_select_summary_table_graphics():
+    from local_operator.supplements.evidence import extract
+
+    table = extract(
+        [], "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    )
+    assert (await _decide(None, [], table)).graphics is False

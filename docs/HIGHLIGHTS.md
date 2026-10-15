@@ -82,3 +82,19 @@ these doors exactly as to the old ones.
 
 
 Desktop cold/older-page and SSE-open snapshots declare `supplements=1` alongside `open_frame=1`. Only a capable reader and that specific viewer receive bounded `supplement_v1` metadata; unknown custom types and errand prompts remain excluded. Component bodies remain authorized digest-addressed attachments, never embedded in paintable history. Older viewers omitting the declaration retain their prior page.
+
+### Table recall versus chart precision
+
+Graphics still need a real user turn, grounded evidence and a vendor answer. Charts/series
+retain probability >=0.7. A validated **labelled-summary/table-only** dataset of four exact,
+distinct operational entity counts uses `SUMMARY_TABLE_THRESHOLD=0.6`: collecting explicit
+labels/values into a table has lower false-positive harm than inferring a ranking/trend across
+comparable bars. Mixed datasets do not get this threshold. Conservative uncertainty guards,
+no-vendor refusal and all timeout/cost/kill switches remain. This is an explicit recall tradeoff,
+not a claim that prior live p=.60/.65 decisions passed the old .7 gate. The prior explicit-table
+generator pilot cost computed $0.004602 for1741/112 tokens in4.150s; it was not automatic proof.
+A subsequent whole-Session automatic sanitized replay at the new policy returned real vendor
+p=.68, then generated and persisted one labelled table in one turn:1764/121 tokens, computed
+$0.004738, answer settled0.419s and component/file row settled4.691s from pilot start. All four
+files were offered; the vendor selected only the primary receipt. These are observations,
+not fixed latency/cost promises; the decision vendor supplied no dollar receipt.

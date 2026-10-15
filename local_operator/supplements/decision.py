@@ -16,7 +16,7 @@ session's one shared ``ClassificationService`` (``decide`` takes its guards from
   the deliverable?" (memo round-1 S-R8). All of it is harness-derived text; the one
   model-controlled string, the file's name, is sanitised and clipped.
 * **Graphics** -- one ``noul`` question ``supplement_graphics`` at :data:`GRAPHICS_THRESHOLD`.
-  Precision over recall: a "yes" below 0.7 is a "no", and a "yes" the pre-filter's structured-
+  Charts require 0.7; exact summary tables require 0.6. A "yes" the pre-filter's structured-
   data signal does not back is OVERRULED (the model has no rows, only shapes, so it cannot see
   whether the data exists; the harness can).
 
@@ -67,6 +67,13 @@ FILE_PROB_FLOOR: Final = 0.25
 NONE_WINS_P: Final = 0.5
 #: Graphics go ahead iff the answer is at least this AND the structured signal is true.
 GRAPHICS_THRESHOLD: Final = 0.7
+#: Explicit operational tables have a different precision/recall tradeoff from charts:
+#: they collect four exact noun-labelled counts, without inferred trends, common axes
+#: or totals. Live sanitized replay decisions were .60/.65 despite useful table evidence.
+#: User-requested table recall therefore uses .60 ONLY for validated, exclusively
+#: labelled-summary/table-only evidence; every chart/series keeps the .70 threshold.
+#: This still requires a vendor answer and all real-turn/evidence/cost guards.
+SUMMARY_TABLE_THRESHOLD: Final = 0.6
 
 #: State bounds (memo §2.3 State), cut with the monitors' marker so the model knows a preview
 #: is incomplete. Duplicated, not imported: ``monitors.classify`` is import-cheap but its
@@ -458,8 +465,32 @@ def drawable(evidence: Evidence) -> bool:
     return evidence.structured and bool(evidence.datasets)
 
 
+def _summary_table_only(evidence: Evidence) -> bool:
+    """Narrow table-recall gate, never a lower threshold for mixed/chart datasets.
+
+    Check the extractor's form AND its concrete shape, not a presentation hint alone.
+    Exact/uncertain context validation belongs to evidence._labelled_summary; these
+    structural checks keep a future other table producer from silently buying this rate.
+    """
+    units = {"comments", "profiles", "links", "matches"}
+    return (
+        evidence.structured
+        and "labelled-summary" in evidence.forms
+        and len(evidence.datasets) == 1
+        and all(
+            d.presentation == "table-only"
+            and d.source == "answer"
+            and d.columns == ("entity (distinct units)", "count")
+            and len(d.rows) == d.n_rows == 4
+            and all(len(row) == 2 and re.fullmatch(r"[0-9]+", row[1]) for row in d.rows)
+            and {row[0] for row in d.rows} == units
+            for d in evidence.datasets
+        )
+    )
+
+
 def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
-    """The graphics half's ONE rule: threshold AND evidence (memo §2.3).
+    """The graphics rule: evidence plus its declared table/chart probability threshold.
 
     A pure function so the evidence overrule can be tested against an answer that ARRIVES
     anyway (a service whose answer was cached before the signal moved): the caller never asks
@@ -468,7 +499,8 @@ def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
     if answer is None or not isinstance(getattr(answer, "value", None), (int, float)):
         return 0.0, False
     probability = round(float(answer.value), 4)
-    return probability, probability >= GRAPHICS_THRESHOLD and drawable(evidence)
+    threshold = SUMMARY_TABLE_THRESHOLD if _summary_table_only(evidence) else GRAPHICS_THRESHOLD
+    return probability, probability >= threshold and drawable(evidence)
 
 
 def heuristic_files(candidates: Sequence[Candidate]) -> list[Candidate]:
