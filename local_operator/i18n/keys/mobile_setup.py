@@ -114,6 +114,10 @@ def identity_unavailable() -> Msg:
     return Msg("mobile.setup.identity_unavailable", {})
 
 
+def in_progress() -> Msg:
+    return Msg("mobile.setup.in_progress", {})
+
+
 def installed() -> Msg:
     return Msg("mobile.setup.installed", {})
 
@@ -164,6 +168,10 @@ def quote() -> Msg:
 
 def quote_changed(*, current: str, accepted: str) -> Msg:
     return Msg("mobile.setup.quote_changed", {"current": current, "accepted": accepted})
+
+
+def quote_unread() -> Msg:
+    return Msg("mobile.setup.quote_unread", {})
 
 
 def reservation_existing() -> Msg:
