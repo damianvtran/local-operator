@@ -44,7 +44,9 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     if name == "edit":
         allowed = {"path", "i", "old_text", "new_text", "edits", "replace_all", "anchor_line"}
     if set(args) - allowed:
-        raise MemoryError("Unsupported memory argument; file ranges and filesystem controls do not apply.")
+        raise MemoryError(
+            "Unsupported memory argument; file ranges and filesystem controls do not apply."
+        )
     scope, entity, query = parse_url(args["path"].strip())
     guard_encoded(query)
     for key in ("version", "cursor"):
@@ -57,13 +59,18 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     from local_operator.memory_capture import policy
 
     if not policy(store.root.parent)["enabled"]:
-        raise MemoryError("Scoped memory is disabled. Enable memory.enabled; human lop memory inspection remains available.")
+        raise MemoryError(
+            "Scoped memory is disabled. Enable memory.enabled; "
+            "human lop memory inspection remains available."
+        )
     if scope:
         store.identity.owner(scope)
     if name == "read":
         if entity:
             if not scope or set(query) - {"related", "version", "tokens"}:
-                raise MemoryError("Read an ID with optional related=true, version=REV or tokens only.")
+                raise MemoryError(
+                    "Read an ID with optional related=true, version=REV or tokens only."
+                )
             if "related" in query and query["related"] != "true":
                 raise MemoryError("Related inspection accepts related=true only.")
             store.import_session()
@@ -73,8 +80,11 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
             elif "related" in query:
                 raise MemoryError("Related inspection accepts related=true only.")
         elif "q" in query:
-            if (set(query) - {"q", "tokens", "limit"} or len(query["q"]) > 2048
-                or not 1 <= int(query.get("limit", 10)) <= 20):
+            if (
+                set(query) - {"q", "tokens", "limit"}
+                or len(query["q"]) > 2048
+                or not 1 <= int(query.get("limit", 10)) <= 20
+            ):
                 raise MemoryError("Search accepts q, 1–20 results and at most 2048 characters.")
             store.import_session()
             value = store.search(
@@ -84,10 +94,15 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
                 limit=int(query.get("limit", 10)),
             )
         else:
-            if set(query) - {"tokens", "limit", "cursor"} or not 1 <= int(query.get("limit", 20)) <= 50:
+            if (
+                set(query) - {"tokens", "limit", "cursor"}
+                or not 1 <= int(query.get("limit", 20)) <= 50
+            ):
                 raise MemoryError("Inventory accepts limit=1–50, cursor and tokens only.")
             store.import_session()
-            value = store.inventory(scope, limit=int(query.get("limit", 20)), cursor=query.get("cursor"))
+            value = store.inventory(
+                scope, limit=int(query.get("limit", 20)), cursor=query.get("cursor")
+            )
     else:
         if scope is None or query:
             raise MemoryError("Writes need an explicit scope and no query parameters.")
@@ -129,6 +144,7 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
                 expected_version=args.get("old_text"),
                 forget=forget,
             )
+
     def encoded() -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -149,7 +165,9 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
             while value and count_text_tokens(encoded()) > budget:
                 value.pop()
         if count_text_tokens(encoded()) > budget:
-            raise MemoryError("Result exceeds recall budget. Read one revision or increase tokens up to 2000.")
+            raise MemoryError(
+                "Result exceeds recall budget. Read one revision or increase tokens up to 2000."
+            )
     return encoded()
 
 

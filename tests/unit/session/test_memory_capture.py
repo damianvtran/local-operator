@@ -95,8 +95,11 @@ async def test_failure_is_terminal_not_false_capture_success(store):
 
 
 @pytest.mark.asyncio
-async def test_real_committed_compaction_finishes_capture_while_idle_without_waking(tmp_path, monkeypatch):
+async def test_real_committed_compaction_finishes_capture_while_idle_without_waking(
+    tmp_path, monkeypatch
+):
     import threading
+
     import local_operator.memory_capture as capture
     from local_operator.compaction.api import CompactionSettings
     from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
@@ -105,24 +108,41 @@ async def test_real_committed_compaction_finishes_capture_while_idle_without_wak
 
     root = tmp_path / "config"
     root.mkdir()
-    (root / "config.yml").write_text('{"values":{"memory":{"enabled":true,"capture":true,"suggest":true}}}')
+    (root / "config.yml").write_text(
+        '{"values":{"memory":{"enabled":true,"capture":true,"suggest":true}}}'
+    )
     gate = threading.Event()
     entered = threading.Event()
     original = capture.extract_messages
+
     def gated(messages):
         entered.set()
         assert gate.wait(5), "capture setup gate was never released"
         return original(messages)
+
     monkeypatch.setattr(capture, "extract_messages", gated)
     requests = []
+
     def stream(request, signal):
         requests.append(request)
+
         async def events():
             yield StreamTextDelta(delta="Recorded reply")
             yield StreamEndEvent(stop_reason="stop")
+
         return events()
+
     transcript = Transcript(root / "sessions" / "idle-native")
-    session = Session(model=ModelSpec(provider="test",model_id="deterministic",context_window=100000,supports_images=False),stream_fn=stream,tools=[],transcript=transcript,system_blocks_provider=lambda:["stable"],compaction_settings=CompactionSettings(keep_recent_tokens=40,strategy="context-full"))
+    session = Session(
+        model=ModelSpec(
+            provider="test", model_id="deterministic", context_window=100000, supports_images=False
+        ),
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=CompactionSettings(keep_recent_tokens=40, strategy="context-full"),
+    )
     session._config_dir = root
     events = []
     session.subscribe(events.append)
@@ -160,19 +180,31 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path):
 
     root = tmp_path / "config"
     root.mkdir()
-    (root / "config.yml").write_text('{"values":{"memory":{"enabled":true,"capture":true,"suggest":true}}}')
+    (root / "config.yml").write_text(
+        '{"values":{"memory":{"enabled":true,"capture":true,"suggest":true}}}'
+    )
     transcript = Transcript(root / "sessions" / "restart-session")
     await transcript.append_message(Message.user("Old source docs/recovered.md"))
     kept = await transcript.append_message(Message.user("Kept turn"))
     marker = await transcript.append_compaction("# Goal\n- Recover committed goal", kept.id, 100)
     # No capture writes: this is the exact crash window after marker fsync.
     requests = []
+
     def stream(request, signal):
         requests.append(request)
+
         async def events():
             yield StreamEndEvent(stop_reason="stop")
+
         return events()
-    reopened = Session(model=ModelSpec(provider="test",model_id="deterministic",context_window=100000),stream_fn=stream,tools=[],transcript=Transcript(transcript.directory),system_blocks_provider=lambda:["stable"])
+
+    reopened = Session(
+        model=ModelSpec(provider="test", model_id="deterministic", context_window=100000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(transcript.directory),
+        system_blocks_provider=lambda: ["stable"],
+    )
     reopened._config_dir = root
     assert not (root / "memory").exists()
     assert await capture.session_tail(reopened) == ""

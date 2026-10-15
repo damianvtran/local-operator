@@ -18,8 +18,8 @@ import json
 import os
 import re
 import sqlite3
-import time
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -43,9 +43,11 @@ MAX_OWNER_OPS = 20000
 MAX_REVISIONS = 128
 MAX_TOMBSTONES = 5000
 MAX_BATCH_BYTES = 256 * 1024
-INVENTORY_HELP = ("Inventory is not the bank. Search ?q=words, read an ID, consolidate explicitly; "
-                  "retrieval does not refresh verification. Read guide://memory for structured "
-                  "write/edit, scopes and forgetting.")
+INVENTORY_HELP = (
+    "Inventory is not the bank. Search ?q=words, read an ID, consolidate explicitly; "
+    "retrieval does not refresh verification. Read guide://memory for structured "
+    "write/edit, scopes and forgetting."
+)
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 # Contextual ID checks complement the shared credential shape table, which does
 # not claim to recognise identity documents. Names such as secret PASSPORT_NO
@@ -228,7 +230,9 @@ def validate_fact(raw: Any) -> dict[str, Any]:
             "Source allows session/entry/tool/kind/uri/author, each at most 256 characters."
         )
     if source.get("kind") not in ("reported", "observed", "inferred", "compaction", "summary"):
-        raise MemoryError("Source kind must be reported, observed, inferred, compaction or summary.")
+        raise MemoryError(
+            "Source kind must be reported, observed, inferred, compaction or summary."
+        )
     if source.get("session"):
         safe_segment(source["session"])
     if fact["replaces"]:
@@ -392,8 +396,9 @@ class MemoryStore:
         # the old fact when that target finally catches up.
         for operation in ops:
             for parent in operation["parents"]:
-                db.execute("INSERT OR IGNORE INTO causal_edges VALUES (?,?)",
-                           (operation["op_id"], parent))
+                db.execute(
+                    "INSERT OR IGNORE INTO causal_edges VALUES (?,?)", (operation["op_id"], parent)
+                )
         db.execute("DELETE FROM recall WHERE entity_id=?", (entity,))
         db.execute("DELETE FROM current WHERE entity_id=?", (entity,))
         db.execute("DELETE FROM associations WHERE entity=?", (entity,))
@@ -469,11 +474,19 @@ class MemoryStore:
         source = fact.get("source", {})
         if not isinstance(source, dict):
             raise MemoryError("Memory source must be an object.")
-        source = {"session": self.identity.session_id, "kind": "reported",
-                  "author": self.identity.agent_id or "anonymous", **source}
-        return validate_fact(dict(fact, source=source,
-                                  created_at=(time.time() if fact.get("created_at") is None
-                                              else fact["created_at"])))
+        source = {
+            "session": self.identity.session_id,
+            "kind": "reported",
+            "author": self.identity.agent_id or "anonymous",
+            **source,
+        }
+        return validate_fact(
+            dict(
+                fact,
+                source=source,
+                created_at=(time.time() if fact.get("created_at") is None else fact["created_at"]),
+            )
+        )
 
     def put(
         self,
@@ -546,7 +559,9 @@ class MemoryStore:
                 # concurrent siblings. Only that explicitly read revision parents
                 # the correction; all other heads stay inspectable conflicts.
                 if forget and heads[0]["op_id"] != expected_version:
-                    raise MemoryError("Memory changed concurrently. Read its current revision and retry.")
+                    raise MemoryError(
+                        "Memory changed concurrently. Read its current revision and retry."
+                    )
                 parents = [expected_version]
             elif expected_version:
                 raise MemoryError("Memory not found in the authorized scope.")
@@ -559,7 +574,9 @@ class MemoryStore:
                 ):
                     raise MemoryError("Replacement target must exist in the same authorized scope.")
                 if clean["replaces"] == entity:
-                    raise MemoryError("Replacement names a separate fact; use an ordinary edit for this ID.")
+                    raise MemoryError(
+                        "Replacement names a separate fact; use an ordinary edit for this ID."
+                    )
                 parents = list(dict.fromkeys([*parents, self._heads(target)[0]["op_id"]]))
             origin = self._origin(db)
             seq = db.execute(
@@ -580,8 +597,11 @@ class MemoryStore:
                 "scope": scope,
                 "owner_key": owner,
                 "fact": clean,
-                "body_sha": (heads[0]["body_sha"] if forget
-                             else hashlib.sha256(_dump(clean).encode()).hexdigest()),
+                "body_sha": (
+                    heads[0]["body_sha"]
+                    if forget
+                    else hashlib.sha256(_dump(clean).encode()).hexdigest()
+                ),
             }
             validate_op(op)
             db.execute(
@@ -613,10 +633,14 @@ class MemoryStore:
         root = self.root.parent / "sessions"
         row = None
         if db is not None:
-            row = db.execute("SELECT value FROM meta WHERE key=?", ("sessiondir:" + owner,)).fetchone()
+            row = db.execute(
+                "SELECT value FROM meta WHERE key=?", ("sessiondir:" + owner,)
+            ).fetchone()
         elif self.path.exists():
             with self.connection() as reader:
-                row = reader.execute("SELECT value FROM meta WHERE key=?", ("sessiondir:" + owner,)).fetchone()
+                row = reader.execute(
+                    "SELECT value FROM meta WHERE key=?", ("sessiondir:" + owner,)
+                ).fetchone()
         candidate = root / (row[0] if row else owner)
         try:
             if candidate.resolve().is_relative_to(root.resolve()) and candidate.is_dir():
@@ -642,9 +666,14 @@ class MemoryStore:
         # Unique 0600 staging, never O_TRUNC through an unexpected symlink. Like
         # network.store's staged writer this survives a PROCESS crash, not a
         # power cut (no directory fsync); the full old/new snapshot is the truth.
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
-                                         prefix=".memory-session.", suffix=".tmp",
-                                         delete=False) as stream:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=".memory-session.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
             temp = Path(stream.name)
             try:
                 stream.write(data)
@@ -657,15 +686,19 @@ class MemoryStore:
             os.replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
-        db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)",
-                   ("exporthash:" + owner, hashlib.sha256(encoded).hexdigest()))
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            ("exporthash:" + owner, hashlib.sha256(encoded).hexdigest()),
+        )
         sessions = (self.root.parent / "sessions").resolve()
         if directory.resolve().is_relative_to(sessions):
             # Local control-plane address, never a fact or a wire payload. This
             # also finds subagent namespaces before their holder opens again.
             relative = directory.resolve().relative_to(sessions).as_posix()
-            db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)",
-                       ("sessiondir:" + owner, relative))
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES (?,?)", ("sessiondir:" + owner, relative)
+            )
+
     def apply_ops(
         self,
         batch: list[dict[str, Any]],
@@ -711,21 +744,28 @@ class MemoryStore:
             db.execute("BEGIN IMMEDIATE")
             if promote:
                 origin = self._origin(db)
-                seq = db.execute("SELECT coalesce(max(seq),0) FROM ops WHERE origin=?",
-                                 (origin,)).fetchone()[0]
+                seq = db.execute(
+                    "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
+                ).fetchone()[0]
                 clock_row = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
                 clock = max(int(time.time() * 1000), int(clock_row[0]) if clock_row else 0)
                 prefix = self.identity.session_id + "|"
+
                 def remap(value: str) -> str:
                     return hashlib.sha256((prefix + value).encode()).hexdigest()
+
                 promoted = []
                 for operation in batch:
                     mapped_id = remap(operation["op_id"])
-                    existing = db.execute("SELECT data FROM ops WHERE op_id=?", (mapped_id,)).fetchone()
+                    existing = db.execute(
+                        "SELECT data FROM ops WHERE op_id=?", (mapped_id,)
+                    ).fetchone()
                     if existing:
                         promoted.append(json.loads(existing[0]))
                         continue
-                    parents = [remap(parent) for parent in operation["parents"]] + [operation["op_id"]]
+                    parents = [remap(parent) for parent in operation["parents"]] + [
+                        operation["op_id"]
+                    ]
                     if len(parents) > 16:
                         raise MemoryError("Promotion parent cap reached; no history was discarded.")
                     fact = operation["fact"]
@@ -733,18 +773,31 @@ class MemoryStore:
                         fact = dict(fact, replaces=remap(fact["replaces"]))
                     seq += 1
                     clock += 1
-                    rewritten = dict(operation, op_id=mapped_id,
-                        entity_id=remap(operation["entity_id"]), owner_key=self.identity.session_id,
-                        origin_device=origin, seq=seq, hlc=[clock, 0, origin], parents=parents,
-                        fact=fact, body_sha=(hashlib.sha256(_dump(fact).encode()).hexdigest()
-                                             if fact else operation["body_sha"]))
+                    rewritten = dict(
+                        operation,
+                        op_id=mapped_id,
+                        entity_id=remap(operation["entity_id"]),
+                        owner_key=self.identity.session_id,
+                        origin_device=origin,
+                        seq=seq,
+                        hlc=[clock, 0, origin],
+                        parents=parents,
+                        fact=fact,
+                        body_sha=(
+                            hashlib.sha256(_dump(fact).encode()).hexdigest()
+                            if fact
+                            else operation["body_sha"]
+                        ),
+                    )
                     validate_op(rewritten, allow_redacted=True)
                     promoted.append(rewritten)
                 batch = promoted
                 tombs = {op["entity_id"] for op in batch if op["kind"] == "tombstone"}
             changed: set[str] = set()
             filled_gap = False
-            owners: set[tuple[str, str]] = {("session", self.identity.session_id)} if portable else set()
+            owners: set[tuple[str, str]] = (
+                {("session", self.identity.session_id)} if portable else set()
+            )
             for op in sorted(batch, key=lambda x: (x["origin_device"], x["seq"])):
                 entity = op["entity_id"]
                 old_ops = self._ops(db, entity)
@@ -777,8 +830,9 @@ class MemoryStore:
                         raise MemoryError("Memory sequence gap; refresh peer state and retry.")
                 if len(old_ops) >= MAX_REVISIONS and op["kind"] != "tombstone":
                     raise MemoryError("Memory revision cap reached; no conflicts discarded.")
-                previous_max = db.execute("SELECT coalesce(max(seq),0) FROM ops WHERE origin=?",
-                                          (op["origin_device"],)).fetchone()[0]
+                previous_max = db.execute(
+                    "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (op["origin_device"],)
+                ).fetchone()[0]
                 filled_gap |= op["seq"] < previous_max
                 stored = dict(op, fact=None) if dead and op["kind"] == "put" else op
                 try:
@@ -800,9 +854,13 @@ class MemoryStore:
                 changed.add(entity)
                 owners.add((op["scope"], op["owner_key"]))
             if filled_gap:
-                previous = db.execute("SELECT value FROM meta WHERE key='stream-generation'").fetchone()
-                db.execute("INSERT OR REPLACE INTO meta VALUES ('stream-generation',?)",
-                           (str(int(previous[0]) + 1 if previous else 1),))
+                previous = db.execute(
+                    "SELECT value FROM meta WHERE key='stream-generation'"
+                ).fetchone()
+                db.execute(
+                    "INSERT OR REPLACE INTO meta VALUES ('stream-generation',?)",
+                    (str(int(previous[0]) + 1 if previous else 1),),
+                )
             if changed:
                 clock = max(op["hlc"][0] for op in batch)
                 last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
@@ -861,8 +919,13 @@ class MemoryStore:
         # between chunks would lose its remaining rows. One bounded portable
         # transaction also re-keys a promotion under this device's REAL origin,
         # then atomically exports canonical rows before the SQLite index commits.
-        self.apply_ops(ops, contiguous=False, portable=True,
-                       promote=next(iter(owners)) != self.identity.session_id)
+        self.apply_ops(
+            ops,
+            contiguous=False,
+            portable=True,
+            promote=next(iter(owners)) != self.identity.session_id,
+        )
+
     def _where(self, scope: str | None) -> tuple[str, list[str]]:
         pairs = [(scope, self.identity.owner(scope))] if scope else self.identity.scopes()
         return "(" + " OR ".join("(scope=? AND owner=?)" for _ in pairs) + ")", [
@@ -920,14 +983,22 @@ class MemoryStore:
                 "conflicts": (
                     []
                     if tombs
-                    else [{"version": op["op_id"], "title": op["fact"]["title"],
-                           "status": op["fact"]["status"]} for op in heads[1:4]]
+                    else [
+                        {
+                            "version": op["op_id"],
+                            "title": op["fact"]["title"],
+                            "status": op["fact"]["status"],
+                        }
+                        for op in heads[1:4]
+                    ]
                 ),
                 "revisions": len(ops),
                 "untrusted": True,
             }
 
-    def inventory(self, scope: str | None = None, *, limit: int = 20, cursor: str | None = None) -> dict[str, Any]:
+    def inventory(
+        self, scope: str | None = None, *, limit: int = 20, cursor: str | None = None
+    ) -> dict[str, Any]:
         where, values = self._where(scope)
         if cursor:
             safe_segment(cursor)

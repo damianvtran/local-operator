@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.memory import (
-    MAX_BATCH_BYTES,
     DEFAULT_EXCLUDED_DEVICES,
+    MAX_BATCH_BYTES,
     SCOPES,
     MemoryError,
     MemoryIdentity,
@@ -70,7 +70,9 @@ def _key(peer: str, scopes: list[str]) -> str:
     return "memory-cursor:" + safe_segment(peer) + ":" + _epoch(scopes)
 
 
-def cursor(memory: MemoryStore, peer: str, scopes: list[str], generation: int = 0) -> dict[str, int]:
+def cursor(
+    memory: MemoryStore, peer: str, scopes: list[str], generation: int = 0
+) -> dict[str, int]:
     if not memory.path.exists():
         return {}
     with memory.connection() as db:
@@ -88,6 +90,7 @@ def generation(memory: MemoryStore) -> int:
         row = db.execute("SELECT value FROM meta WHERE key='stream-generation'").fetchone()
         return int(row[0]) if row else 0
 
+
 def _checked_vector(value: Any) -> dict[str, int]:
     if not isinstance(value, dict) or len(value) > 256:
         raise MemoryError("Invalid bounded memory vector.")
@@ -98,18 +101,33 @@ def _checked_vector(value: Any) -> dict[str, int]:
     return value
 
 
-def batch(memory: MemoryStore, vector: dict[str, int], scopes: list[str], origins: set[str],
-          source_generation: int = 0, withheld: list[str] | None = None) -> dict[str, Any]:
+def batch(
+    memory: MemoryStore,
+    vector: dict[str, int],
+    scopes: list[str],
+    origins: set[str],
+    source_generation: int = 0,
+    withheld: list[str] | None = None,
+) -> dict[str, Any]:
     """Bounded operations and content-free skipped ranges, never guessed bodies."""
     _checked_vector(vector)
-    result: dict[str, Any] = {"v": 1, "generation": source_generation, "scopes": scopes,
-        "ops": [], "skips": [], "proofs": [], "after": dict(vector)}
+    result: dict[str, Any] = {
+        "v": 1,
+        "generation": source_generation,
+        "scopes": scopes,
+        "ops": [],
+        "skips": [],
+        "proofs": [],
+        "after": dict(vector),
+    }
     if not memory.path.exists():
         return result
     with memory.connection() as db:
         for origin in sorted(origins):
-            rows = db.execute("SELECT data,op_id,seq FROM ops WHERE origin=? AND seq>? "
-                "ORDER BY seq LIMIT 128", (origin, vector.get(origin, 0))).fetchall()
+            rows = db.execute(
+                "SELECT data,op_id,seq FROM ops WHERE origin=? AND seq>? " "ORDER BY seq LIMIT 128",
+                (origin, vector.get(origin, 0)),
+            ).fetchall()
             expected = vector.get(origin, 0) + 1
             for row in rows:
                 before = json.loads(_dump(result))
@@ -126,14 +144,19 @@ def batch(memory: MemoryStore, vector: dict[str, int], scopes: list[str], origin
                         raise MemoryError("Memory operation/index identity mismatch.")
                     if op["scope"] in scopes:
                         if op["kind"] == "put" and op["fact"] is None:
-                            proof = db.execute("SELECT data FROM ops WHERE entity_id=? "
-                                "AND kind='tombstone' ORDER BY op_id LIMIT 1", (op["entity_id"],)).fetchone()
+                            proof = db.execute(
+                                "SELECT data FROM ops WHERE entity_id=? "
+                                "AND kind='tombstone' ORDER BY op_id LIMIT 1",
+                                (op["entity_id"],),
+                            ).fetchone()
                             if not proof:
                                 raise MemoryError("A redacted memory put has no tombstone proof.")
                             tomb = json.loads(proof[0])
                             validate_op(tomb)
                             if tomb["origin_device"] not in origins:
-                                raise MemoryError("A tombstone origin is no longer an active member.")
+                                raise MemoryError(
+                                    "A tombstone origin is no longer an active member."
+                                )
                             if all(p["op_id"] != tomb["op_id"] for p in result["proofs"]):
                                 result["proofs"].append(tomb)
                         result["ops"].append(op)
@@ -145,12 +168,17 @@ def batch(memory: MemoryStore, vector: dict[str, int], scopes: list[str], origin
                     result["skips"].append([origin, seq, seq])
                 result["after"][origin] = seq
                 expected = seq + 1
-                if (len(_dump(result).encode()) > MAX_BATCH_BYTES - 1024
-                    or sum(len(result[key]) for key in ("ops", "skips", "proofs")) > 120):
+                if (
+                    len(_dump(result).encode()) > MAX_BATCH_BYTES - 1024
+                    or sum(len(result[key]) for key in ("ops", "skips", "proofs")) > 120
+                ):
                     return before
     return result
 
-def receive(server: Any, peer: str, payload: dict[str, Any], scopes: list[str], origins: set[str]) -> dict[str, Any]:
+
+def receive(
+    server: Any, peer: str, payload: dict[str, Any], scopes: list[str], origins: set[str]
+) -> dict[str, Any]:
     if not isinstance(payload, dict) or len(_dump(payload).encode()) > MAX_BATCH_BYTES:
         raise MemoryError("Invalid or oversized memory payload.")
     guard(payload)
@@ -160,28 +188,39 @@ def receive(server: Any, peer: str, payload: dict[str, Any], scopes: list[str], 
     if type(source_generation) is not int or not 0 <= source_generation <= 2**63 - 1:
         raise MemoryError("Invalid memory stream generation.")
     memory = _store(server.root)
-    before = {origin: seq for origin, seq in cursor(memory, peer, scopes, source_generation).items()
-              if origin in origins}
+    before = {
+        origin: seq
+        for origin, seq in cursor(memory, peer, scopes, source_generation).items()
+        if origin in origins
+    }
     after = _checked_vector(payload.get("after"))
     operations, proofs, skips = (payload.get(key) for key in ("ops", "proofs", "skips"))
-    if any(not isinstance(value, list) or len(value) > 256 for value in (operations, proofs, skips)):
+    if any(
+        not isinstance(value, list) or len(value) > 256 for value in (operations, proofs, skips)
+    ):
         raise MemoryError("Invalid bounded memory batch lists.")
     intervals: dict[str, list[tuple[int, int]]] = {}
     for op in operations + proofs:
         try:
             validate_op(op, allow_redacted=True)
         except MemoryError as exc:
-            reference = _safe_ref(op.get("op_id")) if isinstance(op, dict) else "invalid-operation-id"
+            reference = (
+                _safe_ref(op.get("op_id")) if isinstance(op, dict) else "invalid-operation-id"
+            )
             raise MemoryError(f"Memory operation {reference} refused: {exc}") from None
         if op["origin_device"] not in origins or op["scope"] not in scopes:
             raise MemoryError("Memory origin/scope is not active and authorised.")
     for op in operations:
         intervals.setdefault(op["origin_device"], []).append((op["seq"], op["seq"]))
     for row in skips:
-        if (not isinstance(row, list) or len(row) != 3
-            or not isinstance(row[0], str) or row[0] not in origins
+        if (
+            not isinstance(row, list)
+            or len(row) != 3
+            or not isinstance(row[0], str)
+            or row[0] not in origins
             or any(type(number) is not int or not 1 <= number <= 2**63 - 1 for number in row[1:])
-            or row[1] > row[2]):
+            or row[1] > row[2]
+        ):
             raise MemoryError("Invalid content-free memory sequence range.")
         intervals.setdefault(row[0], []).append((row[1], row[2]))
     for origin in set(before) | set(after) | set(intervals):
@@ -199,10 +238,13 @@ def receive(server: Any, peer: str, payload: dict[str, Any], scopes: list[str], 
     changed = memory.apply_ops(operations + proofs, origins=origins, contiguous=False)
     if after != before:
         with memory.connection() as db:
-            db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)",
-                (_key(peer, scopes), _dump({"generation": source_generation, "vector": after})))
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES (?,?)",
+                (_key(peer, scopes), _dump({"generation": source_generation, "vector": after})),
+            )
             db.commit()
     return {"phase": "push", "changed": changed, "vector": after, "scopes": scopes}
+
 
 def make_handler(server: Any) -> Any:
     def handle(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
@@ -235,9 +277,13 @@ def make_handler(server: Any) -> Any:
                     "v": 1,
                     "scopes": scopes,
                     "generation": source_generation,
-                    "vector": {origin: seq for origin, seq in cursor(
-                        _store(server.root), link.device_id, scopes, source_generation).items()
-                        if origin in origins},
+                    "vector": {
+                        origin: seq
+                        for origin, seq in cursor(
+                            _store(server.root), link.device_id, scopes, source_generation
+                        ).items()
+                        if origin in origins
+                    },
                 }
             if frame.get("phase") == "push":
                 return receive(server, link.device_id, frame.get("payload"), scopes, origins)
@@ -256,8 +302,16 @@ def _safe_ref(value: Any) -> str:
 
 
 def _peer_code(value: Any, fallback: str) -> str:
-    allowed = {"policy", "bad_memory", "refused", "not_authorised", "capability_denied",
-               "phase_forbidden", "not_a_member", "peer_too_old"}
+    allowed = {
+        "policy",
+        "bad_memory",
+        "refused",
+        "not_authorised",
+        "capability_denied",
+        "phase_forbidden",
+        "not_a_member",
+        "peer_too_old",
+    }
     return value if isinstance(value, str) and value in allowed else fallback
 
 
@@ -326,15 +380,23 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
         with memory.connection() as db:
             for row in db.execute("SELECT DISTINCT origin FROM ops LIMIT 257"):
                 if row[0] not in active and len(withheld) < 20:
-                    reference = db.execute("SELECT op_id FROM ops WHERE origin=? LIMIT 1", (row[0],)).fetchone()
+                    reference = db.execute(
+                        "SELECT op_id FROM ops WHERE origin=? LIMIT 1", (row[0],)
+                    ).fetchone()
                     withheld.append(_safe_ref(reference[0]))
     while batches < 8:
         payload = batch(memory, vector, scopes, active, source_generation, withheld)
         if payload["after"] == vector:
-            return {"ok": not withheld,
-                    "code": ("withheld" if withheld else "in_sync"
-                             if generation(memory) == source_generation else "catching_up"),
-                    "batches": batches, "withheld": withheld}
+            return {
+                "ok": not withheld,
+                "code": (
+                    "withheld"
+                    if withheld
+                    else "in_sync" if generation(memory) == source_generation else "catching_up"
+                ),
+                "batches": batches,
+                "withheld": withheld,
+            }
         answer = request("push", payload=payload)
         if not isinstance(answer, dict) or answer.get("op") == "error" or answer.get("ok") is False:
             return {
@@ -351,8 +413,12 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
             return {"ok": False, "code": "ack_mismatch"}
         vector = reply["vector"]
         batches += 1
-    return {"ok": not withheld, "code": "withheld" if withheld else "catching_up",
-            "batches": batches, "withheld": withheld}
+    return {
+        "ok": not withheld,
+        "code": "withheld" if withheld else "catching_up",
+        "batches": batches,
+        "withheld": withheld,
+    }
 
 
 def peer_status(root: Path) -> list[dict[str, Any]]:
@@ -360,9 +426,12 @@ def peer_status(root: Path) -> list[dict[str, Any]]:
     if not memory.path.exists():
         return []
     with memory.connection() as db:
-        return [json.loads(row[0]) for row in db.execute(
-            "SELECT value FROM meta WHERE key LIKE 'sync-status:%' ORDER BY key LIMIT 256",
-        )]
+        return [
+            json.loads(row[0])
+            for row in db.execute(
+                "SELECT value FROM meta WHERE key LIKE 'sync-status:%' ORDER BY key LIMIT 256",
+            )
+        ]
 
 
 def push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
@@ -377,13 +446,22 @@ def push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
             with memory.connection() as db:
                 key = "sync-status:" + device_id
                 present = db.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone()
-                count = db.execute("SELECT count(*) FROM meta WHERE key LIKE 'sync-status:%'").fetchone()[0]
+                count = db.execute(
+                    "SELECT count(*) FROM meta WHERE key LIKE 'sync-status:%'"
+                ).fetchone()[0]
                 if present or count < 256:
-                    previous_receipt = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+                    previous_receipt = db.execute(
+                        "SELECT value FROM meta WHERE key=?", (key,)
+                    ).fetchone()
                     previous_receipt = json.loads(previous_receipt[0]) if previous_receipt else {}
-                    receipt = {"device": device_id, "code": result["code"], "at": time.time(),
-                               "batches": result.get("batches", 0),
-                               "last_withheld": result.get("withheld") or previous_receipt.get("last_withheld", [])}
+                    receipt = {
+                        "device": device_id,
+                        "code": result["code"],
+                        "at": time.time(),
+                        "batches": result.get("batches", 0),
+                        "last_withheld": result.get("withheld")
+                        or previous_receipt.get("last_withheld", []),
+                    }
                     db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, _dump(receipt)))
                     db.commit()
         except Exception:

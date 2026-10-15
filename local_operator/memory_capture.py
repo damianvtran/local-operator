@@ -128,8 +128,13 @@ def watermark(store: MemoryStore, compaction_id: str) -> tuple[str, int] | None:
         return (row[0], row[1]) if row else None
 
 
-def persist(store: MemoryStore, marker_id: str, rows: list[dict[str, Any]], status: str,
-            committed_at: float | None = None) -> None:
+def persist(
+    store: MemoryStore,
+    marker_id: str,
+    rows: list[dict[str, Any]],
+    status: str,
+    committed_at: float | None = None,
+) -> None:
     """Atomic exact-candidate refresh; never overwrite a correction or resurrect a forget."""
     guard(marker_id)
     if status not in ("ok", "failed") or len(rows) > 52:
@@ -137,20 +142,35 @@ def persist(store: MemoryStore, marker_id: str, rows: list[dict[str, Any]], stat
     timestamp = time.time() if committed_at is None else committed_at
     facts = {}
     for row in rows:
-        fact = validate_fact(dict(row, status="candidate", created_at=timestamp,
-            source_time=timestamp, source={"session": store.identity.session_id,
-            "entry": marker_id, "kind": "compaction", "author": "deterministic-capture"}))
+        fact = validate_fact(
+            dict(
+                row,
+                status="candidate",
+                created_at=timestamp,
+                source_time=timestamp,
+                source={
+                    "session": store.identity.session_id,
+                    "entry": marker_id,
+                    "kind": "compaction",
+                    "author": "deterministic-capture",
+                },
+            )
+        )
         facts[_dump([fact["body"], fact["tags"]])] = fact
     # A moved session's full portable truth must be indexed before a capture
     # exports anything, otherwise the new candidates would replace its old facts.
     store.import_session()
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        if db.execute("SELECT 1 FROM captures WHERE session=? AND compaction=?",
-                      (store.identity.session_id, marker_id)).fetchone():
+        if db.execute(
+            "SELECT 1 FROM captures WHERE session=? AND compaction=?",
+            (store.identity.session_id, marker_id),
+        ).fetchone():
             return
         origin = store._origin(db)
-        seq = db.execute("SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)).fetchone()[0]
+        seq = db.execute(
+            "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
+        ).fetchone()[0]
         previous_clock = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
         clock = max(int(time.time() * 1000), int(previous_clock[0]) if previous_clock else 0)
         captured = 0
@@ -171,37 +191,70 @@ def persist(store: MemoryStore, marker_id: str, rows: list[dict[str, Any]], stat
                 current = heads[0]["fact"]
                 # Capture may not resolve conflicts, replace an explicit edit,
                 # or let an older slow pass overwrite newer source provenance.
-                if (len(heads) != 1 or current["status"] != "candidate"
+                if (
+                    len(heads) != 1
+                    or current["status"] != "candidate"
                     or current["source"].get("kind") != "compaction"
-                    or (current["source_time"] or 0) > timestamp or len(ops) >= MAX_REVISIONS):
+                    or (current["source_time"] or 0) > timestamp
+                    or len(ops) >= MAX_REVISIONS
+                ):
                     continue
                 fact["created_at"] = current["created_at"]
             seq += 1
             clock += 1
-            op = {"v": 1, "op_id": operation_id, "entity_id": entity,
-                "origin_device": origin, "seq": seq, "hlc": [clock, 0, origin],
-                "parents": [heads[0]["op_id"]] if heads else [], "kind": "put",
-                "scope": "session", "owner_key": store.identity.session_id,
-                "fact": fact, "body_sha": hashlib.sha256(_dump(fact).encode()).hexdigest()}
+            op = {
+                "v": 1,
+                "op_id": operation_id,
+                "entity_id": entity,
+                "origin_device": origin,
+                "seq": seq,
+                "hlc": [clock, 0, origin],
+                "parents": [heads[0]["op_id"]] if heads else [],
+                "kind": "put",
+                "scope": "session",
+                "owner_key": store.identity.session_id,
+                "fact": fact,
+                "body_sha": hashlib.sha256(_dump(fact).encode()).hexdigest(),
+            }
             validate_op(op)
-            db.execute("INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
-                (operation_id, entity, origin, seq, "session", store.identity.session_id,
-                 "put", _dump(op)))
+            db.execute(
+                "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    operation_id,
+                    entity,
+                    origin,
+                    seq,
+                    "session",
+                    store.identity.session_id,
+                    "put",
+                    _dump(op),
+                ),
+            )
             store._reindex(db, entity)
             captured += 1
         store._quota(db, "session", store.identity.session_id)
         db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
-        db.execute("INSERT INTO captures VALUES (?,?,?,?)",
-                   (store.identity.session_id, marker_id, status, captured))
-        db.execute("DELETE FROM captures WHERE session=? AND compaction NOT IN "
+        db.execute(
+            "INSERT INTO captures VALUES (?,?,?,?)",
+            (store.identity.session_id, marker_id, status, captured),
+        )
+        db.execute(
+            "DELETE FROM captures WHERE session=? AND compaction NOT IN "
             "(SELECT compaction FROM captures WHERE session=? ORDER BY rowid DESC LIMIT 32)",
-            (store.identity.session_id, store.identity.session_id))
+            (store.identity.session_id, store.identity.session_id),
+        )
         if store.session_dir:
             store._export(db, store.identity.session_id)
         db.commit()
 
-async def finish(store: MemoryStore, marker_id: str, task: asyncio.Task[Any], summary: str,
-                 committed_at: float | None = None) -> str:
+
+async def finish(
+    store: MemoryStore,
+    marker_id: str,
+    task: asyncio.Task[Any],
+    summary: str,
+    committed_at: float | None = None,
+) -> str:
     try:
         rows = await asyncio.wait_for(asyncio.shield(task), timeout=2)
         # Summary parsing is deterministic, not another provider request.
@@ -258,9 +311,11 @@ async def session_tail(session: Any) -> str:
     memory_hint = ""
     if enabled["capture"] and marker is not None:
         memory_hint = await asyncio.to_thread(hint, store, marker.id)
-        if (not memory_hint and getattr(session, "_memory_terminal", None) == (marker.id, "failed")):
-            memory_hint = (f'<memory_hint compaction="{marker.id}">Automatic memory capture '
-                           'did not complete; store key decisions explicitly.</memory_hint>')
+        if not memory_hint and getattr(session, "_memory_terminal", None) == (marker.id, "failed"):
+            memory_hint = (
+                f'<memory_hint compaction="{marker.id}">Automatic memory capture '
+                "did not complete; store key decisions explicitly.</memory_hint>"
+            )
         if not memory_hint and getattr(session, "_memory_recovery_marker", None) != marker.id:
             session._memory_recovery_marker = marker.id
 
@@ -294,8 +349,10 @@ async def session_tail(session: Any) -> str:
 
             for item in items:
                 captured = " (captured)" if item["status"] == "candidate" else ""
-                line = (f"- memory://{item['scope']}/{item['id']}: "
-                        f"{json.dumps(item['title'])}{captured}\n")
+                line = (
+                    f"- memory://{item['scope']}/{item['id']}: "
+                    f"{json.dumps(item['title'])}{captured}\n"
+                )
                 if count_text_tokens(suggestions + line + "</memory_suggestions>") <= 180:
                     suggestions += line
             suggestions += "</memory_suggestions>"
@@ -312,7 +369,9 @@ def hint(store: MemoryStore, marker_id: str) -> str:
             "Search/read memory:// for paths and links. Store goals and decisions explicitly."
         )
         if state[0] == "ok"
-        else ("Context compacted; automatic memory capture did not complete. "
-              "Store key decisions explicitly.")
+        else (
+            "Context compacted; automatic memory capture did not complete. "
+            "Store key decisions explicitly."
+        )
     )
     return f'<memory_hint compaction="{marker_id}">\n{text}\n</memory_hint>'

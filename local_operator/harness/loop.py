@@ -4075,9 +4075,11 @@ class AgentLoop:
         _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
         if sensitive_memory:
             return _PlannedCall(
-                call=call, tool=tool,
+                call=call,
+                tool=tool,
                 failure=self._synthetic_result(
-                    call, "Sensitive value refused. Use lop secret; memory may hold its NAME only.",
+                    call,
+                    "Sensitive value refused. Use lop secret; memory may hold its NAME only.",
                     details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
                 ),
             )

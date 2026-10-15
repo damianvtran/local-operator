@@ -4,14 +4,18 @@ import shutil
 
 import pytest
 
-from local_operator.memory import MemoryIdentity, MemoryStore, SESSION_EXPORT_NAME
+from local_operator.memory import SESSION_EXPORT_NAME, MemoryIdentity, MemoryStore
 
 
 def test_portable_import_validates_full_snapshot_before_one_export(tmp_path, monkeypatch):
     source_dir = tmp_path / "source" / "sessions" / "same-session"
-    source = MemoryStore(tmp_path / "source", MemoryIdentity("same-session"), source_dir, origin="source-device")
+    source = MemoryStore(
+        tmp_path / "source", MemoryIdentity("same-session"), source_dir, origin="source-device"
+    )
     for n in range(140):
-        source.put("session", {"title": f"Evidence {n}", "body": f"Evidence number {n} docs/proof.md"})
+        source.put(
+            "session", {"title": f"Evidence {n}", "body": f"Evidence number {n} docs/proof.md"}
+        )
     target_dir = tmp_path / "target" / "sessions" / "same-session"
     target_dir.mkdir(parents=True)
     target_file = target_dir / SESSION_EXPORT_NAME
@@ -20,10 +24,12 @@ def test_portable_import_validates_full_snapshot_before_one_export(tmp_path, mon
     target = MemoryStore(tmp_path / "target", MemoryIdentity("same-session"), target_dir)
     original = target._export
     observed = []
+
     def stop_after_replace(db, owner, directory=None):
         observed.append(db.execute("SELECT count(*) FROM ops").fetchone()[0])
         original(db, owner)
         raise OSError("Synthetic interruption after snapshot replace, before index commit")
+
     monkeypatch.setattr(target, "_export", stop_after_replace)
     with pytest.raises(OSError):
         target.import_session()
