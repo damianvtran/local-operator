@@ -188,7 +188,9 @@ async def test_tool_ready_checks_selected_model_without_targeting_requester_sess
         result = await tool.execute_network(
             "synthetic-ready-call",
             {"action": "ready", "peer": peer},
-            context=ToolContext(cwd=".", session_id=requester, session_model_label=selector),
+            None,
+            None,
+            ToolContext(cwd=".", session_id=requester, session_model_label=selector),
         )
         assert result.details is not None, result
         payload = result.details["network"]
@@ -224,6 +226,7 @@ async def test_tool_ready_checks_selected_model_without_targeting_requester_sess
 
     def legacy_facts(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
         facts = original(link, frame)
+        assert isinstance(facts, dict), "the real readiness handler must return facts"
         facts.pop("selected_model_access", None)
         return facts
 
@@ -231,7 +234,9 @@ async def test_tool_ready_checks_selected_model_without_targeting_requester_sess
     legacy = await tool.execute_network(
         "synthetic-legacy-call",
         {"action": "ready", "peer": server_b.identity.name},
-        context=ToolContext(cwd=".", session_id=requester, session_model_label=selector),
+        None,
+        None,
+        ToolContext(cwd=".", session_id=requester, session_model_label=selector),
     )
     assert legacy.details is not None
     legacy_row = _capability(legacy.details["network"], "selected_model_credential")
@@ -244,7 +249,9 @@ async def test_tool_ready_checks_selected_model_without_targeting_requester_sess
     local = await tool.execute_network(
         "synthetic-local-call",
         {"action": "ready"},
-        context=ToolContext(cwd=".", session_id=requester, session_model_label=selector),
+        None,
+        None,
+        ToolContext(cwd=".", session_id=requester, session_model_label=selector),
     )
     assert local.details is not None
     local_row = _capability(local.details["network"], "selected_model_credential")
