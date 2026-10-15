@@ -682,7 +682,7 @@ def _item(
     state: str = "unread",
     tenant_id: str = "tnt_1",
     recipient_account: str = "acc_1",
-    recipient_endpoint: str = "ep_1",
+    recipient_endpoint: str | None = "ep_1",
     body: Any = None,
     private_reason: Any = None,
 ) -> dict[str, Any]:
@@ -944,6 +944,17 @@ async def test_the_read_refuses_a_page_that_is_not_this_holders(api):
     assert other_endpoint.status_code == 409
     assert other_endpoint.json()["detail"]["code"] == "wrong_recipient"
     assert "bmsg_1" not in other_endpoint.text
+
+    # NO recipient endpoint is the same refusal: the connector's own binding
+    # (``Store._check_binding``) requires the endpoint, so a row ``pull.inbox``
+    # would drop must not render here either (round-1 review).
+    before = _digest(root)
+    FakeClient.behavior["inbox"] = _page(_item("bmsg_1", recipient_endpoint=None))
+    unaddressed = await client.get(INBOX, params=_query())
+    assert unaddressed.status_code == 409
+    assert unaddressed.json()["detail"]["code"] == "wrong_recipient"
+    assert "bmsg_1" not in unaddressed.text
+    assert _digest(root) == before, "a refused read wrote local state"
 
 
 async def test_the_read_refuses_a_machine_with_no_retained_namespace(api):

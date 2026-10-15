@@ -32,6 +32,12 @@ TWO STANDING CONTEXTS, and the difference is a real one, not a label:
   designated session, so the connector's ``no_designation`` fence code is
   deliberately NOT part of this decision.
 
+The two contexts differ in STANDING, not in SOURCE: both answer from the same
+authenticated wire page, and history mode reads no retained local rows. The
+context is the receipt the caller is answered under (``mode``/``read_only``/
+``history_reason``), not a second data path — this slice serves no stored
+history shape.
+
 A read is never a receive: neither context grants delivery, wake, screening or a
 decision, and no path here widens paused history into new traffic.
 
@@ -290,8 +296,6 @@ async def read_inbox_page(
     this surface's to move.
     """
 
-    from local_operator.team_bridge.client import TeamBridgeClient
-
     if limit < 1 or limit > MAX_PAGE:
         raise ReadRefused("bad_limit")
     store = Store(config_dir)
@@ -322,11 +326,16 @@ async def read_inbox_page(
     for item in page.items:
         if item.tenant_id != context.owner.tenant_id:
             raise ReadRefused("wrong_tenant")
-        recipient = item.recipient_account_id
-        if recipient and recipient != context.owner.account_id:
+        # The SAME binding invariant the connector enforces before it persists a
+        # page (``Store._check_binding``): the recipient endpoint is MANDATORY and
+        # exact, the account is compared when the server serves one. An item
+        # addressed elsewhere — or nowhere — refuses the whole page here exactly
+        # as ``pull.inbox`` refuses it, or this surface would render a row the
+        # connector drops.
+        if item.recipient_endpoint_id != context.owner.endpoint_id:
             raise ReadRefused("wrong_recipient")
-        endpoint = item.recipient_endpoint_id
-        if endpoint and endpoint != context.owner.endpoint_id:
+        recipient = item.recipient_account_id
+        if recipient is not None and recipient != context.owner.account_id:
             raise ReadRefused("wrong_recipient")
     _recheck(context, store)
     rows = tuple(_row(store, context.owner, item) for item in page.items)
