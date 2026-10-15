@@ -661,6 +661,7 @@
   "tests/unit/team_bridge/test_h5e_events.py": 1.0,
   "tests/unit/team_bridge/test_model_boundary.py": 1.165,
   "tests/unit/team_bridge/test_pull.py": 1.0,
+  "tests/unit/team_bridge/test_read_context.py": 1.0,
   "tests/unit/team_bridge/test_scheduler.py": 1.0,
   "tests/unit/team_bridge/test_screening.py": 4.349,
   "tests/unit/team_bridge/test_store.py": 1.0,

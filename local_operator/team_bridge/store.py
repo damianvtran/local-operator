@@ -799,6 +799,25 @@ def _decode_categories_text(raw: Any) -> list[str]:
     return decoded
 
 
+def _owner_from_row(row: sqlite3.Row) -> OwnerSnapshot:
+    """One committed enrollment row -> the owner snapshot the readers hand out.
+
+    Extracted so every reader of ``enrollments`` — the writable ones and the
+    read-only pair added for review R-1 — decodes the row the same way: two
+    decoders is how the namespace a read side reports stops matching the
+    namespace the write side committed.
+    """
+
+    return OwnerSnapshot(
+        credential_id=int(row["credential_id"]),
+        account_id=row["account_id"],
+        tenant_id=row["tenant_id"],
+        endpoint_id=row["endpoint_id"],
+        canonical_base_url=row["canonical_base_url"],
+        enrollment_generation=int(row["enrollment_generation"]),
+    ).validated()
+
+
 def _owner_key(owner: OwnerSnapshot) -> str:
     """The namespace key: hub origin + account + tenant + endpoint.
 
@@ -1317,19 +1336,132 @@ class Store:
                     # never be read through a guess — callers name the full
                     # namespace via resolve_owner instead (QA H2-Q5).
                     return None
-                row = rows[0]
-                return OwnerSnapshot(
-                    credential_id=int(row["credential_id"]),
-                    account_id=row["account_id"],
-                    tenant_id=row["tenant_id"],
-                    endpoint_id=row["endpoint_id"],
-                    canonical_base_url=row["canonical_base_url"],
-                    enrollment_generation=int(row["enrollment_generation"]),
-                ).validated()
+                return _owner_from_row(rows[0])
         except StoreRefused:
             return None
         except sqlite3.Error:
             return None
+
+    # -- READ-ONLY accessors (review R-1 / spec M-9) -------------------------
+    #
+    # WHY THESE EXIST APART FROM THE ONES ABOVE. Every reader above opens the
+    # store through ``_connect`` (which ``mkdir``s the tree) and ``_init`` (full
+    # DDL plus the additive migration). That is right for a writer and wrong for
+    # a surface whose whole promise is that it only REPORTS state: a UI read must
+    # not create the database it was asked about, because "this machine holds
+    # nothing for you" and "a store we just made" are different facts, and the
+    # second one is a write nobody asked for. Measured in review R-1: a GET with
+    # nothing enrolled answered 409 and left a fresh ``team_bridge/state.sqlite3``
+    # behind.
+    #
+    # So the readers below open an EXISTING file through SQLite's own read-only
+    # URI — no mkdir, no DDL, no migration, no journal-mode pragma — and treat an
+    # absent file as "nothing enrolled" rather than as something to create. A
+    # file that exists but cannot be read is NOT authority: it refuses with
+    # ``state_unreadable`` instead of being repaired, the same fail-closed law
+    # ``_init`` follows.
+    #
+    # CONTRACT: the invariant they exist for is LOGICAL zero-write (spec M-10):
+    # main-file bytes, schema version and rows unchanged, no new database created.
+    # SQLite's own WAL side files are tolerated — a reader may need them, and they
+    # are not this surface's write.
+
+    @contextmanager
+    def _connect_readonly(self) -> Iterator[sqlite3.Connection | None]:
+        """A read-only connection to an EXISTING store, or ``None`` when absent."""
+
+        if not self._path.exists():
+            # ``yield None``, not a bare ``return``: a contextmanager generator
+            # that never yields raises instead of handing the caller its None.
+            yield None
+            return
+        try:
+            conn = sqlite3.connect(
+                f"{self._path.absolute().as_uri()}?mode=ro",
+                uri=True,
+                timeout=_BUSY_TIMEOUT_MS / 1000.0,
+            )
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", str(error)) from error
+        try:
+            conn.row_factory = sqlite3.Row
+            yield conn
+        except sqlite3.Error as error:
+            # Anything the CALLER's read hits is one fact to the surface: this
+            # machine's store cannot be read. Never a partial answer.
+            raise StoreRefused("state_unreadable", str(error)) from error
+        finally:
+            conn.close()
+
+    def active_owner_readonly(self) -> OwnerSnapshot | None:
+        """The committed owner WITHOUT creating or migrating the store (R-1).
+
+        The same rule as :meth:`active_owner` — exactly one committed row, else
+        None — over a read-only connection, so an absent file reads as
+        "not enrolled" and, crucially, stays absent.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            rows = conn.execute("SELECT * FROM enrollments WHERE state = 'committed'").fetchall()
+            if len(rows) != 1:
+                return None
+            return _owner_from_row(rows[0])
+
+    def owner_consent_receipt_readonly(self, owner: OwnerSnapshot) -> dict[str, str] | None:
+        """The consent receipt for the EXACT live owner, read-only (R-1).
+
+        The same fence and the same columns as :meth:`owner_consent_receipt`:
+        the native live-owner/generation check, then the accepted version/ref.
+        An absent store, a fenced owner or a half-written receipt is None.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT consent_version, consent_ref FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (_owner_key(owner), owner.enrollment_generation),
+            ).fetchone()
+            if row is None:
+                return None
+            version = row["consent_version"]
+            ref = row["consent_ref"]
+            if not isinstance(version, str) or not version:
+                return None
+            if not isinstance(ref, str) or not ref:
+                return None
+            return {"consent_version": version, "consent_ref": ref}
+
+    def screening_hold_readonly(
+        self, owner: OwnerSnapshot, message_id: str
+    ) -> dict[str, Any] | None:
+        """The durable hold row for one message, read-only (R-1).
+
+        The same row :meth:`screening_hold` reads, minus the write. The caller
+        renders ``hold_code``/``retry_at`` only; the screener's own reason has no
+        column here and is never read.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            row = conn.execute(
+                "SELECT hold_code, retry_at, created_at FROM screening_holds "
+                "WHERE owner_key = ? AND message_id = ?",
+                (_owner_key(owner), str(message_id)),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "hold_code": row["hold_code"],
+                "retry_at": row["retry_at"],
+                "created_at": row["created_at"],
+            }
 
     def resolve_owner(
         self,
@@ -1364,15 +1496,7 @@ class Store:
                     rows = [r for r in rows if r["canonical_base_url"] == canonical_base_url]
                 if len(rows) != 1:
                     return None
-                row = rows[0]
-                return OwnerSnapshot(
-                    credential_id=int(row["credential_id"]),
-                    account_id=row["account_id"],
-                    tenant_id=row["tenant_id"],
-                    endpoint_id=row["endpoint_id"],
-                    canonical_base_url=row["canonical_base_url"],
-                    enrollment_generation=int(row["enrollment_generation"]),
-                ).validated()
+                return _owner_from_row(rows[0])
         except StoreRefused:
             return None
         except sqlite3.Error:
