@@ -678,11 +678,15 @@ SIGNAL_DRAIN_S = 120.0
 #: operator's rule for every build move is that a runtime is replaced when its turn
 #: is COMPLETE, never on a heuristic of inactivity. So the bound now ABANDONS the
 #: handover: the runtime keeps the build it loaded, the messages the drain queued
-#: come back in, and the failure is published under ``UPDATE_FAILED_CAUSE``
-#: (``process._abandon_move``). What the bound still buys is unchanged and is what
-#: its calibration was for: a session whose work has gone silent stops being a
-#: handover nobody can complete, and becomes a reported condition on a runtime that
-#: is still serving.
+#: come back in, and NOTHING IS REPORTED AS A FAILURE (``process._abandon_move``) —
+#: the operator's ask of 2026-10-15, which superseded this bound's earlier duty to
+#: publish ``UPDATE_FAILED_CAUSE``. A runtime this bound abandons is HEALTHY and
+#: still on its way to the newer build: the departure stays committed and lands at
+#: the first idle instant, so the ``LEAVING_FOR_BUILD`` phrase the record keeps is
+#: the true account and an error-like notice would be a false alarm. What the bound
+#: still buys is unchanged and is what its calibration was for: a session whose work
+#: has gone silent stops being a handover nobody can complete, and becomes a runtime
+#: that keeps serving without the wait.
 #:
 #: HERE, beside ``SIGNAL_DRAIN_S``, for that constant's own reason: the phrase that
 #: NAMES this bound is published on the record two front ends read
@@ -728,17 +732,20 @@ BUILD_DRAIN_PROGRESS_S = 15 * 60.0
 #: object and the commitment it carries, so the runtime still leaves at the first idle
 #: instant it reaches and the newer build still gets the handover — firing only means
 #: the wait stops being one the operator is locked out of. Firing while work continues
-#: releases the latch, so the session takes work again, and publishes the failure under
-#: :data:`UPDATE_FAILED_CAUSE` so the state is reportable instead of silent. It does
-#: NOT exit the process and does NOT cut the turn in flight: a runtime is replaced
-#: when its turn is COMPLETE, never on a heuristic of inactivity (the operator's rule
-#: for every build move), and it is the reason the arm this bound drives abandons the
-#: handover rather than taking the signal drain's bounded exit.
+#: releases the latch, so the session takes work again. It does NOT publish a failure
+#: and does NOT report the state as one (operator ask, 2026-10-15): the runtime keeps
+#: its commitment and keeps serving, so an error-like notice here was a FALSE ALARM —
+#: measured on this host as error-like notices on busy sessions where nothing failed —
+#: and the record's retained ``LEAVING_FOR_BUILD`` phrase is the true, neutral story.
+#: It does NOT exit the process and does NOT cut the turn in flight: a runtime is
+#: replaced when its turn is COMPLETE, never on a heuristic of inactivity (the
+#: operator's rule for every build move), and it is the reason the arm this bound
+#: drives abandons the handover rather than taking the signal drain's bounded exit.
 #:
 #: HERE, beside the two bounds it is measured against, for their own reason: an
 #: operator comparing what a runtime promises against what a bound can take away has
-#: to read all three in one place, and the failure this bound publishes carries its
-#: number onto the incident row from this constant rather than from a copy.
+#: to read all three in one place, and a bound that no longer publishes its number
+#: still has to be readable beside the one that does.
 BUILD_DRAIN_DWELL_S = 30 * 60.0
 
 
@@ -924,6 +931,19 @@ PUBLISHED_UPDATE_PHASES: tuple[str, ...] = (UPDATING, UPDATING_DONE, UPDATE_FAIL
 #: runtime stays on the build it is running, releases the admission lock, and
 #: journals this token so the failure is reportable rather than silent.
 #:
+#: BUT ONLY ONE ARM PUBLISHES IT (operator ask, 2026-10-15; this corrects the
+#: earlier count of three). The bounded update WINDOW,
+#: ``process._abandon_update_window``, has no departing commitment covering it: it
+#: gave up on a handover and left the runtime idle on the build it loaded, so the
+#: failure is real and reportable. The two build-DRAIN bounds
+#: (:data:`BUILD_DRAIN_PROGRESS_S` and :data:`BUILD_DRAIN_DWELL_S`) do NOT publish
+#: it any more: ``process._abandon_move`` keeps its commitment — the drain object
+#: stays latched, the departure is retried every tick and lands at the first idle
+#: instant — so a published failure was a FALSE ALARM on a healthy runtime that was
+#: still on its way to the newer build. The incident row a deferral no longer
+#: writes is why the record's retained ``LEAVING_FOR_BUILD`` phrase has to carry
+#: the story alone; nothing here changed for the window arm.
+#:
 #: SAME CLASS AS :data:`BUILD_DRAIN_OVERDUE_CAUSE`, and for its reason: an
 #: ``incidents.CUT_OFF_CAUSES`` key, so every surface that repeats a cause can
 #: render it as a sentence. It is deliberately NOT ``runtime-retired``, which is
@@ -1035,8 +1055,11 @@ def update_short(phase: str, pair: str = "") -> str:
         # PHASE ONLY, and the missing pair is the point rather than an omission: the
         # move this names did NOT happen, so the build pair belongs to the failure
         # notice ("could not move to X"), never to a fleet cell that would read as
-        # "went to X". Which build the row is actually on is the neighbouring version
-        # column's job, and it is already there.
+        # "went to X". THE HUMAN FLEET SURFACES HAVE NO VERSION COLUMN to fall back on
+        # — ``lop sessions`` prints STATE/PID/.../UPDATING/STALLED and ``info``
+        # likewise, neither carrying a build — so the reader who needs the loaded build
+        # gets it from the failure notice's own text and from the ``--json`` row; the
+        # cell deliberately does not invent one (design review round 1, D3).
         return "update failed"
     return ""
 
@@ -1478,11 +1501,15 @@ class SessionRecord:
     #: it is true for the whole life of this process, and a surface that showed it
     #: for a moment and then dropped it would be racing the reader it exists for.
     #:
-    #: ``update_failed`` is written by a runtime that STAYED — its window ran out
-    #: of bound — and names the pair it failed to move to. Together the two make the
-    #: outcome of the move legible on every surface that reads a record, including
-    #: the ones that never saw the window itself (a fleet listing taken afterwards,
-    #: the phone's projection, the desktop feed).
+    #: ``update_failed`` is written by a runtime that STAYED — its WINDOW ran out
+    #: of bound, with nothing covering that departure — and names the pair it failed
+    #: to move to. The build DRAIN's abandon does NOT write it (operator ask,
+    #: 2026-10-15): that runtime keeps its departing commitment, so it is a deferral
+    #: rather than a failure and its record carries the ``leaving`` phrase alone.
+    #: Together with ``updated`` the field makes the outcome of the move legible on
+    #: every surface that reads a record, including the ones that never saw the
+    #: window itself (a fleet listing taken afterwards, the phone's projection, the
+    #: desktop feed).
     updated: str = ""
     update_failed: str = ""
 
