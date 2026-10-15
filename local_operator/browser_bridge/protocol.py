@@ -310,6 +310,7 @@ METHODS = (
     # issues no later command and so never self-healed. Presentation only: it
     # drives no tab, reads no page, and returns nothing but the applied label.
     "retitle",
+    "owner_inspect",
     "owner_recover",
     "owner_finish",
     "owner_retain",
@@ -360,6 +361,7 @@ ORIGIN_PROMPT_TIMEOUT_MS = 60_000
 #: HTTP timeout from them (backend.py) so the daemon's typed timeout always
 #: arrives before the client gives up.
 COMMAND_TIMEOUTS = {
+    "owner_inspect": 8.0,
     "owner_recover": 20.0,
     "owner_finish": 20.0,
     "owner_retain": 20.0,
