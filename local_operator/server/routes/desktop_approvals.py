@@ -71,6 +71,8 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     operator (or their next action) can act on all of them.
     """
     status = 404 if error.code in {"unknown_approval", "approval_missing"} else 409
+    if error.code in {"ssh_port_conflict", "invalid_ssh_port", "unexpected_run_body"}:
+        status = 422
     return HTTPException(status, _wd.desktop_refusal(error=str(error)).envelope(code=error.code))
 
 
@@ -123,10 +125,12 @@ async def onboard_probe(request: Request, body: OnboardProbe):
     await _local(request, lambda: bound_root(_root(request)))
     embedded = onboard._port_from(body.host)
     if body.port and embedded and body.port != embedded:
-        raise HTTPException(422, "The supplied SSH ports disagree")
+        raise _http_refusal(MeshRefusal("ssh_port_conflict", "The supplied SSH ports disagree"))
     port = body.port or embedded or 22
     if not 1 <= port <= 65535:
-        raise HTTPException(422, "Choose an SSH port between 1 and 65535")
+        raise _http_refusal(
+            MeshRefusal("invalid_ssh_port", "Choose an SSH port between 1 and 65535")
+        )
     host = body.host.partition(":")[0] if ":" in body.host else body.host
     # Bind the observed port into the exact host field the request/run consumes;
     # otherwise a frontend could accidentally file its default port instead.
@@ -206,7 +210,11 @@ async def run_onboard(request: Request, approval_id: str):
     from local_operator.server.utils.desktop_onboard import bound_root, detail
 
     if await request.body():
-        raise HTTPException(422, "Run takes no body; the signed card supplies every scope")
+        raise _http_refusal(
+            MeshRefusal(
+                "unexpected_run_body", "Run takes no body; the signed card supplies every scope"
+            )
+        )
 
     async def start():
         def admit():
