@@ -2007,8 +2007,11 @@ class RadientClient:
         an org-scoped row -- it does not know it. The server's org-sharing API
         documents ``DELETE /v1/tenants/:tenantid/agents/:agentid`` (admin+),
         which is the only working path for those rows. Both ids land in the URL
-        path, so they are validated BEFORE the request is built: a value that
-        could smuggle a path or query segment through is refused.
+        path, so they are validated BEFORE the request is built, and the rule is
+        a CANONICAL UUID: literal separators are not enough because requests
+        normalizes "." / ".." / percent-encoded components before sending, so a
+        "safe-looking" id could still address a different resource (review R3:
+        `--id ..` prepared a DELETE for the tenant root).
 
         Args:
             tenant_id (str): The organization owning the agent.
@@ -2020,9 +2023,16 @@ class RadientClient:
         """
         tenant = str(tenant_id or "").strip()
         agent = str(agent_id or "").strip()
+        # UUID parsing refuses dots, percent-encoded traversal, slashes,
+        # control characters and empty strings in one rule; the canonical-form
+        # comparison additionally refuses braced/urn/compact spellings.
         for label, value in (("tenant_id", tenant), ("agent_id", agent)):
-            if not value or any(ch in value for ch in "/?#\\") or any(ch.isspace() for ch in value):
-                raise ValueError(f"invalid {label}: an id must be non-empty and path-safe")
+            try:
+                canonical = str(uuid.UUID(value))
+            except (ValueError, TypeError, AttributeError):
+                canonical = ""
+            if not value or value.lower() != canonical:
+                raise ValueError(f"invalid {label}: a canonical UUID is required")
         url = f"{self.base_url}/tenants/{tenant}/agents/{agent}"
         headers = self._get_headers(content_type=None, require_api_key=True)
         try:

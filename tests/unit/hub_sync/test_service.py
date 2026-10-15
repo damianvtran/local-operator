@@ -732,6 +732,74 @@ def test_resolve_source_never_vouches_an_unknown_legacy_baseline(env) -> None:
     assert after.remote_revision is None
 
 
+def test_resolve_places_identity_on_the_original_record_without_rebuilding_the_base(
+    env,
+) -> None:
+    """R2: resolve adds identity/scope to the ORIGINAL record; it never rebuilds.
+
+    Reconstructing the payload from current local content makes a user's
+    unintegrated edit the merge base: the next unchanged-remote apply then
+    classifies as ``remote-only`` and erases the edit. Review repro with the
+    identical-code no-resolve control: with resolve the edit was overwritten;
+    without it the edit survived. This pins the record itself.
+    """
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE.replace("Old advice.", "USER EDIT TO KEEP"))
+    before = prov.read_baseline(root, "agent", row.id)
+    assert before is not None and before.recorded_by != prov.UNKNOWN_BASELINE
+
+    svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+
+    after = prov.read_baseline(root, "agent", row.id)
+    assert after is not None and after.identity is not None
+    assert after.fields == before.fields, "the pulled base must not absorb local edits"
+    assert after.fingerprint == before.fingerprint
+    bytes_now = (root / "hub" / "baselines" / f"agent-{row.id}.json").read_bytes()
+    assert b"USER EDIT TO KEEP" not in bytes_now, "the baseline file must not carry the edit"
+
+    # The remote never changed: the apply is a no-op and the edit survives.
+    report = svc.apply_items(ctx, kind="agent", allow_llm=False)
+    assert report.reports[0].outcome == "up-to-date", report
+    assert "USER EDIT TO KEEP" in _text(agents, row.id)
+
+
+def test_resolve_keeps_the_team_pull_base_and_a_surviving_local_edit(env) -> None:
+    """R2 for teams: same contract, exercised on the team registry path."""
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    teams.update_team(team.id, TeamEditFields(description="USER TEAM EDIT TO KEEP"))
+    before = prov.read_baseline(root, "team", team.id)
+    assert before is not None and before.recorded_by != prov.UNKNOWN_BASELINE
+
+    svc.resolve_source(
+        ctx,
+        kind="team",
+        name=team.name,
+        hub_source="https://hub.test/v1",
+        visibility="org",
+        tenant_id="org-1",
+    )
+
+    after = prov.read_baseline(root, "team", team.id)
+    assert after is not None and after.identity is not None
+    assert after.fields == before.fields
+    assert after.fingerprint == before.fingerprint
+
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+    assert report.reports[0].outcome == "up-to-date", report
+    assert teams.get_team(team.id).description == "USER TEAM EDIT TO KEEP"
+
+
 def test_resolve_source_refuses_unlinked_item(env) -> None:
     ctx, hub, agents, teams, root = env
     row = agents.create_agent(_fields(name="local-only", description="d", tags=["role"]))

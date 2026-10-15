@@ -427,9 +427,11 @@ def resolve_source(
     or invent a ``link_id``. The real ``link_id`` comes only from the canonical
     identity tuple (``LinkIdentity.link_id``).
 
-    A record a real pull/merge already wrote keeps its trusted facts: this arm
-    only ADDS the identity and scope. Ownership, lineage, the remote revision
-    and the outbound receipt survive; the unknown marker itself stays unknown,
+    A record a real pull/merge already wrote is preserved byte-for-byte apart
+    from identity/scope: ownership, lineage, the remote revision, the outbound
+    receipt AND the merge-base payload/fingerprint all survive -- rebuilding
+    the payload from current local content would launder unintegrated edits
+    into the base (review R2). The unknown marker itself stays unknown,
     because a resolve is not an integration.
     """
     from local_operator.agents import hub_origin
@@ -464,28 +466,20 @@ def resolve_source(
         # One writable origin per artifact: a differing source/scope/remote id
         # refuses here rather than relinking, and the old record is untouched.
         existing.identity.require_same_origin(identity)
-    record = prov.make_record(kind, local_id, hub_id, tenant_id, fields, "adopt-unknown")
-    record = replace(record, identity=identity, scope_known=True, lineage="unknown")
     if (
         existing is not None
         and existing.recorded_by != prov.UNKNOWN_BASELINE
         and existing.hub_id == hub_id
     ):
-        # A genuine integration already wrote trusted facts. Resolving CONFIRMS
-        # source+scope and adds the identity; it must not downgrade ownership,
-        # lineage, revision or the outbound receipt to the unknown marker.
-        # Observed on the real pass: a pulled team resolved here, after which
-        # the check classified from an unknown base and refused every removal
-        # as needs-review -- "the baseline is unknown". Only a record a real
-        # pull/merge wrote qualifies; the unknown marker itself stays unknown
-        # (a resolve is not an integration, so it cannot vouch for absence).
-        record = replace(
-            record,
-            recorded_by=existing.recorded_by,
-            lineage=existing.lineage,
-            remote_revision=existing.remote_revision,
-            outbound=existing.outbound,
-        )
+        # A known baseline: REPLACE identity/scope on the ORIGINAL record.
+        # Rebuilding the payload from current local content would make the
+        # user's unintegrated edit the merge base -- the next unchanged-remote
+        # apply then classifies as remote-only and erases it (review R2,
+        # reproduced against the identical-code no-resolve control).
+        record = replace(existing, identity=identity, scope_known=True, tenant_id=tenant_id or None)
+    else:
+        record = prov.make_record(kind, local_id, hub_id, tenant_id, fields, "adopt-unknown")
+        record = replace(record, identity=identity, scope_known=True, lineage="unknown")
     prov.write_baseline(ctx.config_dir, record)
     return record
 

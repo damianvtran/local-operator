@@ -134,14 +134,42 @@ def test_agents_delete_an_org_target_uses_the_tenant_route(
     response.text = ""
     with patch("requests.delete", return_value=response) as mock_delete:
         result = agents_delete_command(
-            Namespace(name=None, agent_id=agent_id, org="tenant-9"),
+            Namespace(name=None, agent_id=agent_id, org="3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f"),
             MagicMock(),
             isolated_config_dir,
         )
-    assert result == 0
-    assert mock_delete.call_args[0][0] == (
-        f"{DEFAULT_RADIENT_API_BASE_URL}/tenants/tenant-9/agents/{agent_id}"
+    expected = (
+        f"{DEFAULT_RADIENT_API_BASE_URL}/tenants/"
+        "3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f"
+        f"/agents/{agent_id}"
     )
+    assert result == 0
+    assert mock_delete.call_args[0][0] == expected
+
+
+def test_agents_delete_refuses_a_traversal_id_before_any_request(
+    isolated_config_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """R3: a dot-dot id must ERROR, never send a DELETE toward the tenant root."""
+
+    monkeypatch.setattr(
+        radient_credentials,
+        "resolve_radient_credential_sync",
+        lambda *args, **kwargs: SecretStr("test-key"),
+    )
+    with patch("requests.delete") as mock_delete:
+        result = agents_delete_command(
+            Namespace(
+                name=None,
+                agent_id="..",
+                org="3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f",
+            ),
+            MagicMock(),
+            isolated_config_dir,
+        )
+    assert result == 1
+    mock_delete.assert_not_called()
+    assert "Error deleting agent from Radient" in capsys.readouterr().out
 
 
 def test_the_environment_tier_is_completed_where_it_is_produced(

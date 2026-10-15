@@ -436,6 +436,11 @@ def test_delete_agent_from_marketplace_network_error(radient_client: RadientClie
         assert "Network error" in str(exc_info.value)
 
 
+# Canonical UUID fixtures: the tenant delete enforces the canonical form.
+_TENANT = "3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f"
+_AGENT = "8f14e45f-ceea-467a-9c1c-1f0e2f0a1234"
+
+
 def test_delete_tenant_agent_uses_the_documented_tenant_route(
     radient_client: RadientClient, base_url: str
 ):
@@ -444,26 +449,36 @@ def test_delete_tenant_agent_uses_the_documented_tenant_route(
     mock_response = MagicMock()
     mock_response.status_code = 204
     with patch("requests.delete", return_value=mock_response) as mock_delete:
-        radient_client.delete_tenant_agent("tenant-1", "agent-1")
+        radient_client.delete_tenant_agent(_TENANT, _AGENT)
     mock_delete.assert_called_once()
     args, kwargs = mock_delete.call_args
-    assert args[0] == f"{base_url}/tenants/tenant-1/agents/agent-1"
+    assert args[0] == f"{base_url}/tenants/{_TENANT}/agents/{_AGENT}"
     assert kwargs["headers"]["Authorization"].startswith("Bearer ")
 
 
 def test_delete_tenant_agent_refuses_an_untrusted_path_segment(radient_client: RadientClient):
-    """Target validation: never build a hub path out of unchecked ids.
+    """Target validation: only canonical UUIDs may build the tenant path.
 
-    Both ids land directly in the URL path; anything that could smuggle a
-    path or query segment through is refused before a request is made.
+    Both ids land directly in the URL path; ``.``/``..``, percent-encoded
+    traversal, encoded slashes, control characters and non-UUID slugs are all
+    refused before a request is made (a normalized path could otherwise
+    address a different resource -- review R3).
     """
     for tenant, agent in (
-        ("", "a"),
-        ("t/1", "a"),
-        ("t", ""),
-        ("t", "a?x"),
-        ("t", "a b"),
-        ("t#f", "a"),
+        ("", _AGENT),
+        (_TENANT, ""),
+        (".", _AGENT),
+        ("..", _AGENT),
+        ("%2e%2e", _AGENT),
+        ("%252e%252e", _AGENT),
+        ("a%2Fb", _AGENT),
+        (_TENANT, ".."),
+        (_TENANT, "%2e%2e"),
+        (_TENANT, "%252e%252e"),
+        (_TENANT, "a/b"),
+        (_TENANT, "a%2Fb"),
+        (_TENANT, "a\x00b"),
+        ("tenant-9", _AGENT),  # a non-UUID slug is not a canonical tenant id
     ):
         with patch("requests.delete") as mock_delete:
             with pytest.raises(ValueError):
@@ -478,7 +493,7 @@ def test_delete_tenant_agent_maps_a_non_204_to_a_named_error(radient_client: Rad
     mock_response.content = b"Agent not found"
     with patch("requests.delete", return_value=mock_response):
         with pytest.raises(RuntimeError) as exc_info:
-            radient_client.delete_tenant_agent("tenant-1", "agent-1")
+            radient_client.delete_tenant_agent(_TENANT, _AGENT)
         assert "Failed to delete organization agent from Radient" in str(exc_info.value)
         assert "Agent not found" in str(exc_info.value)
 

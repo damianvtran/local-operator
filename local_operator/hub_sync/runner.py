@@ -39,6 +39,7 @@ from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.budget import OperationBudget
 from local_operator.hub_sync.check import Link, list_links
+from local_operator.hub_sync.identity import LinkPolicy
 from local_operator.hub_sync.outbox import Outbox
 from local_operator.hub_sync.report import ItemMergeReport
 from local_operator.hub_sync.settings import HubSyncSettings
@@ -117,6 +118,12 @@ class HubSyncRunner:
         self._stop = asyncio.Event()
         self._reported: set[tuple[str, str]] = set()
         self._last_credential: str | None = None
+        # The policy values last read LIVE off disk. A torn read must never
+        # fall back to the boot snapshot -- it predates any explicit OFF
+        # written since -- so this is the only acceptable fallback; with none
+        # the gate fails closed for every link (review R1).
+        self._live_values: dict[str, Any] | None = None
+        self._policies_trusted = True
         self.last_tick: TickReport | None = None
         # A cancelled HTTP waiter or timed-out check does NOT stop a worker
         # thread. Private shielded futures remain owned until actual completion,
@@ -278,6 +285,12 @@ class HubSyncRunner:
             report.available = sum(1 for c in checks if c.verdict == "available")
             grace = await self._offload(self._first_run_grace, ctx)
             policies = self._link_policies(links)
+            if not self._policies_trusted:
+                # No readable file AND no last-good snapshot: no permission is
+                # trustworthy, so nothing periodic may run (neither applies nor
+                # pushes -- `_push_due` sits below this return).
+                report.skipped = "policy-unreadable"
+                return report
             for c in checks:
                 # UP-TO-DATE items still carry an AGREEMENT (QN7): an L == R
                 # check with a live revision is where the origin's lineage
@@ -346,8 +359,9 @@ class HubSyncRunner:
         # gate (observed on the real pass: subscribe=false persisted minutes
         # before a natural tick, yet the link was still picked and applied).
         # read_config_values is the same live seam HubSyncSettings.read_fresh
-        # uses; None means a torn read right now, so keep the manager's view
-        # rather than treating it as "everything unset".
+        # uses. None means a torn read right now -- handled below: NEVER fall
+        # back to the manager's boot snapshot, whose links section predates
+        # any explicit OFF written since.
         values = None
         config_dir = getattr(self._cm, "config_dir", None)
         if config_dir is not None:
@@ -358,10 +372,25 @@ class HubSyncRunner:
             except Exception:  # noqa: BLE001 - never lose the gate over a config read
                 values = None
         if values is None:
-            try:
-                values = self._cm.get_config().values
-            except Exception:  # noqa: BLE001 - a bad read is treated as no explicit policy
-                return {}
+            # An unreadable file is NOT permission to fall back to boot
+            # defaults: creation defaults would silently re-enable a link the
+            # user had explicitly switched off (review R1: a torn read after an
+            # observed OFF ticked checked/applied=1 1 and landed the upstream
+            # text). The last LIVE snapshot is the only trustworthy fallback;
+            # with no snapshot at all, fail closed for every link.
+            values = self._live_values
+            if values is None:
+                self._policies_trusted = False
+                logger.warning("hub policy file unreadable and no live snapshot; failing closed")
+                return {
+                    link.link_id: LinkPolicy(subscribe=False, auto_push=False)
+                    for link in links
+                    if link.link_id
+                }
+            logger.warning("hub policy file unreadable; using the last live snapshot")
+        else:
+            self._live_values = values
+        self._policies_trusted = True
         out: dict[str, Any] = {}
         for link in links:
             if not link.link_id:
