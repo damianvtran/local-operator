@@ -3151,6 +3151,36 @@ def _code_requests_recommendation(
     )
 
 
+_MEMORY_SAVE_INTENT = re.compile(
+    r"(?:\b(?:remember|retain)\b.{0,100}|"
+    r"\b(?:save|store)\b(?:\s+(?:these|the|key|important|useful|work|project|our)){0,4}\s+)"
+    r"\b(?:facts?|details?|goals?|decisions?|files?|runbooks?|channels?|threads?|contacts?|"
+    r"preferences?|future sessions?|after (?:context )?compaction)\b",
+    re.I | re.S,
+)
+_MEMORY_RECALL_INTENT = re.compile(
+    r"\b(?:retained (?:knowledge|facts?)|remembered|previously (?:saved|stored)|"
+    r"what (?:did|do) (?:we|you) (?:decide|remember)|saved (?:facts?|goals?|contacts?))\b",
+    re.I,
+)
+
+
+def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
+    """Route deliberate retain/recall intent even with an empty bank or no classifier.
+
+    The real fresh-agent pilot invented CLI verbs when the guide was merely listed:
+    a bank hit cannot teach the FIRST save. Reuse the existing advisory resource-tail
+    seam, not another model call or frozen-prefix instructions. Compound intent keeps
+    technical memory (RAM/SQLite/store implementations) and ordinary tasks quiet.
+    """
+    text = query[:2048]
+    if not (_MEMORY_SAVE_INTENT.search(text) or _MEMORY_RECALL_INTENT.search(text)):
+        return None
+    return _ClassificationCandidate(
+        "guide", "memory", "Deliberate scoped retain/recall protocol.", "guide://memory"
+    )
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -3444,6 +3474,12 @@ async def _select_knowledge_block(
     # not starve the line the trigger exists to deliver. Vendor answers keep
     # their own late-first order after it.
     answers: list[Any] = []
+    # Deliberate memory intent has a zero-provider fallback: the first save has no
+    # bank to match, and classification may be disabled or unavailable. It rides
+    # the same cap/dedupe and append-only state tail as every resource suggestion.
+    deterministic_memory = _memory_recommendation(query)
+    if deterministic_memory is not None:
+        answers.append(_DeterministicRecommendation(resources=(deterministic_memory,)))
     if deterministic_code_requests is not None:
         answers.append(_DeterministicRecommendation(resources=(deterministic_code_requests,)))
     answers.extend(pending)
