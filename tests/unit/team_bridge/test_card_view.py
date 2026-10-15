@@ -7,11 +7,12 @@ the body hash. These pins hold that line, including when the meta is missing.
 
 D8 (design round 2, PR #2378) owns what each half of the row says: the identity
 column (``bridge_card_sender``, read by ``TeamBridgeBlock._sender_name``) paints
-``<name> (<organization>)``, so ``bridge_card_text`` returns the EXCERPT ALONE
-when that column resolved a member and keeps the old ``<subject> — <excerpt>``
-form — where the subject is the only human named at all — when it did not. RD-1
+``<name> (<organization>)``, so ``bridge_card_text`` returns the EXCERPT when
+that column resolved a member and keeps the old ``<subject> — <excerpt>`` form —
+where the subject is the only human named at all — when it did not. RD-1
 (review, PR #2378) removed the subject's account-id fallback: that value is the
-wake's OWN sender, i.e. the reader's side.
+wake's OWN sender, i.e. the reader's side. D9 (design round 3) states a MISSING
+excerpt on both surfaces rather than leaving a bare identity.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 
 from local_operator.team_bridge.card import (
     GENERIC_CARD_SUBJECT,
+    NO_PREVIEW_TEXT,
     bridge_card_sender,
     bridge_card_subject,
     bridge_card_text,
@@ -71,11 +73,11 @@ def test_the_card_degrades_to_the_generic_line_never_the_wakes_own_sender() -> N
     """
     without_meta = {"body": WIRE_BODY, "sender": {"account_id": "acc_local"}}
     assert bridge_card_subject(without_meta) == GENERIC_CARD_SUBJECT
-    assert bridge_card_text(without_meta) == f"{GENERIC_CARD_SUBJECT} — (no preview available)"
+    assert bridge_card_text(without_meta) == f"{GENERIC_CARD_SUBJECT} — {NO_PREVIEW_TEXT}"
     assert "acc_local" not in bridge_card_text(without_meta)
 
     bare = {"body": WIRE_BODY}
-    assert bridge_card_text(bare) == f"{GENERIC_CARD_SUBJECT} — (no preview available)"
+    assert bridge_card_text(bare) == f"{GENERIC_CARD_SUBJECT} — {NO_PREVIEW_TEXT}"
 
 
 def test_the_identity_column_carries_the_member_once_meta_validated_it() -> None:
@@ -87,17 +89,21 @@ def test_the_identity_column_carries_the_member_once_meta_validated_it() -> None
     assert sender["source"] == "team_bridge_message"
 
 
-def test_a_named_carriage_with_no_excerpt_leaves_the_row_to_the_identity_column() -> None:
-    """D8: the enriched predicate is about the NAME, not the excerpt.
+def test_a_named_carriage_with_no_excerpt_states_the_absence() -> None:
+    """D9: an empty excerpt is STATED, never left as an identity-only row.
 
-    With the identity column resolving a member and no excerpt to show, the body
-    is empty and the collapsed row is the identity alone — the shape every
-    body-less peer receipt already takes (``identity · snippet if snippet``).
-    The degraded subject-prefixed form is for the carriage that named nobody.
+    The carriage is reachable — the byte-fitter trims the excerpt to "" under
+    payload pressure, a screened body can be empty, and the render-time lookup
+    degrades to "" by design — and silence in the body slot asserts a fact the
+    surface cannot know ("the sender sent nothing") where it can equally mean
+    "no preview is derivable on this side". One spelling for one absence: the
+    string the degraded branch already ships.
     """
-    assert bridge_card_text({"bridge": {"sender_name": "dana@acme.example"}}) == ""
+    assert bridge_card_text({"bridge": {"sender_name": "dana@acme.example"}}) == (
+        "(no preview available)"
+    )
     named_no_excerpt = {"bridge": {"sender_name": "dana@acme.example", "excerpt": ""}}
-    assert bridge_card_text(named_no_excerpt) == ""
+    assert bridge_card_text(named_no_excerpt) == NO_PREVIEW_TEXT
 
 
 def test_a_multi_line_field_cannot_reflow_the_card() -> None:

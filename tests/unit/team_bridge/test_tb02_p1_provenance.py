@@ -553,16 +553,18 @@ def test_tag_lookalike_variants_are_neutralised() -> None:
 
 
 def test_an_ask_with_no_sender_or_excerpt_still_names_a_generic_asker() -> None:
-    """M1, re-pointed by D3: the all-empty case is a REAL shape.
+    """M1, re-pointed by D3, and D9: the all-empty case is a REAL shape.
 
     Guarding the assignment on "did any of the fields say something" left the
     question's text unbound on exactly that path — a crash on the reception
-    path, not a degraded render. The text is now the generic line: never a raw
-    account id, and never the §11.1 clause (that is the model's carrier).
+    path, not a degraded render. The text is now the generic line WITH the
+    absence stated (D9): never a raw account id, never the §11.1 clause (that is
+    the model's carrier), and never a bare identity asking for a decision on
+    nothing.
     """
 
     question = bridge_request_question(message_id="bmsg_1", sender="", excerpt="", scope=None)
-    assert str(question["question"]) == GENERIC_ASK_SENDER
+    assert str(question["question"]) == f"{GENERIC_ASK_SENDER}: (no preview available)"
 
 
 def test_the_response_report_never_attributes_sender_words_to_the_user() -> None:

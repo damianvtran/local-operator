@@ -70,6 +70,25 @@ def test_a_carriage_with_no_validated_name_degrades_to_the_generic_line() -> Non
     assert "acc_" not in question["question"]
 
 
+def test_a_missing_excerpt_is_stated_on_the_question_line() -> None:
+    """D9 (design round 3, PR #2378): the `who`-alone shape is UNREACHABLE.
+
+    An empty excerpt is a real carriage (the byte-fitter trims it under payload
+    pressure, a screened body can simply be empty, and the render-time lookup
+    degrades to "" by design), and a decision card asking a member to approve
+    nothing — with no sign that the request text is unavailable here — is the
+    same failure class D3 was about (*who* AND *what*). Both carriages state the
+    absence, in the feature's own words: 51 cells for the named one, 59 for the
+    unnamed, each one uncut row at the card's question width.
+    """
+    named = bridge_request_question(
+        message_id="bmsg_abc", sender="Priya Raman (Acme Research)", excerpt=""
+    )
+    assert named["question"] == "Priya Raman (Acme Research): (no preview available)"
+    unnamed = bridge_request_question(message_id="bmsg_abc", sender="", excerpt="")
+    assert unnamed["question"] == "another member of your organization: (no preview available)"
+
+
 def test_the_excerpt_is_bounded_and_flattened_client_side() -> None:
     question = bridge_request_question(
         message_id="bmsg_abc",

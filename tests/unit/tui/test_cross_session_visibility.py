@@ -657,6 +657,19 @@ BRIDGE_DETAILS: dict[str, Any] = {
 #: collapsed row is ``identity · body``, composed by the block itself.
 BRIDGE_CARD_TEXT = "could you approve the Q3 spend?"
 BRIDGE_CARD_IDENTITY = "Priya Raman (Acme Research)"
+#: D9 (design round 3): the same carriage with the excerpt unavailable — the
+#: byte-fitter trims it to "", a screened body can be empty, and the render-time
+#: lookup degrades to "" by design. The human row states the absence.
+BRIDGE_DETAILS_WITHOUT_EXCERPT: dict[str, Any] = {
+    **BRIDGE_DETAILS,
+    "bridge": {
+        "delivery_ref": "dref_1",
+        "sender_name": "Priya Raman",
+        "organization": "Acme Research",
+        "excerpt": "",
+        "body_sha256": "ab" * 32,
+    },
+}
 #: Long enough that the expanded card wraps to several rows at 100 columns
 #: (the peer control's own growth measurement is 96x4 under the same toggle).
 LONG_BRIDGE_BODY = (
@@ -718,6 +731,20 @@ def test_the_bridge_identity_names_the_member_and_their_organization() -> None:
     # reviewer saw as ``Priya Raman (Acme Research) · Priya Raman…``).
     assert truncate_cells(f"{persona} · {body}", 42) == (
         "Priya Raman (Acme Research) · could you a…"
+    )
+
+    # D9 (design round 3, PR #2378): with the excerpt empty the SAME composed
+    # shape states the absence — measured 52 cells against the 82-cell collapsed
+    # budget, one uncut row at 100 columns.
+    no_preview = TeamBridgeBlock(
+        bridge_card_text(BRIDGE_DETAILS_WITHOUT_EXCERPT),
+        bridge_card_sender(BRIDGE_DETAILS_WITHOUT_EXCERPT),
+    )
+    persona, body = no_preview._summary()
+    assert persona == BRIDGE_CARD_IDENTITY
+    assert body == "(no preview available)"
+    assert truncate_cells(f"{persona} · {body}", 82) == (
+        "Priya Raman (Acme Research) · (no preview available)"
     )
     assert "Acme Research" in header, header
     assert "another session" not in header, header

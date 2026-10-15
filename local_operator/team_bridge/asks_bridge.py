@@ -23,7 +23,9 @@ THE STRING IS THE SURFACE. The question text is the human's question, and it
 is composed for the HUMAN reading it: the first line carries WHO is asking and
 WHAT they are asking for ("sender: body excerpt", §10.3), because the picker
 bounds a question to one row (`MIN_QUESTION_ROWS`) and only the leading line
-reliably survives that bound (D3, design round 2, PR #2378). The §11.1 clause
+reliably survives that bound (D3, design round 2, PR #2378). A missing excerpt
+is STATED (`(no preview available)`), never left as a bare identity: silence
+asserts a fact the surface cannot know (D9, design round 3). The §11.1 clause
 and the thread locator do NOT ride this text: the clause belongs to every
 carrier the MODEL reads (the wake wrap, the bridge tool result, the ask
 report's preamble, the timeout listing in `asks/render`), and the locator is
@@ -38,6 +40,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
+
+# ONE spelling for ONE absence, shared with the transcript card: an empty excerpt
+# is stated, never left as a bare identity. `card` owns the human-facing copy of
+# this feature and imports nothing from here, so this direction carries no cycle.
+from local_operator.team_bridge.card import NO_PREVIEW_TEXT
 
 #: The two answer options (§10.3: "options = Approve / Deny"). Ids are stable
 #: identifiers the answer surfaces key on; labels are the §2.5 strings.
@@ -76,7 +83,9 @@ def bridge_request_question(
     same spelling ``TeamBridgeBlock._sender_name`` paints in the card's
     identity column. It is flattened and tag-neutralised like every other
     sender-derived line, and an empty value degrades to
-    :data:`GENERIC_ASK_SENDER` rather than to an account id (D3).
+    :data:`GENERIC_ASK_SENDER` rather than to an account id (D3). An empty
+    ``excerpt`` composes to :data:`~local_operator.team_bridge.card.NO_PREVIEW_TEXT`
+    rather than leaving the question bare (D9).
 
     ``scope`` is the ORIGINAL authority block
     (``team_bridge.authority.scope_from_runtime``) frozen AT ISSUANCE (S-3):
@@ -114,7 +123,11 @@ def bridge_request_question(
     bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
     if bounded:
         bounded = neutralize_bridge_tag(bounded)
-    text = f"{who}: {bounded}" if bounded else who
+    # D9 (design round 3, PR #2378): the `who`-alone shape is UNREACHABLE by any
+    # input. An empty excerpt states the absence instead — a decision card asking
+    # a member to approve nothing, with no sign that the request text is simply
+    # unavailable here, is the same failure class D3 was about (*who* AND *what*).
+    text = f"{who}: {bounded or NO_PREVIEW_TEXT}"
     question = {
         "id": f"bridge-{message_id}",
         "question": text,
