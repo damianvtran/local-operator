@@ -136,6 +136,35 @@ describe("AskCard", () => {
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
 	});
 
+	it("shows a timed-out ask as lapsed: the question, no answer controls, Dismiss kept", () => {
+		/* Ben's report (2026-10-15): the phone offered the options of an ask whose
+		   deadline had passed, as if the agent were still waiting on them. The
+		   agent has taken its default and moved on, so the card reads that and
+		   offers only the one op the queue accepts on a timeout — dismiss. */
+		renderCard(ask({ status: "timed_out" }));
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		expect(screen.getByText("Lapsed — the agent took its default and moved on")).toBeTruthy();
+		expect(screen.getByText("ship the fix?")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+	});
+
+	it("shows an OPEN ask past its deadline as lapsed too, and offers no Dismiss on it", () => {
+		/* The index reports the status the runtime last wrote; a runtime stopped
+		   before the deadline keeps reporting `open` past it. The phone's clock is
+		   the check. Dismiss stays withheld: the queue refuses it on `open`. */
+		renderCard(ask({ status: "open", expires_at: Date.now() - 60_000 }));
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		expect(screen.getByText("Lapsed — the agent took its default and moved on")).toBeTruthy();
+		expect(screen.getByText("ship the fix?")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+	});
+
 	it("offers no controls on a settled ask, and no error register on an expired one", () => {
 		const { unmount } = renderCard(
 			ask({ status: "answered", delivered: true, answers: { q1: ["yes"] } }),

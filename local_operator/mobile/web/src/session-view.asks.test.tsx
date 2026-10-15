@@ -207,6 +207,50 @@ describe("SessionScreen and queued asks", () => {
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 	});
 
+	it("lists only this conversation's asks when its sheet is opened", async () => {
+		/* Ben's report (2026-10-15): opening one session's questions showed every
+		   session's asks. The aggregate read returns all of them; the sheet opened
+		   from a conversation must show that conversation's rows and no other. */
+		const { getAsks } = await import("./api");
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				ask({ ask_id: "mine-1", session_id: "mine" }),
+				ask({
+					ask_id: "other-1",
+					session_id: "other",
+					questions: [
+						{
+							id: "q1",
+							question: "rename the other workspace?",
+							options: [{ label: "rename", description: "" }],
+							multi: false,
+							secret: false,
+							persist: false,
+						},
+					],
+				}),
+			],
+		});
+		window.location.hash = "#/s/mine";
+		render(<SessionScreen sessionId="mine" />);
+		slot = {
+			projection: projection({
+				session_id: "mine",
+				asks: [ask({ ask_id: "mine-1", session_id: "mine" })],
+				asks_open: 1,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="mine" />);
+		fireEvent.click(screen.getByTestId("ask-dock"));
+		const dialog = await screen.findByRole("dialog");
+		await waitFor(() => expect(dialog.querySelectorAll("[data-ask-status]").length).toBeGreaterThan(0));
+		expect(dialog.textContent).toContain("queue behind the flag?");
+		expect(dialog.textContent).not.toContain("rename the other workspace?");
+		expect(dialog.querySelectorAll("[data-ask-status]").length).toBe(1);
+		expect(dialog.querySelector('[data-ask-id="mine-1"]')).not.toBeNull();
+	});
+
 	it("takes a foreign row's `open` to that conversation, and does not pop back", async () => {
 		/* r2-M1 (agent review round 2), a reproduced functional regression inside
 		   the U2 back-handling: the sheet used to navigate and THEN close itself,
