@@ -11,8 +11,11 @@ scope, so approving it signs exactly one thing and installs/joins/connects nothi
 THE FLOW (each step is a real, separately-gated entrypoint, never a shortcut):
 
 1. ``request``  -- an agent or operator files the card. Nothing is signed or written but
-   the request record; an agent can ask, it can never approve.
-2. ``lop network approvals approve <id>`` -- the operator's own presence-gated signature.
+   the request record; an agent can ask, and cannot approve on its own authority.
+2. ``lop network approvals approve <id>`` -- the operator's own signature. That the signer
+   needs a HUMAN holds only with a presence-gated operator key (Secure Enclave / Touch ID);
+   a ``file-only`` key is readable by any process running as the same user, so there any such
+   process can sign (``lop operator status`` reports which level this machine has).
    :func:`details` is printed to stderr BEFORE the signer runs.
 3. ``apply``    -- ``begin_run`` -> ``consent.provision_from_run`` -> ``mark_connected``.
    One-shot per approval: the card ends ``connected`` (not a lying ``connecting`` that
@@ -255,7 +258,12 @@ def _denies_for(rec: dict[str, Any] | None, provider: str) -> list[dict[str, Any
 
 
 def _existing_conflict(
-    network: str, owner: str, recipient: str, provider: str, root: Path | None
+    network: str,
+    owner: str,
+    recipient: str,
+    provider: str,
+    root: Path | None,
+    approval_id: str = "",
 ) -> None:
     """Refuse, before anything is written, a grant that the foundation would mishandle.
 
@@ -264,7 +272,15 @@ def _existing_conflict(
       author -- it must never be cleared as a side effect of a fresh grant;
     * a different enabled standing permission for the recipient: ``provision_from_run``
       REPLACES a recipient's whole ``inherit`` set, so a second approval would silently
-      drop the first one's coverage. Reduction is not widening, but it is not silent.
+      drop the first one's coverage. Reduction is not widening, but it is not silent. ANY
+      enabled row counts, whatever shape it has (enumerated ids, the broad
+      ``eligible-owner-native`` selector, MCP urls or the MCP selector): this build authors
+      only the enumerated-id shape, but a row written by a later build or by hand must not be
+      narrowed in silence either. It is refused, never cleared or superseded here;
+    * EXCEPT the row THIS approval wrote. ``apply`` records the permission and then closes the
+      card; if it stopped between the two, the replay must be able to finish the card, so a row
+      whose approval ref is this very id is not "a second permission" (``provision_from_run``
+      has its own idempotent same-source path for exactly that case).
     """
     from local_operator.network.credentials import finite_journal
 
@@ -285,14 +301,27 @@ def _existing_conflict(
             f"A finite-share recovery for {provider} on this device is unconfirmed; resolve it "
             "first. Nothing was changed.",
         )
-    if rec is not None and rec.get("enabled") is True and "approval" in rec:
-        covered = rec["inherit"]["providers"].get("ids", [])
-        live = [p for p in covered if not _denies_for(rec, p)]
-        if live:
+    if (
+        rec is not None
+        and rec.get("enabled") is True
+        and "approval" in rec
+        and not (approval_id and rec["approval"].get("ref") == approval_id)
+    ):
+        providers = rec["inherit"]["providers"]
+        mcp = rec["inherit"]["mcp"]
+        live = [p for p in providers.get("ids", []) if not _denies_for(rec, p)]
+        covers = [f"providers: {', '.join(live)}"] if live else []
+        if "selector" in providers:
+            covers.append(f"providers: {providers['selector']}")
+        if "selector" in mcp:
+            covers.append(f"MCP servers: {mcp['selector']}")
+        if mcp.get("urls"):
+            covers.append(f"MCP servers: {', '.join(mcp['urls'])}")
+        if covers:
             raise _refuse(
                 "inherit_permission_exists",
                 "This device already holds a standing inherit permission "
-                f"(providers: {', '.join(live)}). A second approval would replace it, not add "
+                f"({'; '.join(covers)}). A second approval would replace it, not add "
                 "to it; revoke it first. Nothing was changed.",
             )
 
@@ -574,6 +603,24 @@ def details(record: dict[str, Any]) -> list[str]:
     ]
 
 
+def list_lines(record: dict[str, Any]) -> list[str]:
+    """The ``approvals list`` block: one header and the one-line summary, not the disclosure.
+
+    The full fourteen-line disclosure belongs where a decision is taken (``approvals show`` and
+    the stderr print before the signer); a list of several cards must stay scannable.
+    """
+    try:
+        heading = summary(record)
+    except MeshRefusal:
+        heading = "A credential-permission request this build cannot describe; do not approve it."
+    approval_id = record.get("approval_id", "")
+    return [
+        f"approval {approval_id} — {record.get('state', '')}",
+        f"  {heading}",
+        f"  Full details: lop network approvals show {approval_id}",
+    ]
+
+
 def row_extras(record: dict[str, Any]) -> dict[str, Any] | None:
     """Optional, keyless extras for the desktop approval row (derived server-side only).
 
@@ -593,7 +640,7 @@ def row_extras(record: dict[str, Any]) -> dict[str, Any] | None:
         "details": lines,
         "can_approve_here": False,
         "approve_remedy": (
-            "Review and approve it from a terminal on this machine: "
+            "Review and approve it from the command line on this machine: "
             f"lop network approvals approve {record.get('approval_id', '')}"
         ),
     }
@@ -680,8 +727,63 @@ def _matching_context(parsed: dict[str, Any], root: Path | None) -> dict[str, st
     return context
 
 
+def _already_recorded(
+    approval_id: str, parsed: dict[str, Any], context: dict[str, str], root: Path | None
+) -> dict[str, Any] | None:
+    """The permission THIS approval already recorded, proven; else ``None``.
+
+    A replay after a stop between ``provision_from_run`` and ``mark_connected`` must close the
+    card, not record again: ``provision_from_run``'s own same-source path demands an EXECUTED
+    receipt carrying the NEW run's id, and the receipt belongs to the run that stopped. The
+    read-side verifier is the proof instead -- it re-verifies the signature and digest, the
+    EXECUTED receipt, the scope against the live native account and that the stored row is
+    exactly what the signed record describes -- so nothing is trusted from the row alone.
+    Anything short of that proof returns ``None`` and the normal path decides (and refuses).
+    """
+    data = parsed["data"]
+    path = placement.placement_path(data["network_id"], root).with_name("consent.json")
+    if not path.exists():
+        return None
+    authority = consent.ConsentDocument(data["network_id"], data["owner_device"], root)
+    rec = authority.load()["recipients"].get(data["recipient_device"])
+    if (
+        rec is None
+        or rec.get("enabled") is not True
+        or rec.get("approval", {}).get("ref") != approval_id
+    ):
+        return None
+    try:
+        verified = consent.verified_permission(
+            data["network_id"],
+            data["owner_device"],
+            data["recipient_device"],
+            parsed["provider"],
+            context,
+            root,
+        )
+    except MeshRefusal:
+        return None
+    return {
+        "kind": "permission_recorded",
+        "revision": verified["revision"],
+        "activation": verified["activation"],
+    }
+
+
 def _apply(approval_id: str, expected: dict[str, Any], root: Path | None) -> dict[str, Any]:
     source = approvals.load_record(approval_id, root=root)
+    # THE DIGEST BEFORE ANYTHING DERIVED FROM THE RECORD'S CONTENT. The account matching below
+    # reads the unverified record; for an edited account that would answer "sign in to that
+    # account" (a benign remedy) for what is actually tampering. ``begin_run`` still re-verifies
+    # decision, digest and signature; this only makes the first refusal the true one.
+    if intent(source) is not None and approvals.request_digest(source) != str(
+        source.get("request_digest") or ""
+    ):
+        raise MeshRefusal(
+            "approval_record_tampered",
+            "this approval's request no longer matches the digest it was signed over; "
+            "nothing was recorded — file a new request",
+        )
     parsed = _parse(source)
     data = parsed["data"]
     if source.get("state") == approvals.STATE_CONNECTED:
@@ -720,7 +822,12 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None) -> dic
         )
     _require_transport(subject)
     _existing_conflict(
-        data["network_id"], data["owner_device"], data["recipient_device"], parsed["provider"], root
+        data["network_id"],
+        data["owner_device"],
+        data["recipient_device"],
+        parsed["provider"],
+        root,
+        approval_id,
     )
     context = _matching_context(parsed, root)
     expected_subject = {
@@ -736,7 +843,9 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None) -> dic
     # ``operation`` is what lets the generic-runner guard tell this caller from SSH onboarding.
     run = onboard_approvals.begin_run(approval_id, root=root, operation=OP)
     try:
-        result = consent.provision_from_run(approval_id, run.run_id, expected_subject, root)
+        result = _already_recorded(approval_id, parsed, context, root)
+        if result is None:
+            result = consent.provision_from_run(approval_id, run.run_id, expected_subject, root)
     except MeshRefusal as exc:
         # Retry-eligible ``failed`` (until the window ends) instead of an in-flight
         # ``connecting`` that would block a retry for 20 minutes.

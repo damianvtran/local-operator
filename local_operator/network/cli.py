@@ -8613,10 +8613,17 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         # last row read as one block. The JSON half above is what a script
         # parses; this is what a person scans.
         lines: list[str] = []
+        from local_operator.network.credentials import inheritance
+
         for row in rows:
             if lines:
                 lines.append("")
-            lines.extend(_approval_lines(row))
+            # A credential permission is one summary line here; its full disclosure is `show`.
+            lines.extend(
+                inheritance.list_lines(row)
+                if inheritance.intent(row) is not None
+                else _approval_lines(row)
+            )
         return _emit(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)

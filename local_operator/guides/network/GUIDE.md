@@ -839,9 +839,9 @@ A standing permission to borrow your FUTURE sign-ins is authored, not assumed. F
 native OAuth provider and ONE account (never a copy of the login, never GitHub, MCP,
 device-bound or static-key credentials): `lop network credential inherit <provider> --to
 <device> [--account A] [--org O] --request-approval` files the card (an agent may do
-this; it can never approve), the operator answers it with `lop network approvals approve
-<id>` in a terminal — the account, recipient, key fingerprint and duration are printed
-BEFORE the signature — and `... --approval <id>` records it. The permission lasts UNTIL
+this; it cannot approve on its own authority), the operator answers it with `lop network
+approvals approve <id>` on the command line — the account, recipient, key fingerprint and
+duration are printed BEFORE the signature — and `... --approval <id>` records it. The permission lasts UNTIL
 REVOKED (`credential revoke <provider> --from <device>`); the one-hour figure on the card
 is only how long the request stays answerable. It needs `broker_credential` on both member
 rows and does not grant it: a missing one is refused with the exact `member grant` remedy
@@ -851,7 +851,11 @@ and nothing is changed. `... --status` reports PERMISSION from this device's dis
 with no permission, read-only offload still works and only work that needs that login
 fails with an authentication gap. A signed-in different account is `notready:scope_mismatch`
 until the approved account signs in again. The desktop app cannot yet state what this
-signs, so it refuses to approve it and names the terminal command; deny stays available.
+signs, so it refuses to approve it and names the exact command; deny stays available.
+"Cannot approve" is only as strong as the operator key: with a presence-gated key (Secure
+Enclave / Touch ID) every approval needs the human's gesture, but a `file-only` key is readable
+by any process running as the same user, so there an agent on this machine CAN run the approve
+command itself. `lop operator status` reports which level this machine has.
 
 Un-approving a device (`lop network member rm`) and `credential revoke` each END the
 copies they can reach: a reachable device deletes its copy and confirms, and the

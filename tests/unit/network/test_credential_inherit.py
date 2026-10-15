@@ -524,6 +524,107 @@ def test_apply_with_a_failed_signature_leaves_a_retry_eligible_record_not_a_stuc
     assert A.load_record(aid, root=rig.root)["state"] == "connected"
 
 
+def test_a_crash_between_recording_and_closing_the_card_is_finished_by_a_replay(
+    ready: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1: the permission is written, ``mark_connected`` fails, the runner dies.
+
+    The replay must finish the card (``connected``), not refuse as "a second permission" and
+    leave a ``connecting`` card that folds to ``expired`` after its hour.
+    """
+    from local_operator import procstate
+
+    rig = ready
+    aid = settle(rig, capsys)
+    real = A.mark_connected
+
+    def die(*a: Any, **k: Any) -> Any:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(A, "mark_connected", die)
+    with pytest.raises(OSError):
+        _lop_network(*base(rig, "--approval", aid))
+    capsys.readouterr()
+    monkeypatch.setattr(A, "mark_connected", real)
+    row = consent.ConsentDocument(N, rig.own.device_id, rig.root).load()["recipients"]
+    assert row[rig.peer.device_id]["enabled"] is True, "the permission was recorded"
+    assert A.load_record(aid, root=rig.root)["state"] == "connecting"
+    # The runner that died held the lease; its pid is gone (a live one is never overtaken).
+    monkeypatch.setattr(procstate, "pid_alive", lambda pid: False)
+    before = policy_bytes(rig)
+    code, out, err = run(capsys, *base(rig, "--approval", aid, "--json"))
+    assert code == 0, err
+    assert json.loads(out)["state"] == "connected"
+    assert A.load_record(aid, root=rig.root)["state"] == "connected"
+    assert policy_bytes(rig) == before, "finishing the card rewrote the permission"
+    # ...and it is one-shot again afterwards.
+    assert run(capsys, *base(rig, "--approval", aid))[0] == 1
+
+
+@pytest.mark.parametrize("shape", ["broad-selector", "mcp-urls", "mcp-selector", "enumerated"])
+def test_a_standing_row_of_any_shape_is_never_narrowed_in_silence(
+    ready: Any, capsys: pytest.CaptureFixture[str], shape: str
+) -> None:
+    """MINOR-2: broad-selector / MCP rows are refused too, not only enumerated ids.
+
+    No code path here authors such a row, so it is written with the foundation's own validated
+    writer under ANOTHER approval's ref (a later build, or pair-time authoring, would).
+    """
+    rig = ready
+    aid = settle(rig, capsys)
+    inherit: dict[str, Any] = {
+        "providers": {"ids": [P], "future_logins": True},
+        "mcp": {"urls": [], "future_logins": False},
+        "origin": "owner-native-login",
+        "scope_ref": "approval:ap_other:credential-scope",
+    }
+    if shape == "broad-selector":
+        inherit["providers"] = {"selector": "eligible-owner-native", "future_logins": True}
+    elif shape == "mcp-urls":
+        inherit["providers"] = {"ids": [], "future_logins": False}
+        inherit["mcp"] = {"urls": ["https://srv.example/mcp"], "future_logins": True}
+    elif shape == "mcp-selector":
+        inherit["providers"] = {"ids": [], "future_logins": False}
+        inherit["mcp"] = {"selector": "approved-owner-servers", "future_logins": True}
+    authority = consent.ConsentDocument(N, rig.own.device_id, rig.root)
+    doc = authority.load()
+    doc["recipients"][rig.peer.device_id] = {
+        "public_key_fingerprint": A.load_record(aid, root=rig.root)["device"]["fingerprint"],
+        "enabled": True,
+        "approval": {
+            "kind": "operator-request",
+            "ref": "ap_other",
+            "approved_at": time.time(),
+            "approved_by": "operator",
+        },
+        "inherit": inherit,
+        "denies": [],
+    }
+    authority.save(doc, doc["revision"])
+    frozen = snapshot(rig)
+    code, out, err = run(capsys, *base(rig, "--approval", aid))
+    assert code == 1 and "already holds a standing inherit permission" in err, (shape, err)
+    assert snapshot(rig) == frozen
+    assert A.load_record(aid, root=rig.root)["state"] == "approved"
+
+
+def test_an_edited_signed_account_is_refused_as_tampering_not_as_a_login_to_make(
+    ready: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q2: the first refusal for an edited record must be the true one."""
+    rig = ready
+    aid = settle(rig, capsys)
+    record = A.load_record(aid, root=rig.root)
+    record["what"][inheritance.OP]["scope"]["account_id"] = "account-edited"
+    A._write_record(record, rig.root)
+    frozen = snapshot(rig)
+    code, out, err = run(capsys, *base(rig, "--approval", aid))
+    assert code == 1 and "approval_record_tampered" not in out
+    assert "no longer matches the digest" in err and "sign in" not in err.lower(), err
+    assert snapshot(rig) == frozen
+    assert A.load_record(aid, root=rig.root)["state"] == "approved"
+
+
 # ---------------------------------------------------------------------------
 # The generic-runner trap and the desktop route
 # ---------------------------------------------------------------------------
@@ -566,9 +667,19 @@ def test_approvals_show_and_list_describe_a_permission_not_an_onboarding(
     for argv in (("approvals", "show", aid), ("approvals", "list")):
         code, out, err = run(capsys, *argv)
         assert code == 0
-        assert "Recipient key fingerprint" in out
         for forbidden in ("install anchor", "definitions, MCP servers", "provision"):
             assert forbidden not in out, (argv, forbidden)
+    # ``show`` is the full disclosure; ``list`` is a scannable summary (QA Q1), however many
+    # cards there are, with the pointer to the full text.
+    shown = run(capsys, "approvals", "show", aid)[1]
+    assert "Recipient key fingerprint" in shown and len(shown.splitlines()) >= 12
+    listed = run(capsys, "approvals", "list")[1]
+    assert "Recipient key fingerprint" not in listed and "UNTIL YOU REVOKE IT" not in listed
+    assert f"lop network approvals show {aid}" in listed and "borrow your" in listed
+    assert len(listed.splitlines()) <= 4, listed
+    # The machine half is unchanged: ``--json`` still carries the whole frozen row.
+    as_json = json.loads(run(capsys, "approvals", "list", "--json")[1])
+    assert as_json["approvals"][0]["approval_id"] == aid
 
 
 # ---------------------------------------------------------------------------
