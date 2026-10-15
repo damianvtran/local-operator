@@ -12,6 +12,8 @@ call count of the subject's own helpers.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -80,6 +82,16 @@ def envelope(document: dict[str, Any], revision: str = '"hub-rev-1"') -> dict[st
             "moderation": {"flagged": False},
         }
     )
+    return payload
+
+
+def org_envelope(
+    document: dict[str, Any], tenant_id: str = "org-1", revision: str = '"hub-rev-1"'
+) -> dict[str, Any]:
+    """The DETAIL response for an ORG row: same shape, scoped metadata."""
+
+    payload = envelope(document, revision)
+    payload.update({"visibility": "org", "tenant_id": tenant_id})
     return payload
 
 
@@ -215,7 +227,7 @@ async def test_a_public_pull_installs_every_file_and_reads_back_the_contract(api
 
 async def test_an_org_pull_uses_the_org_client_and_records_the_tenant(api) -> None:
     client, root, holder = api
-    holder["client"] = SkillClient(BASE, envelope(manifest()), api_key="org-key")
+    holder["client"] = SkillClient(BASE, org_envelope(manifest()), api_key="org-key")
 
     response = await client.post(
         "/v1/desktop/hub/skills/pull",
@@ -440,3 +452,316 @@ async def test_replays_and_a_second_pull_never_double_install(api) -> None:
     assert result["reports"][0]["applied"] is False
     assert result["link"]["link_id"] == first.json()["result"]["link"]["link_id"]
     assert "Say hi." in (root / "skills" / ALIAS / "SKILL.md").read_text()
+
+
+# -- remediation round 1 (R1/Q2, R2/Q1, Q3, Q4): identity at the boundary, ------
+# -- atomic initial policy, the cross-process lease, and crash resumption -----
+
+
+def attest_skill_capability(root: Path) -> None:
+    """Credit BASE with the skill capability exactly the way a real check does."""
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.check import ItemCheck
+
+    ctx = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=lambda tenant: None,
+    )
+    svc.record_checks(
+        ctx,
+        [
+            ItemCheck(
+                kind="skill",
+                local_id="attest",
+                name="attest",
+                hub_id="attest",
+                tenant_id=None,
+                verdict="up-to-date",
+                remote_revision='"attest"',
+                sync_contract={"revision_cas": 1, "skills": 1},
+                served_by=BASE,
+            )
+        ],
+    )
+
+
+async def test_a_scope_mismatched_row_is_a_nondisclosing_404(api) -> None:
+    client, root, holder = api
+    # The canonical missing-row refusal, to compare bodies against.
+    holder["anon"] = SkillClient(
+        BASE, APIError("not found", status_code=404, code="hub-item-missing")
+    )
+    reference = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert reference.status_code == 404
+
+    # An ORG request answered by a PUBLIC row: the relabel is refused.
+    holder["client"] = SkillClient(BASE, envelope(manifest()), api_key="k")
+    public_for_org = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(visibility="org", tenant_id="org-1"),
+    )
+    assert public_for_org.status_code == 404
+    assert public_for_org.json() == reference.json()
+
+    # An ORG row from ANOTHER tenant answered this tenant's request.
+    holder["client"] = SkillClient(
+        BASE, org_envelope(manifest(), tenant_id="other-org"), api_key="k"
+    )
+    foreign_tenant = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(visibility="org", tenant_id="org-1"),
+    )
+    assert foreign_tenant.status_code == 404
+    assert foreign_tenant.json() == reference.json()
+
+    # A DIFFERENT identity answered the requested hub id.
+    wrong = envelope(manifest())
+    wrong["id"] = "not-requested"
+    holder["anon"] = SkillClient(BASE, wrong)
+    wrong_id = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert wrong_id.status_code == 404
+    assert wrong_id.json() == reference.json()
+
+    # None of the three refusals wrote anything.
+    assert nothing_installed(root)
+    assert list(prov.iter_baselines(root)) == []
+
+
+async def test_a_refused_install_leaves_config_untouched_and_retry_defaults_on(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    authored = root / "skills" / ALIAS
+    authored.mkdir(parents=True)
+    (authored / "SKILL.md").write_text("# authored\n\nNot ours to overwrite.\n")
+    before = read_config_values(root)
+
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body(subscribe=False))
+    assert first.status_code == 422, first.text
+    # R2/Q1: the refusal changed NOTHING -- no orphan policy for a link that
+    # was never installed.
+    assert read_config_values(root) == before
+    assert (authored / "SKILL.md").read_text().endswith("Not ours to overwrite.\n")
+
+    # A retry for the same remote identity at a FREE alias with no overrides
+    # gets the creation default ON -- never the dead request's OFF.
+    retry = await client.post(
+        "/v1/desktop/hub/skills/pull", json=pull_body(local_alias="free-alias")
+    )
+    assert retry.status_code == 200, retry.text
+    row = retry.json()["result"]["link"]
+    policy = pol.read_policy(read_config_values(root) or {}, linked_identity(row))
+    assert policy.policy.subscribe is True and policy.policy.auto_push is False
+
+
+async def test_an_orphan_policy_from_a_crashed_attempt_never_beats_the_request(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    manager = ConfigManager(root)
+
+    # Simulate a crashed earlier attempt: an explicit entry exists, no baseline.
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+    current = pol.read_policy(read_config_values(root) or {}, identity)
+    pol.update_policy(manager, identity, expected_revision=current.revision, subscribe=False)
+
+    # With no override the request's creation default wins, not the orphan's OFF.
+    response = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert response.status_code == 200, response.text
+    row = response.json()["result"]["link"]
+    policy = pol.read_policy(read_config_values(root) or {}, linked_identity(row))
+    assert policy.policy.subscribe is True and policy.policy.auto_push is False
+
+    # And when the next request DOES ask for OFF, the request wins over an
+    # orphan that claimed ON.
+    second = envelope(manifest(name="second-buddy"), '"hub-rev-2"')
+    second["id"] = "sk-2"
+    holder["anon"] = SkillClient(BASE, second)
+    local_id2 = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id="sk-2")
+    identity2 = LinkIdentity("skill", local_id2, BASE, "public", None, "sk-2")
+    current2 = pol.read_policy(read_config_values(root) or {}, identity2)
+    pol.update_policy(manager, identity2, expected_revision=current2.revision, subscribe=True)
+    off = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(hub_id="sk-2", local_alias="second-buddy", subscribe=False),
+    )
+    assert off.status_code == 200, off.text
+    row2 = off.json()["result"]["link"]
+    policy2 = pol.read_policy(read_config_values(root) or {}, linked_identity(row2))
+    assert policy2.policy.subscribe is False and policy2.policy.auto_push is False
+
+
+async def test_an_ineligible_auto_push_refuses_before_any_write(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    before = read_config_values(root)
+
+    # No capability attestation for BASE: the auto-push request is refused with
+    # its own named reason and NOTHING is written, not even for a moment.
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert response.status_code == 422, response.text
+    assert read_config_values(root) == before
+    assert list(prov.iter_baselines(root)) == []
+    assert nothing_installed(root)
+
+
+async def test_a_staged_grant_is_not_rolled_back_over_a_newer_write(api, monkeypatch) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    attest_skill_capability(root)
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+
+    real_apply = ManagedSkillStorage.apply
+    raced: list[str] = []
+
+    def racing_apply(self, identity_arg, alias_arg, document, baseline, **kw):
+        # ANOTHER WRITER lands between the staged auto-push write and the
+        # storage's policy CAS: the transaction must refuse, and the revert
+        # must NOT roll the newer value back.
+        values = read_config_values(root) or {}
+        current = pol.read_policy(values, identity_arg)
+        snapshot = pol.update_policy(
+            ConfigManager(root), identity_arg, expected_revision=current.revision, subscribe=False
+        )
+        raced.append(snapshot.revision)
+        return real_apply(self, identity_arg, alias_arg, document, baseline, **kw)
+
+    monkeypatch.setattr(ManagedSkillStorage, "apply", racing_apply)
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert response.status_code == 409, response.text
+    stored = pol.read_policy(read_config_values(root) or {}, identity)
+    assert stored.revision == raced[0]
+    assert list(prov.iter_baselines(root)) == []
+
+
+async def test_a_held_runner_lease_refuses_the_install(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    from local_operator.hub_sync import store as st
+
+    lease = st.RunnerLease(root)
+    assert lease.acquire(0.0)
+    try:
+        held = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+        assert held.status_code == 409, held.text
+        assert nothing_installed(root)
+        assert list(prov.iter_baselines(root)) == []
+    finally:
+        lease.release()
+
+    after = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert after.status_code == 200, after.text
+
+
+async def test_a_lease_held_by_another_process_also_refuses(api) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from local_operator.hub_sync import store as st\n"
+        "lease = st.RunnerLease(Path(sys.argv[1]))\n"
+        "assert lease.acquire(0.0)\n"
+        "print('READY', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, str(root)],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ),
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "READY"
+        held = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+        assert held.status_code == 409, held.text
+        assert nothing_installed(root)
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+async def test_a_finalize_crash_is_resumed_by_the_next_install(api, monkeypatch) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    from local_operator.hub_sync import skill_storage
+
+    real = skill_storage.write_baseline
+    calls: list[int] = []
+
+    def failing_once(config_dir, record):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("simulated finalize crash")
+        return real(config_dir, record)
+
+    monkeypatch.setattr(skill_storage, "write_baseline", failing_once)
+    first = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert first.status_code != 200, first.text
+    # Content committed, baseline NOT finalized: honestly not claimed complete.
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    assert (root / "skills" / ALIAS / "SKILL.md").exists()
+    assert prov.read_baseline(root, "skill", local_id) is None
+
+    monkeypatch.setattr(skill_storage, "write_baseline", real)
+    retry = await client.post("/v1/desktop/hub/skills/pull", json=pull_body())
+    assert retry.status_code == 200, retry.text
+    result = retry.json()["result"]
+    # Q4: the first retry RECOVERS the crashed transaction and settles as the
+    # idempotent completed-install result -- consistent files, baseline, policy.
+    assert result["reports"][0]["applied"] is False
+    assert result["reports"][0]["outcome"] == "unchanged"
+    record = prov.read_baseline(root, "skill", local_id)
+    assert record is not None and record.remote_revision == '"hub-rev-1"'
+    assert record.lineage == "clean"
+    assert len(list(prov.iter_baselines(root))) == 1
+    values = read_config_values(root) or {}
+    assert pol.stored_link_policy(values, result["link"]["link_id"]) is not None
+    assert (root / "skills" / ALIAS / "references" / "extra.md").read_text() == "More detail.\n"
+
+
+async def test_a_receipt_lost_after_the_install_still_reconciles(api, monkeypatch) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+
+    from local_operator.server.utils import desktop_receipts
+
+    real_finish = desktop_receipts.DesktopReceipts._finish
+    calls: list[int] = []
+
+    def failing_once(self, key, result):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("simulated crash before the receipt was recorded")
+        return real_finish(self, key, result)
+
+    monkeypatch.setattr(desktop_receipts.DesktopReceipts, "_finish", failing_once)
+    body = pull_body()
+    first = await client.post("/v1/desktop/hub/skills/pull", json=body)
+    assert first.status_code != 200, first.text
+    # The install COMPLETED before the receipt was lost.
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    assert prov.read_baseline(root, "skill", local_id) is not None
+
+    monkeypatch.setattr(desktop_receipts.DesktopReceipts, "_finish", real_finish)
+    retry = await client.post("/v1/desktop/hub/skills/pull", json=body)
+    assert retry.status_code == 200, retry.text
+    result = retry.json()["result"]
+    assert result["reports"][0]["applied"] is False
+    assert len(list(prov.iter_baselines(root))) == 1
+
+    # Once the retry records the outcome, the id replays like any other.
+    third = await client.post("/v1/desktop/hub/skills/pull", json=body)
+    assert third.status_code == 200
+    assert third.json()["result"].get("replayed") is True
