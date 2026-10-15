@@ -19897,13 +19897,21 @@ class Session:
                 self._memory_recovery_marker = memory_marker.id
 
                 async def complete_memory_capture() -> None:
-                    terminal = await finish(
-                        store_for(self._build_tool_context()),
-                        memory_marker.id,
-                        plan.memory_capture[0],
-                        summary if plan.strategy == "context-full" else "",
-                        memory_marker.ts,
-                    )
+                    try:
+                        terminal = await finish(
+                            store_for(self._build_tool_context()),
+                            memory_marker.id,
+                            plan.memory_capture[0],
+                            summary if plan.strategy == "context-full" else "",
+                            memory_marker.ts,
+                        )
+                    except asyncio.CancelledError:
+                        # A cancelled capture left no watermark. Re-arm the recovery that
+                        # session_tail runs from the COMMITTED marker on the next boundary,
+                        # instead of waiting for a process restart (QA Q5).
+                        if self._memory_recovery_marker == memory_marker.id:
+                            self._memory_recovery_marker = None
+                        raise
                     self._memory_terminal = (memory_marker.id, terminal)
 
                 self._spawn_background(complete_memory_capture())

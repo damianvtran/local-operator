@@ -17,7 +17,7 @@ def is_memory(name: str, arguments: Any) -> bool:
         name in ("read", "write", "edit")
         and isinstance(arguments, dict)
         and isinstance(arguments.get("path"), str)
-        and arguments["path"].strip().lower().startswith("memory://")
+        and arguments["path"].strip().lower().startswith("memory:")
     )
 
 
@@ -29,6 +29,12 @@ def guard_encoded(value: Any, depth: int = 0) -> None:
     # inspect its JSON spelling too, before another validator can echo it.
     if isinstance(value, (dict, list)):
         guard(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    if isinstance(value, dict):
+        # Same free-text fields the store applies its opaque-token rule to, so a
+        # refused unnamed hex/base64 token is also redacted from the journal.
+        for key in ("title", "body", "subject", "tags", "aliases"):
+            if key in value:
+                guard(value[key], opaque=True)
     if depth >= 4:
         return
     if isinstance(value, dict):

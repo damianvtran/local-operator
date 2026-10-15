@@ -13,6 +13,7 @@ environments wholesale. Secret names, rather than values, belong in memory.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import sqlite3
 import tempfile
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -49,15 +51,184 @@ INVENTORY_HELP = (
     "write/edit, scopes and forgetting."
 )
 _SAFE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+_NAME = re.compile(r"[A-Z][A-Z0-9_]{2,63}")
 # Contextual ID checks complement the shared credential shape table, which does
 # not claim to recognise identity documents. Names such as secret PASSPORT_NO
 # remain useful and are not values; numeric assignments/documents are refused.
-_ID = re.compile(
-    r"(?<![\w-])(?:\d{3}[- ]\d{2}[- ]\d{4}|(?:\d[ -]?){13,19})(?![\w-])"
-    r"|\b(?:passport|ssn|social.security|driver.?s?.?licen[cs]e|licen[cs]e|national.id|card.number)"
-    r"(?:\s*(?:no\.?|number))?\s*[:=#]?\s+(?=[A-Z0-9 -]{0,24}\d)[A-Z0-9][A-Z0-9 -]{4,24}\b",
+#
+# Every quantifier here is BOUNDED. guard() runs on up to 8 KiB per field on the
+# agent's tool path, and an unbounded `[A-Z0-9 -]+` after a repeated keyword is
+# the quadratic shape that froze the capture scanner (see memory_capture._LOCATOR).
+_SSN = re.compile(r"(?<![\w-])\d{3}[ \t-]{1,3}\d{2}[ \t-]{1,3}\d{4}(?![\w-])")
+# Card-like digit runs are only refused when they ALSO pass Luhn and start like an
+# issuer range: bare 13-digit unix-ms timestamps and order numbers are ordinary
+# data (QA Q2), and refusing them made them impossible to store or even search.
+_CARDISH = re.compile(r"(?<![\w-])\d(?:[ -]?\d){12,18}(?![\w-])")
+_ANCHORED = re.compile(
+    r"\b(?:passport|ssn|social.security|driver.?s?.?licen[cs]e|licen[cs]e|national.id"
+    r"|card.number|tax.?(?:id|number|no)|tin|ein|itin|nino|national.insurance|routing|sort.code)"
+    r"(?:\s{0,3}(?:no\.?|number|num|\#)){0,1}(?:\s{1,3}(?:is|was|are)){0,1}"
+    r"\s{0,3}[:=\#]{0,1}\s{0,3}"
+    r"(?:[A-Z0-9]{0,24}\d[A-Z0-9-]{0,24}|[A-Z]{1,3}[ -]\d[A-Z0-9-]{0,24})"
+    r"(?:[ -][A-Z0-9]{1,24}){0,3}",
     re.I,
 )
+# A bare "account" is ordinary prose; only an explicit number marker makes it a value.
+_ACCOUNT = re.compile(
+    r"\b(?:(?:bank.)?account|acct)\s{0,3}(?:no\.?|number|num|\#)\s{0,3}[:=]{0,1}\s{0,3}"
+    r"[A-Z0-9][A-Z0-9 -]{4,24}",
+    re.I,
+)
+_IBAN = re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Z0-9])", re.I)
+# `password is X` prose. The verb list and the mixed-token requirement below keep
+# "password policy: rotate quarterly" storable while "password is hunter2" is not.
+_PROSE_SECRET = re.compile(
+    r"\b(?:pass(?:word|phrase|code|wd)|pwd|login|credentials?)\b"
+    r"(?:\s{1,3}for\s{1,3}[\w.-]{1,32}){0,1}\s{0,3}"
+    r"(?:\bis\b|\bare\b|\bwas\b|=|:|->)\s{0,3}([^\n]{1,80})",
+    re.I,
+)
+_PASSPHRASE_WORDS = re.compile(
+    r"\bpassphrase\b\s{1,3}(?:(?:is|are|=|:)\s{1,3}){0,1}"
+    r"(?!(?:policy|rules?|rotation|requirements?|length|manager|is|are|was|for|in|on|and|or)\b)"
+    r"[a-z]{3,16}(?:\s{1,3}[a-z]{3,16}){3,}"
+)
+_HEX_RUN = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
+_B64_RUN = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/_-]{40,}={0,2}(?![\w+/=-])")
+# A long hex digest is legitimate when it is NAMED as one (commit/sha/checksum);
+# a bare one is indistinguishable from an API key.
+_DIGEST_CONTEXT = re.compile(
+    r"(?:commit|sha(?:1|256|512)?|rev(?:ision)?|merge|cherry-pick|checksum|digest|hash|tag)"
+    r"\W{0,4}\Z",
+    re.I,
+)
+_SYMBOLS = set("!@$%^&*")
+# Cyrillic/Greek look-alikes of Latin letters, so a keyword like "pаssport" (Cyrillic
+# a) still matches. Matching copy only; the stored text is never rewritten.
+_CONFUSABLES = {
+    ord(a): b
+    for a, b in zip(
+        "аеорсхуіјѕАВЕКМНОРСТХΑΒΕΖΗΙΚΜΝΟΡΤΥΧοαρ", "aeopcxyijsABEKMHOPCTXABEZHIKMNOPTYXoap"
+    )
+}
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _fold(text: str) -> str:
+    """Matching copy of ``text``: NFKC, invisible/format chars removed, digits ASCII.
+
+    ``SSN 1<ZWSP>23-45-6789`` stored raw in the DB, session journal and transcript
+    before this existed (QA Q1): the shape tables are ASCII-literal. The folded
+    copy is only ever compared, never stored or echoed.
+    """
+    if text.isascii() and not _CONTROL.search(text):
+        return text
+    out: list[str] = []
+    for ch in unicodedata.normalize("NFKC", text).translate(_CONFUSABLES):
+        category = unicodedata.category(ch)
+        if category in ("Cf", "Mn", "Me", "Co", "Cs") or (category == "Cc" and ch not in "\n\t\r"):
+            continue
+        if category == "Nd":
+            ch = str(unicodedata.decimal(ch))
+        elif category == "Pd" or ch == "\u2212":
+            ch = "-"
+        elif category in ("Zs", "Zl", "Zp"):
+            ch = " "
+        out.append(ch)
+    return "".join(out)
+
+
+def _card_issuer_range(digits: str) -> bool:
+    """Known payment-card prefix AND length. Random 13-digit ids (unix-ms, order numbers)
+    pass Luhn about one time in ten, so Luhn alone refused ordinary data (QA Q2)."""
+    n = len(digits)
+    two = int(digits[:2])
+    return (
+        (digits[0] == "4" and n in (13, 16, 19))
+        or (n == 16 and (51 <= two <= 55 or 2221 <= int(digits[:4]) <= 2720))
+        or (n == 15 and two in (34, 37))
+        or (16 <= n <= 19 and (digits[:4] == "6011" or two in (65, 35, 62) or digits[0] == "6"))
+        or (14 <= n <= 19 and (two in (36, 38, 39) or 300 <= int(digits[:3]) <= 305))
+        or (12 <= n <= 19 and two in (50, 56, 57, 58))
+    )
+
+
+def _luhn(digits: str) -> bool:
+    total = 0
+    for index, ch in enumerate(reversed(digits)):
+        n = int(ch)
+        if index % 2:
+            n = n * 2 - 9 if n > 4 else n * 2
+        total += n
+    return total % 10 == 0
+
+
+def _mixed_token(chunk: str) -> bool:
+    """A password-looking token: letters AND digits/symbols, not a path, URL or NAME."""
+    for raw in chunk.split():
+        token = raw.strip("\"'`.,;)(")
+        # SHOUTY_SNAKE is the NAME-reference form we ask agents to use; it is never a value.
+        if (
+            len(token) < 4
+            or "/" in token
+            or token.startswith(("http", "~"))
+            or _NAME.fullmatch(token)
+        ):
+            continue
+        if any(c.isalpha() for c in token) and any(c.isdigit() or c in _SYMBOLS for c in token):
+            return True
+    return False
+
+
+def _looks_sensitive(text: str, *, opaque: bool) -> bool:
+    """Heuristic pattern guard over the FOLDED text. Not proof of absence.
+
+    ``opaque`` ENABLES the long-hex / base64 rule. It is on only for free-text fact fields
+    (title/body/tags/aliases/subject): structural fields (op ids, body hashes, entity
+    ids) are legitimately 64-hex, and a search for a commit SHA is ordinary, while storing
+    an unnamed 40-hex string is how a leaked API key would be kept.
+    """
+    if _SSN.search(text):
+        return True
+    for match in _CARDISH.finditer(text):
+        digits = re.sub(r"\D", "", match.group())
+        if 13 <= len(digits) <= 19 and _card_issuer_range(digits) and _luhn(digits):
+            return True
+    for match in _ANCHORED.finditer(text):
+        if sum(c.isdigit() for c in match.group()) >= 5:
+            return True
+    for match in _ACCOUNT.finditer(text):
+        if sum(c.isdigit() for c in match.group()) >= 5:
+            return True
+    for match in _IBAN.finditer(text):
+        compact = match.group().replace(" ", "")
+        if 15 <= len(compact) <= 34:
+            rearranged = compact[4:] + compact[:4]
+            number = "".join(str(int(c, 36)) for c in rearranged.upper())
+            if int(number) % 97 == 1:
+                return True
+    for match in _PROSE_SECRET.finditer(text):
+        if _mixed_token(match.group(1)):
+            return True
+    if _PASSPHRASE_WORDS.search(text):
+        return True
+    if opaque:
+        for match in _HEX_RUN.finditer(text):
+            if not _DIGEST_CONTEXT.search(text[max(0, match.start() - 16) : match.start()]):
+                return True
+        for match in _B64_RUN.finditer(text):
+            token = match.group()
+            if (
+                any(c.isdigit() for c in token)
+                and any(c.isupper() for c in token)
+                and any(c.islower() for c in token)
+                and token.count("/") <= 3
+                and sum(token.count(c) for c in "-_") <= 3
+            ):
+                return True
+    return False
+
+
 _STOP = set(
     (
         "a an and are as at be by can could did do does for from have how i in is it me my of on "
@@ -72,6 +243,19 @@ class MemoryError(ValueError):
     """Safe, value-free actionable refusal suitable for user/tool surfaces."""
 
 
+@functools.lru_cache(maxsize=1)
+def fts5_available() -> bool:
+    """Whether this interpreter's SQLite can build the porter FTS5 index we require."""
+    probe = sqlite3.connect(":memory:")
+    try:
+        probe.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='porter unicode61')")
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        probe.close()
+
+
 def safe_segment(value: Any) -> str:
     if not isinstance(value, str) or not _SAFE.fullmatch(value) or value in (".", ".."):
         raise MemoryError("Memory identity must be one safe segment (1–128 characters).")
@@ -79,25 +263,35 @@ def safe_segment(value: Any) -> str:
     return value
 
 
-def guard(value: Any) -> None:
-    """Inspect every string, including metadata and wire-only fields, without echo."""
+def guard(value: Any, *, opaque: bool = False) -> None:
+    """Inspect every string, including metadata and wire-only fields, without echo.
+
+    This is a PATTERN guard, not proof: a secret with no recognisable shape or label
+    can still be stored (and journaled). Lop secrets hold values; memory holds NAMEs.
+    """
     if isinstance(value, dict):
         for key, child in value.items():
-            guard(key)
-            guard(child)
+            guard(key, opaque=opaque)
+            guard(child, opaque=opaque)
     elif isinstance(value, (list, tuple)):
         for child in value:
-            guard(child)
+            guard(child, opaque=opaque)
     elif isinstance(value, str):
         if len(value.encode("utf-8")) > ITEM_BYTES:
             raise MemoryError("Memory field exceeds the 8192-byte cap; split into atomic facts.")
-        if match_shape_names(value) or _ID.search(value):
+        folded = _fold(value)
+        if (
+            match_shape_names(value)
+            or (folded != value and match_shape_names(folded))
+            or _looks_sensitive(folded, opaque=opaque)
+        ):
             raise MemoryError(
-                "Sensitive value refused. Store it with lop secret; memory may hold its NAME only."
+                "Sensitive value refused. Store it with lop secret and keep only its NAME here "
+                "(e.g. 'uses secret GITHUB_TOKEN'); never the value."
             )
         # Check path-like tokens, not the complete prose (which can contain a
         # harmless reference beside a sensitive path). Never persist the latter.
-        for word in re.findall(r"(?:~?/|[A-Za-z]:[/\\])[^\s<>\"']+", value):
+        for word in re.findall(r"(?:~?/|[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
             if is_sensitive(word):
                 raise MemoryError(
                     "Sensitive path refused; retain a safe locator or secret NAME instead."
@@ -156,6 +350,9 @@ def validate_fact(raw: Any) -> dict[str, Any]:
         raise MemoryError("Memory content must be a JSON object; read guide://memory.")
     guard(raw)
     guard(_dump(raw))
+    for key in ("title", "body", "subject", "tags", "aliases"):
+        if key in raw:
+            guard(raw[key], opaque=True)
     allowed = {
         "title",
         "body",
@@ -341,11 +538,19 @@ class MemoryStore:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
+        # Probe BEFORE touching disk: a SQLite build without FTS5 used to leave an
+        # empty memory.db behind and then fail every search with an OperationalError.
+        if not fts5_available():
+            raise MemoryError(
+                "Memory is unavailable: this Python's SQLite was built without FTS5. "
+                "Use a Python whose sqlite3 supports FTS5, or set memory.enabled to false."
+            )
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        created = not self.path.exists()
         db = sqlite3.connect(self.path, timeout=5)
-        os.chmod(self.path, 0o600)
-        db.row_factory = sqlite3.Row
         try:
+            os.chmod(self.path, 0o600)
+            db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA secure_delete=ON")
@@ -353,6 +558,17 @@ class MemoryStore:
             db.execute("PRAGMA wal_autocheckpoint=64")
             db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // 4096}")
             db.executescript(_SCHEMA)
+        except sqlite3.Error as exc:
+            db.close()
+            if created:
+                # A store whose schema never completed must not look initialised.
+                for suffix in ("", "-wal", "-shm"):
+                    Path(str(self.path) + suffix).unlink(missing_ok=True)
+            raise MemoryError(
+                "Memory store unavailable (SQLite " + type(exc).__name__ + "); "
+                "no memory was read or written."
+            ) from exc
+        try:
             yield db
         finally:
             db.close()
@@ -445,7 +661,10 @@ class MemoryStore:
             )
 
     @staticmethod
-    def _quota(db: sqlite3.Connection, scope: str, owner: str) -> None:
+    def _quota(db: sqlite3.Connection, scope: str, owner: str, *, relief: bool = False) -> None:
+        """Refuse growth past the caps. ``relief`` (a forget) skips the OP/TOMBSTONE counts:
+        a tombstone is the only way to remove a sensitive body, so refusing it at the cap
+        would make the cap a trap. The token quota still applies, and a forget only shrinks it."""
         count = db.execute(
             "SELECT count(*) FROM ops WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
@@ -456,10 +675,8 @@ class MemoryStore:
         tokens = db.execute(
             "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
-        if (
-            count > MAX_OWNER_OPS
-            or tombs > MAX_TOMBSTONES
-            or tokens > (16000 if scope == "global" else 50000)
+        if (not relief and (count > MAX_OWNER_OPS or tombs > MAX_TOMBSTONES)) or tokens > (
+            16000 if scope == "global" else 50000
         ):
             raise MemoryError(
                 "Memory quota reached (including history/tombstones). Inspect memory://, "
@@ -611,7 +828,7 @@ class MemoryStore:
             )
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
             self._reindex(db, entity)
-            self._quota(db, scope, owner)
+            self._quota(db, scope, owner, relief=forget)
             # A session's portable log is fsync'd before the index commit. If
             # that commit crashes, lazy import reconstructs it idempotently.
             if scope == "session" and self.session_dir:
@@ -799,6 +1016,7 @@ class MemoryStore:
             owners: set[tuple[str, str]] = (
                 {("session", self.identity.session_id)} if portable else set()
             )
+            growing = set(owners)
             for op in sorted(batch, key=lambda x: (x["origin_device"], x["seq"])):
                 entity = op["entity_id"]
                 old_ops = self._ops(db, entity)
@@ -854,6 +1072,8 @@ class MemoryStore:
                     raise MemoryError("Memory origin sequence reused; refresh peer state.") from exc
                 changed.add(entity)
                 owners.add((op["scope"], op["owner_key"]))
+                if op["kind"] != "tombstone":
+                    growing.add((op["scope"], op["owner_key"]))
             if filled_gap:
                 previous = db.execute(
                     "SELECT value FROM meta WHERE key='stream-generation'"
@@ -872,7 +1092,9 @@ class MemoryStore:
             for entity in changed:
                 self._reindex(db, entity)
             for scope, owner in owners:
-                self._quota(db, scope, owner)
+                # A batch of only tombstones is a forget replicating from a peer; refusing
+                # it at the op cap would leave the body alive here (see _quota).
+                self._quota(db, scope, owner, relief=(scope, owner) not in growing)
                 if scope == "session":
                     directory = self._session_directory(owner, db)
                     if directory and directory.is_dir():
@@ -1074,14 +1296,28 @@ class MemoryStore:
         ):
             raise MemoryError("Search accepts ≤2048 characters, 1–20 results and 1–2000 tokens.")
         where, values = self._where(scope)
-        terms = list(
-            dict.fromkeys(
-                t.lower()
-                for t in re.findall(r"[\w]+", query)
-                if len(t) >= 2 and t.lower() not in _STOP
-            )
-        )[:24]
-        if not terms or not self.path.exists():
+        words = [t.lower() for t in re.findall(r"[\w]+", query) if len(t) >= 2]
+        terms = list(dict.fromkeys(t for t in words if t not in _STOP))[:24]
+        if not self.path.exists():
+            return []
+        if words and not suggest:
+            # A stop-listed word is dropped from the query, which made a 2-letter alias such
+            # as "IS" unfindable (QA Q3). Keep stop words only when they exactly match an
+            # indexed tag/alias in an authorised scope; explicit search only, so the
+            # suggestion path keeps its generic-word suppression.
+            where_alias, alias_values = self._where(scope)
+            with self.connection() as db:
+                for word in dict.fromkeys(w for w in words if w in _STOP):
+                    hit = db.execute(
+                        "SELECT 1 FROM recall JOIN current c ON c.entity_id=recall.entity_id "
+                        "WHERE recall MATCH ? AND "
+                        + where_alias.replace("scope", "c.scope").replace("owner", "c.owner")
+                        + " LIMIT 1",
+                        ["tags:" + '"' + word + '"', *alias_values],
+                    ).fetchone()
+                    if hit and word not in terms and len(terms) < 24:
+                        terms.append(word)
+        if not terms:
             return []
         with self.connection() as db:
             match = " OR ".join('"' + term + '"' for term in terms)
@@ -1160,7 +1396,14 @@ class MemoryStore:
 
 def parse_url(url: str) -> tuple[str | None, str | None, dict[str, str]]:
     parts = urlsplit(url)
-    if parts.scheme != "memory" or parts.fragment or parts.username or parts.password or parts.port:
+    if (
+        not url[:9].lower() == "memory://"
+        or parts.scheme != "memory"
+        or parts.fragment
+        or parts.username
+        or parts.password
+        or parts.port
+    ):
         raise MemoryError(
             "Use memory://, memory://session, or memory://session/ID; owners are never addresses."
         )
