@@ -23533,6 +23533,22 @@ async def _execute_browser(
             conflict = _copy_host(pinned)
         elif state.surface_id.startswith("surface:"):
             conflict = "cmux"
+        # A no-tab approval pinned to a host (`pending_access_host`) is a flow this
+        # session has already started there: request/await/cancel_access keep
+        # routing to it, so a fresh open that names the OTHER host would split one
+        # flow across two jars and call a destination that was never reconciled
+        # (QA Q2). Refuse it before any destination RPC; the pin is left intact so
+        # the approval can still be finished, and a hint that agrees proceeds.
+        resource = getattr(state, "resource", None)
+        waiting = resource.pending_access_pin() if resource is not None else ""
+        if backend and not conflict and waiting and _copy_host(waiting) != backend:
+            return _backend_conflict_result(
+                tool_call_id,
+                backend,
+                f"a site approval this session is still waiting on {_host_label(waiting)}",
+                "Finish it with 'await_access' or 'cancel_access' first, or call 'open' "
+                "without 'backend'.",
+            )
         if backend and conflict and conflict != backend:
             if adopt:
                 return _backend_conflict_result(

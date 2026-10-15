@@ -2191,3 +2191,193 @@ async def test_a_held_handle_still_outranks_an_explicit_hint(
     assert (refused.details or {}).get("error_code") == "backend_conflict"
     assert not any(step.startswith("ext.") for step in order), order
     assert context.browser and context.browser.surface_id == held
+
+
+# --- Round 1 (review R1 / QA Q1, Q2): evidence-only debt and the pending-approval pin ----------
+#
+# Both records below are written by the product itself (real opens, a real unresolved
+# recovery, a real `finish`, a real denied open) -- nothing is injected into the JSON.
+
+
+async def _evidence_only_debt_on(
+    directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+    *,
+    owed: str,
+) -> dict[str, Any]:
+    """Leave `owed` holding only PRIVATE unresolved-handle evidence, via product paths.
+
+    Run A works on the OTHER host (so it has an older-generation scope to be reconciled),
+    run B opens a tab on `owed` and ends holding it, run C resumes while `owed` has lost
+    its authority (its `owner_recover` answers `unresolved`), so the product moves the
+    held handle into `unresolved_surface_id` itself, and then finishes: `unresolved`.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    other = "bridge" if owed == "ui" else "ui"
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=other == "ui", bridge=other == "bridge")
+    context, _resource = _context(directory)
+    opened = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert not opened.is_error, opened.text
+    closed = await builtin.execute_browser("t", {"action": "close"}, None, None, context)
+    assert not closed.is_error, closed.text
+    lease.release()
+
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=owed == "ui", bridge=owed == "bridge")
+    context, _resource = _context(directory)
+    held = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert not held.is_error, held.text
+    lease.release()
+
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    if owed == "ui":
+        ui_client.recover_state = "unresolved"
+    else:
+        fenced_bridge.scopes.clear()
+    context, resource = _context(directory)
+    touched = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
+    assert not touched.is_error, touched.text
+    ended = await resource.finish(resource.generation, "disposed")
+    assert ended.state == "unresolved", ended
+    lease.release()
+    record = json.loads((directory / ".browser-resource.json").read_text())
+    assert record["unresolved_surface_id"].startswith(owed + ":"), record
+    assert not record["surface_id"], "evidence only: no live handle is held"
+    return record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "owed,hinted", [("ui", "extension"), ("bridge", "ui")], ids=["app-owed", "extension-owed"]
+)
+async def test_unresolved_handle_evidence_refuses_a_cross_host_explicit_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+    owed: str,
+    hinted: str,
+) -> None:
+    """R1/Q1: private evidence is a debt, not a held capability.
+
+    `_obligation_host()` counts `unresolved_surface_id` as well as `surface_id`, so the
+    first version of the post-recovery step treated it as a HELD handle, skipped its
+    own refusal, and the dispatcher (which only sees the empty live handle) opened on
+    the destination without ever reconciling it. The debt must refuse with the typed
+    conflict BEFORE any destination RPC, and the evidence must be preserved untouched.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    before = await _evidence_only_debt_on(
+        directory, monkeypatch, ui_client, fenced_bridge, owed=owed
+    )
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    destination = "ext." if hinted == "extension" else "ui."
+    lease = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    context, resource = _context(directory)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": hinted, "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert result.is_error
+    assert (result.details or {}).get("error_code") == "backend_conflict", result.text
+    assert not any(step.startswith(destination) for step in order), order
+    assert resource.record["unresolved_surface_id"] == before["unresolved_surface_id"]
+    assert context.browser is not None and context.browser.surface_id == ""
+    lease.release()
+
+
+@pytest.mark.asyncio
+async def test_a_pending_app_approval_refuses_a_conflicting_extension_open_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """Q2: a no-tab approval pinned to the app must not be contradicted by an extension open.
+
+    The denied app navigation records `pending_access_host=ui` and mints no tab. An
+    explicit `backend=extension` open used to reach the extension anyway (the dispatcher
+    only compared the hint to a HELD handle), while request/await/cancel_access kept
+    routing to the app: two hosts for one flow. The hint is refused with the typed
+    conflict before the extension is called, the approval actions still work on the app
+    afterwards, and once the approval is cancelled the pin is gone and the hint is honoured.
+    """
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    _hosts(monkeypatch, ui=True, bridge=True)
+    # A fresh session: the fixture's default `owned` answer would hand back a held tab,
+    # and a denied open that RESUMES a held handle is not a no-tab approval at all.
+    ui_client.recover_state = "closed"
+    real = ui_client.call
+
+    async def denying(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "open":
+            ui_client.calls.append((method, params))
+            raise BridgeError(
+                ErrorCode.ORIGIN_NOT_ALLOWED,
+                "site not allowed",
+                {"origin": "https://example.test", "url": params["url"]},
+            )
+        return await real(method, params)
+
+    ui_client.call = denying  # type: ignore[method-assign]
+    context, resource = _context(tmp_path)
+    denied = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.test"}, None, None, context
+    )
+    assert denied.is_error and (denied.details or {}).get("error_code") == "origin_not_allowed"
+    assert resource.record.get("pending_access_host") == "ui"
+
+    order = _trace_rpcs(ui_client, fenced_bridge)
+    refused = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.test"},
+        None,
+        None,
+        context,
+    )
+    assert refused.is_error
+    assert (refused.details or {}).get("error_code") == "backend_conflict", refused.text
+    assert not any(step.startswith("ext.") for step in order), order
+    assert resource.record.get("pending_access_host") == "ui", "the approval pin survives"
+
+    for action in ("request_access", "await_access", "cancel_access"):
+        step = await builtin.execute_browser(
+            "t", {"action": action, "url": "https://example.test"}, None, None, context
+        )
+        assert not step.is_error, (action, step.text)
+    assert [s for s in order if s.startswith("ui.")][-3:] == [
+        "ui.request_access",
+        "ui.await_access",
+        "ui.cancel_access",
+    ], order
+    assert not any(step.startswith("ext.") for step in order), order
+    assert "pending_access_host" not in resource.record
+
+    honoured = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.test"},
+        None,
+        None,
+        context,
+    )
+    assert not honoured.is_error, honoured.text
+    assert any(step == "ext.open" for step in order), order
