@@ -90,12 +90,17 @@ GRAPHICS_INSTRUCTIONS: Final = (
     "The assistant just finished answering a user. Would a chart or figure help the user "
     "understand the numbers? Answer with a HIGH probability only when the answer or its tool "
     "output actually shows a table or series of three or more comparable measurements whose "
-    "shape, ranking or trend is faster to see than to read. Answer LOW for a single value, a "
-    "version or count, a short list, a prose-only answer, or data that was only talked about "
+    "shape, ranking or trend is faster to see than to read, OR an extracted labelled-summary "
+    "dataset of four or more operational counts with distinct entity units that a compact "
+    "labelled table makes easier to check than counts scattered through paragraphs. For "
+    "distinct units prefer a table, never comparable bars or a total. Answer LOW for a single "
+    "value, version, unlabelled numbers, ordinary prose, or data only talked about "
     "and never shown."
 )
 GRAPHICS_CRITERIA: Final[dict[str, str]] = {
-    "true": "a chart would let the user see a ranking, trend or comparison at a glance",
+    "true": (
+        "a chart reveals a ranking/trend, or a labelled table clarifies shown operational counts"
+    ),
     "false": "no figure helps: one or two values, prose, or no data actually shown",
 }
 
@@ -369,8 +374,19 @@ def graphics_state(
     The dataset titles ride in the shapes and are turn data too, so the whole composed
     string passes the same egress scrub.
     """
-    shapes = "\n".join(f"- {d.title}: {d.shape()}" for d in evidence.datasets) or (
-        "- numbers inside the answer text"
+    shapes = (
+        "\n".join(
+            f"- {d.title}: {d.shape()}"
+            + (
+                "; explicit noun-labelled operational counts extracted from this answer's list. "
+                "Presentation: compact labelled summary table only (mixed entity units, "
+                "not comparable bars). Judge whether collecting these scattered counts helps."
+                if d.presentation == "table-only"
+                else ""
+            )
+            for d in evidence.datasets
+        )
+        or "- numbers inside the answer text"
     )
     return _egress(
         _state_text(user_text, answer_text) + "\n\nDATA SHOWN THIS TURN:\n" + shapes, literals

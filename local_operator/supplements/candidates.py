@@ -245,11 +245,12 @@ _COPY_COMMANDS: Final = frozenset({"cp", "mv", "install"})
 #: before this runs, and a redirect/``cp``/``tee`` destination is always named, so none of
 #: those arm the sweep -- a plain ``cd d; echo > a.txt`` must not list ``d``.
 _PY_VARIABLE_WRITE: Final = re.compile(
-    r"""\bopen\(\s*(?!f?r?['"])[^\s,)][^,)]*,\s*['"][wax]b?\+?['"]"""
+    r"""\bopen\(\s*(?!f?r?['"])[^\s,)][^,()\n]{0,512},\s*['"][wax]b?\+?['"]"""
     r"""|\.to_(?:csv|excel|json|parquet|markdown|html)\(\s*(?!f?r?['"])[^\s)]"""
     r"""|\.savefig\(\s*(?!f?r?['"])[^\s)]"""
     r"|\bshutil\.(?:copy\w*|move)\("
 )
+SHELL_SCAN_MAX_CHARS: Final = 32_768
 _LEADING_HOME: Final = re.compile(r"^\$(?:\{HOME\}|HOME)(?=/|$)")
 
 
@@ -292,7 +293,40 @@ def _lift_heredocs(command: str) -> tuple[str, list[str]]:
             operators.append((match.group("tag"), bool(match.group("dash"))))
             return " " + _HEREDOC_MARK.format(len(bodies) + len(operators) - 1) + " "
 
-        kept.append(_HEREDOC.sub(mark, line))
+        # Quoted/comment text is not shell syntax. Mask it for operator discovery,
+        # preserving offsets so replacement keeps every original non-operator byte.
+        masked = list(line)
+        quote = ""
+        escaped = False
+        for pos, char in enumerate(line):
+            if escaped:
+                masked[pos] = " "
+                escaped = False
+            elif char == "\\" and quote != "'":
+                masked[pos] = " "
+                escaped = True
+            elif quote:
+                masked[pos] = " "
+                if char == quote:
+                    quote = ""
+            elif char in {"'", '"'}:
+                quote = char
+                masked[pos] = " "
+            elif char == "#" and (pos == 0 or line[pos - 1].isspace()):
+                masked[pos:] = " " * (len(line) - pos)
+                break
+        # Only use the mask to test the operator start: quoted heredoc delimiters
+        # themselves are valid and must be parsed from the original line.
+        matches = [
+            m for m in _HEREDOC.finditer(line) if "".join(masked[m.start() : m.start() + 2]) == "<<"
+        ]
+        pieces = []
+        previous = 0
+        for match in matches:
+            pieces.extend((line[previous : match.start()], mark(match)))
+            previous = match.end()
+        pieces.append(line[previous:])
+        kept.append("".join(pieces))
         for tag, dash in operators:
             body: list[str] = []
             while index < len(lines):
@@ -335,7 +369,7 @@ def _in_dir(raw: str, cwd: str | None) -> str | None:
         return raw
     if cwd is None:
         return None
-    return os.path.normpath(os.path.join(cwd, raw)) if cwd else raw
+    return os.path.join(cwd, raw) if cwd else raw
 
 
 def bash_effects(command: str) -> BashEffects:
@@ -348,6 +382,11 @@ def bash_effects(command: str) -> BashEffects:
     heredoc that feeds an interpreter. Anything with a ``$`` or a glob is dropped: it names no
     single file.
     """
+    # Shared with FileScan, which reads unbounded journal arguments rather than clipped
+    # supplement snapshots. Refuse oversized commands before lexing/regex work; truncating
+    # a shell program can invent a different command (especially inside a heredoc).
+    if len(command) > SHELL_SCAN_MAX_CHARS or "\x00" in command:
+        return BashEffects()
     text, bodies = _lift_heredocs(command)
     tokens = _shell_tokens(text)
     if tokens is None:
@@ -372,14 +411,14 @@ def bash_effects(command: str) -> BashEffects:
         if not words:
             return
         if words[0] == "cd":
-            target = next((w for w in words[1:] if w != "--" and not w.startswith("-")), "~")
+            target = next((w for w in words[1:] if w != "--"), "~")
             target = _LEADING_HOME.sub("~", target)
-            if "$" in target or "*" in target or target == "-" or "`" in target:
+            if "$" in target or "*" in target or target.startswith("-") or "`" in target:
                 cwd = None
             elif target.startswith(("~", "/")):
-                cwd = os.path.normpath(target) if target != "~" else "~"
+                cwd = target
             else:
-                cwd = None if cwd is None else os.path.normpath(os.path.join(cwd, target))
+                cwd = None if cwd is None else os.path.join(cwd, target)
             return
         found: list[str] = []
         operands: list[str] = []
@@ -415,6 +454,15 @@ def bash_effects(command: str) -> BashEffects:
             for word in operands[1:]:
                 emit(word, found)
         elif command_word in _COPY_COMMANDS and len(operands) >= 3:
+            # GNU target-directory forms move the destination before the sources. Until
+            # their option grammar is supported, refuse rather than feature a source.
+            if any(
+                w in {"-t", "--target-directory"}
+                or w.startswith("--target-directory=")
+                or (w.startswith("-t") and len(w) > 2)
+                for w in words[1:]
+            ):
+                return
             destination = operands[-1]
             if not destination.endswith("/"):  # a directory is not itself an output
                 emit(destination, found)
@@ -471,6 +519,10 @@ def _bash_outputs(command: str) -> list[str]:
 
 
 def _eval_outputs(code: str) -> list[str]:
+    # FileScan feeds full eval arguments too; keep the shared grammar's work bounded
+    # regardless of which tool supplied Python, without truncating a literal into a path.
+    if len(code) > SHELL_SCAN_MAX_CHARS or "\x00" in code:
+        return []
     found: list[str] = []
     for match in _EVAL_WRITES.finditer(code):
         item = match.group("path") or match.group("path2") or match.group("path3")
@@ -565,7 +617,7 @@ def _sweep(directory: str, since: float) -> list[str]:
                     continue
                 if modified >= since - SWEEP_SLACK_S:
                     found.append((modified, entry.name))
-    except OSError:
+    except (OSError, ValueError):
         return []
     found.sort(reverse=True)
     return [name for _modified, name in found[:SWEEP_MAX_FILES]]

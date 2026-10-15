@@ -132,21 +132,23 @@ def test_the_replayed_turn_surfaces_all_four_deliverables_with_workspace_paths(
     assert out.skipped is None
 
 
-def test_this_turns_answer_carries_no_structured_signal_and_graphics_are_not_asked(
+def test_this_turns_answer_yields_table_only_labelled_summary(
     home: Path,
 ) -> None:
-    """The brief expected a graphics decision here; the evidence says no, and that is right.
-
-    Measured on this answer: the unit-paragraph rule (form c) needs >= 4 numbers sharing ONE
-    unit token in a paragraph; the answer's counts (296 comments, 225 profiles, 325 links,
-    3,194 matches) are four different quantities, at most one per unit in any paragraph, and
-    no tool output holds a table, delimited block or JSON array. Charting four unrelated
-    magnitudes would be decoration, so the rule is deliberately NOT loosened.
-    """
+    """Heterogeneous operational counts form a labelled table, not a comparable series."""
     items, answer = _turn_after_the_ask()
     _write_deliverables(home)
     out = prefilter(items, answer, cwd=str(home), home=str(home), since=time.time() - 5)
-    assert out.evidence.structured is False and out.evidence.forms == ()
+    assert out.evidence.structured is True
+    assert out.evidence.forms == ("labelled-summary",)
+    dataset = out.evidence.datasets[0]
+    assert dataset.presentation == "table-only"
+    assert {row[0]: row[1] for row in dataset.rows} == {
+        "comments": "296",
+        "profiles": "225",
+        "links": "325",
+        "matches": "3194",
+    }
 
 
 class _Vendor:
@@ -168,7 +170,7 @@ class _Vendor:
 
 
 @pytest.mark.asyncio
-async def test_the_decision_features_the_files_and_asks_no_graphics_question(home: Path) -> None:
+async def test_the_decision_features_files_and_can_select_the_labelled_table(home: Path) -> None:
     items, answer = _turn_after_the_ask()
     _write_deliverables(home)
     out = prefilter(items, answer, cwd=str(home), home=str(home), since=time.time() - 5)
@@ -184,9 +186,9 @@ async def test_the_decision_features_the_files_and_asks_no_graphics_question(hom
         max_featured=4,
     )
     assert {c.name for c in decision.featured} == set(DELIVERABLES)
-    # Cost pin for the graphics-default flip: no structured data -> no second vendor call.
-    assert vendor.asked == [dec.FILES_QUESTION_ID]
-    assert decision.graphics is False
+    # The classifier may now choose a table over this evidence; it still controls selection.
+    assert set(vendor.asked) == {dec.FILES_QUESTION_ID, dec.GRAPHICS_QUESTION_ID}
+    assert decision.graphics is True
 
 
 def _bash_tool(home: Path, calls: list[str]) -> AgentTool:
@@ -326,3 +328,103 @@ def test_the_env_kill_switch_still_removes_the_feature_with_graphics_on(value: s
         [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60
     )
     assert run.stdout.strip() == "False", run.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("cd ~/workspace/a; cd ~/workspace/b; cd -; echo REAL > dash.md", set()),
+        ("cd ~; cd ..; echo REAL > parent.md", set()),
+        ('echo "see <<EOF notes"; echo REAL > proper.md', {"proper.md"}),
+    ],
+)
+async def test_real_session_bash_never_promotes_stale_directory_decoys(
+    tmp_path, monkeypatch, command, expected
+):
+    """R2/Q1: actual bash and Session+runner, not a hand-built refusal or fake write.
+
+    The shell writes A/dash.md after cd -, never the old ~/dash.md. We cannot
+    infer OLDPWD statically, so the parser must decline it. Parent-of-home is
+    outside both allowed roots, not a session-relative output. Quoted << is text.
+    """
+    from local_operator.supplements import candidates
+
+    home = tmp_path / "home"
+    cwd = home / "workspace" / "y"
+    for name in ("a", "b", "y"):
+        (home / "workspace" / name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    # Synthetic home is under pytest's temporary tree, unlike a production home.
+    monkeypatch.setattr(candidates, "_scratch_roots", lambda: [])
+    (home / "dash.md").write_text("STALE HOME DECOY")
+    (cwd / "parent.md").write_text("STALE CWD DECOY")
+    executed = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        process = await asyncio.create_subprocess_exec(
+            "/bin/bash",
+            "-c",
+            args["command"],
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        executed.append((process.returncode, stdout.decode(), stderr.decode()))
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="bash",
+            is_error=process.returncode != 0,
+            content=[TextContent(text=f"exit code: {process.returncode}\\n" + stdout.decode())],
+        )
+
+    tool = AgentTool(
+        name="bash",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(
+                    index=0,
+                    id="real-shell",
+                    name="bash",
+                    argument_delta=json.dumps({"command": command}),
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="Finished."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = _make_session(tmp_path / "sess", stream, [tool], cwd)
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), install_gates=False, cwd=str(cwd)
+    )
+    handle.subscribe(lambda: None)
+    try:
+        await session.prompt("Write the deliverable.")
+        await wait_for(lambda: session.turns_settled == 1, timeout=10)
+        await wait_for(
+            lambda: handle._supplements._task is not None and handle._supplements._task.done(),
+            timeout=10,
+        )
+        assert executed[0][0] == 0, executed
+        row = session.transcript.latest_custom(SUPPLEMENT_CUSTOM_TYPE)
+        assert ({f["path"] for f in row["files"]} if row else set()) == expected
+        assert (home / "dash.md").read_text() == "STALE HOME DECOY"
+        assert (cwd / "parent.md").read_text() == "STALE CWD DECOY"
+        if "cd -;" in command:
+            assert (home / "workspace" / "a" / "dash.md").read_text() == "REAL\n"
+        elif "cd ..;" in command:
+            assert (tmp_path / "parent.md").read_text() == "REAL\n"
+        else:
+            assert (cwd / "proper.md").read_text() == "REAL\n"
+    finally:
+        await handle.dispose()
+        await session.dispose()
