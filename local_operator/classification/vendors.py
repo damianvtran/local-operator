@@ -104,6 +104,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 import httpx
 from pydantic import SecretStr
 
+from local_operator.classification.accounting import note_post
 from local_operator.classification.types import (
     Answer,
     DecisionRequest,
@@ -788,11 +789,24 @@ class _HttpDecisionVendor:
         the same shape — which is correct: from the cascade's point of view both
         mean "ask the next leg".
         """
+        # The ONE place a decision request leaves the process, so it is the one place
+        # that counts it for the channel ledger (``classification.accounting``): a
+        # 401/403 re-send inside a single ``decide`` is a second billable request that
+        # no return value would otherwise report.
+        note_post()
         try:
             return await client.post(self.endpoint, json=body, headers=headers, timeout=timeout_s)
         except httpx.HTTPError as exc:
             raise DecisionVendorError(
-                f"{self.name} transport failure: {type(exc).__name__}", kind="transport"
+                f"{self.name} transport failure: {type(exc).__name__}",
+                kind="transport",
+                # A failure BEFORE the request reached the vendor (no connection, no
+                # pool slot) cannot have been billed. Every other transport failure —
+                # a read timeout, a reset mid-response — leaves the outcome unknown,
+                # and the ledger must say so instead of presuming the call free.
+                outcome_lost=not isinstance(
+                    exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+                ),
             ) from exc
 
 
