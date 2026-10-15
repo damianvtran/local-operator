@@ -32,7 +32,7 @@ import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Sequence, cast
+from typing import Any, Awaitable, Callable, Coroutine, Sequence, cast
 
 import pytest
 
@@ -3329,6 +3329,188 @@ async def test_a_degrade_folded_into_an_in_flight_refresh_is_still_retried(
         registrant.close()
 
 
+class _HeldResyncRetry:
+    """An instance-owned backoff whose entry/expiry are explicit test events."""
+
+    def __init__(self, retry: Callable[[float], Awaitable[None]], delay: float) -> None:
+        self.retry = retry
+        self.configured_delay = delay
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.cancelled = False
+        self.expired = False
+
+    async def run(self) -> None:
+        self.entered.set()
+        try:
+            await self.release.wait()
+            # Exercise the REAL expiry/debt/slot logic, without a wall-clock
+            # backoff. No shared asyncio.sleep patch can freeze client loops.
+            await self.retry(0.0)
+            self.expired = True
+        except asyncio.CancelledError:
+            self.cancelled = True
+        finally:
+            self.finished.set()
+
+
+class _ObservedRefresh:
+    def __init__(self, task: asyncio.Task[None]) -> None:
+        self.task = task
+        self.callbacks_finished = asyncio.Event()
+        # Registered AFTER the real slot filler's debt-aware callback. This
+        # event proves its publication decision ran, not just that sync failed.
+        task.add_done_callback(lambda _done: self.callbacks_finished.set())
+
+
+class _QuiescentRecoveryGate:
+    """Observe real slot callbacks and hold retry backoff on ONE follower only.
+
+    The old test polled a failure count set BEFORE finished() published a retry,
+    then peeked a handle that expiry could already clear. Neither proves the
+    intended takeover interleave. A synchronous retry factory publishes a ticket
+    during the actual callback; entered latches task startup, and release alone
+    admits expiry. The public protocol still runs, including the original
+    integration test's quiet/title/catalogue/debt checks.
+    """
+
+    def __init__(self, remote: AttachedSession, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.refreshes: asyncio.Queue[_ObservedRefresh] = asyncio.Queue()
+        self.retries: asyncio.Queue[_HeldResyncRetry] = asyncio.Queue()
+        real_retry = remote._retry_degraded_resync
+        real_start = remote._start_display_refresh
+
+        def retry(delay: float) -> Coroutine[Any, Any, None]:
+            ticket = _HeldResyncRetry(real_retry, delay)
+            self.retries.put_nowait(ticket)
+            return ticket.run()
+
+        def start(*, prior_delay: float) -> None:
+            real_start(prior_delay=prior_delay)
+            task = remote._display_refresh_task
+            assert task is not None
+            self.observe(task)
+
+        monkeypatch.setattr(remote, "_retry_degraded_resync", retry)
+        monkeypatch.setattr(remote, "_start_display_refresh", start)
+
+    def observe(self, task: asyncio.Task[None]) -> _ObservedRefresh:
+        receipt = _ObservedRefresh(task)
+        self.refreshes.put_nowait(receipt)
+        return receipt
+
+    async def next_refresh(self, *, timeout: float = 8.0) -> _ObservedRefresh:
+        # A deadlock backstop, not a performance assertion; the prior setup
+        # loop already allowed400*0.02s. Publication cannot be lost between ticks.
+        return await asyncio.wait_for(self.refreshes.get(), timeout=timeout)
+
+    async def after_failure(self, refresh: _ObservedRefresh) -> _HeldResyncRetry:
+        await asyncio.wait_for(refresh.callbacks_finished.wait(), timeout=8.0)
+        assert not refresh.task.cancelled() and refresh.task.exception() is not None
+        assert not self.retries.empty(), "failed takeover orphaned recovery debt"
+        ticket = self.retries.get_nowait()
+        await asyncio.wait_for(ticket.entered.wait(), timeout=8.0)
+        return ticket
+
+
+async def _drive_quiescent_retry_order(
+    monkeypatch: pytest.MonkeyPatch, order: str, *, callbackless_takeover: bool = False
+) -> None:
+    """Pure callback contract, NOT a substitute for the5000-row socket test."""
+    baseline = set(asyncio.all_tasks())
+    # Deliberately partial protocol fixture, not a constructed client/store.
+    # Only real callback/expiry methods and the public state getter run here;
+    # the socket integration below still uses a fully connected session.
+    remote: Any = object.__new__(AttachedSession)
+    remote._disposed = False
+    remote._client = SimpleNamespace(connected=True)
+    remote._frontend_resync_pending = True
+    remote._display_refresh_task = None
+    remote._degraded_resync_retry_task = None
+    remote._display_window_supported = True
+    remote._display_invalidated = False
+    remote._display_revision = 0
+    state = SimpleNamespace(conversation_title="stale", model_catalogue=[])
+    # Match the real public getter before any task runs. A prior exploration
+    # incorrectly seeded _frontend_state and failed here, not in product logic.
+    remote._frontend_store = SimpleNamespace(state=state)
+    assert remote.frontend_state is state
+    failures_entered = [asyncio.Event(), asyncio.Event()]
+    finish_failure = [asyncio.Event(), asyncio.Event()]
+    attempts = 0
+
+    async def refresh() -> None:
+        nonlocal attempts
+        index = attempts
+        attempts += 1
+        if index < 2:
+            failures_entered[index].set()
+            await finish_failure[index].wait()
+            raise ConnectionError("synthetic sync failure")
+        state.conversation_title = "recovered"
+        state.model_catalogue = ["synthetic-row"]
+        remote._frontend_resync_pending = False
+
+    monkeypatch.setattr(remote, "_refresh_display_history", refresh)
+    gate = _QuiescentRecoveryGate(remote, monkeypatch)
+    try:
+        remote._start_display_refresh(prior_delay=0.0)
+        first = await gate.next_refresh()
+        await failures_entered[0].wait()
+        assert remote._degraded_resync_retry_task is None  # controlled pre-publication
+        finish_failure[0].set()
+        retry = await gate.after_failure(first)
+        if callbackless_takeover:
+            # Exact old slot-filler defect: real refresh, no debt-aware callback.
+            task = asyncio.create_task(refresh())
+            remote._display_refresh_task = task
+            gate.observe(task)
+        else:
+            remote._invalidate_display_history()
+        second = await gate.next_refresh()
+        assert second.task is not first.task
+        await failures_entered[1].wait()
+        if order == "expiry_before_callback":
+            retry.release.set()
+            await retry.finished.wait()
+            assert retry.expired and remote._degraded_resync_retry_task is None
+        finish_failure[1].set()
+        replacement = await gate.after_failure(second)
+        if order == "callback_before_expiry":
+            await retry.finished.wait()
+            assert retry.cancelled
+        replacement.release.set()
+        recovered = await gate.next_refresh()
+        await recovered.task
+        await recovered.callbacks_finished.wait()
+        assert attempts == 3
+        assert remote.frontend_state.conversation_title == "recovered"
+        assert remote.frontend_state.model_catalogue
+        assert not remote._frontend_resync_pending
+        assert remote._degraded_resync_retry_task is None
+    finally:
+        owned = set(asyncio.all_tasks()) - baseline
+        for task in owned:
+            task.cancel()
+        await asyncio.gather(*owned, return_exceptions=True)
+        assert not (set(asyncio.all_tasks()) - baseline)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order", ["callback_before_expiry", "expiry_before_callback"])
+async def test_quiescent_retry_survives_both_callback_expiry_orders(monkeypatch, order):
+    await _drive_quiescent_retry_order(monkeypatch, order)
+
+
+@pytest.mark.asyncio
+async def test_quiescent_retry_guard_rejects_a_callbackless_takeover(monkeypatch):
+    with pytest.raises(AssertionError, match="failed takeover orphaned recovery debt"):
+        await _drive_quiescent_retry_order(
+            monkeypatch, "expiry_before_callback", callbackless_takeover=True
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("windowed", [False, True])
 async def test_a_quiescent_follower_recovers_without_waiting_for_more_traffic(
@@ -3366,15 +3548,16 @@ async def test_a_quiescent_follower_recovers_without_waiting_for_more_traffic(
         )
         assert remote._display_window_supported is windowed
         _assert_reachable(remote)
+        # Settle any connect-time display pass before arming failure observers;
+        # the test must start from an idle slot, not inherit an unobserved task.
+        await remote.ensure_display_current()
         client = remote._client
         assert client is not None
 
         original = client.frontend_sync
-        failures = 0
+        gate = _QuiescentRecoveryGate(remote, monkeypatch)
 
         async def failing_sync() -> Any:
-            nonlocal failures
-            failures += 1
             raise ConnectionError("injected sync failure")
 
         monkeypatch.setattr(client, "frontend_sync", failing_sync)
@@ -3384,23 +3567,11 @@ async def test_a_quiescent_follower_recovers_without_waiting_for_more_traffic(
             model_catalogue=[_catalogue_row(index) for index in range(5_000)],
             conversation_title="after the degrade",
         )
-        for _ in range(400):
-            if failures:
-                break
-            await asyncio.sleep(0.02)
-        assert failures >= 1, "the injected sync failure never fired"
-
-        # THE INTERLEAVING (this is what orphans the debt, not the failure
-        # alone). Inside the backoff, an ordinary delta that MOVES
-        # ``history_generation`` re-enters ``_invalidate_display_history`` and
-        # takes over the refresh slot. When that pass carried a log-only
-        # callback, ``_retry_degraded_resync`` deferred to it, the pass failed,
-        # and the debt died there — after which only more traffic could repair
-        # it.
-        assert remote._degraded_resync_retry_task is not None, (
-            "no backoff timer to interleave with, so this run cannot reproduce the "
-            "hand-off that orphans the debt"
-        )
+        async with asyncio.timeout(8.0):
+            first = await gate.next_refresh()
+            retry = await gate.after_failure(first)
+        # Backoff is now entered and HELD, after the actual failure callback
+        # published it. A failure counter or transient handle cannot prove this.
         if windowed:
             # Only the windowed follower can be interleaved with:
             # ``_invalidate_display_history`` early-returns for the legacy one,
@@ -3408,40 +3579,26 @@ async def test_a_quiescent_follower_recovers_without_waiting_for_more_traffic(
             # would be asserting against a path that does not exist. The legacy
             # leg below still proves quiescent recovery, just from the simpler
             # state where the retry is the only actor.
-            taken_over = remote._display_refresh_task
             handle._frontend.mutate(history_generation=1, cwd="/tmp/generation-moved")
-            for _ in range(400):
-                current = remote._display_refresh_task
-                if current is not None and current is not taken_over:
-                    break
-                await asyncio.sleep(0.02)
-            current = remote._display_refresh_task
-            # The SLOT genuinely changed hands to a pass this path did not
-            # start. A count of injected failures would not prove this — the
-            # backoff's own attempts also raise, so it would go green on the
-            # broken tree for the wrong reason.
-            assert current is not None and current is not taken_over, (
-                "the generation move never took over the refresh slot, so the debt was "
-                "never handed to the other path"
-            )
-            await asyncio.gather(current, return_exceptions=True)
-            assert current.exception() is not None, (
-                "the interleaved pass succeeded, so it settled the debt by doing the "
-                "work rather than by orphaning it"
-            )
+            async with asyncio.timeout(8.0):
+                takeover = await gate.next_refresh()
+                assert takeover.task is not first.task, "generation move did not take over the slot"
+                replacement = await gate.after_failure(takeover)
+                await retry.finished.wait()
+                assert retry.cancelled, "takeover callback did not supersede the old backoff"
+                retry = replacement
 
         monkeypatch.setattr(client, "frontend_sync", original)
         # Deliberately no mutations from here on. The owner is quiet, which is
         # the condition under which the orphaned debt was never serviced.
         quiet_sequence = handle._frontend.state.sequence
-        for _ in range(600):
-            if (
-                remote.frontend_state.conversation_title == "after the degrade"
-                and not remote._frontend_resync_pending
-                and remote._degraded_resync_retry_task is None
-            ):
-                break
-            await asyncio.sleep(0.02)
+        retry.release.set()
+        # One total12s hang guard, matching the prior600*0.02 quiet window;
+        # publication, completion and callback observation share it.
+        async with asyncio.timeout(12.0):
+            recovered = await gate.next_refresh(timeout=12.0)
+            await recovered.task
+            await recovered.callbacks_finished.wait()
 
         assert handle._frontend.state.sequence == quiet_sequence, (
             "the owner emitted deltas during the quiet window, so this run cannot "
