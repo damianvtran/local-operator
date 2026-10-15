@@ -242,7 +242,7 @@ class MeshCredentialBroker:
         self._github_minter = github_minter
         self._github_lender: github_app.GithubLender | None = None
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
-        self._inflight: dict[tuple[str, str, bool, str, str, str], asyncio.Future[Any]] = {}
+        self._inflight: dict[tuple[Any, ...], asyncio.Future[Any]] = {}
         self._report_refreshed: dict[int, float] = {}
         self._report_blocked: dict[tuple[str, int], float] = {}
         #: ONE lock around each report arm's read-then-stamp (review round 4, R4-n2):
@@ -267,6 +267,7 @@ class MeshCredentialBroker:
         behaviour is unchanged. The broker (and its one event loop) is built the first
         time the answer is yes, and kept.
         """
+        from local_operator.network.credentials import reconcile as reconcile_mod
         from local_operator.network.relay import not_implemented_peer_op
 
         refuse = not_implemented_peer_op("net_broker")
@@ -300,6 +301,19 @@ class MeshCredentialBroker:
                     )
 
                     return member_lifecycle_announce(server, link, frame)
+                # THE CONSENT RECONCILER'S PUSH is addressed to a RECIPIENT too, and the
+                # recipient that needs it most owns nothing (no broker yet). Only a frame
+                # carrying the reconciler's origin marker is routed; a bare pull
+                # (``want: pull``) or any other placement frame keeps the by-name refusal.
+                if (
+                    str((frame or {}).get("kind") or "") == "placement"
+                    and (frame or {}).get("origin") == reconcile_mod.PUSH_ORIGIN
+                ):
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": reconcile_mod.member_placement_push(server, link, frame),
+                    }
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -364,6 +378,7 @@ class MeshCredentialBroker:
                 "nothing was refreshed or lent",
             )
         kind = str(frame.get("kind") or "")
+        from local_operator.network.credentials import reconcile as reconcile_mod
         from local_operator.network.credentials.lifecycle import negotiated
 
         if kind.startswith("lifecycle_") and not negotiated(link):
@@ -383,6 +398,8 @@ class MeshCredentialBroker:
             detail = self.grant(link, frame)
         elif kind == "report":
             detail = self.report(link, frame)
+        elif kind == "placement" and frame.get("origin") == reconcile_mod.PUSH_ORIGIN:
+            detail = reconcile_mod.member_placement_push(self._server, link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
         elif kind == "lifecycle_read":
@@ -460,6 +477,7 @@ class MeshCredentialBroker:
         # peer-merged holder projection stale. Provider-wide refusal precedes
         # native resolution; caller-supplied account metadata is never consulted.
         from local_operator.network.credentials import consent
+        from local_operator.network.credentials import reconcile as reconcile_mod
         from local_operator.network.types import MeshRefusal
 
         try:
@@ -513,6 +531,28 @@ class MeshCredentialBroker:
                 "this device lends GitHub to the DEVICE, not to a session; nothing was lent",
             )
 
+        # 2c. A holder DERIVED from a signed approval (``reconcile``) is account-scoped,
+        #     while a holder row is per key. Decide which native rows the approval
+        #     covers BEFORE any refresh, from metadata alone, so an account the
+        #     approval does not cover is never refreshed (zero IdP POSTs) and never
+        #     served. An explicit share (``granted_by`` = the owner) skips this
+        #     entirely and behaves exactly as before.
+        excluded_ids: tuple[int, ...] = ()
+        if reconcile_mod.is_derived(holder):
+            allowed_ids, excluded_ids, scope_code = reconcile_mod.serve_gate(
+                self.network_id, self.self_device, by, key, self.root
+            )
+            if not allowed_ids:
+                return self._refuse(
+                    link,
+                    key,
+                    provider,
+                    by,
+                    scope_code or reconcile_mod.CODE_UNKNOWN,
+                    "the approval for this device does not cover a login that is signed in "
+                    f"on {self.self_device_name or self.self_device}; nothing was lent",
+                )
+
         # 3-5. Coalesce, resolve, audit. All on the owner's ONE loop.
         try:
             outcome = self._loop.submit(
@@ -524,6 +564,7 @@ class MeshCredentialBroker:
                     force=force,
                     holder_scope=holder.scope if holder is not None else "session",
                     by=by,
+                    excluded_ids=excluded_ids,
                 ),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
@@ -595,6 +636,9 @@ class MeshCredentialBroker:
             fields.get("by", ""),
             fields.get("model_id", ""),
             fields.get("holder_scope", ""),
+            # A derived holder's exclusion set is part of WHAT is being asked: two askers
+            # with different permitted rows must never share one resolve.
+            tuple(fields.get("excluded_ids", ())),
         )
         loop = asyncio.get_running_loop()
         slot = self._inflight.get(ckey)
@@ -632,6 +676,7 @@ class MeshCredentialBroker:
         force: bool,
         holder_scope: str,
         by: str,
+        excluded_ids: tuple[int, ...] = (),
     ) -> Any:
         """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal."""
         if github_app.is_github_key(key):
@@ -667,6 +712,10 @@ class MeshCredentialBroker:
                 # would throw away a single-use refresh token.
                 read_only=True,
                 model_id=model_id,
+                # Rows a derived holder's approval does not cover are hidden from THIS
+                # resolve only (nothing is blocked or repointed): they are neither
+                # picked nor refreshed on a peer's behalf.
+                exclude_credential_ids=excluded_ids or None,
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
@@ -912,6 +961,23 @@ class MeshCredentialBroker:
                     or not entry.is_holder(by)
                 ):
                     raise MeshRefusal("not_a_holder", "holder authority changed before mint")
+                from local_operator.network.credentials import (
+                    reconcile as reconcile_mod,
+                )
+
+                if reconcile_mod.is_derived(entry.holder(by)):
+                    # Account-scoped derived grant: re-verify the signed scope against the
+                    # row the resolve actually used, under the same lock a revoke takes.
+                    reconcile_mod.derived_mint_check(
+                        self.network_id,
+                        self.self_device,
+                        by,
+                        str(fields["key"]),
+                        fields["identity"],
+                        self.root,
+                        credential_id=int(fields["credential_id"]),
+                        kind=str(fields["kind"]),
+                    )
                 return self._mint_grant(**fields)
 
         except MeshRefusal as exc:
