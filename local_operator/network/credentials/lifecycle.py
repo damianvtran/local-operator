@@ -1191,9 +1191,18 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
     refusal, so a failed exchange is retried on the next tick rather than parked.
     """
     from local_operator.network import definitions
+    from local_operator.network.credentials import reconcile
     from local_operator.network.credentials import sync as sync_mod
     from local_operator.network.credentials.types import validate_lifecycle_frame
 
+    # Project a signed future-login approval into holders BEFORE the capability gate:
+    # it is local, metadata-only and writes no capability. Whether the holders can then
+    # be DELIVERED is decided by the same gates below, and a missing capability is a
+    # named ``notready:`` status in ``reconcile`` — never a grant.
+    try:
+        reconcile.project_for(step_server, device_id)
+    except Exception:  # noqa: BLE001 — a reconcile fault must not stop announcements
+        logger.debug("credential reconcile: projection failed", exc_info=True)
     blocked = definitions.unholdable_capability(step_server, device_id, "net_broker")
     if blocked:
         return f"skipped:no_{blocked}"
@@ -1202,6 +1211,10 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
         return "unreachable"
     if not negotiated(link):
         return "skipped:peer_lacks_lifecycle"
+    try:
+        reconcile.deliver(step_server, link, device_id, getattr(link, "link_id", None) or id(link))
+    except Exception:  # noqa: BLE001 — delivery is retried on the next tick
+        logger.debug("credential reconcile: delivery failed", exc_info=True)
     # Ack evidence belongs to this authenticated connection; a recipient restart
     # loses process receipts even while its persisted counters remain unchanged.
     links = getattr(step_server, "_lifecycle_links", None)

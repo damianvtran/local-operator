@@ -229,6 +229,27 @@ def render_broker_error(
             f"provider and cannot be revived by retrying. Re-run '{login}' on {owner}. "
             "Nothing is disabled on either device."
         )
+    if error.code in ("scope_mismatch", "scope_unknown", "consent_withdrawn"):
+        # THE OWNER-SIDE REMEDY, named on the owner: this device cannot fix any of the
+        # three (the approval and the login both live there). They differ in what to do.
+        remedy = {
+            "scope_mismatch": (
+                f"{owner} is signed in to '{label}' as an account the approval for this "
+                f"device does not cover. Sign in to '{label}' on {owner} as the approved "
+                f"account ('{login}'), or approve this device for the account that is signed in."
+            ),
+            "scope_unknown": (
+                f"{owner} cannot confirm which '{label}' account is signed in there, so the "
+                f"approval for this device cannot be applied. Sign in again on {owner} "
+                f"('{login}'); if it persists, re-approve this device."
+            ),
+            "consent_withdrawn": (
+                f"{owner}'s approval for this device to use '{label}' is no longer in effect "
+                f"(withdrawn, expired or changed). Nothing was lent; re-approve this device "
+                f"on {owner} if it should have access."
+            ),
+        }[error.code]
+        return remedy
     if error.code == "device_bound":
         return (
             f"{label} logins are bound to the device that made them, so {owner} cannot lend "
