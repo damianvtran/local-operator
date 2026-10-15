@@ -10,6 +10,122 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def active_view(*, view: str) -> Msg:
+    return Msg("tui.projects.active_view", {"view": view})
+
+
+def binding_copy_attachment() -> Msg:
+    return Msg("tui.projects.binding_copy_attachment", {})
+
+
+def binding_create() -> Msg:
+    return Msg("tui.projects.binding_create", {})
+
+
+def binding_cycle_view() -> Msg:
+    return Msg("tui.projects.binding_cycle_view", {})
+
+
+def binding_down() -> Msg:
+    return Msg("tui.projects.binding_down", {})
+
+
+def binding_jump() -> Msg:
+    return Msg("tui.projects.binding_jump", {})
+
+
+def binding_leave() -> Msg:
+    return Msg("tui.projects.binding_leave", {})
+
+
+def binding_message() -> Msg:
+    return Msg("tui.projects.binding_message", {})
+
+
+def binding_next_section() -> Msg:
+    return Msg("tui.projects.binding_next_section", {})
+
+
+def binding_open_detail() -> Msg:
+    return Msg("tui.projects.binding_open_detail", {})
+
+
+def binding_page_down() -> Msg:
+    return Msg("tui.projects.binding_page_down", {})
+
+
+def binding_page_left() -> Msg:
+    return Msg("tui.projects.binding_page_left", {})
+
+
+def binding_page_right() -> Msg:
+    return Msg("tui.projects.binding_page_right", {})
+
+
+def binding_page_up() -> Msg:
+    return Msg("tui.projects.binding_page_up", {})
+
+
+def binding_prev_section() -> Msg:
+    return Msg("tui.projects.binding_prev_section", {})
+
+
+def binding_preview_attachment() -> Msg:
+    return Msg("tui.projects.binding_preview_attachment", {})
+
+
+def binding_refresh() -> Msg:
+    return Msg("tui.projects.binding_refresh", {})
+
+
+def binding_scroll_end() -> Msg:
+    return Msg("tui.projects.binding_scroll_end", {})
+
+
+def binding_scroll_home() -> Msg:
+    return Msg("tui.projects.binding_scroll_home", {})
+
+
+def binding_scroll_left() -> Msg:
+    return Msg("tui.projects.binding_scroll_left", {})
+
+
+def binding_scroll_right() -> Msg:
+    return Msg("tui.projects.binding_scroll_right", {})
+
+
+def binding_show_board() -> Msg:
+    return Msg("tui.projects.binding_show_board", {})
+
+
+def binding_show_list() -> Msg:
+    return Msg("tui.projects.binding_show_list", {})
+
+
+def binding_show_timeline() -> Msg:
+    return Msg("tui.projects.binding_show_timeline", {})
+
+
+def binding_start() -> Msg:
+    return Msg("tui.projects.binding_start", {})
+
+
+def binding_up() -> Msg:
+    return Msg("tui.projects.binding_up", {})
+
+
+def binding_zoom_in() -> Msg:
+    return Msg("tui.projects.binding_zoom_in", {})
+
+
+def binding_zoom_out() -> Msg:
+    return Msg("tui.projects.binding_zoom_out", {})
+
+
+def new_project() -> Msg:
+    return Msg("tui.projects.new_project", {})
+
+
 def send_binding_choose() -> Msg:
     return Msg("tui.projects.send.binding_choose", {})
 
@@ -80,3 +196,39 @@ def send_title() -> Msg:
 
 def send_wake_unconfirmed() -> Msg:
     return Msg("tui.projects.send.wake_unconfirmed", {})
+
+
+def this_session(*, count: str) -> Msg:
+    return Msg("tui.projects.this_session", {"count": count})
+
+
+def title() -> Msg:
+    return Msg("tui.projects.title", {})
+
+
+def tracked(*, count: str) -> Msg:
+    return Msg("tui.projects.tracked", {"count": count})
+
+
+def unnamed() -> Msg:
+    return Msg("tui.projects.unnamed", {})
+
+
+def updated(*, stamp: str) -> Msg:
+    return Msg("tui.projects.updated", {"stamp": stamp})
+
+
+def view_board() -> Msg:
+    return Msg("tui.projects.view_board", {})
+
+
+def view_list() -> Msg:
+    return Msg("tui.projects.view_list", {})
+
+
+def view_timeline() -> Msg:
+    return Msg("tui.projects.view_timeline", {})
+
+
+def zoom(*, tier: str) -> Msg:
+    return Msg("tui.projects.zoom", {"tier": tier})
