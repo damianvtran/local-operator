@@ -16,6 +16,12 @@ logged "carries questions this surface cannot draw", and the one ask kind that
 cannot be answered on any other surface had no human card anywhere. The acceptance
 below mounts from a row built end-to-end by PRODUCTION (builder -> queue
 projection -> row reader) and asserts the card and its D2 title.
+
+ROUND 15 (D3) ADDS THE QUESTION LINE. The card bounds the question to one row
+(`MIN_QUESTION_ROWS`), so the ONE line that survives is the line the human
+answers from: it must carry who is asking and what they are deciding on. The
+§11.1 clause no longer leads it — the clause rides the carriers a MODEL reads
+(see ``tests/unit/asks/test_render.py`` for the timeout listing's own pin).
 """
 
 from __future__ import annotations
@@ -94,11 +100,15 @@ def test_a_malformed_question_is_not_a_bridge_carriage() -> None:
 
 
 def _production_question() -> dict[str, Any]:
-    """EXACTLY the question ``asks_bridge`` stamps, via the production builder."""
+    """EXACTLY the question ``asks_bridge`` stamps, via the production builder.
+
+    ``sender`` is the display identity the ISSUER composes from the validated
+    display context (``<name> (<organization>)``, D3), not a bare name and not
+    an account id.
+    """
     return bridge_request_question(
         message_id="bmsg_2378",
-        sender="Priya Raman",
-        summary="th-9",
+        sender="Priya Raman (Acme Research)",
         excerpt="could you approve the Q3 spend for the enrichment pod?",
         scope={"delivery_ref": "dref_1"},
     )
@@ -166,6 +176,21 @@ async def test_a_real_bridge_row_mounts_the_card_with_the_cross_member_title(
             await pilot.pause()
         card = app._ask_card
         assert card is not None, "a REAL cross-member ask still mounts no card"
+        # D3: the ONE row the card's question bound leaves standing is the human
+        # question — who is asking and what they are deciding on — not the
+        # §11.1 clause, which led the card before this round and pushed the
+        # sender and the request behind the cut.
+        assert card.question.question == (
+            "Priya Raman (Acme Research): could you approve the Q3 spend for the enrichment pod?"
+        )
+        assert "untrusted" not in card.question.question
+        # ...and it survives the bound UNCUT: the card's own layout draws it as
+        # one row at 100x30 (83 cells against the question width), where the
+        # clause-led text pushed the sender and the request behind the ``…``.
+        layout = card._layout()
+        assert layout.question == (
+            "Priya Raman (Acme Research): could you approve the Q3 spend for the enrichment pod?",
+        ), layout.question
         assert card._title == (
             f"{ASK_MARKER} another member's agent asked — your answer goes back to them"
         )
@@ -178,3 +203,44 @@ async def test_a_real_bridge_row_mounts_the_card_with_the_cross_member_title(
         dumped = card.question.model_dump()
         assert [option["id"] for option in dumped["options"]] == ["approve", "deny"]
         assert [option["label"] for option in dumped["options"]] == ["Approve", "Deny"]
+
+
+@pytest.mark.asyncio
+async def test_a_carriage_with_no_validated_name_mounts_the_generic_asker_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D3: with no validated member name the card still names an asker.
+
+    A no-meta carriage is a real shape (``screening`` tolerates a missing sender
+    block as unknown provenance), and the issuer sends "" for it rather than a
+    raw account id — which would put this side's own owner, or an ``acc_…`` the
+    member cannot place, in front of the person answering. Same production mount
+    as the test above; only the question line differs.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    monkeypatch.setattr(ask_open_policy, "AUTO_OPEN", False)
+
+    question = bridge_request_question(
+        message_id="bmsg_2378",
+        sender="",
+        excerpt="could you approve the Q3 spend for the enrichment pod?",
+        scope={"delivery_ref": "dref_1"},
+    )
+    rows = ask_rows([_stored_record(question)])
+    session = FakeSession()
+    app = App(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(3):
+            await pilot.pause()
+        app._sync_ask_surface(rows)
+        await pilot.pause()
+        app._expand_asks()
+        for _ in range(10):
+            await pilot.pause()
+        card = app._ask_card
+        assert card is not None, "the degraded carriage still mounts its card"
+        assert card.question.question == (
+            "another member of your organization: could you approve the Q3 spend for the "
+            "enrichment pod?"
+        )
+        assert "acc_" not in card.question.question

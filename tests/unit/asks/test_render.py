@@ -156,6 +156,36 @@ def test_a_secret_notice_names_the_key_and_never_quotes_the_prompt():
     assert "was not provided" in text
 
 
+def test_a_bridge_notice_names_the_request_and_keeps_the_untrusted_clause() -> None:
+    """D3 (design round 2, PR #2378): the MODEL's listing carries the clause.
+
+    The ask's own text is the human's question now (the decision card bounds a
+    question to one row, and the clause led it), so the marking must live on the
+    carriers a model reads. This notice is one of them, and it names the request
+    and the house clause itself rather than quoting the sender's words back
+    outside their own framing §11.1 forbids.
+    """
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    record = _record(
+        questions=[
+            {
+                "id": "bridge-bmsg_1",
+                "question": "Priya Raman (Acme Research): please approve the Q3 spend",
+                "question_id": "bmsg_1",
+                "options": [],
+                "multi": False,
+                "secret": False,
+            }
+        ]
+    )
+    text = render.timeout_text(record, now_ms=1_700_003_600_000)
+    assert BRIDGE_UNTRUSTED_CLAUSE in text
+    assert "bridge-bmsg_1" in text
+    # The sender's words are NOT re-served unframed in the notice.
+    assert "Priya Raman" not in text
+
+
 def test_a_long_question_is_clipped_in_the_notice():
     record = _record(
         questions=[

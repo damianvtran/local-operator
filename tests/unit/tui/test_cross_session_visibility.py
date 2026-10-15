@@ -651,9 +651,12 @@ BRIDGE_DETAILS: dict[str, Any] = {
         "body_sha256": "ab" * 32,
     },
 }
-#: What the human card paints for :data:`BRIDGE_DETAILS`: the validated member,
-#: their organization and the screened excerpt — never the wire body.
-BRIDGE_CARD_TEXT = "Priya Raman · Acme Research — could you approve the Q3 spend?"
+#: What the human card's BODY paints for :data:`BRIDGE_DETAILS`: the screened
+#: excerpt ALONE — never the wire body, and (D8) no longer prefixed with the
+#: member, whom the identity column immediately to its left already names. The
+#: collapsed row is ``identity · body``, composed by the block itself.
+BRIDGE_CARD_TEXT = "could you approve the Q3 spend?"
+BRIDGE_CARD_IDENTITY = "Priya Raman (Acme Research)"
 #: Long enough that the expanded card wraps to several rows at 100 columns
 #: (the peer control's own growth measurement is 96x4 under the same toggle).
 LONG_BRIDGE_BODY = (
@@ -698,6 +701,24 @@ def test_the_bridge_identity_names_the_member_and_their_organization() -> None:
     assert "another session" not in identity, identity
     header = block._header(100)
     assert "Priya Raman" in header, header
+
+    # D8: the collapsed row composes the identity column with the body, so the
+    # member is stated ONCE and the budget goes to the request. The budgets are
+    # the row's own (width - 18, measured with the real ``truncate_cells``).
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    persona, body = block._summary()
+    assert persona == BRIDGE_CARD_IDENTITY
+    assert body == BRIDGE_CARD_TEXT
+    assert truncate_cells(f"{persona} · {body}", 82) == (
+        "Priya Raman (Acme Research) · could you approve the Q3 spend?"
+    )
+    # At 60 columns the reader still gets the member once and a legible request
+    # fragment, instead of the name twice and no request at all (the string the
+    # reviewer saw as ``Priya Raman (Acme Research) · Priya Raman…``).
+    assert truncate_cells(f"{persona} · {body}", 42) == (
+        "Priya Raman (Acme Research) · could you a…"
+    )
     assert "Acme Research" in header, header
     assert "another session" not in header, header
 

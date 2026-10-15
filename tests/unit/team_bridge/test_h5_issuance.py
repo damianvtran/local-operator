@@ -339,7 +339,6 @@ def test_the_real_queue_enqueue_is_found_by_the_message_lookup(tmp_path) -> None
         queue,
         message_id="bmsg_abc",
         sender=SENDER,
-        summary="wants sign-off",
         excerpt="please approve",
         scope=scope,
     )
