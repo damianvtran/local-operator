@@ -3963,8 +3963,10 @@ async def test_bootstrap_guard_refuses_unsafe_sidecar_without_repair(tmp_path, m
 
     path = tmp_path / "auth.db"
     lock_path = tmp_path / "auth.db.bootstrap.lock"
+    # The later discriminator reuses this path without making the checker
+    # infer that two separate string comparisons chose the same branch.
+    target = tmp_path / "foreign"
     if kind == "symlink":
-        target = tmp_path / "foreign"
         target.write_bytes(b"unchanged")
         target.chmod(0o600)
         lock_path.symlink_to(target)
@@ -3998,10 +4000,14 @@ async def test_bootstrap_guard_exception_releases_same_inode(tmp_path):
     from local_operator.providers import auth_store as mod
 
     path = tmp_path / "auth.db"
+    inode: int | None = None
     with pytest.raises(RuntimeError, match="synthetic body failure"):
         with mod._auth_bootstrap_guard(path):
             inode = (tmp_path / "auth.db.bootstrap.lock").stat().st_ino
             raise RuntimeError("synthetic body failure")
+    # An early guard failure is not evidence that the body acquired/released
+    # its inode. Require the real observation before checking reacquisition.
+    assert inode is not None, "the protected body never observed its exclusion inode"
     with mod._auth_bootstrap_guard(path):
         assert (tmp_path / "auth.db.bootstrap.lock").stat().st_ino == inode
     assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
@@ -4132,7 +4138,9 @@ async def test_guard_exit_failure_closes_actual_connection_before_constructor_ra
             before_fds,
             after_fds,
             "new_threads",
-            sorted(after_threads - before_threads),
+            # Retain absent identifiers in the evidence, ordering only the
+            # diagnostic display rather than coercing the ownership sets.
+            sorted(after_threads - before_threads, key=str),
             "registry",
             len(mod._BOOTSTRAP_ENTRIES),
             "lockfds",

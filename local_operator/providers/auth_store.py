@@ -445,7 +445,11 @@ def _verify_bootstrap_file(
 
 
 def _open_bootstrap_file(path: Path, database: Path) -> int:
-    uid = os.geteuid() if hasattr(os, "geteuid") else None
+    # Keep the capability guard explicit: the portability audit recognizes
+    # statement guards, and non-POSIX hosts must never call an absent API.
+    uid: int | None = None
+    if hasattr(os, "geteuid"):
+        uid = os.geteuid()
     database_stat = database.stat() if database.exists() else None
     owner = database_stat.st_uid if database_stat is not None and uid is not None else uid
     if owner != uid and uid != 0:
@@ -473,7 +477,10 @@ def _open_bootstrap_file(path: Path, database: Path) -> int:
                 # Root opening an EXISTING user-owned DB must not strand a
                 # root-owned sidecar. Only our fresh verified file may change
                 # owner; an existing foreign/misowned sidecar is never changed.
-                if uid != 0 or database_stat is None or not hasattr(os, "fchown"):
+                # A transfer still requires root and a real database owner;
+                # the optional-UID platform path must fail closed, not supply
+                # an invented owner merely to satisfy the integer-only API.
+                if owner is None or uid != 0 or database_stat is None or not hasattr(os, "fchown"):
                     raise AuthStoreError("Cannot create a bootstrap lock for this database owner")
                 os.fchown(fd, owner, database_stat.st_gid)
         _verify_bootstrap_file(path, fd, owner)
