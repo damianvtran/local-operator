@@ -65,8 +65,11 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
+from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
+from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
@@ -124,6 +127,7 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 # which is what the byte-identical golden caught.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -372,6 +376,7 @@ class Section:
 # retired keys are last.
 
 SECTIONS: tuple[Section, ...] = (
+    Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
     # Defaults are sampled at conversation birth. The watcher still announces
     # edits, but only an explicit local /model action may select for an owner.
     Section(
@@ -1464,6 +1469,66 @@ def _validate_aida_name(value: Any) -> None:
 
 
 SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        key="memory.enabled",
+        path=("memory", "enabled"),
+        section="memory",
+        label=_t(_mm.enabled_label()),
+        help=_t(_mm.enabled_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+    ),
+    Setting(
+        key="memory.capture",
+        path=("memory", "capture"),
+        section="memory",
+        label=_t(_mm.capture_label()),
+        help=_t(_mm.capture_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+        gated_by="memory.enabled",
+    ),
+    Setting(
+        key="memory.suggest",
+        path=("memory", "suggest"),
+        section="memory",
+        label=_t(_mm.suggest_label()),
+        help=_t(_mm.suggest_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+        gated_by="memory.enabled",
+    ),
+    Setting(
+        key="network.memory.enabled",
+        path=("network", "memory", "enabled"),
+        section="network",
+        label=_t(_mm.sync_label()),
+        help=_t(_mm.sync_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+    ),
+    Setting(
+        key="network.memory.scopes",
+        path=("network", "memory", "scopes"),
+        section="network",
+        label=_t(_mm.scopes_label()),
+        help=_t(_mm.scopes_help()),
+        kind=Kind.LIST,
+        default=list(SCOPES),
+        members=SCOPES,
+        gated_by="network.memory.enabled",
+    ),
+    Setting(
+        key="network.memory.exclude_devices",
+        path=("network", "memory", "exclude_devices"),
+        section="network",
+        label=_t(_mm.exclude_label()),
+        help=_t(_mm.exclude_help()),
+        kind=Kind.LIST,
+        default=list(DEFAULT_EXCLUDED_DEVICES),
+        empty_unsets=True,
+        gated_by="network.memory.enabled",
+    ),
     # -- model --------------------------------------------------------------
     Setting(
         key="hosting",

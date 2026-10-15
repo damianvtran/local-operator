@@ -251,7 +251,47 @@ def test_invalid_batch_is_atomic_and_no_sensitive_residue(tmp_path, store):
     assert not target.root.exists()
 
 
+def test_exact_dedup_preserves_near_duplicate_contradictions(store):
+    first = store.put("session", fact("Deploy Mercury on Friday", subject="Mercury"))
+    assert (
+        store.put("session", fact("Deploy Mercury on Friday", subject="Mercury"))["id"]
+        == first["id"]
+    )
+    other = store.put("session", fact("Do not deploy Mercury on Friday", subject="Mercury"))
+    assert other["id"] != first["id"]
+    assert len(store.search("Mercury Friday")) == 2
+
+
+def test_only_explicit_same_scope_replacement_suppresses_old_recall(store):
+    first = store.put("session", fact("Mercury launches Friday", subject="Mercury"))
+    other = store.put("session", fact("Mercury launches Monday", subject="Mercury"))
+    assert len(store.search("Mercury launches")) == 2
+    latest = store.put(
+        "session", fact("Mercury launches Tuesday", subject="Mercury", replaces=first["id"])
+    )
+    ids = {row["id"] for row in store.search("Mercury launches")}
+    assert first["id"] not in ids and other["id"] in ids and latest["id"] in ids
+    assert store.show("session", first["id"])["fact"]["body"].endswith("Friday")
+    with pytest.raises(MemoryError, match="same authorized scope"):
+        store.put("global", fact("Mercury launches Wednesday", replaces=other["id"]))
+
+
+def test_related_is_one_hop_scope_bound_and_newest_first(store):
+    first = store.put("session", fact("Source docs/shared.md", created_at=100))
+    second = store.put("session", fact("Decision docs/shared.md and docs/hop.md", created_at=200))
+    third = store.put("session", fact("Neighbor docs/shared.md", created_at=300))
+    store.put("global", fact("Private foreign association docs/shared.md", created_at=400))
+    store.put("session", fact("Two-hop association docs/hop.md", created_at=500))
+    related = store.related("session", first["id"])
+    assert [row["id"] for row in related] == [third["id"], second["id"]]
+    assert "related" not in store.show("session", first["id"])
+    with pytest.raises(MemoryError):
+        store.related("global", first["id"])
+
+
 def test_actual_read_write_edit_routes(store):
+    store.root.parent.mkdir(parents=True, exist_ok=True)
+    (store.root.parent / "config.yml").write_text(json.dumps({"values": {"memory": {"enabled": True}}}))
     from local_operator.tools.builtin import execute_edit, execute_read, execute_write
 
     context = ToolContext(

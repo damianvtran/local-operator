@@ -388,6 +388,7 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    "net_memory",
     # MESH ROLLING UPDATES (mesh-update-propagation.md §3; mesh-rolling-
     # updates.md §2). One peer-scope op, apply-or-answer: the origin names ONLY a
     # target identity — the version it just moved to, plus its own build ref as
@@ -676,6 +677,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # conversation. A ``drive`` peer is told, in words, that the row could not
     # be sent and why — never silently dropped.
     "net_mcp_defs": "admin",
+    # Memory changes durable all-scope state, shared only with peers already
+    # authorised by this receiver to rewrite agents/MCP definitions.
+    "net_memory": "admin",
     # ``update`` — the receiver-side grant (mesh-rolling-updates.md §2). NOT
     # ``admin``: the grant is per member and governs THIS device's own install,
     # which is the same class as the two onboarding scopes, not a change to the

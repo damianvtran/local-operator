@@ -4603,6 +4603,10 @@ async def _prepare(
     # changes.
     hooks.project_registry = project_registry
     tool_context = ToolContext(
+        # Team attachment happens after this warm inventory. The live Session
+        # derives its registry ID on every turn, never a configured role name.
+        team_id="",
+        memory_config_dir=str(config_manager.config_dir),
         cwd=effective_cwd,
         session_id=transcript_dir.name,
         # The session's own directory. This context is the WARM snapshot
