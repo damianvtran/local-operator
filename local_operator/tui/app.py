@@ -27944,13 +27944,8 @@ class OperatorApp(App[None]):
         submitted = bool(answers) and bool(expected) and expected <= set(answers or {})
         if submitted:
             session = self._queued_ask_session()
-            reader: Any = getattr(session, "respond_ask", None)
-            if callable(reader):
-                try:
-                    outcome: Any = reader(ask_id, answers or {}, by="terminal")
-                except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
-                    logger.warning("could not deliver a queued answer", exc_info=True)
-                    outcome = {"ok": False, "error": "the answer could not be delivered"}
+            outcome: Any = self._deliver_owner_answer(session, row, ask_id, answers)
+            if outcome is not None:
                 self._handle_ask_outcome(outcome, toast=False)
             self._ask_drafts.pop(ask_id, None)
             # ONE QUEUE COSTS ONE COLLAPSE, not one per answer. The card was
@@ -27992,6 +27987,49 @@ class OperatorApp(App[None]):
         # respect (contract clause 4). A submit is not — answering is the opposite of
         # waving a question off — so it records nothing.
         self._collapse_asks(by_user=not submitted)
+
+    def _deliver_owner_answer(
+        self, session: Any, row: AskRow | None, ask_id: str, answers: dict[str, list[str]] | None
+    ) -> Any:
+        """Hand a settled card to the door its ROW belongs to, on the owner contract.
+
+        TWO DOORS, ONE ROW EACH, and the row is what picks (UX review U1). An
+        ordinary ask rides ``respond_ask`` — verbatim, as it always has. A
+        BRIDGE request rides ``Session.bridge_decide``: the verified decision
+        door the runtime's op serves and the fleet worker's engage route calls
+        (``_fleet_ask_worker``), which consumes the one-shot grant the authority
+        seam minted. ``respond_ask`` refuses every bridge record by construction
+        (``BRIDGE_DECISION_DOOR_REQUIRED``), so leaving these rows on the
+        ordinary door made the ORDINARY CARRIAGE — a request arriving in THIS
+        session — undecidable from the card that asked for the decision, while
+        the refusal named that very card (the owner half of security round 3's
+        TB-02/R3-2; the fleet half was wired and no test covered this one).
+
+        The target is built by the SAME helper the fleet route uses, so the word
+        on the wire is the option ID (``approve``/``deny``), never the drawn
+        label, and an ambiguous pick (``None``) falls back to the ordinary door
+        and its refusal rather than deciding something the human did not choose.
+
+        ``None`` means the session offers neither door — the reduced harnesses
+        the surface tests build — and nothing is delivered, exactly as the old
+        ``callable(reader)`` guard behaved.
+        """
+        target = bridge_decision_target(row, answers or {}) if row is not None else None
+        decider: Any = getattr(session, "bridge_decide", None)
+        if target is not None and callable(decider):
+            try:
+                return decider(*target)
+            except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+                logger.warning("could not deliver a queued decision", exc_info=True)
+                return {"ok": False, "error": "the decision could not be delivered"}
+        reader: Any = getattr(session, "respond_ask", None)
+        if not callable(reader):
+            return None
+        try:
+            return reader(ask_id, answers or {}, by="terminal")
+        except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+            logger.warning("could not deliver a queued answer", exc_info=True)
+            return {"ok": False, "error": "the answer could not be delivered"}
 
     def _next_outstanding_ask(self, ask_id: str) -> AskRow | None:
         """The ask to hand the user after ``ask_id`` settles, or None.
