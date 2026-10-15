@@ -20672,6 +20672,21 @@ async def _ownership_lane_host(state: BrowserSurfaceProtocol, resource: Any) -> 
     return ""
 
 
+def _handle_or_approval_pin(resource: Any) -> str:
+    """The durable pin that outranks an explicit `backend`: a handle or a pending approval.
+
+    `pinned_host()` also answers with the record's `host` when the record merely OWES
+    that host a cleanup (a finished scope's `terminal`, a retention, ...). That debt
+    must still be paid on its host, but it holds no tab and no approval, so it is not
+    a reason to ignore the caller's hint for a brand-new surface; the tool pays it
+    first and then re-decides (see `BrowserResource.move_lane_after_obligation`).
+    """
+    pinned = resource.pinned_host()
+    if pinned and resource.obligation_pin_host() == pinned:
+        return ""
+    return pinned
+
+
 async def _explicit_open_lane(
     args: dict[str, Any], state: BrowserSurfaceProtocol, resource: Any
 ) -> str:
@@ -20688,7 +20703,7 @@ async def _explicit_open_lane(
         str(args.get("action", "")).strip().lower() != "open"
         or state.surface_id
         or str(args.get("tab", "")).strip()
-        or resource.pinned_host()
+        or _handle_or_approval_pin(resource)
     ):
         return ""
     hinted = str(args.get("backend", "")).strip().lower()
@@ -23106,6 +23121,8 @@ async def execute_browser(
         return _browser_update_note(
             state, await _execute_browser(tool_call_id, args, signal, on_update, context)
         )
+    # The fresh-open destination to move to AFTER the owed host is reconciled ("" = none).
+    deferred_lane = ""
     if not resource.generation:
         # THE GATE, and it is host-based on purpose. It used to read
         # `not await bridge_browser_reachable()`, which made the lane's own
@@ -23121,7 +23138,15 @@ async def execute_browser(
         # and of the session's own RECORD first, which is the one answer a
         # resumed session has (see `_ownership_lane_host`).
         lane_host = await _ownership_lane_host(state, resource)
-        lane_host = await _explicit_open_lane(args, state, resource) or lane_host
+        explicit = await _explicit_open_lane(args, state, resource)
+        # Asked only for an explicit fresh open: every other action has no hint to defer.
+        owed = resource.obligation_pin_host() if explicit else ""
+        if explicit and owed and lane_host == owed and explicit != owed:
+            # The record owes `owed` a cleanup and the caller wants the OTHER host
+            # for a fresh surface. Reconcile the owed host first and move afterwards;
+            # neither dropping the debt nor letting the hint win up front is safe.
+            deferred_lane, explicit = explicit, ""
+        lane_host = explicit or lane_host
         if not lane_host:
             return _browser_update_note(
                 state, await _execute_browser(tool_call_id, args, signal, on_update, context)
@@ -23136,7 +23161,11 @@ async def execute_browser(
         # as stale on a resumed session. A held capability still pins the lane
         # (`select_host` refuses to contradict it).
         explicit = await _explicit_open_lane(args, state, resource)
-        if explicit:
+        owed = resource.obligation_pin_host() if explicit else ""
+        if explicit and owed and explicit != owed:
+            resource.select_host(owed)
+            deferred_lane = explicit
+        elif explicit:
             resource.select_host(explicit)
     # With a generation, the resource already knows its lane and must keep it:
     # `initialize()` loaded the record (whose `host` is the surface's host) and
@@ -23164,6 +23193,14 @@ async def execute_browser(
         try:
             resource.initialize()
             await resource.ensure_recovered()
+            if deferred_lane and not await resource.move_lane_after_obligation(deferred_lane):
+                owed_label = _host_label(resource.obligation_pin_host())
+                return _backend_conflict_result(
+                    tool_call_id,
+                    _copy_host(deferred_lane),
+                    f"a cleanup this session still owes {owed_label}",
+                    "Try again once that host is reachable, or call 'open' without 'backend'.",
+                )
             state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
             # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
@@ -23496,6 +23533,22 @@ async def _execute_browser(
             conflict = _copy_host(pinned)
         elif state.surface_id.startswith("surface:"):
             conflict = "cmux"
+        # A no-tab approval pinned to a host (`pending_access_host`) is a flow this
+        # session has already started there: request/await/cancel_access keep
+        # routing to it, so a fresh open that names the OTHER host would split one
+        # flow across two jars and call a destination that was never reconciled
+        # (QA Q2). Refuse it before any destination RPC; the pin is left intact so
+        # the approval can still be finished, and a hint that agrees proceeds.
+        resource = getattr(state, "resource", None)
+        waiting = resource.pending_access_pin() if resource is not None else ""
+        if backend and not conflict and waiting and _copy_host(waiting) != backend:
+            return _backend_conflict_result(
+                tool_call_id,
+                backend,
+                f"a site approval this session is still waiting on {_host_label(waiting)}",
+                "Finish it with 'await_access' or 'cancel_access' first, or call 'open' "
+                "without 'backend'.",
+            )
         if backend and conflict and conflict != backend:
             if adopt:
                 return _backend_conflict_result(
