@@ -19020,8 +19020,8 @@ class Session:
         supplies the session-side ruler.
 
         Keyed on the REQUEST being over the byte trigger, not on which arm
-        fired the pass: a pass with no byte pressure (every text-only session,
-        and any image history under ~16 MB) gets ``cut`` back untouched, which
+        fired the pass: an image-free history, or a pass with no byte pressure,
+        gets ``cut`` back untouched, which
         is what keeps those sessions byte-identical to before this existed.
 
         ``fixed`` is what the commit seats IN FRONT of the kept window: the
@@ -19047,7 +19047,11 @@ class Session:
         if not callable(advance) or band is None or trigger is None:
             return cut
         wire_bytes = self._wire_bytes_of(compaction_api, llm_history)
-        if wire_bytes <= trigger:
+        if wire_bytes <= trigger or not any(
+            isinstance(block, ImageContent) for message in llm_history for block in message.content
+        ):
+            # The byte correction is for image pressure only. A very large
+            # text-only transcript must keep the existing token-cut behavior.
             return cut
 
         preserved_key = getattr(compaction_api, "PRESERVED_USER_TURN_KEY", None)
@@ -19090,15 +19094,14 @@ class Session:
             projected, _elided = reclaim_captures_to_wire_budget(llm_history[index:], budget=band)
             return fixed + self._wire_bytes_of(compaction_api, projected)
 
-        advanced = int(
-            advance(
-                llm_history,
-                cut,
-                kept_bytes=kept_bytes,
-                band_bytes=band,
-                replayable=lambda index: self._transcript.has_entry(llm_history[index].id),
-            )
+        advanced_value: Any = advance(
+            llm_history,
+            cut,
+            kept_bytes=kept_bytes,
+            band_bytes=band,
+            replayable=lambda index: self._transcript.has_entry(llm_history[index].id),
         )
+        advanced = int(advanced_value)
         if advanced != cut:
             logger.info(
                 "compaction cut advanced %s -> %s to land inside the wire band "

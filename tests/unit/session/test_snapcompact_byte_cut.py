@@ -230,3 +230,32 @@ async def test_a_run_of_screenshots_no_longer_compacts_every_tool_group(tmp_path
     gaps = [later - earlier for earlier, later in zip(fired, fired[1:])]
     assert all(gap >= 3 for gap in gaps), f"passes fired on consecutive-ish groups: {fired}"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_image_free_history_over_the_byte_trigger_still_keeps_its_cut(tmp_path):
+    """Even an explicitly tiny byte trigger must not change text-only cuts."""
+    settings = CompactionSettings(wire_bytes_trigger=100, keep_recent_tokens=20)
+    session = _make_session(tmp_path, compaction_settings=settings)
+    await session.seed_history([Message.user("goal")])
+    history = [Message.assistant("long text " * 100) for _ in range(6)]
+    assert estimate_wire_bytes(history) > api.resolve_wire_bytes_trigger(settings)
+    assert session._advance_cut_for_wire_band(api, settings, history, 2) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_advanced_cut_records_the_same_kept_observations_on_resume(tmp_path):
+    session = _make_session(tmp_path, compaction_settings=CompactionSettings())
+    await _grow(session, 20)
+    plan = await session._plan_compaction(respect_threshold=True)
+    assert isinstance(plan, _CompactionPlan)
+    kept_ids = [m.id for m in plan.llm_history[plan.cut :]]
+    assert (await session._run_compaction(plan, reason="mid-turn")).ran
+    directory = session._transcript.directory
+    live_kept = [m.model_dump(mode="json") for m in session._context.messages if m.id in kept_ids]
+    await session.dispose()
+    replayed = Transcript(directory).build_llm_history()
+    resumed_kept = [m.model_dump(mode="json") for m in replayed if m.id in kept_ids]
+    assert resumed_kept == live_kept
+    assert [m["id"] for m in resumed_kept] == kept_ids
