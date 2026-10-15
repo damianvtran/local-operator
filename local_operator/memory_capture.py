@@ -10,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from local_operator.memory import (
     MAX_REVISIONS,
@@ -26,18 +27,31 @@ from local_operator.memory import (
     validate_op,
 )
 
+logger = logging.getLogger(__name__)
+
 # Shipped ON: a dark-launched default would leave the feature undelivered. Flipped only
 # after the isolated pilot (store->compact->restart->retrieve, wire-prefix, no-wake,
 # privacy, mesh) passed. settings_io reads this constant too so CLI/TUI declarations and
 # consumers share ONE default authority; `memory.enabled: false` remains the kill switch
 # and never erases retained facts.
 MEMORY_DEFAULT_ENABLED = True
+# Every quantifier is bounded and the email alternative is anchored so a scan cannot
+# restart inside a word run: the old `[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}` took 3.7 s on 32K
+# letters, GIL-held, so no "2 s budget" between matches could interrupt it (review R1).
+# Hex ids stop at 12 characters (short git SHAs) and need a digit: longer bare hex is
+# indistinguishable from an API key and is deliberately NOT captured (review R4).
 _LOCATOR = re.compile(
-    r"https?://[^\s<>\"']+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"
-    r"|(?:~?/|\b(?:src|docs|tests|local_operator)/)[^\s<>\"']+"
-    r"|\bsecret\s+[A-Z][A-Z0-9_]{2,63}\b|(?<!\w)#[\w-]{2,64}"
-    r"|\b[0-9a-f]{7,40}\b|\b(?:branch|thread)[: ]+[\w./-]{3,128}"
+    r"https?://[^\s<>\"']{1,400}"
+    r"|(?<![\w.+-])[\w.+-]{1,64}@[\w.-]{1,255}\.[A-Za-z]{2,24}"
+    r"|(?:~?/|\b(?:src|docs|tests|local_operator)/)[^\s<>\"']{1,400}"
+    r"|\bsecret\s{1,8}[A-Z][A-Z0-9_]{2,63}\b|(?<!\w)#[\w-]{2,64}"
+    r"|\b(?=[0-9a-f]{7,12}\b)[0-9a-f]*\d[0-9a-f]*\b"
+    r"|\b(?:branch|thread)[: ]{1,3}[\w./-]{3,128}"
 )
+#: The regex never sees more than this many characters at once. Bounded quantifiers make
+#: each call linear; windowing makes the worst case independent of input size, and lets
+#: the time budget be checked between windows (a single re call cannot be interrupted).
+SCAN_WINDOW = 4096
 _HEADINGS = re.compile(r"^#{1,4}\s*(?:Goal|Key Decisions|Progress|Critical Context)\b", re.I)
 
 
@@ -77,6 +91,20 @@ def snapshot(messages: list[Any]) -> str:
     return ("\n".join(head) + "\n" + "\n".join(tail)).encode()[:2000000].decode(errors="ignore")
 
 
+def windows(text: str) -> Iterator[str]:
+    """Split ``text`` into <= SCAN_WINDOW pieces, preferring whitespace boundaries."""
+    start = 0
+    size = len(text)
+    while start < size:
+        end = min(size, start + SCAN_WINDOW)
+        if end < size:
+            cut = max(text.rfind(" ", start, end), text.rfind("\n", start, end))
+            if cut > start:
+                end = cut
+        yield text[start:end]
+        start = end
+
+
 def extract_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return extract(snapshot(messages))
 
@@ -87,16 +115,19 @@ def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
     found = []
     counts: Counter[str] = Counter()
     last: dict[str, int] = {}
-    for index, match in enumerate(_LOCATOR.finditer(text[:2000000])):
+    index = 0
+    for window in windows(text[:2000000]):
         if time.monotonic() - started > 2:
             raise TimeoutError("memory capture budget")
-        locator = match.group().rstrip(".,;:)]}")[:200]
-        try:
-            guard(locator)
-        except MemoryError:
-            continue
-        counts[locator] += 1
-        last[locator] = index
+        for match in _LOCATOR.finditer(window):
+            index += 1
+            locator = match.group().rstrip(".,;:)]}")[:200]
+            try:
+                guard(locator)
+            except MemoryError:
+                continue
+            counts[locator] += 1
+            last[locator] = index
     for locator in sorted(counts, key=lambda x: (last[x], counts[x], x), reverse=True)[:40]:
         found.append({"title": locator[:100], "body": locator, "tags": ["locator"]})
     semantic = False
@@ -300,8 +331,28 @@ def recovery_text(transcript: Any, marker: Any) -> str:
     return "\n".join(head + tail)[:1000000]
 
 
+_warned = False
+
+
 async def session_tail(session: Any) -> str:
-    """Observe state only: never wake, start a turn or change prior prompt bytes."""
+    """Observe state only: never wake, start a turn or change prior prompt bytes.
+
+    Advisory memory must never be on the critical path of a provider request: any
+    store failure (FTS5 missing, locked, corrupt, disk full) degrades to "no hint".
+    The failure is logged ONCE per process at WARNING with the exception type only;
+    memory content and paths are untrusted and never logged.
+    """
+    global _warned
+    try:
+        return await _session_tail(session)
+    except Exception as exc:
+        if not _warned:
+            _warned = True
+            logger.warning("memory prompt tail disabled for this request: %s", type(exc).__name__)
+        return ""
+
+
+async def _session_tail(session: Any) -> str:
     if not getattr(session, "_config_dir", None):
         return ""
     enabled = policy(session._config_dir)
