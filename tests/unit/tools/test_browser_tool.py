@@ -966,8 +966,11 @@ def test_close_drops_the_handle_even_when_cmux_fails(monkeypatch) -> None:
 
 
 def test_every_action_degrades_without_cmux(monkeypatch) -> None:
-    """Absence is not an error state: the tool is not advertised at all, and a
-    host that forces it on gets one clear message per action, never a raise."""
+    """Host actions refuse absence; inspection reports it without creating a lane.
+
+    The forced tool must preserve the diagnostic's effect-free missing-record
+    result even when no host can run ordinary browser commands.
+    """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     # Hermetic: the demotion guard classifies the bridge from the DISCOVERY FILE,
     # so without this the developer's own daemon decides which copy this test
@@ -986,9 +989,16 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
         execute=builtin.execute_browser,
     )
     for action in builtin.BROWSER_ACTIONS:
-        result = _run(forced, "t1", {"action": action, "url": "https://x.y"}, _ctx())
-        assert result.is_error, action
-        assert "not available" in result.text
+        context = _ctx()
+        result = _run(forced, "t1", {"action": action, "url": "https://x.y"}, context)
+        if action == "inspect_ownership":
+            assert not result.is_error
+            assert result.details == {"version": 1, "local_scope_missing": True}
+            assert json.loads(result.text) == result.details
+            assert context.browser is None, "inspection must not create a browser holder"
+        else:
+            assert result.is_error, action
+            assert "not available" in result.text
 
 
 def test_unknown_action_lists_the_real_ones(monkeypatch) -> None:

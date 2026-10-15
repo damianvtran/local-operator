@@ -800,6 +800,7 @@
   "tests/unit/tools/test_bash_long_sleep_guard.py": 1.523,
   "tests/unit/tools/test_bash_search_interception.py": 1.0,
   "tests/unit/tools/test_browser_file_transfer.py": 1.022,
+  "tests/unit/tools/test_browser_ownership_inspection.py": 1.0,
   "tests/unit/tools/test_browser_tool.py": 1.263,
   "tests/unit/tools/test_builtin_tools.py": 42.202,
   "tests/unit/tools/test_confinement.py": 1.0,
