@@ -29,6 +29,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mesh-e134-structural-diagnosis
-          path: ${{ runner.temp }}/mesh-e134-guard.jsonl
+          path: |
+            ${{ runner.temp }}/mesh-e134-guard.jsonl
+            ${{ runner.temp }}/mesh-e134-junit.xml
           if-no-files-found: error
           retention-days: 7

@@ -168,6 +168,68 @@ def test_startup_diagnostic_is_bounded_and_omits_untrusted_arguments(tmp_path, m
     assert len(diagnostic) < 600
 
 
+def test_fixture_operator_row_never_falls_back_to_a_host_anchor(tmp_path, monkeypatch):
+    """Actual producer fails under the old alias without ever reading host paths."""
+    from types import SimpleNamespace
+
+    from local_operator import operator
+    from local_operator.network import readiness
+    from local_operator.operator import trust
+    from tests.fixtures.mesh_process_node import install_fixture_anchor
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    anchor = _make_key(tmp_path)
+    (tmp_path / "fixture-owned-anchor.json").write_bytes(trust.anchor_bytes(anchor))
+    original = (
+        trust.load_anchor,
+        operator.load_anchor,
+        trust.anchor_path,
+        trust._ANCHOR_ROOT_OVERRIDE,
+    )
+    try:
+        reads = install_fixture_anchor(tmp_path)
+        member = SimpleNamespace(device_id="d_fixture", name="fixture")
+        fixed = readiness.operator_row(
+            member, {"operator": readiness.operator_fact()}, peer_label="fixture"
+        )
+        assert fixed["ok"] is True and fixed["source"] == "peer"
+        assert reads["native_anchor_reads"] == 0
+        fixed_reads = reads["native_anchor_reads"]
+        # Causal OLD defect: restore ONLY the missed package binding. The
+        # original loader hits our forbidden private OS seam, not this host.
+        operator.load_anchor = original[1]
+        broken = readiness.operator_row(
+            member, {"operator": readiness.operator_fact()}, peer_label="fixture"
+        )
+        assert broken["ok"] is False and reads["native_anchor_reads"] == 1
+        operator.load_anchor = trust.load_anchor
+        repaired = readiness.operator_row(
+            member, {"operator": readiness.operator_fact()}, peer_label="fixture"
+        )
+        assert repaired["ok"] is True and reads["native_anchor_reads"] == 1
+        print(
+            json.dumps(
+                {
+                    "fixture_anchor_control": {
+                        "fixed_operator_ok": fixed["ok"],
+                        "fixed_native_attempts": fixed_reads,
+                        "bad_alias_operator_ok": broken["ok"],
+                        "blocked_native_attempts": reads["native_anchor_reads"],
+                        "repaired_operator_ok": repaired["ok"],
+                        "guard": "before-native-path-construction",
+                    }
+                }
+            )
+        )
+    finally:
+        (
+            trust.load_anchor,
+            operator.load_anchor,
+            trust.anchor_path,
+            trust._ANCHOR_ROOT_OVERRIDE,
+        ) = original
+
+
 class SshBoundary:
     """No fake success branch for join/member/grants/readiness CLI commands."""
 

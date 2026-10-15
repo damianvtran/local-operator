@@ -12,7 +12,7 @@ import threading
 
 ROOT=Path(__file__).resolve().parents[1]
 OUT=Path(os.environ['MESH_DIAG_OUT'])
-MANIFEST=json.loads('{"merge": "e134ee7a44ca0fd7528a954af5d2aa87d561281a", "parents": ["d825a26343bcac566a6ded451eb7b251bfe049b5", "0a66ccf1e5660b4ebbc724ba74fc49514e59c2b6"], "files": {"local_operator/network/enrollment.py": "c5754ee70f619a90e356f5dcb6d275016d7787831a47c9a2961cb9072115f91a", "local_operator/network/readiness.py": "8c6065ab3e1d06a78b0112571eb502aac3b2fda224ac14b5e352614c19ed4b00", "local_operator/network/onboard.py": "1525349a16fe1f988c8192a58c5771037688e1e658f597f616db1ca1fc1c63b6", "local_operator/network/credentials/offers.py": "d0ebe30a9e03c4377813198899cb703ebb195a1517e7f7a73afd36797641b1e9", "local_operator/network/credentials/owner.py": "4a8c3253278a784738018dd00039a60b6ff497afafcf74a6d2e7bb653f24e973", "local_operator/server/routes/desktop_approvals.py": "54ad5c8c6d90cace0dc33cd24cf779ef576fad66e469a352fcd84f346fbf5c67", "tests/unit/network/test_signed_desktop_onboard_e2e.py": "21d684e03a50f1b0f1b2f8a1c2217d094da0181c14d939d2f8ecd4d977f6a1f2", "tests/fixtures/mesh_process_node.py": "9a7cb44cabd23f170cc11fc2527d1738b884f923aec706f16835d7d2a6ef8dbb"}, "authority_at_core": "0a66ccf1e5660b4ebbc724ba74fc49514e59c2b6", "authority_files": {"local_operator/network/approvals.py": "1890ee284cf1d8360c6e2e4479114be1bec4286170189377d45e23d06d455f4c", "local_operator/network/enrollment.py": "c5754ee70f619a90e356f5dcb6d275016d7787831a47c9a2961cb9072115f91a", "local_operator/network/onboard_approvals.py": "558b63782c6152cc12cc12daf4e11a28d3a94338df860487f356fe2782e7cfa3", "local_operator/operator/trust.py": "bce729cd8552f9e2379a7138f978fc856016c4355a9ba44a07eb1abfd2290a39", "local_operator/server/models/desktop_approvals.py": "e55738adea83f37c413ca7ea195878406f205fb59bc26aa599ba49ac6fbbb9eb", "local_operator/server/routes/desktop_approvals.py": "54ad5c8c6d90cace0dc33cd24cf779ef576fad66e469a352fcd84f346fbf5c67", "local_operator/server/utils/desktop_onboard.py": "ebf22cbf8cebefed51a49434f0e2f4d10fe1b8a4160f315dee4cbd99bb68da5b"}}')
+MANIFEST=json.loads('{"merge": "e134ee7a44ca0fd7528a954af5d2aa87d561281a", "parents": ["d825a26343bcac566a6ded451eb7b251bfe049b5", "0a66ccf1e5660b4ebbc724ba74fc49514e59c2b6"], "files": {"local_operator/network/enrollment.py": "c5754ee70f619a90e356f5dcb6d275016d7787831a47c9a2961cb9072115f91a", "local_operator/network/readiness.py": "8c6065ab3e1d06a78b0112571eb502aac3b2fda224ac14b5e352614c19ed4b00", "local_operator/network/onboard.py": "1525349a16fe1f988c8192a58c5771037688e1e658f597f616db1ca1fc1c63b6", "local_operator/network/credentials/offers.py": "d0ebe30a9e03c4377813198899cb703ebb195a1517e7f7a73afd36797641b1e9", "local_operator/network/credentials/owner.py": "4a8c3253278a784738018dd00039a60b6ff497afafcf74a6d2e7bb653f24e973", "local_operator/server/routes/desktop_approvals.py": "54ad5c8c6d90cace0dc33cd24cf779ef576fad66e469a352fcd84f346fbf5c67", "tests/unit/network/test_signed_desktop_onboard_e2e.py": "65530718216797c8a97df7662497247a87a73fdd503f195adc9ba9e5d4f84ab3", "tests/fixtures/mesh_process_node.py": "2cbd037d9d5ec467cdb8f37fea1c5788a8553c043b07bc223754e225de1378e5", "tests/unit/tui/test_ask_fleet.py": "ef68f1a34b7b0d88db9ca03e65bb8e88c6402e4413a38bd1203f84352e34ac75"}, "authority_at_core": "0a66ccf1e5660b4ebbc724ba74fc49514e59c2b6", "authority_files": {"local_operator/network/approvals.py": "1890ee284cf1d8360c6e2e4479114be1bec4286170189377d45e23d06d455f4c", "local_operator/network/enrollment.py": "c5754ee70f619a90e356f5dcb6d275016d7787831a47c9a2961cb9072115f91a", "local_operator/network/onboard_approvals.py": "558b63782c6152cc12cc12daf4e11a28d3a94338df860487f356fe2782e7cfa3", "local_operator/operator/trust.py": "bce729cd8552f9e2379a7138f978fc856016c4355a9ba44a07eb1abfd2290a39", "local_operator/server/models/desktop_approvals.py": "e55738adea83f37c413ca7ea195878406f205fb59bc26aa599ba49ac6fbbb9eb", "local_operator/server/routes/desktop_approvals.py": "54ad5c8c6d90cace0dc33cd24cf779ef576fad66e469a352fcd84f346fbf5c67", "local_operator/server/utils/desktop_onboard.py": "ebf22cbf8cebefed51a49434f0e2f4d10fe1b8a4160f315dee4cbd99bb68da5b"}}')
 LOCK=threading.Lock()
 COUNT=0
 PHASE='preflight'
@@ -20,7 +20,7 @@ PHASE='preflight'
 def emit(event, **data):
     global COUNT
     with LOCK:
-        if COUNT>=128:return
+        if COUNT>=256:return
         line=json.dumps({'phase':PHASE,'event':event,**data},sort_keys=True)
         assert len(line)<20000
         with OUT.open('a') as stream:stream.write(line+'\n')
@@ -54,6 +54,15 @@ def pytest_configure(config):
     emit('identity',merge=MANIFEST['merge'],parents=MANIFEST['parents'],platform=sys.platform,
          python=sys.version.split()[0],installed_metadata=importlib.metadata.version('local-operator'),
          full_file_sha256=MANIFEST['files'],authority_sha256=MANIFEST['authority_files'],explicit_pythonpath=True)
+    nodes=importlib.import_module('tests.unit.network.test_signed_desktop_onboard_e2e')
+    original_read=nodes.Node.read
+    def read_node(self,*args,**kwargs):
+        value=original_read(self,*args,**kwargs)
+        if isinstance(value,dict) and 'native_anchor_attempts' in value:
+            attempts=value['native_anchor_attempts']
+            emit('fixture_native_anchor_guard',attempts=attempts if type(attempts) is int else '<invalid>')
+        return value
+    nodes.Node.read=read_node
     original_require=e.require
     original_ready=e.ready_evidence
     def require(condition,message='The network enrollment authority is invalid'):
@@ -93,12 +102,22 @@ def pytest_sessionfinish(session,exitstatus):
     emit('test_complete',exitstatus=int(exitstatus),collected=session.testscollected,failed=session.testsfailed)
 
 
+NEGATIVES={f'test_authority_table_has_no_unauthorized_remote_effects[{name}]' for name in
+           ('no_bearer','foreign_origin','unsigned','denied','expired','changed_identity')}
+EXPECTED=NEGATIVES|{'test_signed_card_existing_runner_reaches_two_process_members',
+ 'test_lost_join_response_same_card_retry_and_single_target_writer',
+ 'test_startup_diagnostic_is_bounded_and_omits_untrusted_arguments',
+ 'test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain'}
+
+def pytest_runtest_setup(item):
+    global PHASE
+    name=item.nodeid.rsplit('::',1)[-1]
+    PHASE=('expected_negative:' if name in NEGATIVES else 'validation:')+(name if name in EXPECTED else '<unexpected-case>')
+
 def pytest_runtest_logreport(report):
     if report.when in {'setup','call','teardown'}:
         name=report.nodeid.rsplit('::',1)[-1]
-        allowed={'test_signed_card_existing_runner_reaches_two_process_members',
-                 'test_lost_join_response_same_card_retry_and_single_target_writer'}
-        emit('case',case=name if name in allowed else '<unexpected-case>',when=report.when,outcome=report.outcome)
+        emit('case',case=name if name in EXPECTED else '<unexpected-case>',when=report.when,outcome=report.outcome)
 
 
 def main():
@@ -119,14 +138,17 @@ def main():
         if name in os.environ: env[name]=os.environ[name]
     emit('environment',public_flags={name:env[name] for name in public if name in env},
          preserved_pytest_flag_names=[name for name in pytest_flags if name in env],
-         original_shard_stall_seconds=240,serial_two_cases=True,coverage_enabled=False,
+         original_shard_stall_seconds=240,serial_ten_cases=True,coverage_enabled=False,
          prior_suite_state=False,isolated_home_config_tmp=True,cmux_and_xpc_removed=True,
          limit='Isolated targeted diagnosis; does not reproduce original xdist ordering, coverage, prior test state or all ambient environment')
     args=[sys.executable,str(ROOT/'scripts/run_bounded.py'),'--timeout','180','--',
           sys.executable,'-m','pytest','-o','addopts=','-n0','-q','--tb=no',
-          '-p','scripts.mesh_merge_diagnostic','--basetemp',str(profile/'tests'),
+          '-p','scripts.mesh_merge_diagnostic','--basetemp',str(profile/'tests'),'--junitxml',str(profile/'private-junit.xml'),
           'tests/unit/network/test_signed_desktop_onboard_e2e.py::test_signed_card_existing_runner_reaches_two_process_members',
-          'tests/unit/network/test_signed_desktop_onboard_e2e.py::test_lost_join_response_same_card_retry_and_single_target_writer']
+          'tests/unit/network/test_signed_desktop_onboard_e2e.py::test_authority_table_has_no_unauthorized_remote_effects',
+          'tests/unit/network/test_signed_desktop_onboard_e2e.py::test_lost_join_response_same_card_retry_and_single_target_writer',
+          'tests/unit/network/test_signed_desktop_onboard_e2e.py::test_startup_diagnostic_is_bounded_and_omits_untrusted_arguments',
+          'tests/unit/tui/test_ask_fleet.py::test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain']
     started=time.monotonic();peak=0;owned=set();reason=''
     # Raw pytest reprs can contain bootstrap reference paths. Keep them private
     # in the disposable runner, never logs/artifacts; the plugin publishes only
@@ -158,11 +180,31 @@ def main():
                         try:os.kill(pid,signal.SIGKILL)
                         except ProcessLookupError:pass
                     child.wait(5)
+    # JUnit is real pytest output, but publish ONLY allowlisted case identity,
+    # times and outcome markers, never failure repr/locals, stderr or references.
+    import xml.etree.ElementTree as ET
+    raw=ET.parse(profile/'private-junit.xml')
+    public=ET.Element('testsuite',name='mesh-e134-targeted-validation')
+    found=set();failures=0;skips=0;errors=0
+    for case in raw.iter('testcase'):
+        name=case.get('name','');known=name in EXPECTED;found.add(name)
+        failed=case.find('failure') is not None;error=case.find('error') is not None;skipped=case.find('skipped') is not None
+        failures+=int(failed);errors+=int(error);skips+=int(skipped)
+        clean=ET.SubElement(public,'testcase',name=name if known else '<unexpected-case>')
+        clean.set('time',str(float(case.get('time','0'))))
+        if failed:ET.SubElement(clean,'failure',message='case_failed')
+        if error:ET.SubElement(clean,'error',message='case_error')
+        if skipped:ET.SubElement(clean,'skipped',message='case_skipped')
+        emit('junit_case',case=name if known else '<unexpected-case>',failed=failed,error=error,skipped=skipped)
+    complete=found==EXPECTED and len(list(public))==10
+    for key,value in {'tests':len(list(public)),'failures':failures,'errors':errors,'skipped':skips}.items():public.set(key,str(value))
+    ET.ElementTree(public).write(OUT.with_name('mesh-e134-junit.xml'),encoding='utf-8',xml_declaration=True)
+    emit('junit_summary',complete=complete,tests=len(list(public)),failures=failures,errors=errors,skipped=skips)
     emit('lease_result',rc=child.returncode,wall_s=round(time.monotonic()-started,2),
          sampled_peak_tree_rss_mib=round(peak/1024,2),rss_limit_mib=2048,
          test_deadline_s=180,reason=reason,owned_pids=sorted(owned))
     print('Native diagnostic completed; only scrubbed structural JSONL is published. Exit status:',child.returncode)
-    return child.returncode or (124 if reason else 0)
+    return child.returncode or (124 if reason else 1 if not complete or skips else 0)
 
 if __name__=='__main__':
     raise SystemExit(main())
