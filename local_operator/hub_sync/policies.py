@@ -117,6 +117,20 @@ def link_policy_for(values: Mapping[str, Any], link_id: str, kind: str) -> LinkP
     return creation_policy(values, kind)
 
 
+def stored_link_policy(values: Mapping[str, Any], link_id: str) -> LinkPolicy | None:
+    """The EXPLICIT stored entry for ``link_id``, or ``None`` when none exists.
+
+    :func:`read_policy` cannot answer this: it substitutes the kind's creation
+    default for an absent entry. The initial-install path must distinguish a
+    leftover entry -- a failed or crashed earlier attempt's orphan, which would
+    otherwise block the transaction's materialization and silently carry the
+    dead request's values into a later install -- from "no entry yet".
+    """
+
+    policies = _mapping(_hub(values).get("links", {}))
+    return LinkPolicy.from_json(policies[link_id]) if link_id in policies else None
+
+
 def update_policy(
     manager: "ConfigManager",
     identity: LinkIdentity,
@@ -206,3 +220,45 @@ def update_policy(
             hub["public_egress_grants"] = grants
         manager.set_config_value("hub", hub)
         return PolicySnapshot(chosen, chosen.revision(identity, grant), grant)
+
+
+def revert_policy_if_unchanged(
+    manager: "ConfigManager", identity: LinkIdentity, *, expected_revision: str
+) -> bool:
+    """Remove one staged policy entry -- but ONLY while it is still ours.
+
+    The initial install stages an ``auto_push: true`` entry (with its grant)
+    through this module before the content transaction, because the consent
+    carve-out is the one writer that can mint a first public grant and the
+    storage transaction CASes the entry's revision through its commit. When
+    that transaction then REFUSES, the entry must not survive as an orphan
+    policy for a link that was never installed -- but a newer writer's value
+    must not be rolled back either. The CAS on ``expected_revision`` is the
+    boundary: an unchanged revision means nobody has written since the
+    staging, so removal restores the pre-install state exactly. Returns
+    whether the entry was removed.
+    """
+    from local_operator import settings_io
+
+    if not isinstance(expected_revision, str) or not expected_revision:
+        raise LinkError("invalid-link-policy", "an expected policy revision is required")
+    with config_write_lock(manager.config_dir):
+        settings_io._reload_before_write(manager)
+        current = read_policy(manager.get_config().values, identity)
+        if current.revision != expected_revision:
+            return False
+        hub = dict(_hub(manager.get_config().values))
+        links = dict(_mapping(hub.get("links", {})))
+        if identity.link_id not in links:
+            return False
+        del links[identity.link_id]
+        hub["links"] = links
+        grants = dict(_mapping(hub.get("public_egress_grants", {})))
+        if identity.link_id in grants:
+            del grants[identity.link_id]
+        if grants:
+            hub["public_egress_grants"] = grants
+        else:
+            hub.pop("public_egress_grants", None)
+        manager.set_config_value("hub", hub)
+        return True
