@@ -3688,6 +3688,146 @@ async def test_native_lifecycle_legacy_and_null_baselines_stay_unknown(tmp_path)
         writer.close()
 
 
+async def test_direct_constructor_serializes_wal_bootstrap_before_competing_sql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two PUBLIC constructors must serialize before WAL, not merely ALTER.
+
+    Pause A after its actual WAL execute returns, with the genuine cursor
+    still live. Old code lets B enter WAL while A holds that boundary. Fixed
+    code must instead reach an OUTSIDE-guard attempt receipt, allowing A to
+    resume promptly; a rendezvous inside the serialized region would deadlock.
+    The optional observer hook is absent on the old source deliberately: RED
+    must be early protected SQL, never a missing-helper/import failure.
+    """
+    import concurrent.futures
+    import contextlib
+    import os
+    import sqlite3
+    import threading
+    from types import SimpleNamespace
+
+    from local_operator.providers import auth_store as auth_module
+
+    fd_root = Path("/proc/self/fd") if Path("/proc/self/fd").exists() else Path("/dev/fd")
+    before_fds = len(os.listdir(fd_root)) if fd_root.exists() else None
+    owned_threads: list[threading.Thread] = []
+    path = tmp_path / "legacy.db"
+    with contextlib.closing(sqlite3.connect(path)) as legacy:
+        legacy.execute(
+            "CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, "
+            "credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, "
+            "created_at INTEGER, updated_at INTEGER)"
+        )
+        legacy.commit()
+    a_wal_returned = threading.Event()
+    release_a = threading.Event()
+    b_boundary_attempt = threading.Event()
+    a_section_complete = threading.Event()
+    role = threading.local()
+    early_b_sql: list[str] = []
+    connections: list[sqlite3.Connection] = []
+    receipts: list[str] = []
+    failures: list[Exception] = []
+    real_connect = sqlite3.connect
+
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            actor = getattr(role, "name", "setup")
+            if actor == "B":
+                if not a_section_complete.is_set():
+                    early_b_sql.append(sql.split()[0])
+                receipts.append("B.SQL_ENTRY")
+                b_boundary_attempt.set()
+            cursor = super().execute(sql, parameters)
+            if actor == "A" and sql == "PRAGMA journal_mode=WAL":
+                receipts.append("A.REAL_WAL_RETURN")
+                a_wal_returned.set()
+                assert release_a.wait(timeout=5), "coordinator never released actual WAL cursor"
+            return cursor
+
+    def observed_connect(*args, **kwargs):
+        assert "factory" not in kwargs, "unexpected caller factory changes observer fidelity"
+        conn = real_connect(*args, **kwargs, factory=ObservedConnection)
+        connections.append(conn)
+        return conn
+
+    # Replace only this consumer binding, never global sqlite3 or fake SQL.
+    monkeypatch.setattr(
+        auth_module, "sqlite3", SimpleNamespace(**{**vars(sqlite3), "connect": observed_connect})
+    )
+    guard = getattr(auth_module, "_auth_bootstrap_guard", None)
+    if guard is not None:
+
+        @contextlib.contextmanager
+        def observed_guard(*args, **kwargs):
+            actor = getattr(role, "name", "setup")
+            if actor == "B":
+                receipts.append("B.GUARD_ATTEMPT")
+                b_boundary_attempt.set()
+            with guard(*args, **kwargs):
+                try:
+                    yield
+                finally:
+                    if actor == "A":
+                        a_section_complete.set()
+
+        monkeypatch.setattr(auth_module, "_auth_bootstrap_guard", observed_guard)
+
+    def construct(actor: str) -> None:
+        owned_threads.append(threading.current_thread())
+        role.name = actor
+        auth = AuthStore(
+            db_path=path, config_dir=tmp_path / "config", config_overrides={}, usage_cache=None
+        )
+        try:
+            # Real SQL metadata reads, not provider/native lifecycle calls.
+            assert auth.list_credentials() == []
+            assert auth.native_login_incarnation(999) is None
+        finally:
+            auth.close()
+            if actor == "A":
+                a_section_complete.set()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(construct, "A")
+            jobs = [first]
+            try:
+                assert a_wal_returned.wait(timeout=5), "first public constructor never reached WAL"
+                jobs.append(pool.submit(construct, "B"))
+                assert b_boundary_attempt.wait(timeout=5), "second constructor reached no boundary"
+            finally:
+                # Both old-SQL-entry and fixed-guard-attempt release promptly.
+                release_a.set()
+            for job in jobs:
+                try:
+                    job.result(timeout=5)
+                except Exception as error:
+                    failures.append(error)
+        print("AUTH_BOOTSTRAP_RECEIPTS", receipts, "EARLY_B_SQL", early_b_sql, flush=True)
+        assert not early_b_sql, "B entered protected SQL before A completed bootstrap"
+        if failures:
+            raise failures[0]
+        with contextlib.closing(real_connect(path)) as check:
+            columns = [row[1] for row in check.execute("PRAGMA table_info(auth_credentials)")]
+        assert columns.count("login_incarnation") == 1
+    finally:
+        release_a.set()
+        # Constructor failure can occur before AuthStore.close is available;
+        # the observer retains only actual connections for deterministic cleanup.
+        for conn in connections:
+            conn.close()
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+        alive = [thread.name for thread in owned_threads if thread.is_alive()]
+        after_fds = len(os.listdir(fd_root)) if before_fds is not None else None
+        print("AUTH_BOOTSTRAP_CLEANUP", "threads", alive, "fds", before_fds, after_fds, flush=True)
+        assert not alive
+        if before_fds is not None:
+            assert after_fds == before_fds
+
+
 async def test_native_lifecycle_concurrent_migration_serializes_check_and_alter(tmp_path):
     import concurrent.futures
     import sqlite3
@@ -3730,3 +3870,162 @@ async def test_native_lifecycle_mcp_and_copied_rows_are_not_native(store):
     )
     assert store.native_login_incarnation(mcp.id) is None
     assert lifecycle._native_contexts(store._db_path.parent, "mcp-oauth") is None
+
+
+async def test_bootstrap_guard_canonical_alias_reentry_and_independent_path(tmp_path, monkeypatch):
+    from local_operator.providers import auth_store as mod
+
+    directory = tmp_path / "real"
+    directory.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(directory, target_is_directory=True)
+    auth = AuthStore(db_path=alias / "auth.db", config_dir=tmp_path, config_overrides={})
+    assert auth._db_path == (directory / "auth.db").resolve()
+    auth.close()
+    with mod._auth_bootstrap_guard(directory / "auth.db"):
+        with pytest.raises(AuthStoreError, match="Recursive"):
+            with mod._auth_bootstrap_guard(alias / "auth.db"):
+                pytest.fail("same-thread recursive bootstrap ran unlocked")
+        with mod._auth_bootstrap_guard(tmp_path / "other.db"):
+            pass
+    assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+
+
+async def test_bootstrap_guard_process_contention_spends_one_deadline_and_releases(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from local_operator.providers import auth_store as mod
+
+    path = tmp_path / "auth.db"
+    lock_path = tmp_path / "auth.db.bootstrap.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_EXCL, 0o600)
+    try:
+        assert mod._try_lock(fd), "real competing file lock was not acquired"
+        ticks = iter([0.0, 0.0, 0.0, 6.0])
+        # Only this helper's clock changes. No global time/loop clock or OS
+        # locking is mocked; the deadline expires after one real failed try.
+        with monkeypatch.context() as patch:
+            patch.setattr(mod, "_bootstrap_clock", lambda: next(ticks, 6.0))
+            with pytest.raises(AuthStoreError, match="process guard"):
+                with mod._auth_bootstrap_guard(path):
+                    pytest.fail("ran despite an actual competing process lock")
+        assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+    finally:
+        mod._unlock(fd)
+        os.close(fd)
+    with mod._auth_bootstrap_guard(path):
+        assert lock_path.stat().st_mode & 0o777 == 0o600
+    assert lock_path.exists(), "release must not unlink the exclusion inode"
+
+
+@pytest.mark.parametrize("kind", ["symlink", "mode", "replaced_inode"])
+async def test_bootstrap_guard_refuses_unsafe_sidecar_without_repair(tmp_path, monkeypatch, kind):
+    import os
+
+    from local_operator.providers import auth_store as mod
+
+    path = tmp_path / "auth.db"
+    lock_path = tmp_path / "auth.db.bootstrap.lock"
+    if kind == "symlink":
+        target = tmp_path / "foreign"
+        target.write_bytes(b"unchanged")
+        target.chmod(0o600)
+        lock_path.symlink_to(target)
+    elif kind == "mode":
+        lock_path.write_bytes(b"unchanged")
+        lock_path.chmod(0o644)
+    else:
+        real_try = mod._try_lock
+
+        def replace_after_actual_acquisition(fd):
+            acquired = real_try(fd)
+            if acquired:
+                lock_path.rename(tmp_path / "retired-lock")
+                replacement = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                os.close(replacement)
+            return acquired
+
+        monkeypatch.setattr(mod, "_try_lock", replace_after_actual_acquisition)
+    with pytest.raises(AuthStoreError):
+        with mod._auth_bootstrap_guard(path):
+            pytest.fail("unverified sidecar reached bootstrap SQL")
+    if kind == "symlink":
+        assert lock_path.is_symlink() and target.read_bytes() == b"unchanged"
+    elif kind == "mode":
+        assert lock_path.stat().st_mode & 0o777 == 0o644
+        assert lock_path.read_bytes() == b"unchanged"
+    assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+
+
+async def test_bootstrap_guard_exception_releases_same_inode(tmp_path):
+    from local_operator.providers import auth_store as mod
+
+    path = tmp_path / "auth.db"
+    with pytest.raises(RuntimeError, match="synthetic body failure"):
+        with mod._auth_bootstrap_guard(path):
+            inode = (tmp_path / "auth.db.bootstrap.lock").stat().st_ino
+            raise RuntimeError("synthetic body failure")
+    with mod._auth_bootstrap_guard(path):
+        assert (tmp_path / "auth.db.bootstrap.lock").stat().st_ino == inode
+    assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+
+
+async def test_bootstrap_sql_failure_closes_actual_connection_and_releases_guard(
+    tmp_path, monkeypatch
+):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from local_operator.providers import auth_store as mod
+
+    path = tmp_path / "corrupt.db"
+    path.write_bytes(b"not a sqlite database")
+    opened = []
+    real_connect = sqlite3.connect
+
+    def observed_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(
+        mod, "sqlite3", SimpleNamespace(**{**vars(sqlite3), "connect": observed_connect})
+    )
+    with pytest.raises(sqlite3.DatabaseError):
+        AuthStore(db_path=path, config_dir=tmp_path, config_overrides={})
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")
+    with mod._auth_bootstrap_guard(path):
+        pass
+    assert not mod._BOOTSTRAP_ENTRIES and not mod._BOOTSTRAP_FDS
+
+
+@pytest.mark.parametrize("existing", [False, True])
+async def test_read_only_bootstrap_never_creates_guard_or_changes_database(tmp_path, existing):
+    import contextlib
+    import sqlite3
+
+    path = tmp_path / "auth.db"
+    if existing:
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE fixture_marker (id INTEGER)")
+            conn.commit()
+    before = {item.name: item.read_bytes() for item in tmp_path.iterdir() if item.is_file()}
+    auth = AuthStore(db_path=path, config_dir=tmp_path, config_overrides={}, read_only=True)
+    auth.close()
+    after = {item.name: item.read_bytes() for item in tmp_path.iterdir() if item.is_file()}
+    assert before == after
+    assert not (tmp_path / "auth.db.bootstrap.lock").exists()
+
+
+async def test_private_memory_bootstrap_has_no_persistent_side_effects(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    auth = AuthStore(db_path=":memory:", config_dir=tmp_path, config_overrides={})
+    try:
+        assert auth.list_credentials() == []
+    finally:
+        auth.close()
+    assert list(tmp_path.iterdir()) == []
