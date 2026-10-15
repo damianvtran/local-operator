@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.memory_capture import policy
 from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
     SessionStreamFn,
@@ -722,6 +723,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # is that very resolver against the watched directory, in the setting's own
     # units (hours).
     "projects.stale_after_hours": (2, lambda s, w: stale_after_s() / 3600.0),
+    # -- memory: ``memory_capture.policy`` re-reads config.yml on EVERY tool call, capture
+    # pass and suggestion, so a write from another process lands on the next use. The
+    # shipped default is ON, hence the probe value is False. Observed through that very
+    # reader against the watched directory.
+    "memory.enabled": (False, lambda s, w: policy(w.config_dir)["enabled"]),
+    "memory.capture": (False, lambda s, w: policy(w.config_dir)["capture"]),
+    "memory.suggest": (False, lambda s, w: policy(w.config_dir)["suggest"]),
     # -- team_bridge: the local machine prefs, observed through the public
     # bridge settings plumbing the status route's ``local`` block calls -------
     # The section is LIVE because the surfaces consult these keys on every

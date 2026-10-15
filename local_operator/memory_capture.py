@@ -26,9 +26,12 @@ from local_operator.memory import (
     validate_op,
 )
 
-# Flip together only after the complete isolated pilot; settings_io reads this
-# constant too so CLI/TUI declarations and consumers have one default authority.
-MEMORY_DEFAULT_ENABLED = False
+# Shipped ON: a dark-launched default would leave the feature undelivered. Flipped only
+# after the isolated pilot (store->compact->restart->retrieve, wire-prefix, no-wake,
+# privacy, mesh) passed. settings_io reads this constant too so CLI/TUI declarations and
+# consumers share ONE default authority; `memory.enabled: false` remains the kill switch
+# and never erases retained facts.
+MEMORY_DEFAULT_ENABLED = True
 _LOCATOR = re.compile(
     r"https?://[^\s<>\"']+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"
     r"|(?:~?/|\b(?:src|docs|tests|local_operator)/)[^\s<>\"']+"
