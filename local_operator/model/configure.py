@@ -3230,13 +3230,16 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
 #: Why 25: an OpenRouter-routed DeepSeek v4.1 Flash run measured one upstream
 #: host at 20.3 tok/s (fit R2 0.99, 63 consecutive requests, 93% of the run's
 #: request time) beside 130-172 tok/s on the other two hosts the same run saw.
-#: 25 sits just above the slow host and an order of magnitude under the healthy
+#: 25 sits just above the slow host and well under the healthy
 #: ones, so ordinary host-to-host variance never reaches it; at 25 tok/s a
 #: 4,000-token reasoning reply already takes 160 s, which is the point where a
 #: cold-prefix move to another host is cheap by comparison. It is a floor on
 #: DECODE only -- queueing and prefill are excluded by the estimator itself (see
 #: ``SessionStreamFn._score_host_decode_rate``).
-OPENROUTER_RETIRE_BELOW_TPS = 25.0
+# Opt-in until the newly attributable estimator has live evidence across more
+# than one model/run. The measured run above motivates trying 25, not imposing
+# that floor on every cached OpenRouter model (review round 1, C1).
+OPENROUTER_RETIRE_BELOW_TPS = 0.0
 
 
 def _openrouter_retire_below_tps(settings: Mapping[str, Any] | None) -> float:
@@ -3244,10 +3247,9 @@ def _openrouter_retire_below_tps(settings: Mapping[str, Any] | None) -> float:
 
     Same shape as ``_anthropic_cache_ttl_1h_min_context_tokens``: a missing
     ``providers`` block (old config files) or a malformed leaf falls back to the
-    default rather than silently disabling the check, because "disabled" here is
-    a session that quietly stays on a host serving at a fifth of its peers' speed.
-    Only an explicit non-negative number is honoured; ``0`` is the documented off
-    switch.
+    default (off). Only an explicit finite non-negative number opts into this
+    experimental policy; ``0`` also removes learned speed exclusions at the next
+    request boundary, preserving cache-miss retirements.
     """
     providers = settings.get("providers") if isinstance(settings, Mapping) else None
     openrouter = providers.get("openrouter") if isinstance(providers, Mapping) else None
@@ -3257,7 +3259,7 @@ def _openrouter_retire_below_tps(settings: Mapping[str, Any] | None) -> float:
         isinstance(configured, (int, float))
         and not isinstance(configured, bool)
         and configured >= 0
-        and configured == configured  # NaN fails every comparison above only by luck
+        and math.isfinite(configured)
     ):
         return float(configured)
     return OPENROUTER_RETIRE_BELOW_TPS
@@ -3530,11 +3532,11 @@ class SessionStreamFn:
     # ``providers.openrouter.retire_below_tps`` setting (``OPENROUTER_RETIRE_BELOW_TPS``).
     #:
     #: Consecutive qualifying slow turns before the host is retired. THREE, not two
-    #: as for the cache: a decode rate is a noisier reading than "zero cached
-    #: tokens" (a network stall mid-stream shows up as slow decode, and so would a
-    #: consumer that was briefly slow to drain the stream), and the replay of the
+    #: as for the cache: upstream-await rate is a noisier reading than "zero
+    #: cached tokens" (network stalls count and buffering can distort the rate;
+    #: local consumer processing is explicitly excluded), and the replay of the
     #: measured run shows three still retires the slow host on its 4th request
-    #: (turn 31 of 63 on that host) -- the extra strike costs about two requests.
+    #: (absolute run turn 31) -- the extra strike costs about two requests.
     HOST_SLOW_STRIKES_TO_RETIRE = 3
     #: Below this many output tokens a turn carries no decode-rate information and
     #: neither strikes nor clears. The window already starts at the FIRST output
@@ -3958,6 +3960,17 @@ class SessionStreamFn:
         pin from the model it left. The gate refuses isolated requests in BOTH
         directions — see ``_affinity_enabled``.
         """
+        if _openrouter_retire_below_tps(self._settings) <= 0:
+            # A LIVE off-switch must undo its routing effects, not just stop new
+            # scoring (review C2). Speed-only state is independent of cache
+            # evidence: keep cache retirements and the current healthy pin.
+            for model_id, hosts in self._provider_retired_slow.items():
+                self._provider_retired.get(model_id, set()).difference_update(hosts)
+            self._provider_retired_slow.clear()
+            self._provider_slow_strikes.clear()
+            self._provider_slow_strike_at.clear()
+            self._provider_slow_released.clear()
+            self._provider_host_rate.clear()
         if request.purpose == "compaction":
             # A compaction REPLACES this conversation's prefix, which voids
             # every strike and retirement recorded against the old one (review
@@ -4109,11 +4122,15 @@ class SessionStreamFn:
         let go of it). Returns the user-facing notice lines for whatever this call
         changed (usually none) -- the caller owns the (async) emission.
 
-        The reading is ``output_tokens / decode window``, where the window runs
-        from the first to the last output delta the funnel saw. That already
-        excludes queueing and prefill, so no allowance has to be guessed, and it
-        is the same quantity the analytics ledger calls ``decode_tps``
-        (:func:`_decode_measure` is the one eligibility rule for both).
+        The reading is output tokens divided by accumulated upstream-await time
+        BETWEEN the first and last output deltas. Queue/prefill before the first
+        delta, trailers after the last, and time this async generator spends
+        suspended at ``yield`` (consumer processing) are excluded. The existing
+        analytics/band rate intentionally keeps its client-observed wall window;
+        displaying that interval and changing routing on it have different risk.
+        Await time still includes network stalls and upstream iterator work;
+        buffering can overstate speed. This is an opt-in heuristic, not a pure
+        GPU decode-rate or live endpoint-availability guarantee.
 
         What can strike, and what is deliberately refused:
 
@@ -4130,10 +4147,11 @@ class SessionStreamFn:
 
         * **Proof of a faster route.** The host is added to the hard ``ignore``
           filter only while some OTHER, un-retired host has a measured rate at
-          or above the floor. That single rule is what keeps the last viable host,
-          a single-endpoint model, and an all-hosts-slow conversation (a slow
-          MODEL, where every move buys a cold prefix and no speed) from being
-          retired: with no known-fast alternative there is nothing to move to.
+          or above the floor. With no measured alternative this will not ignore
+          the only host seen, or churn through an all-hosts-slow conversation.
+          A historical fast reading can be stale: it does NOT prove that host is
+          still eligible/up, so it cannot guarantee avoidance of every all-ignored
+          response when upstream availability changes.
         * Absent that proof the host's PIN is merely **released** -- it stops
           being named, so OpenRouter's own routing is free to land elsewhere (and
           is never worse than affinity off) -- and the release is promoted to a
@@ -6735,8 +6753,33 @@ class SessionStreamFn:
             # child wrapper's finally also runs on early close, failure, and
             # cancellation, keeping concurrent/nested requests balanced.
             self._descendant_request_counter.begin()
+        # Routing needs an attributable interval, unlike analytics' existing
+        # client-drained first-to-last window. Time ONLY each upstream __anext__:
+        # a yield suspends this generator while subscribers/renderers process it,
+        # and charging that consumer time to the host can retire fast hosts (C1).
+        # Keep the off path untimed; the opt-in path adds two monotonic reads per
+        # upstream event and scalar accumulation, no per-event wrapper/container.
+        # Measured at this real funnel (30 interleaved CPU-time slope waves,
+        # 100 vs 3000 prebuilt output events): opt-in adds 166.8 ns/output delta
+        # against the old estimator (~0.83 ms/5000 deltas); off adds 51.9 ns.
+        # A counting clock confirms 1 -> 3 reads/output delta only when enabled.
+        # These are local microbenchmark conditions, not a zero-work claim.
+        measure_host_speed = _openrouter_retire_below_tps(
+            getattr(self, "_settings", None)
+        ) > 0 and self._affinity_enabled(request)
+        provider_wait_s = 0.0
+        provider_decode_s = 0.0
+        provider_output_started = False
+        upstream = stream.__aiter__()
         try:
-            async for event in stream:
+            while True:
+                wait_started = time.monotonic() if measure_host_speed else 0.0
+                try:
+                    event = await anext(upstream)
+                except StopAsyncIteration:
+                    break
+                if measure_host_speed:
+                    provider_wait_s += max(0.0, time.monotonic() - wait_started)
                 # ONE ``getattr`` for the event type, and it is an ADDITION to
                 # this loop rather than a saving — measured, not assumed
                 # (``scripts/bench_tps_overhead.py``, interleaved A/B below).
@@ -6753,6 +6796,14 @@ class SessionStreamFn:
                 # 5 000-delta turn against a generation measured in seconds. No
                 # allocation, no lock, no I/O in the delta branch.
                 event_type = getattr(event, "type", "")
+                if measure_host_speed and event_type in _OUTPUT_DELTA_TYPES:
+                    # Exclude queue/prefill before the FIRST output, and waits
+                    # after the LAST output (usage/end trailers). Non-output
+                    # events BETWEEN output deltas still belong to the interval.
+                    if provider_output_started:
+                        provider_decode_s += provider_wait_s
+                    provider_output_started = True
+                    provider_wait_s = 0.0
                 if event_type == "reasoning_delta":
                     # Matched on the event's own type string, exactly as
                     # ``ttft_ms`` matches its two below: this wrapper is written
@@ -6850,22 +6901,20 @@ class SessionStreamFn:
                             )
                             # Speed is judged on every served turn, not only the
                             # one we pinned: a host's decode rate is the same
-                            # whether or not we asked for it by name. The window
-                            # is the one ``_stamp_decode_window`` just closed
-                            # (first to last output delta), so no new clock read.
-                            slow_notices = self._score_host_decode_rate(
-                                request,
-                                str(served),
-                                event_usage,
-                                decode_us=(
-                                    max(0, int((last_output_at - first_output_at) * 1_000_000))
-                                    if first_output_at is not None and last_output_at is not None
-                                    else 0
-                                ),
-                                output_deltas=output_deltas,
-                                now=time.monotonic(),
-                                model_id=served_model_id,
-                            )
+                            # whether or not we asked for it by name. Routing
+                            # uses upstream-await time only; analytics above keeps
+                            # its existing client-observed wall interval (C1).
+                            slow_notices = []
+                            if measure_host_speed:
+                                slow_notices = self._score_host_decode_rate(
+                                    request,
+                                    str(served),
+                                    event_usage,
+                                    decode_us=max(0, int(provider_decode_s * 1_000_000)),
+                                    output_deltas=output_deltas,
+                                    now=time.monotonic(),
+                                    model_id=served_model_id,
+                                )
                             if str(served) not in self._provider_retired.get(
                                 served_model_id, ()
                             ) and str(served) not in self._provider_slow_released.get(

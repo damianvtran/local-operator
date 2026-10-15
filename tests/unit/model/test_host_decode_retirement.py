@@ -107,7 +107,13 @@ def _stream(
     """A stream over a mocked auth store, plus the notices it raised."""
     from unittest.mock import MagicMock
 
-    stream = SessionStreamFn(MagicMock(), settings if settings is not None else {}, "s-speed")
+    # Policy cases explicitly opt in; otherwise negative controls such as
+    # affinity=false could pass only because the default floor is now zero.
+    values = dict(settings or {})
+    providers = dict(values.get("providers", {}))
+    routing = {"retire_below_tps": 25.0, **providers.get("openrouter", {})}
+    values["providers"] = {**providers, "openrouter": routing}
+    stream = SessionStreamFn(MagicMock(), values, "s-speed")
     notices: list[tuple[str, str]] = []
 
     def collect(text: str, kind: str) -> None:
@@ -135,12 +141,19 @@ async def _serve(
     request: ChatRequest | None = None,
     idle_s: float = 5.0,
     queue_s: float = 8.0,
+    consumer_pause_s: float = 0.0,
 ) -> ChatRequest:
     """One turn through the real funnel: ``tokens`` at ``tps``, behind ``queue_s``.
 
     The queue/prefill wait happens BEFORE the first delta, so it must never count
     toward the decode rate -- the property that makes a slow-to-start host not
     look slow-to-decode.
+
+    ``consumer_pause_s`` is the TOTAL time the LOCAL consumer spends processing
+    the stream's output deltas (a slow subscriber, a blocked renderer), spread
+    evenly over them. It advances the same clock but happens in the consumer's
+    loop, between the funnel's ``yield`` and its next ``__anext__`` -- i.e. it is
+    consumer time, which no provider can be blamed for.
     """
     clock.advance(idle_s)
     stamped = stream._apply_cache_affinity(request or _request())
@@ -160,7 +173,13 @@ async def _serve(
             usage=Usage(input_tokens=100, output_tokens=tokens),
         )
 
-    assert [event async for event in stream._record_stream(stamped, scripted())]
+    per_delta_pause = consumer_pause_s / deltas
+    consumed = 0
+    async for event in stream._record_stream(stamped, scripted()):
+        consumed += 1
+        if per_delta_pause and getattr(event, "type", "") == "text_delta":
+            clock.advance(per_delta_pause)
+    assert consumed
     return stamped
 
 
@@ -227,7 +246,7 @@ def _replay(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_the_measured_run_retires_the_slow_host_after_three_slow_turns() -> None:
-    result = _replay({})
+    result = _replay({"providers": {"openrouter": {"retire_below_tps": 25.0}}})
 
     oi_turns = [turn for turn, host in result["served"] if host == "OpenInference"]
     # Head: the slow host is retired on its 3rd QUALIFYING slow turn. Turn 29 is a
@@ -253,6 +272,107 @@ def test_with_the_check_off_the_same_run_never_retires() -> None:
     assert result["retired"] == set()
     assert result["notices"] == []
     assert sum(1 for _, host in result["served"] if host == "OpenInference") == 63
+
+
+# ---------------------------------------------------------------------------
+# Attribution: the measured window is PROVIDER time, never consumer time
+# (review round 1, C1)
+# ---------------------------------------------------------------------------
+
+
+async def _three_slow_consumer_turns(
+    stream: SessionStreamFn, clock: FakeClock, *, fast_backend_tps: float
+) -> None:
+    """A healthy host B, then host A whose backend is fast but whose output is
+    consumed by a local reader that stalls 60 s per 1,000-token reply."""
+    await _serve(stream, clock, host="B", tokens=1000, tps=1000.0)
+    for _ in range(3):
+        await _serve(
+            stream,
+            clock,
+            host="A",
+            tokens=1000,
+            tps=fast_backend_tps,
+            consumer_pause_s=60.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_slow_consumer_on_a_fast_backend_never_retires_the_host(clock: FakeClock) -> None:
+    """The reviewer's control. A's backend generates 1,000 tokens in ONE second;
+    only the local consumer is slow (60 s of processing per reply). Wall time from
+    first to last delta is ~61 s (16 tok/s), which the previous estimator took for
+    A's decode rate and retired A -- moving hosts cannot cure a slow local reader,
+    and three such turns could cold-thrash three good hosts."""
+    stream, notices = _stream()
+    await _three_slow_consumer_turns(stream, clock, fast_backend_tps=1000.0)
+
+    assert stream._provider_host_rate[MODEL]["A"] == pytest.approx(1000.0, rel=0.05)
+    assert not stream._provider_retired.get(MODEL)
+    assert not stream._provider_slow_released.get(MODEL)
+    assert notices == []
+    assert stream._apply_cache_affinity(_request()).provider_avoid == []
+
+
+@pytest.mark.asyncio
+async def test_a_slow_backend_with_a_fast_consumer_still_retires_the_host(
+    clock: FakeClock,
+) -> None:
+    """The inverse: the same shape with the delay on the PROVIDER side (1,000
+    tokens at 16 tok/s, consumer instant) is a slow host and is retired."""
+    stream, notices = _stream()
+    await _serve(stream, clock, host="B", tokens=1000, tps=1000.0)
+    for _ in range(3):
+        await _serve(stream, clock, host="A", tokens=1000, tps=16.4)
+
+    assert stream._provider_retired[MODEL] == {"A"}
+    assert len(notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_with_both_slow_the_rate_reflects_only_the_backend(clock: FakeClock) -> None:
+    """A 20 tok/s backend read by a stalling consumer measures ~20 tok/s, not the
+    ~10 tok/s the wall interval would give."""
+    stream, _ = _stream()
+    await _serve(stream, clock, host="A", tokens=1000, tps=20.0, consumer_pause_s=50.0)
+
+    assert stream._provider_host_rate[MODEL]["A"] == pytest.approx(20.0, rel=0.05)
+
+
+@pytest.mark.asyncio
+async def test_the_analytics_window_is_left_as_the_client_observed_rate(
+    clock: FakeClock,
+) -> None:
+    """The attributable window feeds ROUTING only. The ledger/band rate stays what
+    it always was -- the client-observed first-to-last-delta interval -- so a
+    stalled consumer is still visible there (the reviewer's explicit carve-out)."""
+    from local_operator.harness.types import decode_window_of
+
+    stream, _ = _stream()
+    seen: list[Any] = []
+
+    async def scripted() -> AsyncIterator[StreamEvent]:
+        yield StreamStartEvent(response_id="r")
+        for _ in range(10):
+            yield StreamTextDelta(delta="x")
+            clock.advance(0.1)
+        yield StreamEndEvent(
+            stop_reason="stop",
+            served_provider="A",
+            usage=Usage(input_tokens=100, output_tokens=1000),
+        )
+
+    async for event in stream._record_stream(_request(), scripted()):
+        if getattr(event, "type", "") == "text_delta":
+            clock.advance(2.0)  # consumer pause
+        if isinstance(event, StreamEndEvent):
+            seen.append(event.usage)
+
+    window = decode_window_of(seen[0])
+    assert window is not None
+    window_us, tokens = window
+    assert tokens == 1000
+    assert window_us / 1e6 > 18.0  # the consumer's pauses are still in the analytics window
 
 
 # ---------------------------------------------------------------------------
@@ -582,8 +702,8 @@ async def test_a_fresh_delegated_fork_inherits_nothing(clock: FakeClock) -> None
 
 @pytest.mark.asyncio
 async def test_the_floor_is_configurable(clock: FakeClock) -> None:
-    """A 60 tok/s host is healthy at the default and retired under a 100 floor."""
-    for floor, retired in ((None, False), (100, True)):
+    """A 60 tok/s host is healthy at an explicit 25 floor, retired under 100."""
+    for floor, retired in ((25, False), (100, True)):
         providers = (
             {} if floor is None else {"providers": {"openrouter": {"retire_below_tps": floor}}}
         )
@@ -604,13 +724,16 @@ async def test_the_floor_is_configurable(clock: FakeClock) -> None:
         ({"providers": {"openrouter": {"retire_below_tps": 0}}}, 0.0),
         ({"providers": {"openrouter": {"retire_below_tps": 40}}}, 40.0),
         ({"providers": {"openrouter": {"retire_below_tps": 12.5}}}, 12.5),
-        # Malformed values fall back to the default: "disabled" would be a session
-        # quietly staying on a slow host, which is the failure this exists to end.
+        # Malformed values fall back to off, not an unrequested routing policy.
         ({"providers": {"openrouter": {"retire_below_tps": -1}}}, OPENROUTER_RETIRE_BELOW_TPS),
         ({"providers": {"openrouter": {"retire_below_tps": True}}}, OPENROUTER_RETIRE_BELOW_TPS),
         ({"providers": {"openrouter": {"retire_below_tps": "fast"}}}, OPENROUTER_RETIRE_BELOW_TPS),
         (
             {"providers": {"openrouter": {"retire_below_tps": float("nan")}}},
+            OPENROUTER_RETIRE_BELOW_TPS,
+        ),
+        (
+            {"providers": {"openrouter": {"retire_below_tps": float("inf")}}},
             OPENROUTER_RETIRE_BELOW_TPS,
         ),
         ({"providers": "nope"}, OPENROUTER_RETIRE_BELOW_TPS),
@@ -645,6 +768,85 @@ def test_the_constants_state_their_relationships() -> None:
     """The policy's shape, pinned so a tweak to one number is a conscious one."""
     assert SessionStreamFn.HOST_SLOW_STRIKES_TO_RETIRE >= SessionStreamFn.PROVIDER_STRIKES_TO_RETIRE
     # The floor must sit between the measured slow host and the measured fast ones.
-    assert _FITTED_TPS["OpenInference"] < OPENROUTER_RETIRE_BELOW_TPS < _FITTED_TPS["Morph"]
+    assert OPENROUTER_RETIRE_BELOW_TPS == 0.0  # opt-in until broader live evidence
+    assert _FITTED_TPS["OpenInference"] < 25.0 < _FITTED_TPS["Morph"]
     # A qualifying turn at the slow rate must be long enough for decode to dominate.
     assert SessionStreamFn.HOST_SLOW_MIN_OUTPUT_TOKENS / _FITTED_TPS["OpenInference"] >= 20
+
+
+@pytest.mark.asyncio
+async def test_disabling_clears_speed_exclusions_on_next_request(clock: FakeClock) -> None:
+    """C2: disabling the policy undoes its routing effects, not cache evidence."""
+    stream, _ = _stream()
+    await _serve(stream, clock, host="B", tokens=1000, tps=1000.0)
+    for _ in range(3):
+        await _serve(stream, clock, host="A", tokens=1000, tps=16.4)
+    stream._provider_retired[MODEL].add("CacheMiss")
+    stream.apply_settings({"providers": {"openrouter": {"retire_below_tps": 0}}})
+    stamped = stream._apply_cache_affinity(_request())
+    assert stamped.provider_avoid == ["CacheMiss"]
+    assert not stream._provider_retired_slow
+    assert not stream._provider_slow_strikes
+    assert not stream._provider_slow_released
+    assert not stream._provider_host_rate
+
+
+@pytest.mark.asyncio
+async def test_shipped_default_never_scores_or_retires(clock: FakeClock) -> None:
+    """The floor must be explicitly enabled for a benchmark; no live evidence
+    exists across enough models/runs to impose a universal throughput floor."""
+    stream, notices = _stream()
+    stream.apply_settings({})
+    await _serve(stream, clock, host="B", tokens=1000, tps=1000.0)
+    for _ in range(5):
+        await _serve(stream, clock, host="A", tokens=1000, tps=16.4)
+    assert not stream._provider_host_rate
+    assert not stream._provider_retired
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_disabling_clears_releases_and_reenable_starts_fresh(clock: FakeClock) -> None:
+    stream, _ = _stream()
+    for _ in range(3):
+        await _serve(stream, clock, host="A", tokens=1000, tps=16.4)
+    assert stream._provider_slow_released[MODEL] == {"A"}
+    stream.apply_settings({"providers": {"openrouter": {"retire_below_tps": 0}}})
+    stream._apply_cache_affinity(_request())
+    assert not stream._provider_slow_released
+    stream.apply_settings({"providers": {"openrouter": {"retire_below_tps": 25}}})
+    await _serve(stream, clock, host="B", tokens=1000, tps=1000)
+    await _serve(stream, clock, host="A", tokens=1000, tps=16.4)
+    assert not stream._provider_retired.get(MODEL)
+    assert stream._provider_slow_strikes[MODEL]["A"] == 1
+
+
+@pytest.mark.asyncio
+async def test_await_window_covers_mixed_output_not_prefill_or_trailers(clock: FakeClock) -> None:
+    """Reasoning, text and tool args are all output. Non-output frames between
+    them cannot drop upstream wait time, but post-output trailers cannot add it."""
+    from local_operator.harness.types import (
+        StreamReasoningDelta,
+        StreamToolCallDelta,
+        StreamUsageEvent,
+    )
+
+    stream, _ = _stream()
+
+    async def scripted() -> AsyncIterator[StreamEvent]:
+        clock.advance(100)  # prefill
+        yield StreamReasoningDelta(delta="r")
+        clock.advance(0.5)
+        yield StreamUsageEvent(usage=Usage(output_tokens=1000))
+        clock.advance(0.25)
+        yield StreamTextDelta(delta="x")
+        clock.advance(0.25)
+        yield StreamToolCallDelta(index=0, argument_delta="{}")
+        clock.advance(100)  # trailers
+        yield StreamEndEvent(
+            stop_reason="stop", served_provider="Mixed", usage=Usage(output_tokens=1000)
+        )
+
+    async for _ in stream._record_stream(_request(), scripted()):
+        clock.advance(60)  # all consumer processing excluded
+    assert stream._provider_host_rate[MODEL]["Mixed"] == pytest.approx(1000, rel=0.001)

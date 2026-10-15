@@ -550,7 +550,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     # The harness-side decode-rate floor: probed through the resolver that
     # `SessionStreamFn._score_host_decode_rate` reads it with, over the session's
-    # LIVE routing mapping. 40.0 differs from the 25.0 default, so the probe
+    # LIVE routing mapping. 40.0 differs from the 0.0 default, so the probe
     # observes a CHANGE reaching the running session.
     "providers.openrouter.retire_below_tps": (
         40.0,

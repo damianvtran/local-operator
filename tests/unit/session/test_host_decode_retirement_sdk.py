@@ -155,7 +155,7 @@ def offline_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         merged = {"classification": {"auto": False}, **values}
         (root / "config.yml").write_text(yaml.safe_dump({"values": merged}))
 
-    write_settings({})
+    write_settings({"providers": {"openrouter": {"retire_below_tps": 25.0}}})
     return {
         "roots": SessionRoots(
             config_dir=root, agent_home=agent_home, cwd=work, allow_volatile=True
@@ -216,7 +216,14 @@ async def _converse(world: Any, plan: list[str], monkeypatch: pytest.MonkeyPatch
     router = _Router(plan)
     _install_router(monkeypatch, router)
     notices: list[str] = []
-    spec = SessionSpec(hosting="openrouter", model=MODEL, approvals=ApprovalPolicy.auto())
+    # HOME isolation does not clip ancestor skill discovery. Seal the world at
+    # this fixture's synthetic cwd too (QA R1 observed an outer skill without it).
+    spec = SessionSpec(
+        hosting="openrouter",
+        model=MODEL,
+        approvals=ApprovalPolicy.auto(),
+        world_root=world["roots"].cwd_path,
+    )
     async with sdk.open_session(spec, roots=world["roots"]) as session:
 
         def collect(event: Any) -> None:

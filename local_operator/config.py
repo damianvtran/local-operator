@@ -572,9 +572,10 @@ DEFAULT_CONFIG = Config(
                     # HARNESS-side, like `provider_affinity`: the decode rate
                     # (output tokens/sec) under which a host that keeps serving
                     # the conversation is dropped from the cache pin. 0 = off.
-                    # Mirrors `OPENROUTER_RETIRE_BELOW_TPS` in model/configure.py
-                    # (the reasoning for 25 lives there).
-                    "retire_below_tps": 25.0,
+                    # Opt-in: one measured run motivates experimenting with 25,
+                    # not imposing it across every OpenRouter model. Mirrors
+                    # `OPENROUTER_RETIRE_BELOW_TPS` in model/configure.py.
+                    "retire_below_tps": 0.0,
                 },
             },
             # One ordered cascade for every text-model call. Entries may be
