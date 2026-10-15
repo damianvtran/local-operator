@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +17,7 @@ from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync.merge import ConflictProposal, ResolverError
+from local_operator.hub_sync.resolver import LlmResolver, MergeModel
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
 BASE = "## Rules\nBe brief.\n\n## Legacy\nOld advice.\n\n## Tools\nUse tools carefully."
@@ -244,6 +247,67 @@ def test_a_model_outage_leaves_a_conflicting_item_available_but_still_applies_cl
     )
     item = ctx.store().load()["items"][f"agent:{row.id}"]
     assert item["state"] == "available" and item["error_class"] == "model-unavailable"
+
+
+def test_an_unusable_provider_records_the_failure_and_a_future_retry_the_sidebar_sees(
+    env,
+) -> None:
+    """The unattended-update failure path: an unusable provider/model at the
+    resolver call must leave a durable, retryable failure the desktop indicator
+    can read, not a silent no-op.
+
+    This is the leg the two-install unattended-update proof never reached: the
+    orchestrated run always had a working resolver, so no provider-error was ever
+    recorded. The genuine class is provoked by driving the REAL :class:`LlmResolver`
+    over a completion whose provider the wire layer refuses (``clients.py`` raises
+    ``ValueError("Unknown provider: ...")`` before any HTTP), which lands as
+    ``provider-error/request`` through ``classify_failure``/``call_with_retry`` --
+    exactly the wrap's ``ResolverError: provider-error: Unknown provider``. No
+    production seam is added: ``complete`` is already the injected call.
+    """
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE.replace("Be brief.", "Be brief and cite sources."))
+    hub.agents["h1"] = (BASE.replace("Be brief.", "Be brief and use plain words."), "d")
+
+    async def unusable_provider(system: str, prompt: str) -> str:
+        raise ValueError("Unknown provider: 'bogus'")
+
+    ctx.resolver = LlmResolver(
+        ctx.config_manager,
+        complete=unusable_provider,
+        model=MergeModel(
+            spec=SimpleNamespace(context_window=128_000, max_output_tokens=4096),
+            label="bogus/bogus",
+        ),
+    )
+
+    report = svc.apply_items(ctx, kind="agent", auto=True)
+
+    # (1) The item did not settle: a conflict held for review, classed as a
+    # provider failure rather than the merge-refused a two-sided conflict gives.
+    assert report.reports[0].outcome == "needs-review"
+    assert report.reports[0].error_class == "provider-error/request"
+
+    # ...and the failure is RECORDED on the row with a future retry schedule, so
+    # the timer re-attempts instead of the item being abandoned.
+    item = ctx.store().load()["items"][f"agent:{row.id}"]
+    assert (item["error_class"], item["error_subclass"]) == ("provider-error", "request")
+    assert item["last_error"] and item["attempts"] == 1 and item["auto_retry"] is True
+    due = datetime.strptime(item["next_retry_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+    # Counted backoff for attempt 1 is 15 min * U(0.9, 1.1); a future, bounded due.
+    assert timedelta(minutes=12) < due - datetime.now(timezone.utc) < timedelta(minutes=18)
+
+    # (2) The desktop sidebar's failure indicator is a pure store read: the
+    # recorded class and schedule are what it consumes, so both must be exposed.
+    (exposed,) = svc.status_snapshot(ctx)["items"]
+    assert exposed["error_class"] == "provider-error"
+    assert exposed["error_subclass"] == "request"
+    assert exposed["state"] == "available"  # indicator stays; the user resolves it
+    assert exposed["next_retry_at"] == item["next_retry_at"]
 
 
 def test_a_concurrent_edit_between_check_and_write_aborts_and_keeps_the_users_file(env) -> None:
