@@ -22,6 +22,7 @@ THE FOUR PROPERTIES, each from the design and the build plan:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -1612,6 +1613,104 @@ def test_an_mcp_grant_serves_the_owners_access_token(owner: Any, no_mcp_refresh:
     assert detail["credential_ref"]["credential_id"] > 0
     assert detail["credential_ref"]["kind"] == "mcp-oauth"
     assert no_mcp_refresh == [MCP_URL], "the owner's own refresh is the one that runs"
+
+
+def test_dead_mcp_family_with_future_access_is_refused_until_new_grant(
+    owner: Any, no_mcp_refresh: list[str]
+) -> None:
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    _declare_mcp(owner)
+    storage = McpTokenStorage(MCP_URL, owner.auth)
+    asyncio.run(
+        storage.set_tokens(
+            OAuthToken(access_token=MCP_BEARER, refresh_token="synthetic-before", expires_in=3600)
+        )
+    )
+    assert storage.mark_grant_dead()
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=MCP_KEY, model_id="")
+    assert detail["kind"] == "error" and detail["code"] == "interactive_required"
+    assert no_mcp_refresh == [], "known-dead family must cost no owner refresh"
+    # A late response continues the rejected chain and cannot make it usable.
+    assert storage.store_refresh_result(
+        OAuthToken(access_token="synthetic-late", expires_in=3600),
+        presented_refresh_token="synthetic-before",
+    )
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=MCP_KEY, model_id="")
+    assert detail["kind"] == "error" and detail["code"] == "interactive_required"
+    asyncio.run(storage.set_tokens(OAuthToken(access_token="synthetic-new", expires_in=3600)))
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=MCP_KEY, model_id="")
+    assert detail["kind"] == "grant"
+    assert detail["access_token"] == "synthetic-new"
+
+
+def test_unreadable_mcp_marker_is_unavailable_not_a_fabricated_login(
+    owner: Any, no_mcp_refresh: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.mcp.auth import McpTokenStorage
+
+    _declare_mcp(owner)
+    monkeypatch.setattr(McpTokenStorage, "grant_marker", lambda self: None)
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=MCP_KEY, model_id="")
+    assert detail["kind"] == "error" and detail["code"] == "unavailable"
+    assert "could not be verified" in detail["message"]
+    assert no_mcp_refresh == []
+
+
+def test_new_mcp_chain_during_access_read_cannot_lend_the_old_token(
+    owner: Any, no_mcp_refresh: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    _declare_mcp(owner)
+    original = McpTokenStorage.get_tokens
+
+    async def replace_during_read(self: McpTokenStorage) -> Any:
+        tokens = await original(self)
+        await self.set_tokens(OAuthToken(access_token="synthetic-replacement", expires_in=3600))
+        return tokens
+
+    monkeypatch.setattr(McpTokenStorage, "get_tokens", replace_during_read)
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=MCP_KEY, model_id="")
+    assert detail["kind"] == "error" and detail["code"] == "unavailable"
+    assert no_mcp_refresh == [MCP_URL]
+
+
+@pytest.mark.asyncio
+async def test_mcp_owner_invalid_grant_is_refused_after_refresh_without_replaying(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+    from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpTokenStorage
+    from tests.unit.mcp.rotating_oauth_server import FakeTokenEndpoint
+    from tests.unit.mcp.test_oauth_refresh_durability import _stub_discovery
+
+    _declare_mcp(owner)
+    storage = McpTokenStorage(MCP_URL, owner.auth)
+    await storage.set_client_info(OAuthClientInformationFull(client_id="synthetic-client"))
+    await storage.set_tokens(
+        OAuthToken(access_token=MCP_BEARER, refresh_token="synthetic-rejected", expires_in=1)
+    )
+    data = dict(owner.auth.list_credentials("mcp-oauth")[0].data)
+    data[TOKENS_OBTAINED_AT_KEY] = time.time() - 120
+    assert storage._write(data)
+    async with FakeTokenEndpoint(refresh_token="synthetic-other") as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        detail = await asyncio.to_thread(
+            _ask_grant, owner, BORROWER_DEVICE, key=MCP_KEY, model_id=""
+        )
+        assert detail["kind"] == "error" and detail["code"] == "interactive_required"
+        assert len(endpoint.requests) == 1 and storage.grant_is_dead()
+        detail = await asyncio.to_thread(
+            _ask_grant, owner, BORROWER_DEVICE, key=MCP_KEY, model_id=""
+        )
+        assert detail["kind"] == "error" and detail["code"] == "interactive_required"
+        assert len(endpoint.requests) == 1
 
 
 def test_an_mcp_report_is_answered_and_blocks_nothing(

@@ -499,7 +499,20 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
             # cannot open the store reports ``has_row: None``, which must NOT
             # read as "serve it anyway".
             continue
-        rows.append({"key": credential_key_for_mcp(url), "kind": "mcp-rotating", "label": ""})
+        rows.append(
+            {
+                "key": credential_key_for_mcp(url),
+                "kind": "mcp-rotating",
+                "label": "",
+                # Advisory only: canonical_rows and admission still decide the
+                # finite offer as before, not account-scoped inheritance consent.
+                **(
+                    {"auth_diagnostics": server["auth_diagnostics"]}
+                    if "auth_diagnostics" in server
+                    else {}
+                ),
+            }
+        )
 
     from local_operator.network.credentials import sync as sync_mod
 
@@ -605,6 +618,11 @@ def build_items(config: Path, *, network_id: str = "") -> list[dict[str, Any]]:
                 "kind": kind,
                 "label": mask_label(str(row["label"] or "")),
                 "share": share,
+                **(
+                    {"auth_diagnostics": row["auth_diagnostics"]}
+                    if "auth_diagnostics" in row
+                    else {}
+                ),
             }
         )
     return items[:MAX_OFFER_ITEMS]
