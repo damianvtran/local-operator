@@ -180,6 +180,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # Exact finite recovery, never future inheritance or credential material.
         "credential.finite_requested",
         "credential.finite_applied",
+        # Operator-authored future-login permission (credentials/inheritance.py): the card
+        # filed, and the permission recorded. Ids and the provider key only.
+        "credential.inherit_requested",
+        "credential.inherit_applied",
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
@@ -474,6 +478,8 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.finite_applied": frozenset(
         {"credential_key", "act", "sub", "scope", "approval_id"}
     ),
+    "credential.inherit_requested": frozenset({"credential_key", "act", "sub", "approval_id"}),
+    "credential.inherit_applied": frozenset({"credential_key", "act", "sub", "approval_id"}),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
