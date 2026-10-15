@@ -217,6 +217,10 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # Keys, device ids and a code only — never material, never an approval body.
         "credential.permission_projected",
         "credential.permission_refused",
+        # A derived holder taken back because its approval is gone, and a push the
+        # recipient could not take (with the machine reason). Keys/ids/codes only.
+        "credential.permission_withdrawn",
+        "credential.permission_undelivered",
         # The github narrowing's delivery receipts (the adapter's §3.4 bound):
         # the owner's designated repositories reached a borrowing device and
         # were written to its config — or were refused, with the machine reason.
@@ -502,6 +506,8 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.permission_projected": frozenset({"credential_key", "act", "sub"}),
     "credential.permission_refused": frozenset({"credential_key", "act", "sub", "code"}),
+    "credential.permission_withdrawn": frozenset({"credential_key", "act", "sub", "code"}),
+    "credential.permission_undelivered": frozenset({"credential_key", "act", "sub", "code"}),
     # The narrowing's delivery (the github adapter's §3.4 bound): `repositories`
     # is the LIST APPLIED (a config value, never material); a refused delivery
     # carries the machine reason instead.

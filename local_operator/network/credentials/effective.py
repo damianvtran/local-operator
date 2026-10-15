@@ -81,7 +81,8 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
     else:
         state = (
             "owner_unavailable"
-            if result.code in {"owner_offline", "owner_unreachable", "refresh_failed"}
+            if result.code
+            in {"owner_offline", "owner_unreachable", "refresh_failed", "consent_unverifiable"}
             else (
                 "withdrawn"
                 if result.code
