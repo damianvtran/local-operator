@@ -33,7 +33,7 @@ import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -43,6 +43,7 @@ from local_operator.harness.message_types import (
 )
 from local_operator.mobile import peer_client as peer_client_mod
 from local_operator.mobile.peer_client import send_peer_message
+from local_operator.mobile.types import SessionRecord
 from local_operator.session.runtime.inbox import (
     SOURCE_PEER,
     InboxLine,
@@ -55,6 +56,7 @@ from local_operator.session.session import Session
 from local_operator.session.transcript import read_entry_by_id
 from local_operator.team_bridge import store as bridge_store
 from local_operator.team_bridge.ask_issuance import AskIssuance
+from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.store import Store
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
 from tests.unit.team_bridge.test_h5_envelope_negatives import (
@@ -203,7 +205,12 @@ async def _full_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         # stand the real ``current_access`` in for the standing reader.
         return SimpleNamespace(credential_id=_owner().credential_id)
 
-    runtime_stub.client = SimpleNamespace(current_access=_pinned_access)
+    # A stub stand-in for the runtime's pinned authority surface (S-8b): the
+    # shape is deliberate and the real type is what the callers below are typed
+    # against, so the fake is CAST rather than the annotation weakened — the
+    # repo's convention for a typed seam fed a fixture (team_bridge/pull.py,
+    # scheduler.py).
+    runtime_stub.client = cast(TeamBridgeClient, SimpleNamespace(current_access=_pinned_access))
     session.bridge_runtime = runtime_stub
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="tui")
@@ -211,7 +218,9 @@ async def _full_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # socket accept loop is booted here, and that is the ONLY fixture bit.
     server.set_record_started(True)
     _wire(server, monkeypatch)
-    record = SimpleNamespace(control_port=0, control_key="k")
+    # ``send_peer_message`` is typed against the REAL record; this fixture
+    # supplies only the two fields the request assembly reads.
+    record = cast(SessionRecord, SimpleNamespace(control_port=0, control_key="k"))
     return session, record
 
 
@@ -275,6 +284,11 @@ def _seed_second_envelope(session) -> dict[str, Any]:
     hints = dict(_HINT_FIELDS)
     hints["excerpt"] = "second request"
     digest = display_context_digest(hints)
+    # The hint form IS valid here — that is what this fixture is for — and the
+    # serializer returns ``None`` only for an unknown/oversized/ambiguous form,
+    # which the writer below would refuse as a selector. Pinned, so a fixture
+    # edit that broke the form fails here rather than as an argument error.
+    assert digest is not None
     body = hashlib.sha256(b"second body").hexdigest()
     store = Store(session.bridge_runtime.config_dir)
     key = bridge_store._owner_key(_owner())

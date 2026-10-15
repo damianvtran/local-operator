@@ -66,8 +66,11 @@ _HINT_FIELDS = {
     "thread_id": "t-1",
     "excerpt": "please approve before 1700",
 }
-DISPLAY_DIGEST = display_context_digest(_HINT_FIELDS)
-assert DISPLAY_DIGEST is not None
+DISPLAY_DIGEST: str = cast(str, display_context_digest(_HINT_FIELDS))
+# The form above is valid by construction, so this is not a guard against the
+# serializer's ``None``; it is the fixture's own precondition, failing HERE
+# rather than as a confusing selector mismatch in whichever case first uses it.
+assert DISPLAY_DIGEST, "the hint fixture must serialize to a display digest (S-9)"
 MESSAGE_ID = "bmsg_1"
 DREF = "dref_" + "ab" * 16
 #: The harness's own accepted transcript row id (``peer-<32 lowercase hex>``);
@@ -275,12 +278,23 @@ def _stamp(
 class _StubSession(Session):
     """The validator methods, WITHOUT constructing a real Session."""
 
-    session_id = "s1"
-
-    def __init__(self, runtime, queue, *, config_dir):
+    def __init__(self, runtime, queue, *, config_dir, session_id: str = "s1"):
         self.bridge_runtime = runtime
         self._test_queue = queue
         self._config_dir = config_dir
+        self._session_id = session_id
+
+    @property
+    def session_id(self) -> str:
+        """The base's own read-only property, mirrored.
+
+        Not a class attribute: ``Session.session_id`` is a property, so an
+        attribute here would try to replace the base's descriptor (the pyright
+        error) and would misstate the base's contract. The id is a constructor
+        argument instead, which is how a case asks for a stub whose id differs
+        from the stamped designation.
+        """
+        return self._session_id
 
     def ask_queue(self):
         return self._test_queue
@@ -394,8 +408,7 @@ def test_rebound_designation_refuses_with_zero_enqueue(tmp_path, _no_enqueue) ->
     # receiver's own session id, which is what scope_matches_runtime reads.
     runtime = _runtime(tmp_path)
     runtime.session_id = "s2"
-    stub = _StubSession(runtime, object(), config_dir=tmp_path)
-    stub.session_id = "s2"
+    stub = _StubSession(runtime, object(), config_dir=tmp_path, session_id="s2")
     Session._authorize_bridge_envelope(
         stub, stub.bridge_runtime, store, _owner(), _meta(), MESSAGE_ID, DREF, LOCAL_ROW_ID
     )

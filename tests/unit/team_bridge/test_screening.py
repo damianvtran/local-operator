@@ -83,6 +83,18 @@ def _setup(tmp_path: Path, owner: OwnerSnapshot | None = None) -> tuple[Store, O
     return store, owner
 
 
+def _claim_turn(store: Store, owner: OwnerSnapshot) -> str:
+    """A screening turn, refusing a failed claim.
+
+    ``claim_screen_turn`` returns ``str | None``, and every case below needs a
+    REAL turn — that is the thing under test. A miss must fail here, naming the
+    claim, rather than as an argument error three frames down.
+    """
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=time.time(), ttl=90)
+    assert turn is not None, "the fixture store must grant a screening turn"
+    return turn
+
+
 def _item(body: str = CANARY_BODY, message_id: str = "bmsg_1") -> dict[str, Any]:
     return {
         "message": {
@@ -1099,8 +1111,7 @@ def test_expired_turn_cannot_admit_receipt(tmp_path) -> None:
     from local_operator.team_bridge.store import StoreRefused
 
     store, owner = _setup(tmp_path)
-    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
-    assert turn is not None
+    turn = _claim_turn(store, owner)
     conn = _sqlite3.connect(state_db_path(tmp_path))
     try:
         conn.execute(
@@ -1241,7 +1252,6 @@ def test_finish_refuses_field_mutation_with_matching_revision(tmp_path) -> None:
     """
 
     import sqlite3 as _sqlite3
-    import time as _time
 
     from local_operator.team_bridge.model_boundary import AdmissionJob
     from local_operator.team_bridge.screening import _identities_digest
@@ -1256,7 +1266,7 @@ def test_finish_refuses_field_mutation_with_matching_revision(tmp_path) -> None:
         default_model="qa-default",
         revision="rev-1",
     )
-    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    turn = _claim_turn(store, owner)
     body = "b" * 64
     proof = {
         "owner": (
@@ -1276,12 +1286,12 @@ def test_finish_refuses_field_mutation_with_matching_revision(tmp_path) -> None:
         "epoch": 1,
         "message": "bmsg_1",
         "tenant": owner.tenant_id,
-        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(('qa-default',))}"),
+        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(frozenset({'qa-default'}))}"),
     }
     attempt = store.reserve_screening_attempt(
         owner,
         message_id="bmsg_1",
-        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(('qa-default',))}",
+        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(frozenset({'qa-default'}))}",
         input_proof=proof,
     )
     job = AdmissionJob(
@@ -1398,7 +1408,6 @@ def test_first_bind_refuses_zero_digest(tmp_path) -> None:
     BEFORE the bind — no row mutation, no physical charge."""
 
     import sqlite3 as _sqlite3
-    import time as _time
 
     from local_operator.team_bridge.model_boundary import AdmissionJob
     from local_operator.team_bridge.store import StoreRefused, state_db_path
@@ -1420,7 +1429,7 @@ def test_first_bind_refuses_zero_digest(tmp_path) -> None:
         default_model="qa-default",
         revision="rev-1",
     )
-    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    turn = _claim_turn(store, owner)
     attempt = store.reserve_screening_attempt(
         owner,
         message_id="bmsg_1",
@@ -1490,7 +1499,6 @@ def test_bound_registration_corruption_refused_at_reservation(tmp_path) -> None:
 
     import json as _json
     import sqlite3 as _sqlite3
-    import time as _time
 
     from local_operator.team_bridge.model_boundary import AdmissionJob
     from local_operator.team_bridge.screening import _identities_digest
@@ -1504,7 +1512,7 @@ def test_bound_registration_corruption_refused_at_reservation(tmp_path) -> None:
         default_model="qa-default",
         revision="rev-1",
     )
-    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    turn = _claim_turn(store, owner)
     body = "b" * 64
     proof = {
         "owner": (
@@ -1524,12 +1532,12 @@ def test_bound_registration_corruption_refused_at_reservation(tmp_path) -> None:
         "epoch": 1,
         "message": "bmsg_1",
         "tenant": owner.tenant_id,
-        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(('qa-default',))}"),
+        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(frozenset({'qa-default'}))}"),
     }
     attempt = store.reserve_screening_attempt(
         owner,
         message_id="bmsg_1",
-        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(('qa-default', 'qa/alias'))}",
+        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(frozenset({'qa-default', 'qa/alias'}))}",
         input_proof=proof,
     )
     job = AdmissionJob(
@@ -1585,8 +1593,6 @@ def test_alias_served_model_still_commits(tmp_path) -> None:
     approved map (a legitimate alias, not the default string) still
     commits its receipt."""
 
-    import time as _time
-
     from local_operator.team_bridge.model_boundary import AdmissionJob
     from local_operator.team_bridge.screening import _identities_digest
     from local_operator.team_bridge.types import ScreeningReceipt
@@ -1599,7 +1605,7 @@ def test_alias_served_model_still_commits(tmp_path) -> None:
         default_model="qa-default",
         revision="rev-1",
     )
-    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    turn = _claim_turn(store, owner)
     body = "b" * 64
     proof = {
         "owner": (
@@ -1619,12 +1625,14 @@ def test_alias_served_model_still_commits(tmp_path) -> None:
         "epoch": 1,
         "message": "bmsg_1",
         "tenant": owner.tenant_id,
-        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(('qa-default', 'qa/alias'))}"),
+        "logical": (
+            f"rev-1|{'e' * 64}|{_identities_digest(frozenset({'qa-default', 'qa/alias'}))}"
+        ),
     }
     attempt = store.reserve_screening_attempt(
         owner,
         message_id="bmsg_1",
-        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(('qa-default', 'qa/alias'))}",
+        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(frozenset({'qa-default', 'qa/alias'}))}",
         input_proof=proof,
     )
     job = AdmissionJob(

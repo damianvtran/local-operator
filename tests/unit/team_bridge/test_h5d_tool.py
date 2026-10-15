@@ -4,6 +4,7 @@ through the outbox, and NO decide authority."""
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import httpx
 import pytest
@@ -68,8 +69,15 @@ def _client(handler) -> TeamBridgeClient:
 
 def test_the_builder_never_advertises_without_a_runtime() -> None:
     assert build_bridge_tool(ToolContext()) is None
+    # The builder reads no client; ``BridgeRuntime`` is typed against the real
+    # one, so the stand-in is cast rather than the annotation weakened (see
+    # test_h5_remediation_doors).
     runtime = BridgeRuntime(
-        client=object(), config_dir=".", tenant_id=TENANT, owner=_owner(), session_id="s1"
+        client=cast(TeamBridgeClient, object()),
+        config_dir=".",
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="s1",
     )
     tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
     assert tool is not None and tool.name == "bridge"

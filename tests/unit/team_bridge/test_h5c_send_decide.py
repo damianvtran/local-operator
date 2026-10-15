@@ -201,8 +201,15 @@ async def test_a_decide_without_or_with_a_mismatched_receipt_never_ships() -> No
     client = _make_client(_refusal_requests(requests))
 
     with pytest.raises(ValueError):
-        # type: ignore[arg-type] — the point of the case: the server word
-        await client.decide("bmsg_1", tenant_id=TENANT, decision="approved", ask_ref=None)
+        # The point of the case: a caller with NO receipt must be refused
+        # locally, before anything ships. The fixture is deliberately the wrong
+        # shape, and the ignore sits on the argument pyright reports.
+        await client.decide(
+            "bmsg_1",
+            tenant_id=TENANT,
+            decision="approved",
+            ask_ref=None,  # pyright: ignore[reportArgumentType]
+        )
     with pytest.raises(ValueError):
         await client.decide(
             "bmsg_1",

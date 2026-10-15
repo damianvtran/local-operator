@@ -65,8 +65,11 @@ DISPLAY_FIELDS = {
     "thread_id": "t-1",
     "excerpt": "hello from the org",
 }
-ENVELOPE["display_digest"] = canonical_display_digest(DISPLAY_FIELDS)
-assert ENVELOPE["display_digest"]  # a complete projection always digests
+ENVELOPE["display_digest"] = canonical_display_digest(DISPLAY_FIELDS) or ""
+# A complete projection always digests: the empty fallback above exists only
+# because the serializer is typed ``str | None``, and this is what proves the
+# fixture is whole (an empty digest would fail every read below, confusingly).
+assert ENVELOPE["display_digest"]
 
 #: The LOCAL transcript row id: the receiver stamps the accepted peer id
 #: (``peer-<32 lowercase hex>``) — a DIFFERENT domain from the server's
@@ -139,7 +142,11 @@ def _ref(**overrides) -> SimpleNamespace:
 class _Stub(Session):
     """The refresh method bound to attrs it touches, no constructed Session."""
 
-    session_id = "s1"
+    @property
+    def session_id(self) -> str:
+        """Mirror the parent's read-only property (a class attribute would
+        replace its descriptor)."""
+        return "s1"
 
     def __init__(self, runtime, transcript_dir: Path | None = None):
         self.bridge_runtime = runtime
@@ -256,7 +263,11 @@ async def _drive(
     # supplied (S-8b) — never a fresh client scope minted at the boundary.
     for kwargs in seen:
         assert kwargs.get("access") is ACCESS
-    return reads, AskIssuance(tmp_path).read(OWNER, MESSAGE_ID)
+    # ``read`` returns ``dict | None``; the caller asserts on the row, so a miss
+    # must fail HERE (the same convention ``_read`` keeps in test_h5_issuance).
+    row = AskIssuance(tmp_path).read(OWNER, MESSAGE_ID)
+    assert row is not None
+    return reads, row
 
 
 async def test_a_fresh_pending_request_passes_with_one_bounded_read(

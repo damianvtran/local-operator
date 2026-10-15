@@ -203,6 +203,21 @@ def test_a_second_answer_names_the_surface_that_won():
     assert render.refusal_copy(record) == "already answered by desktop."
 
 
+def test_a_role_word_the_member_was_never_shown_is_not_attributed():
+    """D4 (round 14): the bridge decide door has no surface to name.
+
+    It stamps "operator" — the runtime's authority op, which the terminal, the
+    desktop app and the phone can all drive, so the door cannot honestly name
+    one of them. Every other caller passes a SURFACE, and this sentence is in
+    the user's voice: a role word would tell the member about a label they are
+    shown nowhere else, so the unattributed form is returned instead.
+    """
+    record = _record(status=store.STATUS_ANSWERED, answered_by={"surface": "operator"})
+    assert render.refusal_copy(record) == "already answered."
+    # And an id-less record keeps the same sentence it always did.
+    assert render.refusal_copy(_record(status=store.STATUS_ANSWERED)) == "already answered."
+
+
 def test_the_span_helper_reads_like_a_person_wrote_it():
     assert render._span(45) == "45s"
     assert render._span(90) == "1m"

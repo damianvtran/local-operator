@@ -187,8 +187,10 @@ def test_baseline_v5_migrates_additively_preserving_every_row(tmp_path) -> None:
 
 def test_wip_v5_with_table_and_rows_migrates_without_losing_them(tmp_path) -> None:
     store = _seed_full_store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None, "the seeded store must have an active owner"
     envelope = store.write_screened_request_delivery(
-        store.active_owner(),
+        owner,
         delivery_ref="dref_wip",
         message_id="bmsg_1",
         designated_session="s1",

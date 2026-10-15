@@ -261,6 +261,20 @@ def timeout_text(
 REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
 
 
+#: The ``by`` words that name a ROLE rather than a surface (D4, round 14).
+#:
+#: Every ordinary caller of ``AskQueue.respond``/``revise`` passes the SURFACE the
+#: human answered from ("terminal" from the TUI, "remote" from the phone), and
+#: the sentence below is in the user's voice — so naming the surface tells them
+#: where the answer came from. The bridge decide DOOR has no surface to name: it
+#: is reached over the runtime's authority op, which the terminal, the desktop
+#: app and the phone can all drive, and it stamps "operator" (`session.py`).
+#: That word appears nowhere else a member can see, so it renders as the
+#: UNATTRIBUTED form — a true sentence rather than a third-person label about a
+#: role they were never shown.
+ROLE_BY_WORDS = frozenset({"operator"})
+
+
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
 
@@ -295,7 +309,9 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         )
     if status == store.STATUS_ANSWERED:
         by = (record.get("answered_by") or {}).get("surface")
-        return f"already answered by {by}." if by else "already answered."
+        if not by or by in ROLE_BY_WORDS:
+            return "already answered."
+        return f"already answered by {by}."
     return "this ask is no longer open."
 
 

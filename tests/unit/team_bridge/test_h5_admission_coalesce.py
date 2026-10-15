@@ -161,7 +161,8 @@ async def test_admit_soon_is_bounded_and_fenced() -> None:
     await asyncio.sleep(0.05)
     assert client.calls == 1
     # A drifted runtime schedules nothing at all.
-    blocked = _runtime(_Client(_payload()))
+    blocked_client = _Client(_payload())
+    blocked = _runtime(blocked_client)
     original = fence_mod.authority_fence
     fence_mod.authority_fence = _ScriptedFence(_REFUSAL)
     try:
@@ -169,7 +170,9 @@ async def test_admit_soon_is_bounded_and_fenced() -> None:
     finally:
         fence_mod.authority_fence = original
     assert blocked._admission_task is None
-    assert blocked.client.calls == 0
+    # The claim is made on the client FAKE, which is where ``calls`` lives;
+    # ``runtime.client`` is the cast seam (see test_h5_remediation_doors).
+    assert blocked_client.calls == 0
 
 
 async def test_reads_pass_paused_and_read_only_but_mutations_refuse() -> None:

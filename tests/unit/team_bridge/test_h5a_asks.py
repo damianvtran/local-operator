@@ -10,6 +10,7 @@ projection and the fold.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -112,7 +113,11 @@ def test_the_gate_short_circuits_before_the_clearance_fork(monkeypatch) -> None:
     import asyncio
 
     outcome = asyncio.run(
-        Session._gate_ask(stub, [SimpleNamespace(secret=False, human_required=True)])
+        # ``stub`` is a SimpleNamespace standing in for the session, and the
+        # door is a static method read through the class: the cast is the
+        # boundary that keeps the fixture honest without weakening the door's
+        # own signature.
+        Session._gate_ask(cast(Session, stub), [SimpleNamespace(secret=False, human_required=True)])
     )
     assert outcome is None
     assert calls == []
