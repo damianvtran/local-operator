@@ -200,6 +200,8 @@ def receive(
     ):
         raise MemoryError("Invalid bounded memory batch lists.")
     intervals: dict[str, list[tuple[int, int]]] = {}
+    assert isinstance(operations, list) and isinstance(proofs, list)
+    assert isinstance(skips, list)
     for op in operations + proofs:
         try:
             validate_op(op, allow_redacted=True)
@@ -286,7 +288,10 @@ def make_handler(server: Any) -> Any:
                     },
                 }
             if frame.get("phase") == "push":
-                return receive(server, link.device_id, frame.get("payload"), scopes, origins)
+                payload = frame.get("payload")
+                if not isinstance(payload, dict):
+                    raise MemoryError("Invalid or oversized memory payload.")
+                return receive(server, link.device_id, payload, scopes, origins)
             raise MemoryError("Unknown memory sync phase.")
         except MemoryError as exc:
             raise MeshRefusal("bad_memory", str(exc)) from None

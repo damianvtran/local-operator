@@ -20114,7 +20114,7 @@ class OperatorApp(App[None]):
 
         session = self._session
         builder = getattr(session, "_build_tool_context", None)
-        context = builder() if callable(builder) else None
+        context: Any = builder() if callable(builder) else None
         identity = MemoryIdentity(
             context.session_id if context else str(getattr(session, "session_id", "") or ""),
             context.team_id if context else "",

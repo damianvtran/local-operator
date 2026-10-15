@@ -4,11 +4,6 @@
     "tone": "concise, neutral; explicit about trust and limitations",
     "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
   },
-  "wire.memory.command": {
-    "role": "Memory slash-command picker/help description",
-    "tone": "concise, neutral; explicit about trust and limitations",
-    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
-  },
   "wire.memory.description": {
     "role": "Memory settings section or policy row",
     "tone": "concise, neutral; explicit about trust and limitations",
@@ -73,5 +68,10 @@
     "role": "Memory settings section or policy row",
     "tone": "concise, neutral; explicit about trust and limitations",
     "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.command": {
+    "role": "Memory slash-command picker/help description",
+    "tone": "concise, neutral",
+    "note": "English-only until independently translated and audited; kept out of wire.slash so audited locales stay shipped."
   }
 }
