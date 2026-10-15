@@ -14602,16 +14602,37 @@ def main() -> int:
         # `--help` (which argparse exits from inside `parse_args`) never pay it.
         _maybe_brand_process(args)
 
-        # `lop acp` owns fd 0/1 for its JSON-RPC stream, so it is dispatched
+        # `lop acp` owns fd 0/1 for its JSON-RPC stream, so it claims them
         # BEFORE every other startup step: the login-shell PATH probe and the
-        # startup migrations below can print, and anything printed to stdout
-        # once a client is reading it corrupts the protocol (design D4).
+        # startup migrations can print, and anything printed to stdout once a
+        # client is reading it corrupts the protocol (design D4). Both still
+        # run, after the claim, in the branch below.
         if args.subcommand == "acp":
+            from local_operator.acp_agent.main import refused_flags
+
+            refused = refused_flags(args)
+            if refused:
+                # Refused rather than ignored (QA Q3): `--yolo` would read as
+                # "auto-approve" while every call still asks the client, and
+                # `--resume` would silently start a fresh session. Printed
+                # before the claim, to stderr, so stdout stays empty.
+                parser.error(
+                    f"lop acp does not take {', '.join(refused)}: the ACP client "
+                    "chooses the session and answers every approval"
+                )
             from local_operator.acp_agent.stdio import claim_stdio
 
             stdio = claim_stdio()
             # A login-shell PATH, as exec gets: the agent's tools run commands.
             setup_cross_platform_environment()
+            # The startup migrations every launch runs, now that fd 1 is stderr
+            # and they cannot touch the protocol stream (R3). "daemon" is the
+            # report-only surface: an ACP client is not a terminal anyone reads,
+            # so the seed-update arm writes nothing and announces nothing, and
+            # the next human surface applies and tells the person.
+            from local_operator.config_migrations import run_startup_migrations
+
+            run_startup_migrations(config_dir(), surface="daemon")
             from local_operator.acp_agent.main import run as run_acp
 
             return run_acp(

@@ -521,6 +521,11 @@ class SessionSpec:
             raise SessionSpecError(
                 wire_errors_sdk_spec.resume_empty().envelope(locale="en")["text"]
             )
+        if self.mcp_servers is not None and not self.mcp_servers:
+            # ``{}`` declares nothing, so it is the absent value: spawn and
+            # attach refuse a SET field, and an empty mapping must not read as
+            # one.
+            object.__setattr__(self, "mcp_servers", None)
         if self.tools is not None and not isinstance(self.tools, tuple):
             # A list is the ergonomic spelling; frozen here so the spec is
             # hashable and cannot be mutated between validation and use.

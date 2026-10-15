@@ -218,7 +218,19 @@ def mcp_server_configs(servers: Sequence[Any]) -> tuple[dict[str, dict[str, Any]
                 header.name: escape_secret_references(header.value)
                 for header in (getattr(server, "headers", None) or [])
             }
-            configs[name] = {"type": "http", "url": server.url, "headers": dict(headers)}
+            # ``preloadTools``: the client hands a server over because its
+            # tools are meant to be CALLED (the Gateway's coordination tools),
+            # and lop's MCP tools are lazy by default — hidden behind
+            # ``mcp://`` until the model reads them, which a model that has
+            # never heard of the server does not do. The existing preload path
+            # puts the server's whole inventory in the tool list, at the
+            # startup gate or when a slow connect settles.
+            configs[name] = {
+                "type": "http",
+                "url": server.url,
+                "headers": dict(headers),
+                "preloadTools": True,
+            }
         else:
             ignored.append(f"{name or '?'} ({getattr(server, 'type', None) or 'stdio'})")
     return configs, ignored

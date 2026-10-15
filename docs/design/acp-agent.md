@@ -55,8 +55,13 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
     document classifies.
   - A failed or closed client connection raises `ApprovalUnavailableError`
     ("nobody could answer"), never a silent `False` that the transcript would
-    render as "User denied". A request left unanswered for serving's
-    `PENDING_REQUEST_TIMEOUT_S` (30 s) is denied.
+    render as "User denied". So does a request left unanswered for
+    `PERMISSION_TIMEOUT_S` (120 s): unanswered is not a denial. 120 s rather
+    than serving's 30 s card timeout because the first client is a voice
+    gateway, and a spoken answer — hear the question, decide, say it —
+    routinely takes longer than 30 s. The refusal's text names the ACP client
+    as the place to answer, not `lop exec` flags (an ACP-worded subclass of the
+    error, so every call site still catches it).
   - The callback replaces the headless gate, so a saved
     `tool_approval_mode: auto` is not honoured here. That is stricter than
     exec, not weaker.
@@ -83,8 +88,13 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
   fd 1 at stderr. Without it, `bash` tool children inherit stdin (the bash tool
   sets only stdout/stderr on its child), so a `cat` would swallow protocol
   frames; and the library's stray `print()`s would corrupt the stream the client
-  reads. The CLI dispatches `acp` before its login-shell PATH probe and its
-  startup migrations, both of which can print.
+  reads. The CLI claims stdio before its login-shell PATH probe and its startup
+  migrations, both of which can print, and then runs both: the migrations on
+  the report-only `daemon` surface, so a host whose only lop surface is an ACP
+  client still gets them, and the seed-update arm writes nothing for a client
+  no one reads. Global flags `lop acp` cannot honour — `--yolo`, `--resume`,
+  `--agent`, `--train`, `--run-in` — are refused at the parse, before the claim
+  (exit 2, stdout empty), rather than silently ignored.
 
 - **D5 Transport.** `agent-client-protocol>=0.12,<0.13` as the optional extra
   `acp` (also pulled in by `dev`), imported lazily; a missing extra prints the
@@ -98,8 +108,10 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
 - **D6 Session ids.** The ACP `sessionId` is the lop `session_id`, so a later
   `session/load` can become `SessionSpec(resume=id)`. The agent keeps one entry
   per id (the session, its event mapper, one-prompt-at-a-time lock, pending
-  permission requests, a cancel flag). A second concurrent `session/prompt` on
-  the same session is refused with JSON-RPC -32600; an unknown id with -32602.
+  permission requests, the prompt in flight). A second concurrent
+  `session/prompt` on the same session is refused with JSON-RPC -32600, and so
+  is a prompt while the session runs a turn it opened by itself (D11); an
+  unknown id, a relative `cwd` or one that does not exist get -32602.
   Each session lives in its own host task, because the MCP transports it builds
   hold anyio cancel scopes that must be exited in the task that entered them.
 
@@ -107,6 +119,15 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
   `cancel_subagents(...)` — ACP asks to stop all work, and `abort` alone leaves
   children running. It also settles any pending permission request as denied.
   The prompt then answers `stopReason: "cancelled"`.
+  - **A cancel that arrives before the turn is live still cancels it.** The
+    cancel is recorded on the prompt's own token (one per `session/prompt`, never
+    reset). `Session.prompt` clears its sticky abort flag when it admits a
+    prompt — after expanding `@` references and taking the turn lock — so an
+    abort issued in that window would be wiped. The agent therefore re-issues
+    the abort on the first event it sees once `session.is_streaming` is true,
+    when the turn's signal exists. The ACP library runs every request as its
+    own task, so a prompt followed closely by a cancel (a spoken "stop") is a
+    normal sequence, not an edge case.
 
 - **D8 (revised): superseded the original accept-and-ignore after the live
   Gateway refused the backend.** The original D8 accepted `mcpServers` and
@@ -124,6 +145,19 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
     (`extra_configs=`). The manager merges them **after** the file-loaded
     configs on every load (startup, connect-by-name, reload). lop's MCP client
     connects them with its existing streamable-HTTP transport.
+  - **Their tools are loaded eagerly.** lop's MCP tools are lazy by default:
+    hidden behind `mcp://` until the model reads them, and the `<mcps>` hint
+    names at most one server. A model that has never heard of the Gateway does
+    not read its URL, so its coordination tools went unused (QA round 1, Q1).
+    Each session-only entry therefore sets the existing `preloadTools` option,
+    which puts the server's whole inventory in the tools array — at the startup
+    gate, or when a connect that outlasts the gate settles.
+  - **`session/new` waits for them, bounded** (`MCP_SETTLE_TIMEOUT_S`, 10 s).
+    The tools array is published once per turn, so a preloaded tool that lands
+    after the 250 ms gate would otherwise reach only the SECOND prompt —
+    measured on QA's repro: the first `LISTTOOLS` saw no `mcp__gw_*` tool, the
+    second did. A server slower than the bound keeps connecting (logged), and
+    the session opens anyway.
   - **A file-configured server wins a name collision.** A session-only server
     can add a name, never replace one the operator configured; the shadowed
     entry is logged.
@@ -131,8 +165,12 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
     to `$${`. lop resolves `${NAME}` in MCP headers against the operator's
     secret store, and a header the client supplied must not be able to name the
     operator's secrets and send them to the client's URL.
-  - Nothing is written to disk: no `.mcp.json`, no `mcp.json`. The servers
-    live only in that session's manager.
+  - Nothing is written to disk: no `.mcp.json`, no `mcp.json`, and no row in
+    the operator's shared tool cache (`mcp_cache.db`). The cache is keyed by
+    server name and a write first deletes that name's rows, so a session-only
+    server writing one would also evict the operator's cached tools for a
+    same-named server configured elsewhere. The servers live only in that
+    session's manager.
   - stdio (and SSE / ACP-transport) servers are still ignored in the POC, and
     their names are logged to stderr.
   - `SessionSpec.mcp_servers` is refused for a spawned SDK session
@@ -150,6 +188,34 @@ is the optional `acp` extra (`agent-client-protocol>=0.12,<0.13`).
   still isolate a test. Notifications are suppressed, because the client is the
   user interface. `--hosting` / `--model` after `acp` select the model, as for
   every subcommand.
+
+- **D11: background-opened turns stream as unsolicited `session/update`;
+  supersedes the R2 restrict option** (an exact-name allow-list would strip
+  `mcp__` tools; `AsyncJobManager` is unconditional).
+  - A lop session opens turns by itself: a background `bash` job, a subagent or
+    a video job settling while it is idle, a wake, a monitor notice, a parked
+    peer or ask delivery. Review round 1 (R2) offered two fixes: remove the
+    tools that cause them, or keep the client subscribed between prompts.
+  - Restricting is not possible with the levers that exist.
+    `SessionSpec.tools` is an exact-name allow-list (`Session._filter_declared`)
+    applied to every inventory write, including the MCP rebind, so it would
+    also strip the client's `mcp__<server>_*` tools, whose names are known only
+    after connect — undoing D8. And without `task`/`wake`/`jobs`,
+    `bash background=true` still works, because the session builds its
+    `AsyncJobManager` unconditionally; monitors and deliveries remain too.
+  - So the agent subscribes **once per session**, in `session/new`, and
+    releases the subscription when the session closes (stdin EOF). Events with
+    no prompt in flight are sent as plain `session/update`s for that session.
+    A prompt never claims them: it collects only its own turn's `agent_end`,
+    and its updates are drained before it answers, so none trails its stop
+    reason.
+  - While such a turn runs, `session/prompt` gets -32600 with a message saying
+    so, and `session/cancel` aborts it (and its subagents).
+  - A permission request with no prompt in flight goes out on the call's id if
+    the stream announced it, otherwise on a synthetic `perm-<hex>` id that is
+    opened with a `tool_call` and closed after the answer.
+  - **Caveat:** some ACP clients may ignore updates outside a prompt. The real
+    Qwen Gateway's behaviour is to be checked in QA round 2.
 
 ## Event mapping (lop event → ACP `session/update`)
 
@@ -171,14 +237,25 @@ summary and job id), and it runs after `tool_execution_start`. So a permission
 request is matched to the oldest started, unfinished, not-yet-claimed call with
 the same tool name. With no match — a subagent's call (job id set) or an
 unexpected name — it uses a synthetic `perm-<hex>` id and announces that call
-with a `tool_call` first, so the client has something to render.
+with a `tool_call` first, so the client has something to render. Once answered,
+that call is closed with a `tool_call_update`: `completed` if allowed, `failed`
+otherwise, since no `tool_execution_end` of this session will ever name it.
 
 ## Out of scope for the POC
 
 - `session/load` and history replay.
 - `configOptions` and model switching from the client.
 - stdio, SSE and ACP-transport MCP servers from `session/new` (logged and
-  ignored).
+  ignored). Deferred — stdio (QA Q2): a client-supplied command line runs in
+  the operator's account, so it needs its own approval story before lop
+  spawns it; the first client only sends HTTP.
+- Deferred — SDK parse errors (QA Q6): a non-JSON line gets no reply and an
+  ERROR with a traceback on stderr. That is the `agent-client-protocol`
+  library's own handling; the agent keeps serving, and JSON-RPC 2.0's -32700
+  reply would need a change in that library.
+- Deferred — colour codes in stderr logs (QA Q7): the yellow `Warning:` lines
+  are raw ANSI `print`s in `session_factory.py`. Stripping them under `lop acp`
+  needs a process-wide `sys.stderr` wrapper, not a one-liner.
 - **Subagents do not inherit session-only MCP servers.** The servers live in
   the parent session's manager; a delegated child builds its own and does not
   see them.

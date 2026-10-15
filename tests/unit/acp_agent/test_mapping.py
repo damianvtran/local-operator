@@ -251,6 +251,7 @@ def test_http_mcp_servers_become_lop_http_entries_and_others_are_ignored() -> No
             "type": "http",
             "url": "http://127.0.0.1:9/mcp",
             "headers": {"Authorization": "Bearer abc"},
+            "preloadTools": True,
         }
     }
     assert ignored == ["local (stdio)", "old (sse)"]

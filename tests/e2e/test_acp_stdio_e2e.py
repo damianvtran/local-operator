@@ -190,3 +190,25 @@ def test_the_child_environment_carries_no_cmux_or_lop_variables(
     env = _child_env(tmp_path)
     assert not [k for k in env if k.startswith(("CMUX_", "LOP_"))]
     assert env["HOME"] == str(tmp_path) and os.environ["HOME"] != env["HOME"]
+
+
+@pytest.mark.parametrize("flags", [["--yolo"], ["--resume", "synthetic-0000"]])
+def test_flags_acp_cannot_honour_are_refused(tmp_path: Path, flags: list[str]) -> None:
+    """QA Q3 through the real binary: refused at the parse, stdout untouched."""
+    import subprocess
+
+    home = tmp_path / "home"
+    (home / "work").mkdir(parents=True)
+    _configure(home / ".local-operator")
+    result = subprocess.run(
+        [*_lop_command(), *flags],
+        env=_child_env(home),
+        cwd=home / "work",
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=GUARD_S,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert f"lop acp does not take {flags[0]}" in result.stderr

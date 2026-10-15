@@ -13,6 +13,23 @@ from typing import Any, cast
 logger = logging.getLogger(__name__)
 
 
+#: Global flags ``lop acp`` cannot honour, as ``(namespace attribute, flag)``.
+#: The client owns what they would choose: it opens (and would resume) the
+#: session, and it answers every approval, so ``--yolo`` cannot loosen it.
+_REFUSED_FLAGS = (
+    ("yolo", "--yolo"),
+    ("resume", "--resume"),
+    ("agent_name", "--agent"),
+    ("train", "--train"),
+    ("run_in", "--run-in"),
+)
+
+
+def refused_flags(args: Any) -> list[str]:
+    """The flags on ``args`` that ``lop acp`` refuses (QA Q3), in a fixed order."""
+    return [flag for attr, flag in _REFUSED_FLAGS if getattr(args, attr, None)]
+
+
 def _missing_extra_message() -> str:
     from local_operator.optional import missing_extra_error
 
