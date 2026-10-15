@@ -29,8 +29,10 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.asks import policy, store
+from local_operator.session.session import Session
 from local_operator.tui import ask_open_policy
 from local_operator.tui.app import OperatorApp, bridge_decision_target
+from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.ask_queue import (
     DELIVERING_MARK,
     EMPTY_ALL,
@@ -50,6 +52,7 @@ from local_operator.tui.widgets.ask_queue import (
     filter_counts,
     settled_chip,
 )
+from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 pytestmark = pytest.mark.asyncio
@@ -131,10 +134,27 @@ class _RecordingSession(FakeSession):
         super().__init__()
         self.answered: list[tuple[str, dict[str, Any], str]] = []
         self.declined: list[tuple[str, str]] = []
+        #: The VERIFIED decision door's calls (U1): the owner path must reach
+        #: this one for a bridge row and ``respond_ask`` for everything else.
+        self.decided: list[tuple[str, str, str]] = []
+        #: Set to a typed refusal to pin the door's refusal carriage.
+        self.decide_refusal: dict[str, Any] | None = None
+        #: Ask ids whose CARRIAGE makes the plain door refuse, mirroring the
+        #: product's ``BRIDGE_DECISION_DOOR_REQUIRED``: ``respond_ask`` refuses
+        #: every bridge record by construction, so a fixture that accepted one
+        #: would hide U1 rather than reproduce it. A refused call records
+        #: nothing, exactly as the real door writes nothing.
+        self.bridge_ask_ids: set[str] = set()
 
     def respond_ask(self, ask_id, answers, *, by="unknown"):
+        if ask_id in self.bridge_ask_ids:
+            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
         self.answered.append((ask_id, dict(answers), by))
         return {"ok": True}
+
+    def bridge_decide(self, ask_id, question_id, word):
+        self.decided.append((ask_id, question_id, word))
+        return self.decide_refusal or {"ok": True}
 
     def decline_ask(self, ask_id, *, by="unknown"):
         self.declined.append((ask_id, by))
@@ -773,6 +793,79 @@ async def test_a_bridge_card_answer_decides_through_the_verified_door(
         assert "respond" not in record  # the ordinary door is never used for a request
         assert record["decide"] == ("b1", "bmsg_1", "approve")
         assert record["closed"] is True
+
+
+@pytest.mark.parametrize("status", ["open", "timed_out"])
+async def test_a_same_session_bridge_card_decides_through_the_owner_path(
+    enabled, isolated_index, status: str
+):
+    """U1: the request that arrives in THIS session is decidable from its card.
+
+    The card's own door (the bar, ``f4``) mounts the ask in the SESSION scope, so
+    the settle callback hands it to the owner contract. Before this fix that
+    contract sent ``respond_ask``, which refuses every bridge record by
+    construction (``BRIDGE_DECISION_DOOR_REQUIRED``) — so the ordinary carriage
+    closed its card on a warning that named that very card, and no test covered
+    it. The decision now rides the SAME verified door the fleet route calls, with
+    exactly one submission and the ordinary door untouched. The timed-out card
+    (the state the reviewer also pressed Approve on) takes the same route.
+    """
+    session = _RecordingSession()
+    session.bridge_ask_ids = {"b1"}
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_bridge_row("b1", status=status)]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["Approve"])
+        await _settle(pilot, 6)
+        assert session.decided == [("b1", "bmsg_1", "approve")]
+        assert session.answered == []  # the ordinary door is never used for a request
+        # ...and the dead-end warning the plain door answers with is gone.
+        notices = [block.text() for block in app.query(NoticeBlock)]
+        assert not any(Session.BRIDGE_DECISION_DOOR_REQUIRED in text for text in notices), notices
+
+
+async def test_an_ordinary_ask_still_answers_through_the_owner_contract(enabled, isolated_index):
+    """The other half of the row-picked door: nothing moved for ordinary asks."""
+    session = _RecordingSession()
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["yes"])
+        await _settle(pilot, 6)
+        assert session.answered == [("a1", {"q1": ["yes"]}, "terminal")]
+        assert session.decided == []
+
+
+async def test_a_refused_bridge_decision_reaches_the_surface_typed(enabled, isolated_index):
+    """The door's refusal is reported in its own words, and the ask is not lost."""
+    session = _RecordingSession()
+    session.bridge_ask_ids = {"b1"}
+    session.decide_refusal = {
+        "ok": False,
+        "code": "decision_expired",
+        "error": "that answer expired before it could be sent — please answer again",
+    }
+    app = _app(session)
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_bridge_row("b1")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["Approve"])
+        await _settle(pilot, 6)
+        assert session.decided == [("b1", "bmsg_1", "approve")]
+        assert session.answered == []
+        notices = [block.text() for block in app.query(NoticeBlock)]
+        assert any("expired before it could be sent" in text for text in notices), notices
 
 
 def test_bridge_decision_target_reads_option_ids_and_ignores_ordinary_asks() -> None:
