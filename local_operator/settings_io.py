@@ -4833,17 +4833,6 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=1440,
         help=_t(_ws.hub_check_interval_min_help()),
     ),
-    Setting(
-        key="hub.merge_model",
-        path=("hub", "merge_model"),
-        section="hub",
-        label=_t(_ws.hub_merge_model_label()),
-        kind=Kind.TEXT,
-        default="",
-        placeholder=_t(_ws.hub_merge_model_placeholder()),
-        help=_t(_ws.hub_merge_model_help()),
-        empty_unsets=True,
-    ),
     # -- agents ------------------------------------------------------------
     # The starter-update switch. A LITERAL default for the same reason the hub
     # keys are literals: this module stays off the import path of the package

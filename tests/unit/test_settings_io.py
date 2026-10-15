@@ -611,7 +611,6 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.rate": "tui/settings.py derives its defaults from this registry",
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
-    "hub.merge_model": "free text; empty means 'use the default model', no constant",
     "subagents.models.lo": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.med": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.hi": "free text; empty removes the tier; 'default' tracks it, no constant",
