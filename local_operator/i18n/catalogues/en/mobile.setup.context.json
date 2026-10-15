@@ -363,5 +363,15 @@
     "role": "Unexpected failure fallback",
     "tone": "Cautious",
     "note": "Never infer rollback or print raw exception; slash action only."
+  },
+  "mobile.setup.in_progress": {
+    "role": "Local-only setup blocker",
+    "tone": "Clear",
+    "note": "No upstream refresh or mutation from poll; explicit fresh plan/run only."
+  },
+  "mobile.setup.quote_unread": {
+    "role": "Local-only setup blocker",
+    "tone": "Clear",
+    "note": "No upstream refresh or mutation from poll; explicit fresh plan/run only."
   }
 }

@@ -417,7 +417,8 @@ alone is not an inference credential.
   `{"command": str, "url": str}` or `null`: the command that clears the
   condition, with the console URL that belongs beside it. The remedy is a
   terminal command, so the UI shows it rather than running it, and this route has
-  no write half. It is an OBJECT rather than a bare string for that reason — the
+  no poll-side write half. Explicit setup is separately gated below. It is an
+  OBJECT rather than a bare string for that reason — the
   URL travels with the command.
   **`connector.detail` names no command.** It is one surface-neutral sentence
   that this route, `lop tunnel status` and the park file all print verbatim, and
@@ -431,6 +432,71 @@ alone is not an inference credential.
 There is no SSE frame for this. It changes when a person signs in or edits the
 console, so the app polls it on open and refetches when a sign-in it started
 settles; a new frame kind would carry minutes-old news.
+
+### Explicit phone setup (`tunnel_setup: 1`)
+
+This additive capability does not change `tunnel: 1` or its health GET. Clients
+must not expose/call setup when the key is absent. It grants the same bounded
+setup authority as `lop tunnel setup apply`, not arbitrary browser-side shell
+execution. The existing desktop bearer, Origin allowlist and Sec-Fetch-Site
+checks apply unchanged; authentication/terms remain the existing human OAuth
+flow. There is no credit purchase, package/bundle build, new grant, bind change,
+revocation/re-creation of a healthy route or silent owning-account repoint.
+
+| Route | Request | Authority |
+|---|---|---|
+| GET `/v1/desktop/tunnel/setup` | optional positive `credential_id` query | Local metadata/probe only: read-only auth store, no upstream read/token refresh/store creation. `quote:null`, `verified:false`, `url:null`; cached active never means verified. |
+| POST same | `{\"action\":\"plan\",\"credential_id\":17}` | Explicit fresh account/quote/preparation observation, no setup mutation. Owner optional here for account choice, never for run. |
+| POST same | `{\"action\":\"run\",\"credential_id\":17,\"accept_monthly_price\":\"0.05\"}` | Shared forward-only runner; explicit positive integer owner required. Price optional only when activation is not required; exact fresh amount/owner are rechecked. |
+
+Bodies are strict (`extra=forbid`): IDs are not coerced from strings/bools, and
+prices are finite nonnegative decimal **strings** (max64 characters). Plan
+rejects price acceptance; run without an owner is422. Wrong/stale amount is an
+expected200 blocker (`step:quote_changed`), never a charge/setup operation.
+Do not parse human sentences to select a client action.
+
+Responses use the normal `{status,message,result}` envelope. `result` contains:
+- `step`, `blocked_on`, `configured`, `ready`, `verified`, `url`;
+- selected `credential_id`, safely masked `identity_label`,
+  `credential_choices:[{id,identity_label}]` (no token/payload);
+- `quote:null|{monthly_price_usd,positive_balance,eligible,account_valid}`;
+- `receipts:[{step,ok,text}]`, `done:[step]` and optional
+  `billing_outcome`, `reservation_outcome`, `failure_stage`, `accepted_price_usd`;
+- `remedy:null|{kind,text,command,url}`; `command` is an optional **report**, not
+  authorization for a client to execute a shell command. `kind` drives the
+  existing sign-in/account-choice/quote/prerequisite affordance;
+- `source:local|fresh`, `request_timeout_ms`, `in_progress`, `progress:[text]`,
+  `active_credential_id`. Polling exposes only fixed-copy ephemeral progress,
+  not raw provider responses or another persisted setup journal.
+
+`blocked_on` vocabulary: `none`, `login`, `choose_account`, `owner_missing`,
+`quote`, `quote_unread`, `account`, `cloudflared`, `mobile_bundle`, `supervisor`,
+`balance`, `stopped`, `verification`, `failed`, `in_progress`. Prerequisite
+remedies direct an approved normal installation/preparation step; the route
+never installs cloudflared or builds the interface silently. Only fresh active
+cloud route + actual connected producer + gateway + healthy/protected mobile
+origin gives `verified:true` and the exact URL. This is not phone-side login
+or reachability proof.
+
+One POST owns the backend slot across accounts; another POST returns409
+`setup_in_progress` while it is active. Mutation additionally uses the shared
+CLI/TUI/API in-process guard and existing nonblocking kernel claim over the
+same journal. Healthy/no-op and default observation do not create that claim.
+Interrupted creation retains its original key/payload. Request cancellation,
+including repeated cancellation, and server shutdown **drain** owned work before
+releasing the mutation lease, rather than orphaning blocking installation.
+
+Request budgets are120000ms for observation/plan and900000ms for run. These
+are conservative client budgets around existing bounded network/probe/bundle/
+supervisor calls, not a promise of native-install latency. On expiry, response
+is504 `setup_deadline` **after safe drain**; drain can exceed the nominal budget.
+Never retry speculatively as a second owner—poll local state and retry the saved
+journal after work settles. HTTP401/403/503 admission and strict422 validation
+remain unchanged. Expected business blockers are200. A safe503
+`setup_unavailable` does not imply rollback.
+
+The backend contract is additive; desktop renderer consumption/design/real-device
+acceptance is a separate slice, not established merely by advertising this key.
 
 ## Settings
 
@@ -2859,6 +2925,7 @@ something alive or ready until then.
 | `skill_catalogue` | 1 | `GET /v1/desktop/skills` with `cwd` (home when omitted) — the folder's discoverable skills with NO session, for a composer that needs them before a conversation exists — and `version`, the skill tree's identity, on every answer (sessionless and session form alike) | the composer fires no sessionless skill query and says "update the backend" instead: an older backend REQUIRES `session_id` on that route, so a sessionless call is a 422 the client cannot classify. Nothing else is gated on this key — the session arm and the session-scoped `/skills` panel keep working |
 | `radient_org` | 1 | the four organization reads on `POST /v1/desktop/radient` — `memberships.list`, `org_agents.list`, `org_teams.list`, `org_team.get` — and the frozen membership refusals they carry through under their own codes (`not_a_member`, `insufficient_role`, `team_plan_required`) | the org selector is not offered: a backend without these operations answers them with a masked 422 ("The request has invalid fields."), indistinguishable from a malformed call, so the app must not attempt them |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
+| `tunnel_setup` | 1 | local-only setup GET; explicit fresh plan/run POST with owner/quote binding | no phone-setup block and no setup calls; existing health/sign-in behavior remains |
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
 | `session_draft_warm` | 1 | `POST /v1/desktop/sessions/draft`, the `draft_id` field on `POST /v1/desktop/sessions`, and the five-door resolution of a registered draft id (`snapshot`, `history`, `watch`, `warm`, `events`) | the app never mints a draft and sends every create exactly as today (`draft_id` omitted), paying the cold engage on a new chat's first send; it must NOT gate any existing surface on this key — the warm is an optimisation on a send path that already works |
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |

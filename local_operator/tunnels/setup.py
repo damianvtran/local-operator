@@ -14,6 +14,7 @@ import asyncio
 import json
 import re
 import subprocess
+import threading
 from collections.abc import Callable
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
@@ -23,10 +24,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from local_operator import supervisors
+from local_operator.config_writer import nonblocking_file_claim
 from local_operator.i18n.keys import mobile_setup as ms
 from local_operator.i18n.text import tr
 from local_operator.mobile import install as mobile_install
 from local_operator.network.credentials.offers import mask_label
+from local_operator.owned_tasks import join_owned
 from local_operator.providers.auth_store import AuthStore, credential_identity
 from local_operator.tunnels import config, install, report
 from local_operator.tunnels.api import (
@@ -37,6 +40,45 @@ from local_operator.tunnels.api import (
 from local_operator.tunnels.service import cloudflared_binary, tunnel_path
 
 _t = tr("mobile.setup")
+
+# All in-process owners share this guard; the kernel claim below also excludes
+# a separate CLI process against the same journal. Never keyed by credential:
+# two accounts still contend for one machine's connector/configuration.
+_APPLY_GUARD = threading.Lock()
+
+
+class SetupInProgress(ValueError):
+    """Another owner still holds this machine's mutation journal."""
+
+
+async def apply(
+    selected: int | None = None,
+    accepted: str | None = None,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    plan = await observe(selected)
+    if (
+        plan["verified"]
+        or not plan["ready"]
+        or (
+            plan.get("activation_required") and not _same_price(accepted, plan["monthly_price_usd"])
+        )
+    ):
+        # Read-only/healthy cases must not create a lease file as a hidden write.
+        return await _apply(selected, accepted, progress=progress, initial_plan=plan)
+    if not _APPLY_GUARD.acquire(blocking=False):
+        raise SetupInProgress(_t(ms.in_progress()))
+    try:
+        with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
+            if not acquired:
+                raise SetupInProgress(_t(ms.in_progress()))
+            operation = asyncio.create_task(_apply(selected, accepted, progress=progress))
+            # Reobserve under the claim, and drain even a repeatedly cancelled
+            # response before its lease can be released around blocking install.
+            return await join_owned(operation)
+    finally:
+        _APPLY_GUARD.release()
 
 
 def _plan(step: str, remedy: str, **fields: Any) -> dict[str, Any]:
@@ -126,6 +168,63 @@ def _mobile_url(record: dict[str, Any]) -> str | None:
             ):
                 return "https://" + hostname
     return None
+
+
+def local_credential_choices() -> list[dict[str, Any]]:
+    """Read-only identity whitelist shared by the local poll and transport."""
+    with closing(AuthStore(read_only=True)) as store:
+        rows = [r for r in store.list_credentials("radient") if r.credential_type == "oauth"]
+    return [
+        {
+            "id": row.id,
+            "identity_label": mask_label(credential_identity(row) or "")
+            or _t(ms.identity_unavailable()),
+        }
+        for row in rows
+    ]
+
+
+async def observe_local(selected: int | None = None) -> dict[str, Any]:
+    """Poll-on-open facts without upstream reads, refreshes or store writes.
+
+    A cached active record is not a verified route. Even a connected loopback
+    probe cannot supply fresh billing/account/cloud authority to a desktop poll.
+    Metadata-only AuthStore is intentional: its constructor cannot create an
+    auth database or mutate WAL/schema while merely opening this affordance.
+    """
+    value = config.load() if (config.directory() / "config.json").exists() else {}
+    pending_path = config.directory() / "create.json"
+    pending = json.loads(pending_path.read_text()) if pending_path.exists() else {}
+    pin = value.get("credential_id") if value else pending.get("credential_id")
+    choices = local_credential_choices()
+    fields: dict[str, Any] = {
+        "configured": bool(value),
+        "credential_choices": choices,
+        "credential_id": selected if selected is not None else pin,
+    }
+    if pin is not None and selected is not None and selected != pin:
+        return _plan("owner_choice", _t(ms.owner_mismatch()), **fields)
+    requested = selected if selected is not None else pin
+    matches = [r for r in choices if requested is None or r["id"] == requested]
+    if len(matches) != 1:
+        return _plan(
+            (
+                "owner_missing"
+                if pin is not None and not matches
+                else "owner_choice" if len(matches) > 1 else "login"
+            ),
+            _t(ms.owner_missing()) if pin is not None and not matches else _t(ms.choose_login()),
+            **fields,
+        )
+    fields.update(credential_id=matches[0]["id"], identity_label=matches[0]["identity_label"])
+    if value.get("stopped"):
+        return _plan("stopped", _t(ms.stopped()), **fields)
+    if value:
+        # A poll must remain loopback-only even with malformed local config;
+        # do not interpolate an unchecked authority/userinfo string into a URL.
+        value = {**value, "gateway_port": config.port(value.get("gateway_port"))}
+        fields["connector"] = await report.connector_state(value)
+    return _plan("quote_unread", _t(ms.quote_unread()), **fields)
 
 
 async def observe(selected: int | None = None) -> dict[str, Any]:
@@ -250,17 +349,18 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
     return _plan("apply", _t(ms.apply(command=command)), ready=True, **fields)
 
 
-async def apply(
+async def _apply(
     selected: int | None = None,
     accepted: str | None = None,
     *,
     progress: Callable[[str], None] | None = None,
+    initial_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Advance forward steps, retaining each completed receipt even on failure."""
+    """Advance under an owned claim; blocked observations never take a claim."""
     from local_operator.tunnels.arguments import add_parser
     from local_operator.tunnels.cli import dispatch
 
-    plan = await observe(selected)
+    plan = initial_plan if initial_plan is not None else await observe(selected)
     if plan["verified"] or not plan["ready"]:
         return plan
     if plan.get("activation_required") and not _same_price(accepted, plan["monthly_price_usd"]):
@@ -281,6 +381,7 @@ async def apply(
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
     receipts: list[str] = []
+    receipt_steps: list[str] = []
     stage = "prerequisites"
     billing = "not_activated" if plan.get("activation_required") else "already_active"
     reservation = "existing" if plan["configured"] else "not_requested"
@@ -291,6 +392,7 @@ async def apply(
 
     def receipt(message: str) -> None:
         receipts.append(message)
+        receipt_steps.append(stage)
         if progress:
             progress(message)
 
@@ -406,6 +508,7 @@ async def apply(
     return {
         **plan,
         "receipts": receipts,
+        "receipt_steps": receipt_steps,
         "billing_outcome": billing,
         "reservation_outcome": reservation,
     }

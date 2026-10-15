@@ -588,6 +588,10 @@ def feature_flags() -> dict[str, Any]:
         # an old renderer ignores the extra fields, and bumping would
         # hide a working sign-in flow behind an update it does not need.
         "tunnel": 1,
+        # Explicit setup is a separate capability. Older renderers/backends
+        # retain health/sign-in behavior; only this key admits the new account-
+        # pinned quote/run affordance, never an automatic poll-side mutation.
+        "tunnel_setup": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md

@@ -35,6 +35,7 @@ from . import (
     wire_settings,
     wire_settings_hub_defaults,
     wire_slash,
+    wire_tunnel_setup,
 )
 
 __all__ = [
@@ -65,4 +66,5 @@ __all__ = [
     "wire_settings",
     "wire_settings_hub_defaults",
     "wire_slash",
+    "wire_tunnel_setup",
 ]
