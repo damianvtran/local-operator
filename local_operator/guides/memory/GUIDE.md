@@ -1,6 +1,6 @@
 ---
 name: memory
-description: "Remember and recall scoped files, links, contacts, names, goals and decisions across compaction; inspect, correct or forget facts with memory:// and lop memory."
+description: "Read guide://memory to save or recall goals, files, channels, threads, contacts and decisions across compaction or sessions via read/write/edit memory://."
 ---
 
 # Bounded memory
@@ -29,6 +29,18 @@ description: "Remember and recall scoped files, links, contacts, names, goals an
   secret can still be stored, journaled and synced. When unsure, keep the value in
   `lop secret` and write only its NAME (for example `uses secret GITHUB_TOKEN`).
   Scope filtering is not a filesystem sandbox.
+
+## Deliberate store and recall
+
+Use `memory(op="store", scope="session", text="Kestrel rollout ships Friday; runbook docs/kestrel.md")`
+for an atomic fact, and `memory(op="recall", scope="session", text="Kestrel rollout")` to find it.
+Choose `global` only for facts deliberately retained across sessions; `session` is the
+current conversation, not a cross-session address. The tool uses the same guard,
+quotas and provenance as the URLs below. Explicit role tool allowlists are never widened:
+if `memory` is absent, use the existing read/write/edit protocol.
+
+The human CLI verbs are `list`, `show`, `search`, `edit`, `forget`, `status` — there
+are no `lop memory remember` or `recall` CLI commands.
 
 ## Existing read/write/edit tools
 

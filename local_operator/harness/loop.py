@@ -861,7 +861,7 @@ def _tool_start_event(
     ``ToolCard.restore``), so a system-clock adjustment after the seed cannot
     move a counter that is already running.
     """
-    if tool_name in ("read", "write", "edit"):
+    if tool_name in ("read", "write", "edit", "memory"):
         from local_operator.memory_privacy import retained_arguments
 
         args, _, masked = retained_arguments(tool_name, args)

@@ -13,7 +13,7 @@ from typing import Any
 
 
 def is_memory(name: str, arguments: Any) -> bool:
-    return (
+    return name == "memory" or (
         name in ("read", "write", "edit")
         and isinstance(arguments, dict)
         and isinstance(arguments.get("path"), str)
@@ -32,7 +32,7 @@ def guard_encoded(value: Any, depth: int = 0) -> None:
     if isinstance(value, dict):
         # Same free-text fields the store applies its opaque-token rule to, so a
         # refused unnamed hex/base64 token is also redacted from the journal.
-        for key in ("title", "body", "subject", "tags", "aliases"):
+        for key in ("title", "body", "subject", "tags", "aliases", "text"):
             if key in value:
                 guard(value[key], opaque=True)
     if depth >= 4:
@@ -63,12 +63,22 @@ def retained_arguments(
         if raw is not None:
             guard_encoded(raw)
     except MemoryError:
-        path = arguments["path"]
-        try:
-            guard(path)
-        except MemoryError:
-            path = "memory://"
-        safe = {"path": path, "memory_arguments_redacted": True}
+        safe: dict[str, Any] = {"memory_arguments_redacted": True}
+        if name == "memory":
+            # Malformed calls are recognised BEFORE validators can echo values. A
+            # retained receipt may preserve only these enum-validated controls.
+            if isinstance(arguments, dict):
+                if arguments.get("op") in ("store", "recall"):
+                    safe["op"] = arguments["op"]
+                if arguments.get("scope") in ("global", "session", "team", "agent"):
+                    safe["scope"] = arguments["scope"]
+        else:
+            path = arguments["path"]
+            try:
+                guard(path)
+            except MemoryError:
+                path = "memory://"
+            safe["path"] = path
         return safe, json.dumps(safe), True
     return arguments, raw, False
 
