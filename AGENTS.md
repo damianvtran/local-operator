@@ -2920,10 +2920,13 @@ outer-tool limits were not proof a detached test/build child was capped.
 resolved ceiling before clearing env and pass `--memory-mb "$MEMORY_MB"`
 explicitly. Outside updated Toolbash set MEMORY_MB to the actual granted
 ceiling, not an assumed unlimited/default value. Positive inherited budgets
-cannot be widened/disabled by that flag. No inherited value/flag uses canonical
-auto policy; an unavailable default refuses before spawn. Explicit zero is a
-disclosed disable only without an inherited positive ceiling. Units are MiB;
-memory breach137 is distinct from timeout124. Check the stderr provenance.
+cannot be widened or disabled by that flag. With neither an inherited value nor
+an explicit flag, the runner uses canonical auto policy; an unavailable default
+refuses before spawn. Explicit zero disables protection only without an inherited
+positive ceiling. Inherited zero keeps protection off unless a positive explicit
+flag adds a ceiling. Units are MiB. Memory breach status 137 is named by the
+`MEMORY LIMIT EXCEEDED` diagnostic; timeout status is 124. Check the first
+`[run_bounded] memory budget …` stderr line for the effective ceiling and source.
 
 The bound is sampled/live-wrapper/owned-PG only: no aggregate ancestor or
 arbitrary descendant-setsid protection. Outer SIGKILL can still orphan a child;

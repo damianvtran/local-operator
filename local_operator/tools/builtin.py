@@ -4061,10 +4061,6 @@ async def execute_bash(
         temp = confinement.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
-    # Resolve BEFORE spawning: a cooperative runner can start a separate PG
-    # before this coroutine next runs, escaping our group-only accounting.
-    # Pass the SAME resolved ceiling to that runner and our own Guard below.
-    memory_budget = _configured_memory_budget(params.memory_mb)
     env = shell_env.child_environment(
         # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
         # the model's own command must not read ambient credentials out of its
@@ -4072,6 +4068,13 @@ async def execute_bash(
         shell_env.policy_for_confinement(None if confinement is None else confinement.root),
         injections=injections,
     )
+
+    # Latch/filter shell policy FIRST: ConfigManager's budget read can quarantine
+    # malformed YAML, making a later policy probe see an absent file and silently
+    # inherit credentials. This preserves the existing fail-closed first read.
+    # Still resolve BEFORE spawn: a cooperative runner can immediately start a
+    # separate PG outside our group accounting. Reuse this Budget for both guards.
+    memory_budget = _configured_memory_budget(params.memory_mb)
 
     # Resource metadata is reserved, not a credential grant: caller extras or
     # shell policy exclusion must not silently drop/widen the resolved ceiling.
