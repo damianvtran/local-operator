@@ -34,7 +34,8 @@ description: "Read guide://memory to save or recall goals, files, channels, thre
 
 Use `memory(op="store", scope="session", text="Kestrel rollout ships Friday; runbook docs/kestrel.md")`
 for an atomic fact, and `memory(op="recall", scope="session", text="Kestrel rollout")` to find it.
-Choose `global` only for facts deliberately retained across sessions; `session` is the
+Choose `global` for an explicit future-session durability request or deliberately cross-session
+user facts; never override the selected scope automatically. `session` is the
 current conversation, not a cross-session address. The tool uses the same guard,
 quotas and provenance as the URLs below. Explicit role tool allowlists are never widened:
 if `memory` is absent, use the existing read/write/edit protocol.
