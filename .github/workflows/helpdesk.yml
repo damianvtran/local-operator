@@ -826,16 +826,16 @@ jobs:
               python -m pytest -n0 -x -v -rA --basetemp "$iso/pytest" -o "cache_dir=$iso/pytest-cache" --junitxml="$RUNNER_TEMP/root-fixture-evidence/junit-$pass.xml" "${selected[@]}" \
               2>&1 | tee "$RUNNER_TEMP/root-fixture-evidence/pytest-$pass.log"
             PASS_NUMBER="$pass" python - <<'PY'
-            import json, os, xml.etree.ElementTree as ET
-            from pathlib import Path
-            evidence = Path(os.environ["RUNNER_TEMP"]) / "root-fixture-evidence"
-            number = os.environ["PASS_NUMBER"]
-            cases = list(ET.parse(evidence / f"junit-{number}.xml").iter("testcase"))
-            expected = [node.split("::", 1)[1] for node in (evidence / f"order-{number}.txt").read_text().splitlines()]
-            assert len(cases) == 7 and [case.get("name") for case in cases] == expected
-            assert not any(case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error"))
-            (evidence / f"count-{number}.json").write_text(json.dumps({"calls": 7, "failures": 0, "skips": 0, "order": expected}, indent=2) + "\n")
-            PY
+          import json, os, xml.etree.ElementTree as ET
+          from pathlib import Path
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "root-fixture-evidence"
+          number = os.environ["PASS_NUMBER"]
+          cases = list(ET.parse(evidence / f"junit-{number}.xml").iter("testcase"))
+          expected = [node.split("::", 1)[1] for node in (evidence / f"order-{number}.txt").read_text().splitlines()]
+          assert len(cases) == 7 and [case.get("name") for case in cases] == expected
+          assert not any(case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error"))
+          (evidence / f"count-{number}.json").write_text(json.dumps({"calls": 7, "failures": 0, "skips": 0, "order": expected}, indent=2) + "\n")
+          PY
           done
       - name: Retain exact-head evidence even on first failure
         if: always()
