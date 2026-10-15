@@ -28,7 +28,24 @@ resolved forms are both under the session cwd or ``~``; it is not scratch (scrat
 ``*.lock``/``*.pyc``, not under an operator ``denyPrefixes`` entry; it is not SENSITIVE
 (:mod:`~local_operator.supplements.denylist`, applied before anything is listed or sent); and
 it is not ALREADY VISIBLE -- its path appears verbatim in the answer inside a code span or a
-markdown link, which the UI keeps outside the fold.
+markdown link, which the UI keeps outside the fold. That last rule applies to tier 3 (a
+prose-only mention) and to non-deliverable kinds. A tier 1/2 DELIVERABLE the answer links is
+KEPT and flagged :attr:`Candidate.linked_in_answer`: "the turn wrote this and says so" is the
+strongest evidence there is, and the answer's link sits inside the (often folded) prose, not
+in the callout block -- dropping it made a turn that linked its own receipt show no
+Highlights at all.
+
+WHAT A SHELL COMMAND WROTE (:func:`bash_effects`). Tier 2 reads the command with its
+working directory tracked: a ``cd ~/x; cp a.jsonl b.jsonl; python3 - <<PY ... open('r.md','w')``
+names ``~/x/b.jsonl`` and ``~/x/r.md``, not session-cwd-relative strings (which stat the wrong
+file or none). Heredoc bodies are lifted out BEFORE the shell is tokenised -- a python body
+holds unbalanced quotes that made ``shlex`` raise and the whole command name nothing -- and are
+scanned for python write literals only when the heredoc feeds an interpreter (a ``cat >
+f <<EOF`` body is the FILE's text, not code). A ``cd`` whose target is not statically
+knowable (``$VAR``, ``cd -``) makes later relative names UNRESOLVABLE and they are dropped,
+never guessed against the session cwd. Files a writing call left beside its outputs under a
+variable path (``json.dump(d, open(p, 'w'))``) are found by the bounded touched-directory
+sweep (:func:`_sweep`), which is why it only runs for calls that show a write signal.
 
 PATHS ARE NEVER ABSOLUTE ON THE WAY OUT. :attr:`Candidate.path` is cwd-relative or ``~/``-
 relative so the operator's directory layout does not replicate to peers (memo S-R14);
@@ -44,7 +61,8 @@ import shlex
 import stat as stat_module
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import islice
 from typing import Final, Iterable, Sequence
 
 from local_operator.ansi import sanitize_prompt_line
@@ -92,6 +110,15 @@ _KIND_BY_EXT: Final[dict[str, str]] = {
         "code",
     ),
 }  # fmt: skip
+#: Checksum manifests (``shasum -a 256 *.csv > SHA256SUMS``) are the receipt of a delivery
+#: package. They have no extension, so ``other`` would keep them out of every deliverable
+#: rule; plain text is what they are and an icon class every surface already paints.
+#: NARROW ON PURPOSE: only manifests -- ``LICENSE``/``Makefile``/``README`` style names are
+#: ordinary extension-less files and stay ``other``.
+_CHECKSUM_NAMES: Final = frozenset(
+    {"sha256sums", "sha512sums", "sha1sums", "md5sums", "checksums", "checksums.txt"}
+)
+_CHECKSUM_SUFFIXES: Final = (".sha256", ".sha512", ".sha1", ".md5", ".sha256sum", ".md5sum")
 #: Kinds that are a PRODUCT for a reader, as opposed to source (``code``) or unknown. The
 #: no-vendor heuristic and tier 3 admit only these.
 _DELIVERABLE_KINDS: Final = frozenset(
@@ -125,6 +152,9 @@ _EVAL_WRITES: Final = re.compile(
     r"""\(\s*(?:f?r?)(?P<q>['"])(?P<path>[^'"\n]+)(?P=q)"""
     r"|\bopen\(\s*(?:f?r?)(?P<q2>['\"])(?P<path2>[^'\"\n]+)(?P=q2)\s*,\s*"
     r"""['"][wax]b?\+?['"]"""
+    # ``Path('out.md').write_text(s)`` -- the literal is the Path's argument, not write_text's.
+    r"|\bPath\(\s*(?:f?r?)(?P<q3>['\"])(?P<path3>[^'\"\n]+)(?P=q3)\s*\)"
+    r"(?:\.expanduser\(\))?\.write_(?:text|bytes)\("
 )
 #: Tier-3 prose path: ``/abs/x.pdf`` or ``~/x.csv``. No spaces, so a sentence cannot swallow
 #: its neighbour; ``(?<![\w:/.])`` rejects URLs and mid-token matches.
@@ -152,6 +182,10 @@ class Candidate:
     #: Position of the first mention in the turn (higher = later); recency tiebreak.
     order: int
     intent: str = ""
+    #: The answer's own prose links or code-spans this path. Informational: the callout is
+    #: still offered (see the module docstring); journaled additively as
+    #: ``SupplementFile.linked_in_answer`` so a surface MAY fold it against its own link.
+    linked_in_answer: bool = False
 
     @property
     def deliverable(self) -> bool:
@@ -183,57 +217,288 @@ class Prefilter:
 
 
 def kind_of(name: str) -> str:
+    base = os.path.basename(name).casefold()
+    if base in _CHECKSUM_NAMES or base.endswith(_CHECKSUM_SUFFIXES):
+        return "text"
     return _KIND_BY_EXT.get(os.path.splitext(name)[1].casefold(), "other")
 
 
 # -- harvesting --------------------------------------------------------------------------
 
 
-def _bash_outputs(command: str) -> list[str]:
-    """Output paths named by one shell command (tier 2). Tolerant: bad quoting -> none."""
+#: Heredoc operator (``<<EOF``, ``<<-'PY'``). ``(?<!<)``/``(?!<)`` keep a here-STRING (``<<<``)
+#: and a shift (``1<<3``) out; the tag must start with a letter or underscore.
+_HEREDOC: Final = re.compile(
+    r"(?<!<)<<(?!<)(?P<dash>-?)\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_]\w*)(?P=q)"
+)
+_HEREDOC_MARK: Final = "__HEREDOC_{}__"
+_HEREDOC_MARK_RE: Final = re.compile(r"^__HEREDOC_(\d+)__$")
+#: A shell word that makes a heredoc body PYTHON source (its stdin is the program).
+_PYTHON_WORD: Final = re.compile(r"^(?:python[\d.]*|pypy\d*|ipython\d*)$")
+#: The shell's separator and redirect punctuation, as ``shlex`` merges adjacent runs of it.
+_PUNCT_PIECES: Final = re.compile(r"&>>|&>|>>|>&|>|<<|<|;;|;|&&|\|\||\||&|\(|\)|\n")
+_SEPARATORS: Final = frozenset({";;", ";", "&&", "||", "|", "&", "\n"})
+_COPY_COMMANDS: Final = frozenset({"cp", "mv", "install"})
+#: A python write whose TARGET is not a string literal (``open(p, 'w')``, ``df.to_csv(path)``,
+#: ``Path(x).write_text(..)`` on a variable): the one case no literal names, so the only case
+#: the touched-directory sweep exists for. Literal targets are removed (``_EVAL_WRITES``)
+#: before this runs, and a redirect/``cp``/``tee`` destination is always named, so none of
+#: those arm the sweep -- a plain ``cd d; echo > a.txt`` must not list ``d``.
+_PY_VARIABLE_WRITE: Final = re.compile(
+    r"""\bopen\(\s*(?!f?r?['"])[^\s,)][^,)]*,\s*['"][wax]b?\+?['"]"""
+    r"""|\.to_(?:csv|excel|json|parquet|markdown|html)\(\s*(?!f?r?['"])[^\s)]"""
+    r"""|\.savefig\(\s*(?!f?r?['"])[^\s)]"""
+    r"|\bshutil\.(?:copy\w*|move)\("
+)
+_LEADING_HOME: Final = re.compile(r"^\$(?:\{HOME\}|HOME)(?=/|$)")
+
+
+@dataclass(frozen=True)
+class BashEffects:
+    """What one shell command wrote, with its ``cd`` working directory tracked.
+
+    ``outputs`` are raw path spellings, already joined against the directory the shell was
+    in at that point (``~/``-rooted, absolute or session-cwd-relative). ``sweep_dirs`` are the
+    directories the command ``cd``'d into AND wrote something in: the only places the
+    touched-directory sweep may look (see :func:`_sweep`).
+    """
+
+    outputs: tuple[str, ...] = ()
+    sweep_dirs: tuple[str, ...] = ()
+
+
+def _variable_write(code: str) -> bool:
+    """Whether python ``code`` writes through a path no literal names (arms the sweep)."""
+    return bool(_PY_VARIABLE_WRITE.search(_EVAL_WRITES.sub("", code)))
+
+
+def _lift_heredocs(command: str) -> tuple[str, list[str]]:
+    """The command with each heredoc body removed and its operator replaced by a marker.
+
+    WHY: a python heredoc is full of quotes and apostrophes that make ``shlex`` raise on the
+    whole command, which used to make ``cd d; python3 - <<PY ... open('r.md','w')`` name
+    NOTHING. Bodies are returned in operator order for :func:`bash_effects` to scan.
+    """
+    lines = command.split("\n")
+    kept: list[str] = []
+    bodies: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        operators: list[tuple[str, bool]] = []
+
+        def mark(match: "re.Match[str]") -> str:
+            operators.append((match.group("tag"), bool(match.group("dash"))))
+            return " " + _HEREDOC_MARK.format(len(bodies) + len(operators) - 1) + " "
+
+        kept.append(_HEREDOC.sub(mark, line))
+        for tag, dash in operators:
+            body: list[str] = []
+            while index < len(lines):
+                candidate = lines[index]
+                index += 1
+                if (candidate.strip() if dash else candidate.rstrip()) == tag:
+                    break
+                body.append(candidate)
+            bodies.append("\n".join(body))
+    return "\n".join(kept), bodies
+
+
+def _shell_tokens(text: str) -> list[str] | None:
+    """Words and punctuation of a (heredoc-free) shell text; ``None`` when it will not lex."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";()<>|&\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens: list[str] = []
     try:
-        tokens = shlex.split(command, comments=False, posix=True)
+        for token in lexer:
+            if token and all(char in ";()<>|&\n" for char in token):
+                tokens.extend(_PUNCT_PIECES.findall(token))
+            else:
+                tokens.append(token)
     except ValueError:
-        return []
-    found: list[str] = []
-    for index, token in enumerate(tokens):
-        following = tokens[index + 1] if index + 1 < len(tokens) else ""
-        if token in _OUTPUT_FLAGS or token in _REDIRECT_TOKENS or token == "tee":
-            found.append(following)
-        elif token.startswith("--output=") or token.startswith("--out="):
-            found.append(token.split("=", 1)[1])
-        elif token == "-a" and index and tokens[index - 1] == "tee":
-            found.append(following)
+        return None
+    return tokens
+
+
+def _in_dir(raw: str, cwd: str | None) -> str | None:
+    """``raw`` joined onto the shell's directory, or ``None`` when that is unknowable.
+
+    ``cwd`` is ``""`` before any ``cd`` (names stay session-cwd-relative), a path after one,
+    and ``None`` after a ``cd`` whose target the harness cannot know statically: a relative
+    name is then DROPPED, never guessed against the session cwd (the wrong file, or none).
+    """
+    raw = _LEADING_HOME.sub("~", raw)
+    if raw.startswith(("~", "/")):
+        return raw
+    if cwd is None:
+        return None
+    return os.path.normpath(os.path.join(cwd, raw)) if cwd else raw
+
+
+def bash_effects(command: str) -> BashEffects:
+    """Output paths named by one shell command (tier 2), ``cd``-aware. Tolerant: bad lexing -> none.
+
+    Walks the command statement by statement tracking the working directory (``cd a && cmd``,
+    ``cd a; cmd``, ``( cd a; cmd )``), and finds: output flags (``-o``/``--output``),
+    redirects, ``tee [-a]``, the destination of ``cp``/``mv``/``install`` (plus
+    ``dest/<source name>`` for a directory destination) and the python write literals of a
+    heredoc that feeds an interpreter. Anything with a ``$`` or a glob is dropped: it names no
+    single file.
+    """
+    text, bodies = _lift_heredocs(command)
+    tokens = _shell_tokens(text)
+    if tokens is None:
+        return BashEffects()
+    outputs: list[str] = []
+    sweep_dirs: list[str] = []
+    cwd: str | None = ""
+    stack: list[str | None] = []
+    segment: list[str] = []
+
+    def emit(raw: str, found: list[str]) -> None:
+        if raw and not raw.startswith(("-", "&", "/dev/")) and "$" not in raw and "*" not in raw:
+            joined = _in_dir(raw, cwd)
+            if joined:
+                found.append(joined)
+
+    def flush() -> None:
+        nonlocal cwd
+        words, segment[:] = list(segment), []
+        while words and "=" in words[0] and not words[0].startswith(("=", "-")):
+            words.pop(0)  # ``FOO=bar cmd``
+        if not words:
+            return
+        if words[0] == "cd":
+            target = next((w for w in words[1:] if w != "--" and not w.startswith("-")), "~")
+            target = _LEADING_HOME.sub("~", target)
+            if "$" in target or "*" in target or target == "-" or "`" in target:
+                cwd = None
+            elif target.startswith(("~", "/")):
+                cwd = os.path.normpath(target) if target != "~" else "~"
+            else:
+                cwd = None if cwd is None else os.path.normpath(os.path.join(cwd, target))
+            return
+        found: list[str] = []
+        operands: list[str] = []
+        redirected = False
+        for index, word in enumerate(words):
+            following = words[index + 1] if index + 1 < len(words) else ""
+            if redirected:
+                redirected = False
+                continue
+            if word in _REDIRECT_TOKENS:
+                emit(following, found)
+                redirected = True
+                if operands and operands[-1].isdigit():
+                    operands.pop()  # ``2>err.txt``: the lexer split the fd off the operator
+            elif word in _OUTPUT_FLAGS:
+                emit(following, found)
+            elif word.startswith(("--output=", "--out=")):
+                emit(word.split("=", 1)[1], found)
+            elif _REDIRECT_ATTACHED.match(word):
+                attached = _REDIRECT_ATTACHED.match(word)
+                emit(attached.group("path") if attached else "", found)
+            elif word in _HEREDOC_OPERANDS or word.startswith(("<", ">")):
+                # ``2>&1`` / ``<in`` / ``<<MARK``: the word after is a descriptor, an INPUT or
+                # a heredoc marker, never an output; the digit before ``>&`` is its fd.
+                redirected = True
+                if word == ">&" and operands and operands[-1].isdigit():
+                    operands.pop()
+                continue
+            elif not word.startswith("-") and not _HEREDOC_MARK_RE.match(word):
+                operands.append(word)
+        command_word = os.path.basename(words[0])
+        if command_word == "tee":
+            for word in operands[1:]:
+                emit(word, found)
+        elif command_word in _COPY_COMMANDS and len(operands) >= 3:
+            destination = operands[-1]
+            if not destination.endswith("/"):  # a directory is not itself an output
+                emit(destination, found)
+            for source in operands[1:-1]:
+                if "*" not in source and "$" not in source:
+                    emit(destination.rstrip("/") + "/" + os.path.basename(source), found)
+        unnamed_write = False
+        if any(_PYTHON_WORD.match(os.path.basename(w)) for w in words):
+            for index, word in enumerate(words[:-1]):
+                if word == "-c":  # ``python3 -c "open('r.md','w')..."``: the code is one word
+                    literals = _eval_outputs(words[index + 1])
+                    for raw in literals:
+                        emit(raw, found)
+                    unnamed_write = unnamed_write or _variable_write(words[index + 1])
+            for word in words:
+                mark = _HEREDOC_MARK_RE.match(word)
+                if mark and int(mark.group(1)) < len(bodies):
+                    body = bodies[int(mark.group(1))]
+                    literals = _eval_outputs(body)
+                    for raw in literals:
+                        emit(raw, found)
+                    unnamed_write = unnamed_write or _variable_write(body)
+        outputs.extend(found)
+        if unnamed_write and cwd:
+            sweep_dirs.append(cwd)
+
+    for token in tokens:
+        if token in _SEPARATORS:
+            flush()
+        elif token == "(":
+            flush()
+            stack.append(cwd)
+        elif token == ")":
+            flush()
+            if stack:
+                cwd = stack.pop()
         else:
-            attached = _REDIRECT_ATTACHED.match(token)
-            if attached:
-                found.append(attached.group("path"))
-    return [
-        item
-        for item in found
-        if item and not item.startswith(("-", "&", "/dev/")) and "$" not in item and "*" not in item
-    ]
+            segment.append(token)
+    flush()
+    return BashEffects(tuple(dict.fromkeys(outputs)), tuple(dict.fromkeys(sweep_dirs)))
+
+
+#: ``<`` / ``<<`` tokens and the word after a redirect that is an INPUT, never an output.
+_HEREDOC_OPERANDS: Final = frozenset({"<", "<<", "<<-", ">&"})
+
+
+def _bash_outputs(command: str) -> list[str]:
+    """Output paths named by one shell command (tier 2); see :func:`bash_effects`.
+
+    Kept under its old name because ``session_files.scan`` imports it: one parser for "what
+    did this command write", so the Files inventory gains the ``cd`` tracking too.
+    """
+    return list(bash_effects(command).outputs)
 
 
 def _eval_outputs(code: str) -> list[str]:
     found: list[str] = []
     for match in _EVAL_WRITES.finditer(code):
-        item = match.group("path") or match.group("path2")
+        item = match.group("path") or match.group("path2") or match.group("path3")
         if item and "{" not in item:
             found.append(item)
     return found
 
 
-def _harvest(
-    items: Sequence[TurnItem],
-) -> list[tuple[str, int, str, str, int]]:
-    """``(raw path, tier, tool, intent, order)`` for every door-1 and door-2 mention.
+@dataclass(frozen=True)
+class Mention:
+    """One door-1/2/3 mention of a path, before it is admitted as a :class:`Candidate`."""
+
+    raw: str
+    tier: int
+    tool: str
+    intent: str
+    order: int
+
+
+def _harvest(items: Sequence[TurnItem]) -> tuple[list[Mention], list[tuple[str, str, int]]]:
+    """Every door-1 and door-2 mention, plus the ``(dir, intent, order)`` sweep candidates.
 
     A call whose tool RESULT errored wrote nothing, so it is not evidence: results are
     matched back to calls by ``tool_call_id``.
     """
     failed = {item.tool_call_id for item in items if item.role == "tool" and item.is_error}
-    harvested: list[tuple[str, int, str, str, int]] = []
+    harvested: list[Mention] = []
+    sweep: list[tuple[str, str, int]] = []
     order = 0
     for item in items:
         if item.role != "assistant":
@@ -243,26 +508,67 @@ def _harvest(
             if call.id in failed:
                 continue
             intent = sanitize_prompt_line(call.args.get("i", ""), limit=_INTENT_MAX_CHARS)
-            harvested.extend(_from_call(call, intent, order))
-    return harvested
+            if call.name == "bash":
+                effects = bash_effects(call.args.get("command", ""))
+                harvested.extend(
+                    Mention(p, TIER_COMMAND, "bash", intent, order) for p in effects.outputs
+                )
+                sweep.extend((d, intent, order) for d in effects.sweep_dirs)
+            else:
+                harvested.extend(_from_call(call, intent, order))
+    return harvested, sweep
 
 
-def _from_call(
-    call: ToolCallItem, intent: str, order: int
-) -> Iterable[tuple[str, int, str, str, int]]:
+def _from_call(call: ToolCallItem, intent: str, order: int) -> Iterable[Mention]:
     if call.name == "write" or (
         call.name == "edit"
         and kind_of(call.args.get("path", "")) in {"markdown", "text", "html", "document", "pdf"}
     ):
         path = call.args.get("path", "")
         if path:
-            yield (path, TIER_WRITE, call.name, intent, order)
-    elif call.name == "bash":
-        for path in _bash_outputs(call.args.get("command", "")):
-            yield (path, TIER_COMMAND, "bash", intent, order)
+            yield Mention(path, TIER_WRITE, call.name, intent, order)
     elif call.name == "eval":
         for path in _eval_outputs(call.args.get("code", "")):
-            yield (path, TIER_COMMAND, "eval", intent, order)
+            yield Mention(path, TIER_COMMAND, "eval", intent, order)
+
+
+#: Touched-directory sweep bounds. The sweep exists for the write a command makes through a
+#: VARIABLE path (``p = ...; json.dump(d, open(p, 'w'))``) or a glob-fed tool
+#: (``shasum *.csv > SHA256SUMS`` is a redirect and is named, but its sibling outputs are
+#: not), where no literal names the file. It lists only a directory the command ``cd``'d into
+#: and wrote in, one level, at most this many entries, and keeps at most this many files.
+SWEEP_MAX_ENTRIES: Final = 200
+SWEEP_MAX_FILES: Final = 8
+#: A file counts as touched this turn if its mtime is within this slack of the turn start
+#: (coarse filesystem timestamps; a clock read a hair after the first write).
+SWEEP_SLACK_S: Final = 2.0
+
+
+def _sweep(directory: str, since: float) -> list[str]:
+    """Regular, visible files of a deliverable kind in ``directory`` modified since ``since``.
+
+    Non-recursive and bounded (:data:`SWEEP_MAX_ENTRIES` entries read). Dotfiles are skipped
+    outright (``.env`` and friends never need the denylist to catch them); extension-less names
+    qualify only as checksum manifests (:func:`kind_of`). Returns names, newest first.
+    """
+    found: list[tuple[float, str]] = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in islice(entries, SWEEP_MAX_ENTRIES):
+                if entry.name.startswith(".") or kind_of(entry.name) not in _DELIVERABLE_KINDS:
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    modified = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if modified >= since - SWEEP_SLACK_S:
+                    found.append((modified, entry.name))
+    except OSError:
+        return []
+    found.sort(reverse=True)
+    return [name for _modified, name in found[:SWEEP_MAX_FILES]]
 
 
 def _spellings(raw: str, absolute: str, display: str, home: str) -> set[str]:
@@ -363,6 +669,18 @@ def _normalise_deny(prefixes: Iterable[str], cwd: str) -> list[str]:
     return roots
 
 
+def _expand_home(raw: str, home: str) -> str:
+    """``~``/``~/x`` against the pre-filter's ``home`` (not the process's), like
+    ``session_files.scan.resolve_path``: one pinned home for every path in a pass. In
+    production the two are the same directory; a test or a reader that pins ``home`` gets
+    the file it meant. ``~user`` forms are left to ``expanduser``."""
+    if raw == "~":
+        return home
+    if raw.startswith("~/"):
+        return os.path.join(home, raw[2:])
+    return os.path.expanduser(raw)
+
+
 def _display_path(absolute: str, cwd: str, home: str) -> str:
     """cwd-relative if under cwd, else ``~/``-relative; never absolute (memo S-R14)."""
     if _under(absolute, cwd):
@@ -379,6 +697,7 @@ def prefilter(
     home: str | None = None,
     want_files: bool = True,
     want_graphics: bool = True,
+    since: float = 0.0,
 ) -> Prefilter:
     """Run the whole deterministic pre-filter over the logical turn.
 
@@ -386,6 +705,11 @@ def prefilter(
     contributes nothing, and the gate (``candidates == [] and not structured``) is evaluated
     over what is left, so ``files: false`` plus a table in the answer still stops when
     ``graphics`` is also off.
+
+    ``since`` is the logical turn's start (epoch seconds) and arms the touched-directory
+    sweep (:func:`_sweep`). ``0`` -- the default, and what a provenance that never recorded
+    a start carries -- DISABLES the sweep: without a start every file in the directory would
+    look "written this turn", which is the over-matching failure, so absent means off.
     """
     started = time.perf_counter()
     home = os.path.abspath(home or os.path.expanduser("~"))
@@ -419,21 +743,40 @@ def prefilter(
                         prepared_content[identity] = (absolute, call.prepared_html)
     prepared: list[tuple[Candidate, str]] = []
     if want_files or prepared_content:
-        mentions = _harvest(items)
-        # Links participate in admission too, but remain deduped below when already
-        # visible. Metadata discovery must never turn read source files into products.
+        mentions, sweep_dirs = _harvest(items)
+        if since > 0:
+            for directory, intent, order in sweep_dirs:
+                base = _expand_home(directory, home) if directory else cwd
+                base = os.path.normpath(base if os.path.isabs(base) else os.path.join(cwd, base))
+                if not (_under_any(base, cwd_roots) or _under_any(base, home_roots)):
+                    reject("outside-roots")
+                    continue
+                mentions.extend(
+                    Mention(os.path.join(base, name), TIER_COMMAND, "bash", intent, order)
+                    for name in _sweep(base, since)
+                )
+        # Links participate in admission too; a tier-3 mention of a file the answer already
+        # shows is deduped below, a tier-1/2 deliverable is kept and flagged. Metadata
+        # discovery must never turn read source files into products.
         for match in _MD_LINK.finditer(answer_text):
             target = match.group("target")
             if kind_of(target) in _DELIVERABLE_KINDS and ":" not in target:
-                mentions.append((target, TIER_PROSE, "answer", "", 10_000))
+                mentions.append(Mention(target, TIER_PROSE, "answer", "", 10_000))
         for match in _PROSE_PATH.finditer(answer_text):
             if kind_of(match.group("path")) in _DELIVERABLE_KINDS:
-                mentions.append((match.group("path"), TIER_PROSE, "answer", "", 10_000))
+                mentions.append(Mention(match.group("path"), TIER_PROSE, "answer", "", 10_000))
         visible = _answer_spans(answer_text)
-        for raw, tier, tool, intent, order in mentions[: MAX_CONSIDERED * 4]:
+        for mention in mentions[: MAX_CONSIDERED * 4]:
+            raw, tier, tool, intent, order = (
+                mention.raw,
+                mention.tier,
+                mention.tool,
+                mention.intent,
+                mention.order,
+            )
             if len(candidates) >= MAX_CONSIDERED:
                 break
-            expanded = os.path.expanduser(raw.strip())
+            expanded = _expand_home(raw.strip(), home)
             if not expanded:
                 continue
             absolute = os.path.normpath(
@@ -464,25 +807,38 @@ def prefilter(
                 continue
             display = _display_path(absolute, cwd, home)
             captured = prepared_content.get(os.path.realpath(absolute))
-            if (captured is None or captured[0] != absolute) and not _spellings(
-                raw.strip(), absolute, display, home
-            ).isdisjoint(visible):
-                reject("already-visible")
-                continue
             held = candidates.get(absolute)
+            kind = kind_of(absolute)
+            # Linked in the answer: its path in a code span / link, in any spelling, or --
+            # for the flag only -- its bare base name (``RUN-RECORD.md`` in backticks beside
+            # ``in ~/workspace/x/``). The base-name form never DEDUPS: two files can share a name.
+            linked = not _spellings(raw.strip(), absolute, display, home).isdisjoint(visible)
+            linked_name = linked or os.path.basename(absolute) in visible
+            if (captured is None or captured[0] != absolute) and linked:
+                # Dedup stays for what the turn only MENTIONED (tier 3) and for non-deliverable
+                # kinds (a linked script). A tier 1/2 deliverable is kept, flagged below.
+                if held is not None and held.tier <= TIER_COMMAND:
+                    candidates[absolute] = replace(held, linked_in_answer=True)
+                    continue
+                if tier == TIER_PROSE or kind not in _DELIVERABLE_KINDS:
+                    reject("already-visible")
+                    continue
             if held is not None and (held.tier, -held.order) <= (tier, -order):
+                if linked_name and not held.linked_in_answer:
+                    candidates[absolute] = replace(held, linked_in_answer=True)
                 continue
             candidates[absolute] = Candidate(
                 path=display,
                 absolute=absolute,
                 name=os.path.basename(absolute),
-                kind=kind_of(absolute),
+                kind=kind,
                 size_bytes=int(info.st_size),
                 mtime=float(info.st_mtime),
                 tier=tier,
                 tool=tool,
                 order=order,
                 intent=intent,
+                linked_in_answer=linked_name or (held is not None and held.linked_in_answer),
             )
     prepared = [
         (candidate, captured[1])

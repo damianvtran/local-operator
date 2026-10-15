@@ -95,10 +95,9 @@ SeamResolver = Callable[[], Any]
 
 #: Whether a generator exists to hand a graphics "yes" to. TRUE since lane C1b: the fork in
 #: ``supplements/generator.py`` runs the errand, so a graphics question the decision answers
-#: "yes" now has something to act on. ``supplements.graphics`` is still OFF by default (memo
-#: §6: the flip ships in the window that carries the first renderer), so an operator who has
-#: not opted in sees no change at all -- and one who has gets the ROWS and the spend, not a
-#: picture, until a surface lane lands.
+#: "yes" now has something to act on. ``supplements.graphics`` is ON by default (memo
+#: §6's flip; see ``policy.DEFAULT_GRAPHICS`` for what bounds the spend). A surface that cannot
+#: render components (the TUI, the phone) still gets the ROWS and the spend but not a picture.
 GENERATOR_AVAILABLE: Final = True
 
 #: How many settled jobs keep their inputs for a later ``restart``/``steer`` (§2.7: both are
@@ -534,6 +533,7 @@ class SupplementRunner:
             deny_prefixes=settings.deny_prefixes,
             want_files=want_files,
             want_graphics=want_graphics,
+            since=float(getattr(provenance, "started_at", 0.0) or 0.0),
         )
         logger.debug(
             "supplements: prefilter candidates=%d structured=%s skipped=%s rejected=%s "
