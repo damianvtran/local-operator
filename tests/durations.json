@@ -80,6 +80,7 @@
   "tests/unit/evaluation/adapters/osworld/test_guest_argv_exposure.py": 1.0,
   "tests/unit/evaluation/adapters/osworld/test_guest_deadline.py": 2.527,
   "tests/unit/evaluation/adapters/osworld/test_guest_disk.py": 1.0,
+  "tests/unit/evaluation/adapters/osworld/test_guest_loss.py": 4.298,
   "tests/unit/evaluation/adapters/osworld/test_observation.py": 2.609,
   "tests/unit/evaluation/adapters/osworld/test_paste.py": 1.0,
   "tests/unit/evaluation/adapters/osworld/test_provisioning.py": 1.0,
