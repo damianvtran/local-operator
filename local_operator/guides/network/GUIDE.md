@@ -835,6 +835,24 @@ the pushed bundles declare it (`ref:<NAME>`); otherwise the pairing screens' sha
 add, so a `not offered` secret reaches a device by being marked `sync` before the
 approval, or by `credential share` after it.
 
+A standing permission to borrow your FUTURE sign-ins is authored, not assumed. For ONE
+native OAuth provider and ONE account (never a copy of the login, never GitHub, MCP,
+device-bound or static-key credentials): `lop network credential inherit <provider> --to
+<device> [--account A] [--org O] --request-approval` files the card (an agent may do
+this; it can never approve), the operator answers it with `lop network approvals approve
+<id>` in a terminal — the account, recipient, key fingerprint and duration are printed
+BEFORE the signature — and `... --approval <id>` records it. The permission lasts UNTIL
+REVOKED (`credential revoke <provider> --from <device>`); the one-hour figure on the card
+is only how long the request stays answerable. It needs `broker_credential` on both member
+rows and does not grant it: a missing one is refused with the exact `member grant` remedy
+and nothing is changed. `... --status` reports PERMISSION from this device's disk
+(`no-consent`, `awaiting-approval`, `approved-not-applied`, `ready`, `notready:<why>`,
+`withdrawn`, `not-applicable`), never whether the recipient holds a working login now;
+with no permission, read-only offload still works and only work that needs that login
+fails with an authentication gap. A signed-in different account is `notready:scope_mismatch`
+until the approved account signs in again. The desktop app cannot yet state what this
+signs, so it refuses to approve it and names the terminal command; deny stays available.
+
 Un-approving a device (`lop network member rm`) and `credential revoke` each END the
 copies they can reach: a reachable device deletes its copy and confirms, and the
 receipt says so; a device that is unreachable at that instant keeps its copy — and
