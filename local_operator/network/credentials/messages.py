@@ -229,6 +229,13 @@ def render_broker_error(
             f"provider and cannot be revived by retrying. Re-run '{login}' on {owner}. "
             "Nothing is disabled on either device."
         )
+    if error.code == "consent_unverifiable":
+        return (
+            f"{owner} could not read the approval or login state it needs to lend '{label}' "
+            "to this device just now. This is usually momentary and is retried "
+            f"automatically; if it persists, check {owner}'s credential files "
+            "(auth.db and the network credentials directory) are readable."
+        )
     if error.code in ("scope_mismatch", "scope_unknown", "consent_withdrawn"):
         # THE OWNER-SIDE REMEDY, named on the owner: this device cannot fix any of the
         # three (the approval and the login both live there). They differ in what to do.

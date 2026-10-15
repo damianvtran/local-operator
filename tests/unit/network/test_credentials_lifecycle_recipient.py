@@ -433,6 +433,7 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "session-mobility-v1": "net_session_move",
         "credential-broker-v1": "net_broker",
         wire.CREDENTIAL_LIFECYCLE_V1: "net_broker",
+        wire.CREDENTIAL_PLACEMENT_PUSH_V1: "net_broker",
         "peer-readiness-v1": "net_readiness",
         "mcp-defs-v1": "net_mcp_defs",
         "mesh-update-v1": "net_update",

@@ -1192,13 +1192,11 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
     """
     from local_operator.network import definitions
     from local_operator.network.credentials import reconcile
-    from local_operator.network.credentials import sync as sync_mod
-    from local_operator.network.credentials.types import validate_lifecycle_frame
 
     # Project a signed future-login approval into holders BEFORE the capability gate:
     # it is local, metadata-only and writes no capability. Whether the holders can then
-    # be DELIVERED is decided by the same gates below, and a missing capability is a
-    # named ``notready:`` status in ``reconcile`` — never a grant.
+    # be DELIVERED is decided by the gates below, and a missing capability is a named
+    # ``notready:`` status in ``reconcile`` — never a grant.
     try:
         reconcile.project_for(step_server, device_id)
     except Exception:  # noqa: BLE001 — a reconcile fault must not stop announcements
@@ -1209,12 +1207,31 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
     link = step_server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
     if link is None:
         return "unreachable"
-    if not negotiated(link):
-        return "skipped:peer_lacks_lifecycle"
+    # The push is gated on ITS OWN negotiated capability (inside ``deliver``), not on the
+    # lifecycle one: a peer that has only the lifecycle string has no push handler. It runs
+    # BEFORE the lifecycle gate so a peer lacking both is still reported, and its outcome
+    # is part of this step's return so a stuck delivery is never discarded.
     try:
-        reconcile.deliver(step_server, link, device_id, getattr(link, "link_id", None) or id(link))
+        pushed = reconcile.deliver(
+            step_server, link, device_id, getattr(link, "link_id", None) or id(link)
+        )
     except Exception:  # noqa: BLE001 — delivery is retried on the next tick
         logger.debug("credential reconcile: delivery failed", exc_info=True)
+        pushed = "failed"
+    outcome = _announce_over(step_server, device_id, link)
+    if pushed.startswith(("skipped", "refused", "failed")):
+        return f"{outcome}+push:{pushed}"
+    return outcome
+
+
+def _announce_over(step_server: Any, device_id: str, link: Any) -> str | None:
+    """The lifecycle announcement itself, over an already dialled ``link`` (see
+    :func:`lifecycle_tick_step`, which owns the doc and the gates before this point)."""
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import validate_lifecycle_frame
+
+    if not negotiated(link):
+        return "skipped:peer_lacks_lifecycle"
     # Ack evidence belongs to this authenticated connection; a recipient restart
     # loses process receipts even while its persisted counters remain unchanged.
     links = getattr(step_server, "_lifecycle_links", None)
