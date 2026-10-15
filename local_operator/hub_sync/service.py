@@ -426,6 +426,11 @@ def resolve_source(
     bytes are left untouched -- this route can never silently relink an artifact
     or invent a ``link_id``. The real ``link_id`` comes only from the canonical
     identity tuple (``LinkIdentity.link_id``).
+
+    A record a real pull/merge already wrote keeps its trusted facts: this arm
+    only ADDS the identity and scope. Ownership, lineage, the remote revision
+    and the outbound receipt survive; the unknown marker itself stays unknown,
+    because a resolve is not an integration.
     """
     from local_operator.agents import hub_origin
 
@@ -461,6 +466,26 @@ def resolve_source(
         existing.identity.require_same_origin(identity)
     record = prov.make_record(kind, local_id, hub_id, tenant_id, fields, "adopt-unknown")
     record = replace(record, identity=identity, scope_known=True, lineage="unknown")
+    if (
+        existing is not None
+        and existing.recorded_by != prov.UNKNOWN_BASELINE
+        and existing.hub_id == hub_id
+    ):
+        # A genuine integration already wrote trusted facts. Resolving CONFIRMS
+        # source+scope and adds the identity; it must not downgrade ownership,
+        # lineage, revision or the outbound receipt to the unknown marker.
+        # Observed on the real pass: a pulled team resolved here, after which
+        # the check classified from an unknown base and refused every removal
+        # as needs-review -- "the baseline is unknown". Only a record a real
+        # pull/merge wrote qualifies; the unknown marker itself stays unknown
+        # (a resolve is not an integration, so it cannot vouch for absence).
+        record = replace(
+            record,
+            recorded_by=existing.recorded_by,
+            lineage=existing.lineage,
+            remote_revision=existing.remote_revision,
+            outbound=existing.outbound,
+        )
     prov.write_baseline(ctx.config_dir, record)
     return record
 

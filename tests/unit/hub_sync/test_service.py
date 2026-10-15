@@ -656,6 +656,82 @@ def test_resolve_source_materializes_identity_and_preserves_scope(env) -> None:
     assert (root / "hub" / "baselines" / f"agent-{stamped.id}.json").read_bytes() == before
 
 
+def test_resolve_source_keeps_a_genuine_pulls_provenance(env) -> None:
+    """F2: pull then resolve must ADD identity, never downgrade a trusted baseline.
+
+    Observed on the real acceptance pass: the team's pull recorded a trusted
+    baseline (``recorded_by=pull``); the CLI's resolve then overwrote it with the
+    unknown marker, and the next tick refused the merge with "the baseline is
+    unknown". The check trusts the recorded base exactly when ``recorded_by`` is
+    not the unknown marker (``known = record.recorded_by != UNKNOWN_BASELINE``),
+    so the downgrade silently discarded a perfectly good merge base.
+    """
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    before = prov.read_baseline(root, "team", team.id)
+    assert before is not None and before.recorded_by == "pull"
+
+    svc.resolve_source(
+        ctx,
+        kind="team",
+        name=team.name,
+        hub_source="https://hub.test/v1",
+        visibility="org",
+        tenant_id="org-1",
+    )
+
+    after = prov.read_baseline(root, "team", team.id)
+    assert after is not None and after.identity is not None
+    assert after.recorded_by == "pull"  # was adopt-unknown: the F2 downgrade
+    assert after.recorded_by != prov.UNKNOWN_BASELINE
+    assert after.remote_revision == before.remote_revision
+    assert after.scope_known is True  # the resolve still confirms source+scope
+
+    # The real consequence: a remote-only edit now merges unattended from the
+    # pull-time base instead of refusing "baseline is unknown".
+    hub.teams["ht1"] = {**hub.teams["ht1"], "instructions": "## Brief\nShip it safely."}
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+    assert report.reports and report.reports[0].applied, report
+
+
+def test_resolve_source_never_vouches_an_unknown_legacy_baseline(env) -> None:
+    """The anti-laundering half: a legacy record stays unknown after resolve.
+
+    Resolving confirms SOURCE+SCOPE; it is not an integration. A record no real
+    pull/merge wrote keeps the unknown marker, so the check keeps refusing to
+    diff against it -- resolve must not convert absence of evidence into a
+    trusted baseline.
+    """
+
+    ctx, hub, agents, _t, root = env
+    stamped = _pull_agent(agents, hub, root)
+    record = prov.read_baseline(root, "agent", stamped.id)
+    assert record is not None
+    prov.write_baseline(
+        root,
+        dataclasses.replace(
+            record, identity=None, recorded_by=prov.UNKNOWN_BASELINE, scope_known=True
+        ),
+    )
+
+    resolved = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=stamped.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    assert resolved.identity is not None
+
+    after = prov.read_baseline(root, "agent", stamped.id)
+    assert after is not None
+    assert after.recorded_by == prov.UNKNOWN_BASELINE  # still conservative
+    assert after.lineage != "clean"
+    assert after.remote_revision is None
+
+
 def test_resolve_source_refuses_unlinked_item(env) -> None:
     ctx, hub, agents, teams, root = env
     row = agents.create_agent(_fields(name="local-only", description="d", tags=["role"]))
@@ -1269,7 +1345,11 @@ def test_a_local_only_check_never_marks_or_seeds_integration(env) -> None:
     assert stored.lineage == "unknown", "a local edit is not an integration"
     assert stored.remote_revision is None, "no revision may be borrowed"
     assert stored.outbound is None, "no receipt may be seeded"
-    assert stored.recorded_by == "adopt-unknown"
+    # F2: resolve keeps the pull's provenance, so the record here is still the
+    # PULL record -- what this test pins is that the local-only check did not
+    # upgrade it into an integration (the lineage/revision/receipt trio above is
+    # the integration evidence; the unknown marker is only for unpulled rows).
+    assert stored.recorded_by == "pull"
 
 
 def test_an_equal_read_without_a_revision_never_marks(env, monkeypatch) -> None:
