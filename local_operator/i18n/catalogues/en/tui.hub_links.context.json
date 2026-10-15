@@ -29,6 +29,16 @@
     "role": "publication consent explanation",
     "tone": "plain, precise"
   },
+  "tui.hub_links.confirm.keys": {
+    "role": "key legend",
+    "tone": "plain, precise",
+    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
+  },
+  "tui.hub_links.confirm.lead": {
+    "role": "decision lead",
+    "tone": "plain, precise",
+    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
+  },
   "tui.hub_links.confirm.private": {
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
     "role": "publication consent explanation",
@@ -48,6 +58,50 @@
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
     "role": "help text",
     "tone": "plain, precise"
+  },
+  "tui.hub_links.hint.auto_push": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.cancel": {
+    "role": "key name",
+    "tone": "plain, precise",
+    "note": "The bare key name ('esc'); the surrounding sentence supplies the verb ('... to cancel'). Do not repeat the verb here."
+  },
+  "tui.hub_links.hint.close": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.confirm": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
+  },
+  "tui.hub_links.hint.failed": {
+    "note": "Status fragment in the dim key-hint row when the selected link's last check failed; {reason} is a short lower-case phrase (e.g. `provider error`). Keep it compact: whole segments of this row drop to fit, and this one drops last among the hints.",
+    "maxCells": 48
+  },
+  "tui.hub_links.hint.range": {
+    "role": "range indicator",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.refresh": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.select": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint fragment for the Hub links overlay: a key and what it does, joined by ' · '. '↑↓ select' appears whenever there is more than one link. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.subscribe": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
   },
   "tui.hub_links.mark.available": {
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
@@ -109,6 +163,36 @@
     "role": "control label",
     "tone": "plain, precise"
   },
+  "tui.hub_links.reason.baseline_unknown": {
+    "note": "Refusal sentence for enabling Auto-push (U4). One complete sentence naming the situation and the next step; no developer codes."
+  },
+  "tui.hub_links.reason.mixed_lineage": {
+    "note": "Refusal sentence for enabling Auto-push (U4): the local copy mixes sources. Sentence plus next step; no developer codes."
+  },
+  "tui.hub_links.reason.no_receipt": {
+    "note": "Refusal sentence for enabling Auto-push (U4): no agreed starting point exists yet. Names the next step (pull or publish once). No developer codes."
+  },
+  "tui.hub_links.reason.unsafe_publication": {
+    "note": "Refusal sentence for enabling Auto-push (U4): public scope needs the deliberate consent first. The interactive TUI usually shows the consent prompt instead; this copy is the fallback."
+  },
+  "tui.hub_links.reason.unsupported_precondition": {
+    "note": "Refusal sentence for enabling Auto-push (U4): the hub server has not positively attested atomic revision support. Complete sentence, no developer codes."
+  },
+  "tui.hub_links.refusal.ineligible": {
+    "role": "refusal message",
+    "tone": "plain, precise",
+    "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
+  },
+  "tui.hub_links.refusal.resolve_first": {
+    "role": "refusal message",
+    "tone": "plain, precise",
+    "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
+  },
+  "tui.hub_links.refusal.revision_moved": {
+    "role": "refusal message",
+    "tone": "plain, precise",
+    "note": "Shown when the armed consent's policy revision differs from the row at confirm time; the user is confirming a value they never saw, so nothing is written."
+  },
   "tui.hub_links.section.agents": {
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
     "role": "control label",
@@ -164,6 +248,9 @@
     "role": "help text",
     "tone": "plain, precise"
   },
+  "tui.hub_links.state.unavailable": {
+    "note": "Panel-level state line when the local inventory read fails (U8). Safe user copy only: the raw exception (YAML/OS error) stays in the log, never on the card. Keep it a full sentence; the hint row below names the recovery key."
+  },
   "tui.hub_links.state.unsubscribed": {
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
     "role": "help text",
@@ -173,85 +260,5 @@
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
     "role": "help text",
     "tone": "plain, precise"
-  },
-  "tui.hub_links.hint.close": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
-  },
-  "tui.hub_links.hint.range": {
-    "role": "range indicator",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
-  },
-  "tui.hub_links.hint.refresh": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
-  },
-  "tui.hub_links.hint.auto_push": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
-  },
-  "tui.hub_links.hint.subscribe": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
-  },
-  "tui.hub_links.confirm.lead": {
-    "role": "decision lead",
-    "tone": "plain, precise",
-    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
-  },
-  "tui.hub_links.confirm.keys": {
-    "role": "key legend",
-    "tone": "plain, precise",
-    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
-  },
-  "tui.hub_links.hint.confirm": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
-  },
-  "tui.hub_links.hint.cancel": {
-    "role": "key name",
-    "tone": "plain, precise",
-    "note": "The bare key name ('esc'); the surrounding sentence supplies the verb ('... to cancel'). Do not repeat the verb here."
-  },
-  "tui.hub_links.hint.select": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint fragment for the Hub links overlay: a key and what it does, joined by ' · '. '↑↓ select' appears whenever there is more than one link. Keep each fragment short so the joined row fits a narrow card."
-  },
-  "tui.hub_links.refusal.ineligible": {
-    "role": "refusal message",
-    "tone": "plain, precise",
-    "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
-  },
-  "tui.hub_links.refusal.resolve_first": {
-    "role": "refusal message",
-    "tone": "plain, precise",
-    "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
-  },
-  "tui.hub_links.confirm.alt": {
-    "role": "escape route",
-    "tone": "plain, precise",
-    "note": "A command-line fallback shown only when it fits unwrapped, for terminals that swallow ctrl+y. Names the CLI verb, the <id> placeholder and --auto-push true --confirm-public-egress; the real id is shown on the next line so the command is completable. No secrets."
-  },
-  "tui.hub_links.refusal.revision_moved": {
-    "role": "refusal message",
-    "tone": "plain, precise",
-    "note": "Shown when the armed consent's policy revision differs from the row at confirm time; the user is confirming a value they never saw, so nothing is written."
-  },
-  "tui.hub_links.confirm.id": {
-    "role": "link identifier",
-    "tone": "plain, precise",
-    "note": "The 64-char link id, shown so the escape-route command can be completed by hand; an opaque identifier, not a secret."
-  },
-  "tui.hub_links.confirm.id_hint": {
-    "role": "escape route pointer",
-    "tone": "plain, precise",
-    "note": "Shown alongside the escape-route command when the real link id does not fit on a line, so the user still has a way to obtain it. Names the `lop hub links` inventory command."
   }
 }

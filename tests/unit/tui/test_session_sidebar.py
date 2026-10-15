@@ -5610,3 +5610,69 @@ def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
 
     check(SessionSidebar)
     check(HubLinksPanel)
+
+
+@pytest.mark.asyncio
+async def test_the_hub_door_answers_press_and_hover_at_100_columns() -> None:
+    """D2 (pre-release batch): the door exists AND is interactive at 100x30.
+
+    The ladder now lets `hub: N` outlive `ctrl+b hide` at the sidebar's
+    29-cell floor (the default 100-column layout), so the door is on screen
+    without a wider terminal. This pins the painted note plus its two pointer
+    affordances: a hover underlines exactly the note's cells, and a press
+    posts the open request (spied at the app level).
+
+    ORDER MATTERS: the press moves the keyboard into the panel (click-to-focus),
+    and the FOCUSED ladder at 29 cells does not carry the note — so the hover
+    assertions run first, on the resting frame, and the press reads the note's
+    cells from the same frame.
+    """
+
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        sidebar.set_hub_total(3)
+        await pilot.pause()
+        resting = sidebar.render()
+        footer = resting.plain.splitlines()[-1]
+        match = re.search(r"hub: \d+", footer)
+        assert match is not None, f"the door must be painted at 100 columns: {footer!r}"
+        assert "ctrl+b hide" not in footer, f"the hint yields to the door: {footer!r}"
+        first, end = match.start(), match.end()
+        pad = int(sidebar.styles.padding.left)
+
+        note = footer[first:end]
+        await _footer_gesture(
+            pilot,
+            app,
+            sidebar,
+            (events.MouseMove,),
+            pad + first,
+            sidebar.size.height - 1,
+            button=0,
+        )
+        hovered = sidebar.render()
+        assert hovered.plain == resting.plain, "the hover must not move the ladder"
+        underlined = [
+            span for span in hovered.spans if getattr(span.style, "underline", None) is True
+        ]
+        assert len(underlined) == 1, f"expected exactly the door underlined: {hovered.spans!r}"
+        span = underlined[0]
+        start = hovered.plain.rfind(note)
+        assert (span.start, span.end) == (start, start + len(note)), span
+
+        opened: list[str] = []
+        app.action_hub_links = lambda: opened.append("hub")  # type: ignore[method-assign]
+        await _footer_gesture(
+            pilot,
+            app,
+            sidebar,
+            (events.MouseDown, events.MouseUp, events.Click),
+            pad + first,
+            sidebar.size.height - 1,
+        )
+        await pilot.pause()
+        assert opened == ["hub"], "the door press must open the hub links surface"

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual import events
@@ -53,14 +52,39 @@ FOCUS_ESCAPE_KEYS: frozenset[str] = frozenset({"tab", "shift+tab"})
 
 
 def _humanize_reason(reason: str) -> str:
-    """Turn a service eligibility code into readable text for a human.
+    """Turn an UNKNOWN service code into readable text (the U4 fallback path).
 
-    The service returns codes like ``unsupported-precondition``; a raw code in a
-    user-facing notice is exactly what round-3 D19 flags. Hyphens become spaces
-    so the message reads as a sentence while still naming the fact.
+    Known eligibility reasons get their own catalogue sentences
+    (:func:`_reason_sentence`); this fallback keeps a newer service reason from
+    leaking a bare hyphenated code at the user. Hyphens become spaces so the
+    message reads as a sentence while still naming the fact.
     """
 
     return (reason or "ineligible").replace("-", " ")
+
+
+#: One user-oriented sentence per service eligibility reason (U4). The raw
+#: codes (``no-receipt``, ``unsupported-precondition``, ...) are developer
+#: vocabulary; each is answered with copy a user can act on (a next step where
+#: one exists), never a hyphen-to-space echo. Codes NOT in this map keep the
+#: generic refusal template with the humanized fallback, so a service that
+#: grows a new reason degrades readably instead of leaking the code.
+_REASON_SENTENCES = {
+    "unsupported-precondition": _k.reason_unsupported_precondition,
+    "baseline-unknown": _k.reason_baseline_unknown,
+    "mixed-lineage": _k.reason_mixed_lineage,
+    "unsafe-publication": _k.reason_unsafe_publication,
+    "no-receipt": _k.reason_no_receipt,
+}
+
+
+def _reason_sentence(reason: str) -> str:
+    """A catalogue sentence for a service eligibility code (U4); see the map."""
+
+    factory = _REASON_SENTENCES.get(reason or "")
+    if factory is not None:
+        return _t(factory())
+    return _t(_k.refusal_ineligible(reason=_humanize_reason(reason)))
 
 
 def _entry_lines(entry: Text) -> int:
@@ -190,6 +214,10 @@ class HubLinksPanel(Static):
         """Open the panel and mark a fetch in flight (kept rows, not a skeleton)."""
 
         self._loading = True
+        # A reopen starts a NEW lifecycle: the dismiss already cancelled the
+        # group, so no write+reread SURVIVES into this panel state (R1 life-
+        # cycle rule) — clearing the marker here, like close, can never reopen
+        # stale intent; the fresh fetch settles on its own installed snapshot.
         self._refreshing = False
         self._error = ""
         self._notice = ""
@@ -280,11 +308,49 @@ class HubLinksPanel(Static):
         the panel's own status line while the rows stay put, so the user reads it
         on the surface they are looking at rather than a transcript notice
         behind the overlay. ``severity`` picks the warning ink when appropriate.
+
+        It does NOT settle an in-flight policy write (R1/U7): the app paints a
+        CAS-refusal notice BEFORE the re-read that installs the moved revision,
+        so clearing ``_refreshing`` here would re-arm `s`/`a` against the STALE
+        revision — the same false-conflict race as U3, one state later. Only an
+        installed snapshot (``show_links``), the terminal ``show_save_failed``,
+        or the panel's lifecycle (``close``/``start_fetch``) settle it.
         """
 
         self._notice = message
         self._notice_severity = severity
         self._repaint()
+
+    def show_save_failed(self, policy: str, link_id: str | None, local_id: str) -> None:
+        """The card's own line for a policy write that could not complete (U1).
+
+        Reached when the WRITE or its post-write re-read raises (read-only or
+        full config dir, unreadable config). Before this, such a raise killed
+        the whole process; the session must survive and the user must read the
+        failure on the card they acted from, with the item named. The catalogue
+        owns the copy (`policy.save_failed`).
+        """
+
+        row = next(
+            (
+                r
+                for r in self._rows
+                if (link_id is not None and r.link_id == link_id)
+                or (link_id is None and r.local_id == local_id)
+            ),
+            None,
+        )
+        label = (
+            _t(_k.policy_auto_push_label())
+            if policy == "auto_push"
+            else _t(_k.policy_subscribe_label())
+        )
+        item = (row.name if row is not None else local_id) or local_id
+        # R1/U7: this is one of the two TERMINAL settle points of the
+        # write+reread lifetime (the other is an installed snapshot). Settle
+        # BEFORE painting, so the notice helper itself never touches the flag.
+        self._refreshing = False
+        self.show_notice(_t(_k.policy_save_failed(policy=label, source=item)), "warning")
 
     def close(self) -> None:
         self._loading = False
@@ -299,6 +365,12 @@ class HubLinksPanel(Static):
     @property
     def is_open(self) -> bool:
         return bool(self.display)
+
+    @property
+    def is_refreshing(self) -> bool:
+        """Whether a policy write+reread is in flight (R2: the app's guard)."""
+
+        return self._refreshing
 
     @property
     def selected_row(self) -> core.LinkRow | None:
@@ -382,6 +454,15 @@ class HubLinksPanel(Static):
             self._repaint()
 
     def action_refresh(self) -> None:
+        # R2: DEFERRED while OUR policy write+reread is unsettled. A refresh
+        # would start a second exclusive worker in the same `hub-links` group
+        # and CANCEL the pending worker's re-read — while its write keeps
+        # running in a thread — so the moved revision would never install and
+        # the next write would CAS against it again. The pending worker
+        # installs the fresh snapshot itself, which is what a refresh would
+        # have shown.
+        if self._refreshing:
+            return
         self.post_message(self.RefreshRequested())
 
     def action_move(self, delta: int) -> None:
@@ -394,6 +475,20 @@ class HubLinksPanel(Static):
         self._notice = ""
         self._repaint()
 
+    def _policy_actions_allowed(self) -> bool:
+        """Whether a policy write may START from this panel state (U2/U3).
+
+        Inert while the error body replaces the rows (the user cannot SEE what
+        would be written — the blind-egress case U2), while a fetch is in
+        flight (the revision may move under the write), and while a write of
+        our own is unsettled (a second press would CAS against our own first
+        write — the false ``link policy changed`` conflict U3). The card's
+        hint row teaches only keys live in the current state, so an inert
+        press needs no notice; recovery is the taught refresh.
+        """
+
+        return not self._error and not self._loading and not self._refreshing
+
     def action_toggle_subscribe(self) -> None:
         """`s` — flip the focused link's Subscribe (round-2 D7).
 
@@ -401,6 +496,8 @@ class HubLinksPanel(Static):
         revision is required. The app performs the write through the SAME
         service path `lop hub link set` uses.
         """
+        if not self._policy_actions_allowed():
+            return
         self._notice = ""
         row = self.selected_row
         if row is None:
@@ -409,6 +506,11 @@ class HubLinksPanel(Static):
             self.post_message(self.RefusalRaised(_t(_k.refusal_resolve_first()), "warning"))
             return
         desired = not bool(row.subscribe)
+        # U3: the panel enters its in-flight state BEFORE the message is
+        # handled, so the title/hint show `Saving…` and a second press is inert
+        # until the app's worker settles (show_links / show_notice clears it).
+        self._refreshing = True
+        self._repaint()
         self.post_message(
             self.PolicyToggleRequested(
                 row.link_id, row.local_id, "subscribe", desired, row.policy_revision
@@ -424,6 +526,8 @@ class HubLinksPanel(Static):
         An ineligible origin is REFUSED with its named reason. Nothing here
         infers consent from a keypress.
         """
+        if not self._policy_actions_allowed():
+            return
         self._notice = ""
         row = self.selected_row
         if row is None:
@@ -433,6 +537,8 @@ class HubLinksPanel(Static):
             return
         if row.auto_push:
             # Turning it OFF never needs eligibility or consent.
+            self._refreshing = True
+            self._repaint()
             self.post_message(
                 self.PolicyToggleRequested(
                     row.link_id, row.local_id, "auto_push", False, row.policy_revision
@@ -452,10 +558,7 @@ class HubLinksPanel(Static):
                 self._repaint()
                 return
             self.post_message(
-                self.RefusalRaised(
-                    _t(_k.refusal_ineligible(reason=_humanize_reason(row.eligibility_reason))),
-                    "warning",
-                )
+                self.RefusalRaised(_reason_sentence(row.eligibility_reason), "warning")
             )
             return
         if row.visibility == "public":
@@ -464,6 +567,8 @@ class HubLinksPanel(Static):
             self._consent_revision = row.policy_revision
             self._repaint()
             return
+        self._refreshing = True
+        self._repaint()
         self.post_message(
             self.PolicyToggleRequested(
                 row.link_id, row.local_id, "auto_push", True, row.policy_revision
@@ -481,6 +586,14 @@ class HubLinksPanel(Static):
         """
         if self._consent_link_id is None:
             return
+        if not self._policy_actions_allowed():
+            # U2 (including the confirm): a confirm must never write while the
+            # row is invisible or an own write is unsettled. Disarm so a later
+            # ctrl+y cannot complete a prompt the user can no longer see.
+            self._consent_link_id = None
+            self._consent_revision = None
+            self._repaint()
+            return
         row = next((r for r in self._rows if r.link_id == self._consent_link_id), None)
         armed_revision = self._consent_revision
         self._consent_link_id = None
@@ -493,6 +606,8 @@ class HubLinksPanel(Static):
             self._notice_severity = "warning"
             self._repaint()
             return
+        self._refreshing = True
+        self._repaint()
         self.post_message(
             self.PolicyToggleRequested(
                 row.link_id,
@@ -509,13 +624,15 @@ class HubLinksPanel(Static):
     def _visible_rows(self) -> list[core.LinkRow]:
         return list(self._rows)
 
-    def _body_budget(self, consent_lines: int) -> int:
+    def _body_budget(self, extra_lines: int) -> int:
         """Body rows available before the card would run off the screen (D22).
 
         The body was capped by the CONSTANT :data:`MAX_BODY_ROWS`, so at a 24-row
         terminal a card with several links extended past the bottom edge and its
         consent keys were clipped. The real budget is what the card may occupy
-        (:func:`overlay.rows_above_dock`) less its own chrome, the consent block,
+        (:func:`overlay.rows_above_dock`) less its own chrome, the extra blocks
+        composed OUTSIDE the body (the consent prompt and the notice lines —
+        each is wrapped and its line count counted here, so neither can clip),
         and the padding — floored so a tiny screen still shows some body.
 
         D36 SCOPE OF THE CLAIM: this fits the card above the dock for screens of
@@ -527,7 +644,7 @@ class HubLinksPanel(Static):
         """
 
         available = overlay.rows_above_dock(self)
-        chrome = CHROME_ROWS + CARD_PADDING_ROWS + consent_lines + 1  # +1 hint row
+        chrome = CHROME_ROWS + CARD_PADDING_ROWS + extra_lines + 1  # +1 hint row
         return max(1, min(MAX_BODY_ROWS, available - chrome))
 
     def _plan_window(self, body: list[Text], budget: int) -> tuple[int, int, int | None]:
@@ -569,9 +686,10 @@ class HubLinksPanel(Static):
             hi += 1
             used += counts[hi]
         # D37: never END the window on a section header with its rows below the
-        # cap — an empty-looking section. If the last admitted entry is a header
+        # cap — an empty-looking section — nor on a bare section separator (D6);
+        # both are trailing chrome. If the last admitted entry is one of them
         # past the selection, drop it.
-        while hi > selected and self._is_header(body[hi]):
+        while hi > selected and (self._is_header(body[hi]) or self._is_blank(body[hi])):
             used -= counts[hi]
             hi -= 1
         while lo - 1 >= 0 and used + counts[lo - 1] <= budget:
@@ -586,12 +704,21 @@ class HubLinksPanel(Static):
         if lo > 0 and self._is_header(body[lo - 1]) and used + counts[lo - 1] <= budget:
             lo -= 1
             used += counts[lo]
+        # D8: never OPEN the window on a bare separator (the D6 chrome). A
+        # window that opens on a blank reads as an orphan gap, and the sticky
+        # search below would attach the preceding section title to a SEPARATOR
+        # rather than to a row — the orphan header the narrow frames showed
+        # (`Agents` above a blank, its own row scrolled out). The selection is
+        # a link row, so this can never drop the selection itself.
+        while lo < selected and self._is_blank(body[lo]):
+            used -= counts[lo]
+            lo += 1
         # D35 STICKY HEADER: if the window still opens mid-section, remember the
         # section header to paint AS the first line (it is not in the range, so
         # the caller counts its line against the budget and drops the last entry
         # to pay for it).
         sticky: int | None = None
-        if lo > 0 and not self._is_header(body[lo]):
+        if lo > 0 and not self._is_header(body[lo]) and not self._is_blank(body[lo]):
             for i in range(lo - 1, -1, -1):
                 if self._is_header(body[i]):
                     sticky = i
@@ -618,11 +745,16 @@ class HubLinksPanel(Static):
 
     @staticmethod
     def _body_index_for(link_index: int, body: list[Text]) -> int | None:
-        """Map a LINK index to its BODY entry index (skipping section headers)."""
+        """Map a LINK index to its BODY entry index (skipping headers AND separators).
+
+        D6 added section separators; like the headers they are chrome, not link
+        entries, so the mapping skips both or the highlight/write target would
+        shift by one per section boundary.
+        """
 
         seen = 0
         for i, entry in enumerate(body):
-            if HubLinksPanel._is_header(entry):
+            if HubLinksPanel._is_header(entry) or HubLinksPanel._is_blank(entry):
                 continue
             if seen == link_index:
                 return i
@@ -651,6 +783,12 @@ class HubLinksPanel(Static):
 
         return str(entry.style) == "bold"
 
+    @staticmethod
+    def _is_blank(entry: Text) -> bool:
+        """Whether a body entry is a section SEPARATOR (D6): neither header nor link."""
+
+        return not entry.plain
+
     def _content_width(self) -> int:
         """The width rows are COMPOSED to: the card width less its padding.
 
@@ -672,10 +810,13 @@ class HubLinksPanel(Static):
             return
         outer = self.panel_width()
         width = self._content_width()
-        # The consent block is composed FIRST: its line count is part of the
-        # screen-derived body budget (D22), so it cannot be clipped.
+        # The blocks composed OUTSIDE the body are composed FIRST: their line
+        # counts are part of the screen-derived body budget (D22), so neither
+        # can be clipped — the consent decision (round-3 D16) and, for U1, the
+        # wrapped notice/save-failed line.
         consent = self._consent_lines(width)
-        budget = self._body_budget(len(consent))
+        notice = self._notice_lines(width)
+        budget = self._body_budget(len(consent) + len(notice))
         if self._error:
             body: list[Text] = [Text(self._error, style="dim")]
         else:
@@ -700,21 +841,11 @@ class HubLinksPanel(Static):
         lines.append(Text(""))
         lines.extend(visible)
         lines.append(Text(""))
-        # The refusal/notice line (round-3 D19) rides above the hint/consent, in
-        # the warning ink when it is a refusal, so the message is on the surface
-        # the user is looking at.
-        if self._notice:
-            from local_operator.tui import theme as theme_mod
-
-            ink = "warning" if self._notice_severity == "warning" else "muted"
-            try:
-                notice_style = Style(color=theme_mod.semantic_color(ink))
-            except Exception:  # noqa: BLE001 - a card must not fail to paint
-                notice_style = "dim"
-            for chunk in Text(self._notice).wrap(self.app.console, width) or [Text("")]:
-                chunk.stylize(notice_style)
-                lines.append(chunk)
-            lines.append(Text(""))
+        # The refusal/notice/save-failed lines (round-3 D19, U1) ride above the
+        # hint/consent, in the warning ink when appropriate, so the message is
+        # on the surface the user is looking at. Composed and height-accounted
+        # by `_notice_lines` (counted into the budget above).
+        lines.extend(notice)
         # The CONSENT PROMPT is its OWN wrapped, height-accounted block (round-3
         # D16), not a segment squeezed into the one-row hint: it is a decision,
         # it must show in FULL at any width, and it needs priority ink (D20).
@@ -730,18 +861,58 @@ class HubLinksPanel(Static):
             out.append_text(row)
         self.styles.width = outer
         self.styles.height = len(lines) + CARD_PADDING_ROWS
+        # D1 (pre-release batch): the DOCUMENTED overlay placement — the /usage
+        # card's own call. The card was pinned at the host's top-left (left gap
+        # 1 cell, right gap 9 at 100 columns) and cut stray logo fragments at
+        # the frame edge; `recentre` offsets the HOST so the card centres in the
+        # ground above the dock, and the screen-derived body budget above keeps
+        # it clear of the dock for screens >= 24 rows.
+        overlay.recentre(self, outer, len(lines) + CARD_PADDING_ROWS)
         self.update(out)
+
+    def _notice_lines(self, width: int) -> list[Text]:
+        """The status/notice lines, wrapped and height-accounted (U1/D22).
+
+        Extracted from `_repaint` so the SAME wrapped line count is both painted
+        and counted into the body budget: the notice used to be appended AFTER
+        the budget was spent, so a long refusal (or the U1 save-failed line, or
+        a wrapped one) could push the card past the screen edge. ``severity``
+        picks the warning ink when appropriate; the block ends with the same
+        blank separator the painted layout always had.
+        """
+
+        if not self._notice:
+            return []
+        from local_operator.tui import theme as theme_mod
+
+        ink = "warning" if self._notice_severity == "warning" else "muted"
+        try:
+            notice_style = Style(color=theme_mod.semantic_color(ink))
+        except Exception:  # noqa: BLE001 - a card must not fail to paint
+            notice_style = "dim"
+        out: list[Text] = []
+        for chunk in Text(self._notice).wrap(self.app.console, width) or [Text("")]:
+            chunk.stylize(notice_style)
+            out.append(chunk)
+        out.append(Text(""))
+        return out
 
     def _visible_link_range(self, body: list[Text], lo: int, hi: int) -> tuple[int, int]:
         """The 1-based first/last LINK the window ``[lo, hi]`` shows, for the indicator.
 
-        ``body`` interleaves section HEADERS with link entries, so the painted
-        window may open on a header; this counts only LINK entries to report a
-        truthful ``n–m`` range.
+        ``body`` interleaves section HEADERS and separators (D6) with link
+        entries, so the painted window may open on either; this counts only LINK
+        entries to report a truthful ``n–m`` range.
         """
 
-        before = sum(1 for entry in body[:lo] if not self._is_header(entry))
-        shown = sum(1 for entry in body[lo : hi + 1] if not self._is_header(entry))
+        before = sum(
+            1 for entry in body[:lo] if not self._is_header(entry) and not self._is_blank(entry)
+        )
+        shown = sum(
+            1
+            for entry in body[lo : hi + 1]
+            if not self._is_header(entry) and not self._is_blank(entry)
+        )
         if not shown:
             return (0, 0)
         return (before + 1, before + shown)
@@ -777,24 +948,15 @@ class HubLinksPanel(Static):
             _t(_k.confirm_keys(confirm=_t(_k.hint_confirm()), cancel=_t(_k.hint_cancel()))),
             style=warn,
         )
-        # D26/D32/D39: the escape route when a terminal swallows a control chord.
-        # The `or:` command line and the `link id` line are shown TOGETHER or not
-        # at all — a user must never see `<id>` with no way to obtain an id; when
-        # only the command line fits, a `lop hub links` pointer stands in. Each
-        # emitted only when it fits unwrapped, so they can never break the D22
-        # height budget or wrap the keys line.
+        # U6 (pre-release batch): the machinery escape block (`or: lop hub link
+        # set <id> ...` plus a raw 64-hex `link id` line) is GONE from the
+        # decision. A consent prompt is where the user decides a PUBLICATION,
+        # not a place for developer tooling; the block was the largest thing on
+        # the card and the `<id>` literal sat next to a real id. The prompt is
+        # exactly the lead, the consequence, and the two named keys; the CLI
+        # route stays documented where it belongs. The three catalogue keys
+        # (confirm.alt / confirm.id / confirm.id_hint) are removed with it.
         paras = [lead, body, keys]
-        alt = _t(_k.confirm_alt())
-        id_line = _t(_k.confirm_id(id=(row.link_id or row.local_id)))
-        if cell_len(alt) <= width:
-            if cell_len(id_line) <= width:
-                paras.append(Text(alt, style=warn))
-                paras.append(Text(id_line, style=warn))
-            else:
-                hint = _t(_k.confirm_id_hint())
-                if cell_len(hint) <= width:
-                    paras.append(Text(alt, style=warn))
-                    paras.append(Text(hint, style=warn))
         # Wrap each paragraph to the content width; every produced line is a
         # real painted line, so the caller's height sum stays honest.
         out: list[Text] = []
@@ -817,10 +979,26 @@ class HubLinksPanel(Static):
         it is about choosing a row, not only about scrolling past the cap). When
         the window does not cover the whole body (``whole`` False) the row also
         reports the visible RANGE of the total link count (round-2 D11).
+
+        STATE-AWARE (pre-release batch, U5/D4): the row teaches only keys that
+        DO something in the state on screen. The error body, a fetch in flight
+        and an empty inventory have no fresh, selectable rows, so `s`/`a`/↑↓ /
+        `r` as taught would be dead keys; each shows the subset that is live
+        (close, plus refresh where a re-read is the live action). A FAILED
+        selected row names its failure (`check failed: <reason>`, D3).
         """
 
         if self._refreshing:
             return Text(_t(_k.policy_saving()), style="dim")
+        if self._error:
+            # The error body replaced the rows; a re-read is the one live row
+            # control, so teach exactly it and the exit.
+            return Text(" · ".join([_t(_k.hint_refresh()), _t(_k.hint_close())]), style="dim")
+        if self._loading or not self._visible_rows():
+            # A fetch is in flight, or there is nothing to select: every
+            # row-shaped control is inert (U2), so teaching one would be
+            # teaching a dead key. `esc` is honoured in both states.
+            return Text(_t(_k.hint_close()), style="dim")
         width = self._content_width()
         segments: list[str] = []
         if not self._engaged:
@@ -845,6 +1023,14 @@ class HubLinksPanel(Static):
         # same arrows, and the pair read as "↑↓ to begin · ↑↓ select".
         if self._engaged and len(self._visible_rows()) > 1:
             segments.append(_t(_k.hint_select()))
+        failed: str | None = None
+        selected = self.selected_row
+        if selected is not None and selected.slot_state == "failure":
+            # D3: name WHAT failed on the frame. `r refresh` (already taught) is
+            # the live recovery affordance here; the runner's automatic retry is
+            # scheduled in the background, not this key.
+            failed = _t(_k.hint_failed(reason=_humanize_reason(selected.error_class or "unknown")))
+            segments.append(failed)
         segments.append(_t(_k.hint_subscribe()))
         segments.append(_t(_k.hint_auto_push()))
         segments.append(_t(_k.hint_refresh()))
@@ -852,13 +1038,24 @@ class HubLinksPanel(Static):
         segments.append(close)
         # Drop WHOLE segments to fit: the range (D11) and `esc close` are FACTS
         # recoverable nowhere else on the frame, so they go last; the key hints
-        # yield first, most obscure first.
+        # yield first, most obscure first. A FAILED selected row flips the yield
+        # order (D3): `r refresh` IS the recovery affordance there, so the
+        # policy hints give way first and refresh drops only after them; the
+        # failure fact yields last of all (it is the row's own state).
         drop_order = [
             _t(_k.hint_refresh()),
             _t(_k.hint_auto_push()),
             _t(_k.hint_subscribe()),
             _t(_k.hint_select()),
         ]
+        if failed is not None:
+            drop_order = [
+                _t(_k.hint_auto_push()),
+                _t(_k.hint_subscribe()),
+                _t(_k.hint_select()),
+                _t(_k.hint_refresh()),
+            ]
+            drop_order.append(failed)
         for candidate in drop_order:
             if len(" · ".join(segments)) <= width:
                 break
