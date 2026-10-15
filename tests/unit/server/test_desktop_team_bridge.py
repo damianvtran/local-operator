@@ -10,7 +10,9 @@ status cache.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import replace
@@ -19,10 +21,12 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.providers.auth_store import OAuthAccess
 from local_operator.server.routes import desktop_team_bridge
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import (
@@ -33,6 +37,7 @@ from local_operator.team_bridge.client import (
     BridgeSignInRequired,
     StatusCheck,
 )
+from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
 
 pytestmark = pytest.mark.asyncio
 
@@ -45,6 +50,11 @@ class FakeClient:
 
     behavior: dict[str, Any] = {}
     instances: list["FakeClient"] = []
+    #: The committed hub of the fixtures below. A REAL client always names its
+    #: destination, and the read path refuses one that cannot (the shared
+    #: destination guard), so a double that omitted this would exercise the
+    #: refusal instead of the read.
+    base_url = "https://hub.example"
 
     def __init__(self, config_dir: Any = None, **kwargs: Any) -> None:
         self.config_dir = config_dir
@@ -58,6 +68,31 @@ class FakeClient:
 
     async def status(self, **kwargs: Any) -> dict[str, Any]:
         return self._answer("status")
+
+    async def current_access(self) -> Any:
+        return self._answer("access")
+
+    async def inbox(
+        self,
+        *,
+        tenant_id: str,
+        after: str | None = None,
+        limit: int | None = None,
+        state: str | None = None,
+        thread_id: str | None = None,
+        sender_account_id: str | None = None,
+        access: Any = None,
+    ) -> dict[str, Any]:
+        FakeClient.behavior["last_inbox_kwargs"] = {
+            "tenant_id": tenant_id,
+            "after": after,
+            "limit": limit,
+            "state": state,
+            "thread_id": thread_id,
+            "sender_account_id": sender_account_id,
+            "access": access,
+        }
+        return self._answer("inbox")
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("settings")
@@ -591,3 +626,383 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     assert sixth_local["enabled"] is True
     assert sixth_local["session"] == "synthetic-r3-restored"
     assert app.state.config_manager is manager
+
+
+# -- the READ slice: the inbox read (metadata only, zero local writes) ---------
+
+INBOX = "/v1/desktop/team-bridge/inbox"
+HUB = "https://hub.example"
+
+
+def _access(account_id: str = "acc_1", credential_id: int = 7) -> OAuthAccess:
+    return OAuthAccess(
+        access_token="synthetic-bearer",
+        credential_id=credential_id,
+        account_id=account_id,
+        kind="oauth",
+    )
+
+
+def _owner(*, tenant_id: str = "tnt_1", generation: int = 5) -> OwnerSnapshot:
+    return OwnerSnapshot(
+        credential_id=7,
+        account_id="acc_1",
+        tenant_id=tenant_id,
+        endpoint_id="ep_1",
+        canonical_base_url=HUB,
+        enrollment_generation=generation,
+    )
+
+
+def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
+    """Commit the owner + consent receipt H4 commits, and set the local switch.
+
+    The switch is the DOCUMENT the running daemon reads (`values.team_bridge.
+    enabled`), written the way the settings page writes it — the read path reads
+    the file from disk, never a long-lived manager, so a fixture that set an
+    in-memory value would test nothing.
+    """
+    owner = _owner()
+    Store(root).commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
+    (root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"team_bridge": {"enabled": enabled}}})
+    )
+    return owner
+
+
+def _query(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {"expected_account_id": "acc_1", "tenant_id": "tnt_1"}
+    base.update(overrides)
+    return base
+
+
+def _item(
+    message_id: str = "bmsg_1",
+    *,
+    state: str = "unread",
+    tenant_id: str = "tnt_1",
+    recipient_account: str = "acc_1",
+    recipient_endpoint: str = "ep_1",
+    body: Any = None,
+    private_reason: Any = None,
+) -> dict[str, Any]:
+    """One upstream item, in the frozen nested shape (``_project_item`` reads it).
+
+    ``body``/``private_reason`` are the sentinels the privacy cells put ON THE
+    WIRE: the projection never reads them, and the route must not either.
+    """
+    message: dict[str, Any] = {
+        "id": message_id,
+        "thread_id": "bth_1",
+        "tenant_id": tenant_id,
+        "type": "note",
+        "seq": 4,
+        "origin": "ep_9",
+        "body_hash": "a" * 64,
+        "recipient": {"account_id": recipient_account, "endpoint_id": recipient_endpoint},
+    }
+    if body is not None:
+        message["body"] = body
+    if private_reason is not None:
+        message["private_reason"] = private_reason
+    return {
+        "message": message,
+        "delivery": {"state": state, "state_at": None},
+        "thread": {"id": "bth_1", "status": "open"},
+        "sender": {"account_id": "acc_9", "endpoint_id": "ep_9"},
+    }
+
+
+def _page(*items: dict[str, Any], next_cursor: str | None = None) -> dict[str, Any]:
+    return {
+        "items": list(items),
+        "next_cursor": next_cursor,
+        "counts": {"unread": len(items), "requests_pending": 0, "blocked": 0},
+    }
+
+
+def _digest(root: Path) -> tuple[list[str], str]:
+    """(new file names under the root, a content digest of every SQLite table).
+
+    The zero-write proof, and it compares STATE rather than page bytes: SQLite's
+    own ``CREATE TABLE IF NOT EXISTS`` can touch a database file without changing
+    a row, so a proof built on mtimes would be a proof about SQLite. SQLite's
+    WAL companions are excluded from the name list for the same reason — a reader
+    may need them, and neither is this surface's write. An ack intent, a merged
+    ref or a moved connector checkpoint WOULD show up here, in either half.
+    """
+    names = sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_file() and not path.name.endswith(("-wal", "-shm"))
+    )
+    digest = hashlib.sha256()
+    for db in sorted(root.rglob("*.db")):
+        connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            tables = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+            ]
+            for table in tables:
+                digest.update(table.encode("utf-8"))
+                for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1"):  # noqa: S608
+                    digest.update(repr(row).encode("utf-8"))
+        finally:
+            connection.close()
+    return names, digest.hexdigest()
+
+
+async def test_the_inbox_read_needs_the_desktop_bearer(api):
+    """The plane's gate first: a wrong or absent bearer never reaches the read.
+
+    The fixture's client carries the correct bearer, and httpx has no per-request
+    "remove this header", so this cell edits the per-test client's default header
+    — the same object the gate reads on each request.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    original = client.headers["Authorization"]
+
+    client.headers["Authorization"] = "Bearer not-the-token"
+    wrong = await client.get(INBOX, params=_query())
+    del client.headers["Authorization"]
+    absent = await client.get(INBOX, params=_query())
+    client.headers["Authorization"] = original
+
+    assert wrong.status_code == 401
+    assert absent.status_code == 401
+    # No client, no wire call, no store work: the gate is a dependency.
+    assert FakeClient.instances == []
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+
+
+async def test_a_read_that_names_a_bad_id_is_refused_before_any_upstream_path(api):
+    """S-RSA-5: grammar on the ids, BEFORE the transport can build a path.
+
+    The upstream interpolates ids into ``/messaging/messages/{id}`` and folds
+    them into query strings, so ``..`` or ``?`` in one rewrites the request; the
+    probe that found this built ``/v1/messaging`` from ``..``. The rejected VALUE
+    must not ride the refusal back either — the sentence is fixed.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    for bad in (
+        _query(thread_id="../etc/passwd"),
+        _query(sender_account_id="acc_1?tenant_id=tnt_other"),
+        _query(after="x?y=1"),
+        _query(state="screened"),
+        _query(expected_account_id="acc_1/../acc_2"),
+    ):
+        response = await client.get(INBOX, params=bad)
+        assert response.status_code == 422, bad
+        detail = response.json()["detail"]
+        assert detail["code"] == "invalid_request"
+        assert detail["message"] == desktop_team_bridge.INVALID_READ_QUERY
+        assert str(bad) not in response.text
+
+    # The grammar runs before the client exists: zero upstream path, zero calls.
+    assert FakeClient.instances == []
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+
+
+async def test_the_inbox_read_refuses_a_wrong_account_with_zero_upstream_and_zero_writes(api):
+    """The captured-account receipt, on a READ: A's inbox is never B's answer."""
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access("acc_other")
+    FakeClient.behavior["inbox"] = _page(_item())
+    before = _digest(root)
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert (
+        FakeClient.behavior.get("last_inbox_kwargs") is None
+    ), "no wire call for a refused account"
+    assert _digest(root) == before
+
+
+async def test_the_inbox_read_answers_metadata_only_and_writes_nothing(api):
+    """The ordinary page: ids, states, coarse codes — and not one local write."""
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    # The wire carries a body and a private reason; neither may reach the answer.
+    FakeClient.behavior["inbox"] = _page(
+        _item("bmsg_1", body={"text": "BODY-SENTINEL"}, private_reason="REASON-SENTINEL"),
+        _item("bmsg_2", state="read"),
+        next_cursor="MjU=",
+    )
+    before = _digest(root)
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["mode"] == "receive"
+    assert result["read_only"] is False
+    assert result["history_reason"] is None
+    assert result["read_capability"] == 1
+    assert result["account_id"] == "acc_1"
+    assert result["tenant_id"] == "tnt_1"
+    assert result["owner"]["hub_origin"] == HUB
+    assert result["next_cursor"] == "MjU="
+    assert result["counts"] == {"items": 2, "unread": 1, "held": 0, "blocked": 0}
+    assert result["body_included"] is False
+    assert result["screening_detail_included"] is False
+    assert result["local_events"] is False
+    # The row is the ALLOWLIST, exactly — no field may appear beside it.
+    assert set(result["items"][0]) == {
+        "message_id",
+        "thread_id",
+        "message_type",
+        "origin",
+        "seq",
+        "delivery",
+        "sender",
+        "recipient",
+        "request",
+        "screening",
+    }
+    assert result["items"][0]["message_id"] == "bmsg_1"
+    assert result["items"][0]["delivery"] == {"state": "unread", "state_at": None}
+    assert result["items"][0]["screening"] == {
+        "state": "unreviewed",
+        "hold_code": None,
+        "retry_at": None,
+    }
+    assert "BODY-SENTINEL" not in response.text
+    assert "REASON-SENTINEL" not in response.text
+    # The wire call carried the caller's scope, never a widened one.
+    wire = FakeClient.behavior["last_inbox_kwargs"]
+    assert wire["tenant_id"] == "tnt_1"
+    assert wire["limit"] == 50
+    assert _digest(root) == before, "a read moved local state"
+
+
+async def test_the_inbox_read_reports_a_hold_as_a_coarse_code_and_never_its_text(api):
+    """A connector-written hold can quote provider prose; the row reports a CODE."""
+    client, root, _discipline = api
+    owner = _enroll(root)
+    Store(root).persist_hold(
+        owner, "bmsg_2", "provider_error: upstream said HOLD-PROSE", retry_at=123.0
+    )
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item("bmsg_2"))
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 200
+    row = response.json()["result"]["items"][0]
+    assert row["screening"]["state"] == "held"
+    assert row["screening"]["hold_code"] == "unknown_hold"
+    assert row["screening"]["retry_at"] == 123.0
+    assert "HOLD-PROSE" not in response.text
+    assert response.json()["result"]["counts"]["held"] == 1
+
+
+async def test_a_machine_with_the_local_switch_off_reads_retained_history_read_only(api):
+    """Paused/disabled: the same participant may READ what already arrived."""
+    client, root, _discipline = api
+    _enroll(root, enabled=False)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+    before = _digest(root)
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["mode"] == "history"
+    assert result["read_only"] is True
+    assert result["history_reason"] == "bridge_off"
+    assert result["items"][0]["message_id"] == "bmsg_1"
+    assert _digest(root) == before
+
+
+async def test_the_read_refuses_a_page_that_is_not_this_holders(api):
+    """A foreign page refuses WHOLE: no partial render, no adoption."""
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+
+    FakeClient.behavior["inbox"] = _page(_item("bmsg_1"), _item("bmsg_2", tenant_id="tnt_other"))
+    foreign = await client.get(INBOX, params=_query())
+    assert foreign.status_code == 409
+    assert foreign.json()["detail"]["code"] == "wrong_tenant"
+    assert "bmsg_1" not in foreign.text
+
+    FakeClient.behavior["inbox"] = _page(_item("bmsg_1", recipient_endpoint="ep_other"))
+    other_endpoint = await client.get(INBOX, params=_query())
+    assert other_endpoint.status_code == 409
+    assert other_endpoint.json()["detail"]["code"] == "wrong_recipient"
+    assert "bmsg_1" not in other_endpoint.text
+
+
+async def test_the_read_refuses_a_machine_with_no_retained_namespace(api):
+    """Nothing enrolled for this account: typed unavailable, never a guess."""
+    client, root, _discipline = api
+    (root / "config.yml").write_text(yaml.safe_dump({"values": {"team_bridge": {"enabled": True}}}))
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "history_context_unavailable"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+
+
+async def test_the_read_refuses_a_tenant_this_machine_did_not_enroll_with(api):
+    """The named organization IS the scope; another one is not a filter."""
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    response = await client.get(INBOX, params=_query(tenant_id="tnt_other"))
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_tenant"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+
+
+def test_the_read_slice_keeps_httpx_off_the_boot_path(tmp_path: Path) -> None:
+    """`lop serve` imports the router; the client stack must stay in handlers."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env.update(HOME=str(tmp_path), LOCAL_OPERATOR_CONFIG_DIR=str(tmp_path / ".local-operator"))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; "
+            "from local_operator.server.routes import desktop_team_bridge as m; "
+            "paths = {str(r.path) for r in m.router.routes}; "
+            "assert '/v1/desktop/team-bridge/inbox' in paths, paths; "
+            "assert 'httpx' not in sys.modules, 'the read put httpx on the boot path'; "
+            "print('read slice: lazy')",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "lazy" in result.stdout
+
+
+def test_the_read_capability_is_advertised_without_moving_its_sibling() -> None:
+    """Its OWN key (§7): reads are not a bump, and not a decision promise."""
+    from local_operator.server.features import feature_flags
+
+    flags = feature_flags()
+    assert flags["team_bridge_read"] == 1
+    assert flags["team_bridge"] == 1
