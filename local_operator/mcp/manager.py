@@ -2201,6 +2201,19 @@ class McpManager:
             await self._teardown_connection(name)
         return await self._connect_round(configs, sources)
 
+    def _cache_for(self, name: str) -> McpToolCache | None:
+        """The tool cache for ``name``, or ``None`` for a session-only server.
+
+        The cache is the operator's shared ``mcp_cache.db``, keyed by server
+        NAME. A session-only server must leave nothing behind there, and a
+        ``put`` first deletes every row of that name, so writing one would let a
+        client's server evict the operator's cached tools for a same-named
+        server configured elsewhere.
+        """
+        if name in self._extra_configs and self._sources.get(name) == SESSION_MCP_SOURCE:
+            return None
+        return self.tool_cache
+
     def _load_configs(self) -> tuple[dict[str, MCPServerConfig], dict[str, str]]:
         """The file-loaded configs plus this session's own servers, merged.
 
@@ -2246,9 +2259,10 @@ class McpManager:
             _settle_future_error(
                 future, McpConnectionError(f"MCP server {name!r} removed from config")
             )
-            if self.tool_cache is not None:
+            removed_cache = self._cache_for(name)
+            if removed_cache is not None:
                 with suppress(Exception):
-                    self.tool_cache.delete(name)
+                    removed_cache.delete(name)
 
     async def _connect_round(
         self, configs: dict[str, MCPServerConfig], sources: dict[str, str]
@@ -2373,9 +2387,10 @@ class McpManager:
             # re-report the combined outcome instead of the gate snapshot.
             self._startup_deferred.add(name)
             # Still pending at the gate: defer from cache, or contribute nothing.
+            gate_cache = self._cache_for(name)
             cached = (
-                self.tool_cache.get(name, config_digest(self._configs.get(name)))
-                if self.tool_cache is not None
+                gate_cache.get(name, config_digest(self._configs.get(name)))
+                if gate_cache is not None
                 else None
             )
             if cached:
@@ -2451,8 +2466,9 @@ class McpManager:
             return
         conn.tools = tools
         self._register_tools(name, tools)
-        if self.tool_cache is not None:
-            self.tool_cache.put(
+        refresh_cache = self._cache_for(name)
+        if refresh_cache is not None:
+            refresh_cache.put(
                 name,
                 [_tool_to_cache_entry(tool) for tool in tools],
                 config_digest(self._configs.get(name)),
@@ -2998,8 +3014,9 @@ class McpManager:
             from local_operator.mcp.auth import forget_refused_challenge
 
             forget_refused_challenge(url)
-        if self.tool_cache is not None:
-            self.tool_cache.put(
+        connect_cache = self._cache_for(name)
+        if connect_cache is not None:
+            connect_cache.put(
                 name,
                 [_tool_to_cache_entry(tool) for tool in tools],
                 config_digest(self._configs.get(name)),
