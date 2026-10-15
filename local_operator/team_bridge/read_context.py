@@ -289,8 +289,11 @@ def admit_read_content(
     intent = proof.get("intent")
     if not isinstance(policy, Mapping) or not isinstance(receipt, Mapping):
         return ContentAdmission(False, "proof_missing")
-    authority, damage = receipt_authority(context.owner, policy, receipt)
+    authority, damage, _note = receipt_authority(context.owner, policy, receipt)
     if authority is None:
+        # ``_note`` is the write-side diagnostic (R-8) and is deliberately not
+        # this side's business: nothing here renders a reason for a human, so the
+        # closed code is the whole of what the admission carries.
         return ContentAdmission(False, damage or RECEIPT_CORRUPT)
     if authority["verdict"] != "allow":
         return ContentAdmission(False, "not_allowed")
@@ -629,6 +632,18 @@ def _screening_state(hold: Mapping[str, Any] | None) -> Mapping[str, Any]:
     The hold row arrives from the CALLER's one proof snapshot (S-RSA-3) rather
     than from a reader of its own: a page must not open a connection per row, and
     the state a row reports has to be the state its admission was decided on.
+
+    AN ADMITTED ROW STILL READS ``unreviewed``, and that is the contract rather
+    than a bug (review R-4): this field is THIS MACHINE's own recorded hold
+    state, never a verdict about the sender's screening. A row can therefore
+    carry admitted content beside ``unreviewed`` because what admitted the
+    content is the read slice's tuple (policy + receipt + confirmed intent),
+    which is a different question from "did this machine hold the message". A
+    renderer must read it that way — "this machine recorded no hold" — and
+    MUST NOT draw it as "nobody reviewed this": a state derived from a receipt
+    (``reviewed``, or M0's removed ``allowed``) is exactly what M-12a forbids,
+    and adding one is a change to the surface contract's closed vocabulary
+    rather than something this layer may introduce on its own.
     """
 
     if hold is not None:

@@ -10,16 +10,17 @@ status cache.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 import pytest_asyncio
@@ -57,6 +58,120 @@ pytestmark = pytest.mark.asyncio
 
 TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+# --- the tripwire: no REAL wire object may be built inside these cells (R-2) --
+#
+# WHY IT EXISTS. Everything below replaces ``client.TeamBridgeClient`` with the
+# scripted double, and the read path resolves that symbol at CALL time — so a
+# cell that lost the patch (a new fixture, an import that captured the real
+# class first, a monkeypatch undone early) would construct the REAL client,
+# whose constructor resolves the deployment's base URL, inside a test that reads
+# as hermetic. This guard makes that construction fail immediately and loudly
+# instead of quietly exercising a wire.
+#
+# IT IS A TEST GUARD, NOT AN OS BOUNDARY, and the difference is stated rather
+# than implied: in-process pytest cannot prove that no syscall egresses. It
+# catches the CONSTRUCTORS this slice could reach — the real client, an httpx
+# transport, a socket, a subprocess — and nothing beyond them. Wire-HTTP
+# evidence needs a launched daemon and an OS-level boundary; that evidence is
+# held (programme launch hold) rather than claimed from here.
+_TRIPWIRE: dict[str, list[str]] = {"trips": [], "expected": []}
+
+#: The real constructors, captured BEFORE any fixture patches a module
+#: attribute, so the two named allowances can hand the real one back.
+_REAL_CLIENT_INIT = tb_client.TeamBridgeClient.__init__
+_REAL_POPEN_INIT = subprocess.Popen.__init__
+
+
+def _trip(name: str) -> NoReturn:
+    _TRIPWIRE["trips"].append(name)
+    raise AssertionError(f"GUARD TRIPPED: {name}")
+
+
+def _expect_trip() -> None:
+    """Declare that THIS cell means to trip the guard (the negative controls)."""
+
+    _TRIPWIRE["expected"].append("control")
+
+
+def _arm_tripwire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bomb every constructor a read path could use to reach a wire."""
+
+    import socket as socket_mod
+
+    import httpx
+
+    def _bomb(name: str) -> Any:
+        def _fail(*args: Any, **kwargs: Any) -> NoReturn:
+            _trip(name)
+
+        return _fail
+
+    monkeypatch.setattr(tb_client.TeamBridgeClient, "__init__", _bomb("a real TeamBridgeClient"))
+    monkeypatch.setattr(httpx.HTTPTransport, "__init__", _bomb("httpx.HTTPTransport"))
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "__init__", _bomb("httpx.AsyncHTTPTransport"))
+    monkeypatch.setattr(socket_mod, "getaddrinfo", _bomb("socket.getaddrinfo"))
+    monkeypatch.setattr(socket_mod, "create_connection", _bomb("socket.create_connection"))
+    monkeypatch.setattr(socket_mod.socket, "connect", _bomb("socket.connect"))
+    monkeypatch.setattr(socket_mod.socket, "connect_ex", _bomb("socket.connect_ex"))
+    monkeypatch.setattr(subprocess.Popen, "__init__", _bomb("subprocess.Popen"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_wire_object(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Arm the tripwire for every cell in this file, and audit it at teardown.
+
+    A cell that trips it without declaring so (``_expect_trip``) fails HERE as
+    well as at the construction site: the declaration is what keeps a
+    negative-control cell honest about the one thing it means to do.
+    """
+
+    _TRIPWIRE["trips"].clear()
+    _TRIPWIRE["expected"].clear()
+    _arm_tripwire(monkeypatch)
+    yield
+    assert len(_TRIPWIRE["trips"]) == len(_TRIPWIRE["expected"]), (
+        "a real wire object was constructed in a cell that did not declare it: "
+        f"{_TRIPWIRE['trips']}"
+    )
+
+
+@contextlib.contextmanager
+def _spawn_allowed() -> Iterator[None]:
+    """The ONE hole in the subprocess bomb, asked for by name.
+
+    Two cells need a REAL fresh interpreter: the lazy-import cell proves the
+    router's boot path leaves httpx unimported, and the retained-manager
+    regression needs an EXTERNAL writer whose writes this process has never
+    made. Both run this repo's own literal script with no socket and no
+    credential, and the rest of the tripwire stays armed around them.
+    """
+
+    saved = subprocess.Popen.__init__
+    subprocess.Popen.__init__ = _REAL_POPEN_INIT
+    try:
+        yield
+    finally:
+        subprocess.Popen.__init__ = saved
+
+
+@contextlib.contextmanager
+def _real_client_allowed() -> Iterator[None]:
+    """Disarm ONLY the client bomb, for the fixture that drives the real one.
+
+    ``retained_api`` deliberately exercises the REAL status discipline, whose
+    constructor builds a real client; with no credentials on that isolated
+    config the discipline answers signed out from local state and calls no wire
+    method. Everything else — httpx, sockets, subprocesses — stays armed.
+    """
+
+    saved = tb_client.TeamBridgeClient.__init__
+    tb_client.TeamBridgeClient.__init__ = _REAL_CLIENT_INIT
+    try:
+        yield
+    finally:
+        tb_client.TeamBridgeClient.__init__ = saved
 
 
 class FakeClient:
@@ -541,17 +656,23 @@ async def test_every_route_requires_the_desktop_bearer(tmp_path: Path, monkeypat
 
 
 def _external(lines: str) -> None:
-    """Run a REAL separate process against the isolated config; fail loudly."""
+    """Run a REAL separate process against the isolated config; fail loudly.
+
+    ``_spawn_allowed`` is the tripwire's one subprocess hole and this is where
+    it is asked for: the process is this repo's own script against a scratch
+    config, with no socket and no credential.
+    """
 
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOP_"))}
-    result = subprocess.run(
-        [sys.executable, "-c", lines],
-        env=env,
-        cwd=str(Path(__file__).resolve().parents[3]),
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    with _spawn_allowed():
+        result = subprocess.run(
+            [sys.executable, "-c", lines],
+            env=env,
+            cwd=str(Path(__file__).resolve().parents[3]),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
     assert result.returncode == 0, result.stderr
 
 
@@ -579,10 +700,11 @@ async def retained_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app = FastAPI()
     app.state.config_manager = ConfigManager(root)  # THE retained manager
     app.include_router(desktop_team_bridge.router)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
-    ) as client:
-        yield client, root, app
+    with _real_client_allowed():
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
+        ) as client:
+            yield client, root, app
 
 
 async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
@@ -786,6 +908,27 @@ def _plant_proof(
     categories_text: str | None = overrides.pop("categories_text", None)
     hold: str | None = overrides.pop("hold", None)
     intent_body: str = overrides.pop("intent_body", receipt_body)
+    # The intent's OWN tuple, one knob per member (review R-1): every member is
+    # compared by ``_intent_matches``, so every member needs a case that moves
+    # only it — otherwise a comparison that stopped comparing ships green on the
+    # privacy boundary. All of them default to what a real pipeline writes.
+    intent_model: str = overrides.pop("intent_model", model)
+    intent_prompt_version: str = overrides.pop("intent_prompt_version", "bridge-screen-v1")
+    intent_template: str = overrides.pop("intent_template", template)
+    intent_verdict: str = overrides.pop("intent_verdict", "allow")
+    intent_categories: tuple[str, ...] = overrides.pop("intent_categories", categories)
+    intent_categories_text: str | None = overrides.pop("intent_categories_text", None)
+    # ``record_ack_intent`` requires an ALLOW receipt for ``target=read``, so a
+    # read intent with any other verdict is a state the product's API cannot
+    # mint — and the tuple comparison still has to cover it (a copied row, an
+    # older store). It therefore rides the same raw-write escape hatch as the
+    # two text knobs below.
+    intent_verdict_text: str | None = overrides.pop("intent_verdict_text", None)
+    # The TWO values no writer of this codebase could produce: TEXT where the
+    # schema says INTEGER (a legal SQLite store), and categories text that is not
+    # the array it claims to be. Both are written straight to the row after the
+    # product's own API has committed it, exactly as ``categories_text`` does.
+    receipt_epoch_text: str | None = overrides.pop("receipt_epoch_text", None)
     assert not overrides, overrides
 
     store = Store(root)
@@ -825,6 +968,13 @@ def _plant_proof(
                     1_700_000_000.0,
                 ),
             )
+        if receipt_epoch_text is not None:
+            with sqlite3.connect(state_db_path(root)) as conn:
+                conn.execute(
+                    "UPDATE screening_receipts SET policy_epoch = ? "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (receipt_epoch_text, _owner_key(owner), str(item["message"]["id"])),
+                )
     if hold is not None:
         with sqlite3.connect(state_db_path(root)) as conn:
             conn.execute(
@@ -834,14 +984,15 @@ def _plant_proof(
             )
     if intent is not None:
         # The intent's OWN tuple rides its own receipt object: a case that wants a
-        # tuple nobody could have written passes ``intent_body``.
+        # tuple nobody could have written passes ``intent_body`` (or any of the
+        # per-member knobs above), so a cell can move ONE member at a time.
         planted = ScreeningReceipt(
-            verdict="allow",
-            model=model,
-            prompt_version="bridge-screen-v1",
-            template_sha256=template,
+            verdict=intent_verdict,
+            model=intent_model,
+            prompt_version=intent_prompt_version,
+            template_sha256=intent_template,
             body_sha256=intent_body,
-            categories=categories,
+            categories=intent_categories,
         )
         intent_id = store.record_ack_intent(
             owner, str(item["message"]["id"]), "read", planted, "r" * 36
@@ -850,6 +1001,17 @@ def _plant_proof(
             store.mark_ack_result(owner, intent_id, state="confirmed", error_code=None)
         elif intent == "conflict":
             store.mark_ack_result(owner, intent_id, state="conflict", error_code="conflict")
+        for column, raw in (
+            ("categories", intent_categories_text),
+            ("verdict", intent_verdict_text),
+        ):
+            if raw is not None:
+                with sqlite3.connect(state_db_path(root)) as conn:
+                    conn.execute(
+                        f"UPDATE ack_intents SET {column} = ? "
+                        "WHERE owner_key = ? AND message_id = ? AND target = 'read'",
+                        (raw, _owner_key(owner), str(item["message"]["id"])),
+                    )
 
 
 def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
@@ -1411,23 +1573,24 @@ def test_the_read_slice_keeps_httpx_off_the_boot_path(tmp_path: Path) -> None:
     """`lop serve` imports the router; the client stack must stay in handlers."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
     env.update(HOME=str(tmp_path), LOCAL_OPERATOR_CONFIG_DIR=str(tmp_path / ".local-operator"))
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; "
-            "from local_operator.server.routes import desktop_team_bridge as m; "
-            "paths = {str(r.path) for r in m.router.routes}; "
-            "assert '/v1/desktop/team-bridge/inbox' in paths, paths; "
-            "assert 'httpx' not in sys.modules, 'the read put httpx on the boot path'; "
-            "print('read slice: lazy')",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
+    with _spawn_allowed():
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; "
+                "from local_operator.server.routes import desktop_team_bridge as m; "
+                "paths = {str(r.path) for r in m.router.routes}; "
+                "assert '/v1/desktop/team-bridge/inbox' in paths, paths; "
+                "assert 'httpx' not in sys.modules, 'the read put httpx on the boot path'; "
+                "print('read slice: lazy')",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
     assert result.returncode == 0, result.stderr
     assert "lazy" in result.stdout
 
@@ -1505,6 +1668,16 @@ async def test_the_detail_read_serves_the_body_only_on_the_whole_tuple(api):
     assert result["content"]["content_sha256"] == item["message"]["body_hash"]
     assert result["body_included"] is True
     assert result["screening_detail_included"] is True
+    # R-4, pinned rather than only documented: the badge beside SERVED bytes is
+    # still this machine's own hold state — the closed three-state vocabulary —
+    # because what admitted the text is the tuple above, not anybody's screening.
+    # A renderer reads it as "this machine recorded no hold"; the alternative (a
+    # receipt-derived ``reviewed``) is a vocabulary change M-12a forbids here.
+    assert result["item"]["screening"] == {
+        "state": "unreviewed",
+        "hold_code": None,
+        "retry_at": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1665,3 +1838,126 @@ async def test_the_detail_read_refuses_a_machine_with_no_retained_namespace(api)
     assert not (root / "team_bridge").exists(), "a refused detail read created the bridge store"
     assert not list(root.rglob("state.sqlite3"))
     assert _digest(root) == before
+
+
+# ---------------------------------------------------------------------------
+# The programme guard (R-2), the header the APP's middleware supplies (R-6) and
+# the damage code a text integer must map to (R-3): the three things the cells
+# above structurally cannot show.
+# ---------------------------------------------------------------------------
+
+
+def test_the_tripwire_fires_on_a_real_client_construction(tmp_path: Path) -> None:
+    """The negative control for the client arm: the REAL class cannot be built.
+
+    Without this cell, deleting the bomb would leave the file green — nothing
+    else here constructs the real client — and the guard would be decoration.
+    """
+
+    _expect_trip()
+    with pytest.raises(AssertionError, match="GUARD TRIPPED: a real TeamBridgeClient"):
+        tb_client.TeamBridgeClient(tmp_path)
+
+
+def test_the_tripwire_fires_on_a_socket_a_subprocess_and_a_transport() -> None:
+    """The other three arms, each measured rather than assumed.
+
+    A socket dial, a child process and a default httpx transport are the three
+    remaining ways a cell could leave this process's memory; each must fail the
+    cell that makes it, before any call it was made for.
+    """
+
+    import socket as socket_mod
+
+    import httpx
+
+    _expect_trip()
+    with pytest.raises(AssertionError, match="GUARD TRIPPED: socket.create_connection"):
+        socket_mod.create_connection(("127.0.0.1", 9), timeout=0.1)
+    _expect_trip()
+    with pytest.raises(AssertionError, match="GUARD TRIPPED: subprocess.Popen"):
+        subprocess.run([sys.executable, "-c", "pass"], capture_output=True, timeout=10)
+    _expect_trip()
+    with pytest.raises(AssertionError, match="GUARD TRIPPED: httpx.AsyncHTTPTransport"):
+        httpx.AsyncHTTPTransport()
+
+
+async def test_the_desktop_boundary_marks_the_read_no_store(tmp_path, monkeypatch):
+    """The header belongs to the APP's middleware, so this cell mounts it (R-6).
+
+    The cells above mount the router alone, where ``cache-control`` is ``None``:
+    the header the shipped app puts on every ``/v1/desktop/`` answer was
+    therefore asserted by nothing in this file, and a middleware that stopped
+    supplying it would ship green. This mounts the SAME function the app
+    registers (``managed_desktop_boundary``, registered by the decorator exactly
+    as ``BaseHTTPMiddleware(dispatch=...)``) on a minimal app carrying this
+    router, drives one refused read through it, and keeps the negative control:
+    a route outside the sensitive prefixes is left alone, so the pin cannot pass
+    by marking everything.
+    """
+
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    from local_operator.server.app import managed_desktop_boundary
+
+    for name in list(os.environ):
+        if name.startswith(("CMUX_", "LOP_")):
+            monkeypatch.delenv(name)
+    root = tmp_path / ".local-operator"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    FakeClient.behavior = {}
+    FakeClient.instances = []
+    FakeClient.behavior["access"] = _access()
+    monkeypatch.setattr(tb_client, "TeamBridgeClient", FakeClient)
+    monkeypatch.setattr(
+        tb_client,
+        "get_status_discipline",
+        lambda config_dir=None, base_url=None: FakeDiscipline(_status_check()),
+    )
+    app = FastAPI()
+    app.add_middleware(BaseHTTPMiddleware, dispatch=managed_desktop_boundary)
+    app.state.config_manager = ConfigManager(root)
+    app.include_router(desktop_team_bridge.router)
+
+    @app.get("/probe-outside-the-boundary")
+    async def _probe() -> dict[str, bool]:
+        return {"ok": True}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
+    ) as client:
+        refused = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+        outside = await client.get("/probe-outside-the-boundary")
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "history_context_unavailable"
+    assert refused.headers["cache-control"] == "no-store"
+    assert outside.status_code == 200
+    assert "cache-control" not in outside.headers, "the boundary marked an unrelated route"
+
+
+async def test_a_text_epoch_is_a_typed_refusal_and_not_a_500(api) -> None:
+    """SQLite stores TEXT in an INTEGER column, so the read must stay typed (R-3).
+
+    The value is written by the fixture's own raw-write knob — the one thing the
+    product's API cannot mint — and the answer is this family's ordinary metadata
+    answer with ``content: null``. A predicate that let ``int()`` raise would
+    surface here as an untyped 500, which the route's closed table cannot name.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    owner = _enroll(root)
+    item = _wire_item()
+    _plant_proof(root, owner, item, receipt_epoch_text="not-a-number")
+    FakeClient.behavior["message"] = item
+
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["content"] is None
+    assert result["body_included"] is False
+    assert "not-a-number" not in response.text
