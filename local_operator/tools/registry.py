@@ -18,6 +18,7 @@ from local_operator.code_requests.tool import build_code_requests_tool
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.network.tool import build_network_tool
+from local_operator.team_bridge.tool import build_bridge_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
@@ -159,6 +160,12 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # appending never shifts a provider-visible array prefix, which is what
     # the prompt cache keys on.
     "setting": lambda _context: builtin.build_setting_tool(),
+    # createIf: returns None without a bridge runtime on the context (not
+    # signed in, disabled, or not the designated session) — a session that
+    # cannot use the bridge pays no schema for it. Appended at the END of
+    # both tables on purpose: appending never shifts a provider-visible
+    # array prefix, which is what the prompt cache keys on (H5d).
+    "bridge": lambda context: build_bridge_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -206,6 +213,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "generate_video",
     "video_status",
     "setting",
+    "bridge",
 ]
 
 

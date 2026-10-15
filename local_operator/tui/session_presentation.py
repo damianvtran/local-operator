@@ -19,6 +19,7 @@ from textual.binding import Binding
 from textual.message import Message
 
 from local_operator.harness.types import ImageContent
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
@@ -1105,6 +1106,7 @@ def project_settled_rows(
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_SEND_NOTICE_MESSAGE_TYPE,
+        TEAM_BRIDGE_MESSAGE_TYPE,
     )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
@@ -1132,6 +1134,7 @@ def project_settled_rows(
         AssistantBlock,
         MonitorDeltaBlock,
         PeerMessageBlock,
+        TeamBridgeBlock,
         UserBlock,
         WakeBlock,
         _resume_tail_start,
@@ -1365,6 +1368,25 @@ def project_settled_rows(
                             PeerMessageBlock(
                                 str(details.get("body", "")),
                                 details.get("sender") or {},
+                                fold_width=fold_width,
+                            )
+                        )
+                        appended = True
+                continue
+            # A team-bridge wake (§13.4: its OWN provenance kind, never the
+            # peer card) replays with the SAME dedup and cross-session gates as
+            # the peer branch directly above — the row is a receipt either way,
+            # and a bridge delivery is no more the user's own turn than a peer
+            # note is. The branch paints the dedicated card; the `continue`
+            # keeps the message consumed even when the mount is hidden.
+            if getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                if str(getattr(message, "id", "")) not in self._live_peer_receipts:
+                    if not hide_cross_session:
+                        self._append_block(
+                            TeamBridgeBlock(
+                                bridge_card_text(details),
+                                bridge_card_sender(details),
                                 fold_width=fold_width,
                             )
                         )

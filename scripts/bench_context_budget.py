@@ -1493,7 +1493,43 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ~25,808 -> ~26,004). The additive task/batch/hub model field is required
 #: to express inherit without erasing a role; no profiles/defaults were changed.
 #: Preserve the existing 55-token headroom band on both measured arms.
-BUDGET_BILLED_TOKENS = 29_015
+#: A 41st tool, `bridge` (H5d, Team Bridge). Measured with the repo's own
+#: script, isolated HOME/config, on three trees: the merge base `703aa047`,
+#: this head, and the shared checkout (`2115d3e194`, for unrelated drift).
+#:
+#:   component             base 703aa047     head     delta
+#:   instructions                25,863   25,863         0
+#:   tool_inventory                 785      794        +9
+#:   environment                     81       81         0
+#:   knowledge                      854      854         0
+#:   tool_schemas                53,537   54,766    +1,229
+#:   ------------------------------------------------------------
+#:   top total (chars)           81,120   82,358    +1,238  = ~+445 billed
+#:   child total (chars)         72,903   74,141    +1,238  = ~+445 billed
+#:   (child tool_schemas        45,614   46,843    +1,229)
+#:
+#: The inventory delta is not a reworded line: the surface gains exactly one
+#: name (`bridge` — 40 tools to 41, verified by listing both), so the line
+#: grows by the name plus its separator.
+#:
+#: Two facts to read separately:
+#:
+#: - THE MERGE BASE ALREADY EXCEEDED THE OLD CEILING. 81,120 chars is ~29,180
+#:   billed against 29,015: +165 on the top arm, +165 on the child. No ceiling
+#:   covering this branch can sit at the old value whatever this branch does —
+#:   the ratchet was already stale, behind a path-gated job that does not run
+#:   when a schema changes.
+#: - UNRELATED DRIFT, reproduced: the shared checkout reads tool_schemas
+#:   53,669 (base +132) and ~29,227 billed (+47 over the base) — main moved
+#:   after the merge base without the gate re-running.
+#:
+#: Our share of the CI-reported overage is +445 billed, all of it the bridge
+#: tool's published schema (the description was trimmed twice; what remains is
+#: the schema of the ops themselves, which cannot shrink without unpublishing
+#: one). The ceiling is head + the existing 55-token band on both arms —
+#: 29,680 / 26,724 — and that raise is NOT self-approved: it is stated here
+#: and in the PR thread for a reviewer to verify before it settles.
+BUDGET_BILLED_TOKENS = 29_680
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1594,7 +1630,7 @@ BUDGET_BILLED_TOKENS = 29_015
 #:   delta                             +249 chars = ~+90
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 26_059
+BUDGET_CHILD_BILLED_TOKENS = 26_724
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

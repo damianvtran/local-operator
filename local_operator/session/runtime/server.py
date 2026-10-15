@@ -1417,6 +1417,48 @@ def receives_message_id(target: Any) -> bool:
     return "message_id" in parameters
 
 
+def receives_custom_type(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes a ``custom_type``.
+
+    The ``receives_message_id`` discipline, one field over: the dispatch asks
+    the HANDLE and both hosts ask the SESSION OBJECT their handle wraps before
+    handing the keyword on, so a reduced double or an older build never sees a
+    keyword its literal signature would refuse. VAR_KEYWORD answers NO for the
+    same reason as above (swallowing the type would silently stamp the default
+    and lose the provenance this carriage exists for); no method at all also
+    answers NO — the dispatch refuses that session with its own sentence.
+    """
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "custom_type" in parameters
+
+
+def receives_bridge_meta(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes ``bridge_meta``.
+
+    The ``receives_custom_type`` discipline, one field over (H5 F3): the
+    dispatch asks the HANDLE, and both hosts ask the SESSION OBJECT their
+    handle wraps, before handing the keyword on — so a reduced double or an
+    older build never sees a keyword its literal signature would refuse.
+    VAR_KEYWORD answers NO for the same reason; no method at all also
+    answers NO.
+    """
+
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "bridge_meta" in parameters
+
+
 def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
     """The ``(detail, extra)`` an op's answer contributes to its ack frame.
 
@@ -5546,6 +5588,20 @@ class RuntimeServer:
         )
         signature = self._operator_signature_verdict(frame, conn)
         admitted = admit_increasing(capability=capability, signature=signature)
+        if admitted and frame.get("op") == "bridge_decide":
+            # TB-02 P1: the one-shot ask-bound grant the decision needs is
+            # minted HERE, on the admission this seam just granted (capability
+            # proof or a verified operator/device signature). The dispatcher
+            # consumes it at the point of effect; without it there is no POST.
+            # Memory-only; see approval.py's grant table.
+            from local_operator.harness.approval import mint_bridge_decide_grant
+
+            mint_bridge_decide_grant(
+                session_id=str(self._record.session_id),
+                ask_id=str(frame.get("ask_id") or ""),
+                question_id=str(frame.get("question_id") or ""),
+                word=str(frame.get("word") or ""),
+            )
         if not admitted:
             # Logged because the two refusals have different causes and only
             # one of them is an attack: a capability miss is a follower or a
@@ -6280,8 +6336,8 @@ class RuntimeServer:
                 # loosening is whatever the client chose. All four are baked into
                 # the signed message, so a challenge cannot be moved between them.
                 action = str(frame.get("action") or "")
-                if action not in ("loosen", "approve"):
-                    raise ValueError("action must be 'loosen' or 'approve'")
+                if action not in ("loosen", "approve", "decide"):
+                    raise ValueError("action must be 'loosen', 'approve' or 'decide'")
                 request_id = frame.get("request_id", "")
                 if not isinstance(request_id, str):
                     raise ValueError("request_id must be a string")
@@ -7465,6 +7521,24 @@ class RuntimeServer:
             if not inspect.isawaitable(outcome):
                 raise ValueError(f"owner {op} operation must be awaitable")
             return cast("str", await outcome)
+        if op == "bridge_decide":
+            # TB-02 P1: the VERIFIED door for a bridge decision. The authority
+            # seam above has already admitted this frame (capability proof or a
+            # verified operator/device signature for action ``decide`` over the
+            # composite ask#question#word target) and minted the one-shot grant
+            # the dispatcher consumes; a raw ``ask_respond`` on a bridge ask is
+            # refused at the session, so this is the only way one is decided.
+            method = getattr(h, "bridge_decide", None)
+            if not callable(method):
+                raise ValueError("this session's runtime predates verified bridge decisions")
+            outcome = method(
+                str(frame.get("ask_id", "")),
+                str(frame.get("question_id", "")),
+                str(frame.get("word", "")),
+            )
+            if not inspect.isawaitable(outcome):
+                raise ValueError("owner bridge_decide operation must be awaitable")
+            return cast("str", await outcome)
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
             # the user tapped (U8 guard): the handle rejects the answer if the
@@ -7543,6 +7617,48 @@ class RuntimeServer:
             # entirely, leaving this op byte-identical.
             if receives_message_id(h):
                 fields["message_id"] = frame.get("message_id")
+            # PROVENANCE CARRIAGE (H4e-render): a sender-declared ``custom_type``
+            # is VALIDATED against the client-local allowlist before anything
+            # is forwarded — an unknown value is a typed refusal, never coerced
+            # (a wrong provenance kind on the receiving card is worse than a
+            # refused send), and a frame without the key stays byte-identical.
+            # The allowlist import is IN-FUNCTION: this module keeps its import
+            # weight off the happy path, and the common frame never carries the
+            # field at all.
+            custom_type = frame.get("custom_type")
+            if custom_type is not None:
+                from local_operator.harness.message_types import (
+                    PEER_DELIVERABLE_CUSTOM_TYPES,
+                )
+
+                if (
+                    not isinstance(custom_type, str)
+                    or custom_type not in PEER_DELIVERABLE_CUSTOM_TYPES
+                ):
+                    raise ValueError(
+                        "peer_message carries an unknown custom_type; "
+                        "refusing to stamp a provenance kind the receiver "
+                        "cannot verify"
+                    )
+                if receives_custom_type(h):
+                    fields["custom_type"] = custom_type
+            # BRIDGE LOCATOR (H5 F3): the internal bounded ``bridge_meta`` is
+            # validated against the closed key set BEFORE anything forwards
+            # it — an unknown/oversized/non-scalar block is a typed refusal,
+            # never a coercion — and a frame without the key stays
+            # byte-identical, exactly like ``custom_type`` above.
+            bridge_meta = frame.get("bridge_meta")
+            if bridge_meta is not None:
+                from local_operator.harness.message_types import validate_bridge_meta
+
+                try:
+                    bridge_meta = validate_bridge_meta(bridge_meta)
+                except ValueError as failure:
+                    raise ValueError(
+                        f"peer_message carries an invalid bridge_meta: {failure}"
+                    ) from failure
+                if receives_bridge_meta(h):
+                    fields["bridge_meta"] = bridge_meta
             return await typed_receive(**fields)
         if op == "peer_set_model":
             # Another local session switching THIS one's model (design D1). The

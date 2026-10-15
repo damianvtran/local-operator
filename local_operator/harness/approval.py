@@ -372,7 +372,7 @@ def transition_authority(command: str, args: str, *, approved: bool | None = Non
 #: from ``server.py``'s own dispatch source and asserts the two are equal, so a
 #: coder who adds an op that reaches a sink fails the suite rather than shipping
 #: an unguarded way to loosen a running gate.
-AUTHORITY_OPS = frozenset({"slash", "slash_result", "approval_answer"})
+AUTHORITY_OPS = frozenset({"slash", "slash_result", "approval_answer", "bridge_decide"})
 
 
 def frame_authority(frame: dict[str, Any]) -> Authority | None:
@@ -394,6 +394,13 @@ def frame_authority(frame: dict[str, Any]) -> Authority | None:
         # as one. ``False`` — and an absent value, which fails the dispatch on
         # its own — stays ordinary, so denying a card keeps working everywhere.
         return transition_authority("", "", approved=bool(frame.get("approved")))
+    if op == "bridge_decide":
+        # TB-02 (design memo §2): BOTH words are authority-increasing — this
+        # DIVERGES from approval_answer's asymmetry on purpose. A bridge deny is
+        # not a local gate settling in the safe direction; it is a statement of
+        # the operator's will to a third party that can suppress a legitimate
+        # request — so a deny carries exactly the authority an approve does.
+        return transition_authority("", "", approved=True)
     return transition_authority(str(frame.get("command", "")), str(frame.get("args", "")))
 
 
@@ -419,6 +426,17 @@ def signature_target(frame: dict[str, Any]) -> tuple[str, str] | None:
         return None
     if frame_authority(frame) != "authority-increasing":
         return None
+    if frame.get("op") == "bridge_decide":
+        # TB-02: the binding is the composite ask#question#word, DERIVED from
+        # the frame both ends already carry (the client asks this function what
+        # to sign; the runtime re-derives it at the same seam), so a signature
+        # minted for one request/question/word cannot be retargeted to another.
+        ask_id = frame.get("ask_id")
+        question_id = frame.get("question_id")
+        word = frame.get("word")
+        if not all(isinstance(part, str) and part for part in (ask_id, question_id, word)):
+            return "decide", ""
+        return "decide", f"{ask_id}#{question_id}#{word}"
     request_id = frame.get("request_id")
     action = "approve" if frame.get("op") == "approval_answer" else "loosen"
     return action, request_id if isinstance(request_id, str) else ""
@@ -845,6 +863,256 @@ def operator_cap_for(pid: int) -> bytes | None:
 def reset_operator_caps_for_tests() -> None:
     """Clear the process-wide table. Tests only — nothing in production calls it."""
     _OPERATOR_CAPS.clear()
+
+
+#: One-shot bridge-decision grants (TB-02 P1), keyed ``(session_id, ask_id,
+#: question_id)`` with the decision word bound in the value.
+#:
+#: MINTED by the runtime's authority seam at the moment it ADMITS a
+#: ``bridge_decide`` frame — i.e. only after the presenter proved the spawn
+#: capability or a verified operator/device signature — and CONSUMED by
+#: ``Session._dispatch_bridge_decisions`` at the point of effect. The grant —
+#: never the ask-log fold — is the proof that a human decided, so a forged
+#: fold line carries none and can neither POST nor win the ask.
+#:
+#: Memory-only, never written anywhere, dies with the process: the
+#: ``_OPERATOR_CAPS`` pattern and for the same reason (a value nothing can
+#: read cannot be forged). A CONSUMED grant is retained for the TTL so the
+#: later fold re-reads that follow consumption can still tell a verified
+#: answer from a forged one.
+_BRIDGE_DECIDE_GRANTS: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+#: How long a minted (or consumed) grant stays in the table, measured FROM THE
+#: MINT. The mint→consume window is one answer's durable append; the consumed
+#: tail must outlive the reconcile passes that re-read the frozen row. Both are
+#: well under this. Consuming does NOT extend it (S3-5): an expiry a decision
+#: can silently outlive is worse than a shorter window, so the drop of a LIVE
+#: grant is recorded and logged by :func:`_prune_bridge_grants`.
+BRIDGE_DECIDE_GRANT_TTL_S = 300.0
+
+#: The bounded audit ring of LIVE grants the TTL dropped IN THIS PROCESS (S3-5).
+#: HONEST SCOPE: in-process only, memory-only, newest 32 kept — so a RESTART
+#: clears it and leaves neither an entry nor a log line here, and nothing in
+#: this ring survives a restart. Reads: :func:`bridge_decide_grant_drops` (all)
+#: and :func:`bridge_decide_grant_drops_for` (one target — the DOOR's reader,
+#: which turns a dropped decision into a typed refusal instead of a generic
+#: one), plus the WARNING :func:`_prune_bridge_grants` logs as it drops.
+_BRIDGE_DECIDE_GRANT_DROPS: list[dict[str, Any]] = []
+
+
+def bridge_decide_grant_drops() -> list[dict[str, Any]]:
+    """The LIVE grants the TTL dropped in THIS process, newest last (S3-5)."""
+    return [dict(entry) for entry in _BRIDGE_DECIDE_GRANT_DROPS]
+
+
+def bridge_decide_grant_drops_for(*, session_id: str, ask_id: str, question_id: str) -> bool:
+    """Whether THIS target's live decision was dropped by the TTL (S3-5).
+
+    The production reader: the door asks before refusing, so a human whose tap
+    expired unspent is told to answer again instead of being handed a generic
+    "no decision admitted" that reads like a bug.
+    """
+    return any(
+        entry["session_id"] == str(session_id)
+        and entry["ask_id"] == str(ask_id)
+        and entry["question_id"] == str(question_id)
+        for entry in _BRIDGE_DECIDE_GRANT_DROPS
+    )
+
+
+#: The SPENT grants, per target, newest last — the evidence TS3-5/R3-5 read.
+#: A consume MOVES an entry here instead of marking it in the live slot, so a
+#: re-decided target can hold a fresh live grant while the earlier admission
+#: stays on the record (TB-02 NIT) and a later mint cannot make a spent grant
+#: look live again. Memory-only, pruned on the same mint-anchored TTL, bounded
+#: per target and overall.
+_BRIDGE_DECIDE_GRANTS_CONSUMED: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+
+#: Bounds: 4 spent entries per target, 256 targets overall.
+_BRIDGE_CONSUMED_PER_TARGET = 4
+_BRIDGE_CONSUMED_TARGETS = 256
+
+
+def _prune_bridge_grants(now: float) -> None:
+    """Drop grants past the TTL — VISIBLY when a decision is still live (S3-5).
+
+    Expiry is keyed off the MINT time (``at`` is written once, at mint, and
+    never refreshed), so a spent entry ages out on the same clock as a live
+    one rather than being extended by the consume. That makes the drop real:
+    a LIVE grant falling out of the TTL is a human decision that can no longer
+    be dispatched, so it is announced — a bounded audit ring the surfaces/tests
+    can read, plus a log line — instead of vanishing between two reads. A
+    spent entry ageing out only ends the supersede window, which is quiet.
+    """
+    stale = [
+        key
+        for key, entry in _BRIDGE_DECIDE_GRANTS.items()
+        if now - entry["at"] > BRIDGE_DECIDE_GRANT_TTL_S
+    ]
+    for key in stale:
+        entry = _BRIDGE_DECIDE_GRANTS.pop(key, None)
+        if entry is None:
+            continue
+        session_id, ask_id, question_id = key
+        _BRIDGE_DECIDE_GRANT_DROPS.append(
+            {
+                "session_id": session_id,
+                "ask_id": ask_id,
+                "question_id": question_id,
+                "word": str(entry.get("word") or ""),
+                "at": float(entry.get("at") or 0.0),
+            }
+        )
+        del _BRIDGE_DECIDE_GRANT_DROPS[:-32]
+        logger.warning(
+            "bridge decide grant for ask %s / %s expired before it was spent — the "
+            "decision was NOT sent; the card must offer a fresh answer",
+            ask_id,
+            question_id,
+        )
+    for key in list(_BRIDGE_DECIDE_GRANTS_CONSUMED):
+        kept = [
+            entry
+            for entry in _BRIDGE_DECIDE_GRANTS_CONSUMED[key]
+            if now - float(entry.get("at") or 0.0) <= BRIDGE_DECIDE_GRANT_TTL_S
+        ]
+        if kept:
+            _BRIDGE_DECIDE_GRANTS_CONSUMED[key] = kept
+        else:
+            _BRIDGE_DECIDE_GRANTS_CONSUMED.pop(key, None)
+
+
+def mint_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: str, word: str) -> None:
+    """Record that THIS runtime admitted a human decision for this ask.
+
+    TB-02 NIT: a CONSUMED grant is EVIDENCE — it is what the supersede test and
+    the recovery door read for the rest of the TTL — so spending one MOVES it
+    into the consumed ledger rather than leaving it in the live slot, and a
+    later mint for the same target neither looks live again (it could then be
+    spent twice) nor erases the earlier verdict. A re-decided ask therefore gets
+    a fresh live grant while the previous admission stays on the record.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    key = (str(session_id), str(ask_id), str(question_id))
+    _BRIDGE_DECIDE_GRANTS[key] = {
+        "word": str(word).strip().lower(),
+        "at": now,
+    }
+    _prune_bridge_grants(now)
+
+
+def consume_bridge_decide_grant(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> bool:
+    """Spend the one-shot grant for EXACTLY this word; ``False`` when absent.
+
+    Pop-then-check discipline: the decision word is part of the match, so a
+    grant minted for one word cannot be spent on the other, and a second
+    consume of the same target finds no LIVE grant (the first spend moved it to
+    the spent ledger) — the m8 exact-replay rule covers the (already recorded)
+    replay, never a downgrade.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    key = (str(session_id), str(ask_id), str(question_id))
+    entry = _BRIDGE_DECIDE_GRANTS.get(key)
+    if entry is None:
+        return False
+    if str(entry.get("word")) != str(word).strip().lower():
+        return False
+    # SPEND IT: the evidence moves to the consumed ledger, so the live slot is
+    # free for a later admission of the same target and the earlier verdict
+    # stays readable for the rest of the TTL. ``at`` stays the MINT time (S3-5)
+    # — consuming must not extend the window.
+    _BRIDGE_DECIDE_GRANTS.pop(key, None)
+    spent = _BRIDGE_DECIDE_GRANTS_CONSUMED.setdefault(key, [])
+    spent.append(
+        {
+            "word": str(entry.get("word") or ""),
+            "at": float(entry.get("at") or now),
+            "consumed_at": now,
+        }
+    )
+    del spent[:-_BRIDGE_CONSUMED_PER_TARGET]
+    while len(_BRIDGE_DECIDE_GRANTS_CONSUMED) > _BRIDGE_CONSUMED_TARGETS:
+        _BRIDGE_DECIDE_GRANTS_CONSUMED.pop(next(iter(_BRIDGE_DECIDE_GRANTS_CONSUMED)))
+    return True
+
+
+def bridge_decide_grant_seen(*, session_id: str, ask_id: str, question_id: str, word: str) -> bool:
+    """Whether this exact decision was EVER admitted (live or spent)."""
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    wanted = str(word).strip().lower()
+    key = (str(session_id), str(ask_id), str(question_id))
+    entry = _BRIDGE_DECIDE_GRANTS.get(key)
+    if entry is not None and str(entry.get("word")) == wanted:
+        return True
+    return any(
+        str(spent.get("word")) == wanted for spent in _BRIDGE_DECIDE_GRANTS_CONSUMED.get(key, ())
+    )
+
+
+def bridge_decide_grant_committed(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> bool:
+    """Whether a SPENT grant exists for exactly this word (S-R3-1).
+
+    THE PROVENANCE TEST for an already-recorded answer: an answer that came
+    through the verified door was CONSUMED by the dispatcher at the point of
+    effect, and the spent entry is retained for the TTL. A MINTED-but-unspent
+    grant is the operator's own live decision whose fold row has not been
+    written yet — reading that as "the recorded answer was proven" is what let
+    a forged SAME-WORD line suppress the operator's decision and leave the grant
+    unspent (S-R3-1). Distinct from :func:`bridge_decide_grant_seen`, which
+    answers "was this decision ever admitted" and is the wrong question here.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    wanted = str(word).strip().lower()
+    key = (str(session_id), str(ask_id), str(question_id))
+    return any(
+        str(spent.get("word")) == wanted for spent in _BRIDGE_DECIDE_GRANTS_CONSUMED.get(key, ())
+    )
+
+
+def withdraw_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: str) -> None:
+    """Drop a minted-but-unconsumed grant when the door REFUSES the frame.
+
+    S-R3-3: mint-on-admission happens before the door can validate the ask, the
+    question and the word, so a refusal must not leave a live grant behind —
+    otherwise the same TARGET could be spent later (by a stale retry or another
+    route) without a fresh, admitted human decision. The key is the target, not
+    the attempted word: an admitted frame whose word the door refused proves
+    nothing about the target, and the grant on it must not outlive the refusal.
+    A CONSUMED entry is left in place — it is the provenance record the
+    supersede test reads.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    key = (str(session_id), str(ask_id), str(question_id))
+    entry = _BRIDGE_DECIDE_GRANTS.get(key)
+    if entry is None:
+        return
+    _BRIDGE_DECIDE_GRANTS.pop(key, None)
+
+
+def reset_bridge_decide_grants_for_tests() -> None:
+    """Clear the process-wide tables and the drop audit ring. Tests only."""
+    _BRIDGE_DECIDE_GRANTS.clear()
+    _BRIDGE_DECIDE_GRANTS_CONSUMED.clear()
+    _BRIDGE_DECIDE_GRANT_DROPS.clear()
 
 
 class OperatorCapHandoff:

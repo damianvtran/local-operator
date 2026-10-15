@@ -4790,6 +4790,23 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
+    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
+    # account-bound designated session. The decision is the HOST's, taken at
+    # the ONE construction seam, and a gate miss adds NO key at all (the
+    # ordinary kwargs dict cannot drift from what existing callers built).
+    # The helper is import-light and NETWORK-FREE: it reads local
+    # enrollment/settings/availability state and constructs the runtime — no
+    # fetch, no spawn; the client stays cheap until its first request.
+    # Subagent children are built elsewhere and never receive it (see the
+    # parameter's comment on ``Session``).
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    if bridge_runtime is not None:
+        session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,
