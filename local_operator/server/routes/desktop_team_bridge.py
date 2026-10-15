@@ -164,6 +164,39 @@ INVALID_READ_QUERY = "this read named a value the agent-messages read surface do
 STATE_UNREADABLE = "this machine's agent-messages store cannot be read right now"
 
 
+class TeamBridgeMessageQuery(_Strict):
+    """The single-message read query (M1a): the captured account and the org.
+
+    No id rides the query: the message id is a PATH segment, and it is validated
+    by its own grammar before any I/O (a malformed one is the family's 404, not a
+    422 — §2). These two names are the same captured-account receipt and org scope
+    the page carries, so a detail asked for under another account or another org is
+    refused before a request is built.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "TeamBridgeMessageQuery":
+        from local_operator.team_bridge.read_context import (
+            ACCOUNT_ID_PATTERN,
+            TENANT_ID_PATTERN,
+        )
+
+        checks = (
+            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
+            (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
+        )
+        for value, pattern, name in checks:
+            # ``fullmatch``, not ``match`` (review R-5): these patterns are
+            # anchored ``^…$``, and ``$`` also matches BEFORE a trailing newline,
+            # so a value carrying one would reach the transport's path or query.
+            if re.fullmatch(pattern, value) is None:
+                raise ValueError(f"{name} is outside the accepted grammar")
+        return self
+
+
 class TeamBridgeInboxQuery(_Strict):
     """The inbox read query (§6.1), STRICT and grammar-checked before any I/O.
 
@@ -334,6 +367,12 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
         "the answer carried a message addressed to another endpoint",
     ),
     "invalid_request": (422, INVALID_READ_QUERY),
+    # The ONE 404 of this family (spec §2): a message id outside the closed
+    # grammar, or the upstream's single-coded 404 for a message this account is
+    # not a participant of. The sentence is the spec's own fixed text — a
+    # malformed id and an absent message are deliberately indistinguishable, so
+    # this path cannot be probed for which ids exist.
+    "message_not_found": (404, "Message not found."),
 }
 
 
@@ -617,6 +656,11 @@ READ_QUERY_PARAMS = frozenset(
     }
 )
 
+#: The single-message read accepts these names and nothing else, by the same rule:
+#: a filter the upstream would ignore must not be silently dropped, because the
+#: caller believes it narrowed the read.
+READ_DETAIL_QUERY_PARAMS = frozenset({"expected_account_id", "tenant_id"})
+
 
 @router.get("/v1/desktop/team-bridge/inbox", response_model=CRUDResponse[Any])
 async def get_inbox(
@@ -741,3 +785,103 @@ async def get_inbox(
     except ReadRefused as exc:
         _raise_read(exc.code)
     return reply(inbox_view(result))
+
+
+@router.get("/v1/desktop/team-bridge/messages/{message_id}", response_model=CRUDResponse[Any])
+async def get_message(
+    message_id: str,
+    request: Request,
+    # Plain optional STRINGS for the same reason as the page (review R-6): a
+    # ``Query(...)`` bound answers 422 with the caller's own value echoed back in
+    # the body, and this family never quotes caller input.
+    expected_account_id: str | None = Query(default=None),
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """ONE agent message: metadata always, the BODY only when screening admits it.
+
+    The body is served through :func:`~local_operator.team_bridge.read_context.
+    admit_read_content` and nothing else: the fetched envelope must bind to this
+    owner and hash to what the server said it sent, a native receipt must still
+    be the policy's and this enrollment's, its recomputed body hash and envelope
+    digest must equal the receipt's, and a CONFIRMED read intent must carry that
+    exact tuple. A message that fails ANY term — unreviewed, held, blocked by the
+    native bounce, not yet read upstream, hash-mismatched — answers its metadata
+    with ``content: null``; it is never an error, and the screener's own reason is
+    never read, let alone returned.
+
+    The message id is validated by grammar BEFORE any upstream path is built
+    (review S-RSA-5) and a value outside it is this family's 404, so a caller
+    cannot use a malformed id to make the transport build a path of its choosing.
+    The whole read stays zero-write: one read-only proof snapshot, no ``_init``,
+    no migration, no ``merge_refs``, no checkpoint, no ACK intent, no screening
+    call, and no database created to answer for a machine that has none.
+    """
+
+    from pydantic import ValidationError
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        MESSAGE_ID_PATTERN,
+        ReadRefused,
+        detail_view,
+        read_message_detail,
+        resolve_read_context,
+        wire_for,
+    )
+
+    if set(request.query_params) - READ_DETAIL_QUERY_PARAMS:
+        _raise_read("invalid_request")
+    # BEFORE any I/O, and deliberately indistinguishable from an absent message:
+    # the id is interpolated into the upstream path, and a replacement for
+    # ``validate_envelope``'s own id check it is not — this one runs before the
+    # transport is allowed to build anything at all.
+    if re.fullmatch(MESSAGE_ID_PATTERN, message_id) is None:
+        _raise_read("message_not_found")
+    raw: dict[str, Any] = {
+        "expected_account_id": expected_account_id,
+        "tenant_id": tenant_id,
+    }
+    try:
+        query = TeamBridgeMessageQuery(
+            **{name: value for name, value in raw.items() if value is not None}
+        )
+    except ValidationError:
+        _raise_read("invalid_request")
+
+    # ONE wire per request, by the same rule the page uses (review R-2).
+    wire = wire_for(config_manager.config_dir)
+    try:
+        context = await resolve_read_context(
+            config_manager.config_dir,
+            expected_account_id=query.expected_account_id,
+            wire=wire,
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+
+    if query.tenant_id != context.tenant_id:
+        # The named organization IS the scope, exactly as on the page: answering
+        # for a tenant this machine did not enroll with would be a cross-tenant
+        # read dressed as a filter.
+        _raise_read("invalid_tenant")
+
+    try:
+        detail = await read_message_detail(
+            context,
+            config_dir=config_manager.config_dir,
+            message_id=message_id,
+            tenant_id=query.tenant_id,
+            wire=wire,
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+    return reply(detail_view(detail))

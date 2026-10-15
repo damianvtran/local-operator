@@ -799,6 +799,24 @@ def _decode_categories_text(raw: Any) -> list[str]:
     return decoded
 
 
+def _decode_intent_categories(raw: Any) -> list[str] | None:
+    """A read intent's persisted categories, or ``None`` when unreadable.
+
+    The READ slice compares an intent's tuple against a receipt's, and it must
+    never turn "this text is not the array it claims to be" into "the tuples
+    differ": an unreadable value is proof that cannot admit, which the caller
+    spells with the same closed refusal a mismatch gets.
+    """
+
+    try:
+        decoded = _decode_categories_text(raw)
+    except StoreRefused:
+        return None
+    if not all(isinstance(item, str) for item in decoded):
+        return None
+    return decoded
+
+
 def _owner_from_row(row: sqlite3.Row) -> OwnerSnapshot:
     """One committed enrollment row -> the owner snapshot the readers hand out.
 
@@ -835,6 +853,83 @@ def _owner_key(owner: OwnerSnapshot) -> str:
         ],
         separators=(",", ":"),
     )
+
+
+#: Why a stored receipt is NOT authority (S-RSA-3). Two different facts, kept
+#: apart because the callers act differently: a receipt minted under a policy or
+#: generation that has since moved is a MISS (nothing may be concluded from it,
+#: and the connector may screen again), while a row whose own metadata cannot be
+#: read as the tuple it claims is DAMAGE (it must never be re-screened behind,
+#: or shown to a reader, as if it were proof).
+RECEIPT_STALE = "receipt_stale"
+RECEIPT_CORRUPT = "proof_corrupt"
+
+
+def receipt_authority(
+    owner: OwnerSnapshot, policy: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    WHY THIS IS ONE FUNCTION, called from two sides of the store: the WRITE-side
+    consumption point (:meth:`Store.consume_screening_receipt`, which must refuse
+    rather than let a caller re-screen and double-bill behind a damaged row) and
+    the READ slice's read-only proof snapshot, which decides what a person is
+    shown. A second copy of these checks is how the two drift apart, and the
+    drift is the defect this slice exists to close: one surface admitting a
+    receipt the other holds.
+
+    ALL of them are required. The PUBLISHED policy must still equal the
+    receipt's own template/model/admission_revision AND its epoch, because a
+    verdict is only evidence of what the policy of its moment asked for; the
+    receipt's ``creator_generation`` must still be the owner's enrollment
+    generation, because re-enrollment invalidates every receipt an earlier
+    enrollment minted; the categories must decrypt to a valid list drawn from
+    the CLOSED set (empty SQL text is damaged proof, never an empty tuple); the
+    verdict is a closed value; and an ``allow`` carrying rejection categories is
+    internally inconsistent, so it is refused rather than delivered on.
+
+    Returns ``(decoded_receipt, None)``, ``(None, :data:`RECEIPT_STALE`)`` or
+    ``(None, :data:`RECEIPT_CORRUPT`)``. The row's ABSENCE is the caller's
+    business: a cache miss is not damage.
+    """
+
+    if (
+        policy.get("template_sha256") != receipt.get("template_sha256")
+        or policy.get("default_model") != receipt.get("model")
+        or policy.get("revision") != receipt.get("admission_revision")
+        or int(policy.get("epoch") or 0) != int(receipt.get("policy_epoch") or -1)
+        or int(receipt.get("creator_generation") or -1) != owner.enrollment_generation
+    ):
+        return None, RECEIPT_STALE
+    try:
+        decoded = _decode_categories_text(receipt.get("categories"))
+    except StoreRefused:
+        return None, RECEIPT_CORRUPT
+    if (
+        not isinstance(decoded, list)
+        or not all(isinstance(item, str) for item in decoded)
+        or not set(decoded) <= _CLOSED_CATEGORIES
+    ):
+        # Unknown category strings (or wrong shapes) can never be handed to a
+        # receipt: typed uncertainty, zero spend.
+        return None, RECEIPT_CORRUPT
+    verdict = receipt.get("verdict")
+    if verdict not in ("allow", "reject"):
+        return None, RECEIPT_CORRUPT
+    if verdict == "allow" and decoded:
+        return None, RECEIPT_CORRUPT
+    return {
+        "verdict": verdict,
+        "model": receipt.get("model"),
+        "prompt_version": receipt.get("prompt_version"),
+        "template_sha256": receipt.get("template_sha256"),
+        "body_sha256": receipt.get("body_sha256"),
+        "categories": decoded,
+        "envelope_digest": receipt.get("envelope_digest"),
+        "admission_revision": receipt.get("admission_revision"),
+        "policy_epoch": receipt.get("policy_epoch"),
+        "creator_generation": receipt.get("creator_generation"),
+    }, None
 
 
 @dataclass(frozen=True)
@@ -1462,6 +1557,80 @@ class Store:
                 "retry_at": row["retry_at"],
                 "created_at": row["created_at"],
             }
+
+    def content_proof_readonly(
+        self, owner: OwnerSnapshot, message_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """The native content-admission proof for these messages, ONE snapshot (S-RSA-3).
+
+        WHY ONE READ TRANSACTION. Admission has to be decided over a single
+        linearized moment: policy, receipt and the confirmed read intent read at
+        three different times could be assembled into a decision no single
+        moment authorized — the reviewer's own S-RSA-3 construction. So this
+        opens ONE read-only connection, begins ONE deferred transaction and reads
+        the owner's policy row plus the three per-message rows inside it. The
+        DECISION stays pure (:func:`~local_operator.team_bridge.read_context.
+        admit_read_content`); this method only fetches.
+
+        ZERO WRITES, structurally: :meth:`_connect_readonly` never creates,
+        migrates or repairs the store, and this transaction is read-only by
+        construction. An ABSENT store answers every id with an entry whose fields
+        are all ``None`` — "nothing enrolled" is not an error, and a reader must
+        never be handed a database created to explain its own absence.
+
+        The intent's persisted ``categories`` are DECODED here (a list on
+        success, ``None`` when the stored text is not the array it must be): the
+        caller compares tuples, and text that cannot be decoded is not a mismatch
+        to explain — it is proof that cannot admit.
+        """
+
+        ids = [str(message_id) for message_id in message_ids]
+        # Every requested id gets an ENTRY, always: the caller decides one row's
+        # content, and "no proof" is a field being None rather than a missing key
+        # it would have to distinguish from a bug.
+        snapshot: dict[str, dict[str, Any]] = {
+            message_id: {"policy": None, "receipt": None, "intent": None, "hold": None}
+            for message_id in ids
+        }
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return snapshot
+            # DEFERRED, and deliberately: no writer can be blocked by a read,
+            # while every SELECT below sees one consistent database image (a
+            # writer that commits mid-snapshot would otherwise be half-visible).
+            conn.execute("BEGIN")
+            key = _owner_key(owner)
+            policy_row = conn.execute(
+                "SELECT version, template_sha256, default_model, revision, epoch "
+                "FROM screening_policy WHERE owner_key = ?",
+                (key,),
+            ).fetchone()
+            policy = dict(policy_row) if policy_row is not None else None
+            for message_id in ids:
+                receipt_row = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                ).fetchone()
+                intent_row = conn.execute(
+                    "SELECT * FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                    "AND target = 'read'",
+                    (key, message_id),
+                ).fetchone()
+                hold_row = conn.execute(
+                    "SELECT hold_code, retry_at, created_at FROM screening_holds "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (key, message_id),
+                ).fetchone()
+                intent = dict(intent_row) if intent_row is not None else None
+                if intent is not None:
+                    intent["categories"] = _decode_intent_categories(intent.get("categories"))
+                snapshot[message_id] = {
+                    "policy": policy,
+                    "receipt": dict(receipt_row) if receipt_row is not None else None,
+                    "intent": intent,
+                    "hold": dict(hold_row) if hold_row is not None else None,
+                }
+            return snapshot
 
     def resolve_owner(
         self,
@@ -2922,54 +3091,23 @@ class Store:
                 ).fetchone()
                 if row is None:
                     return None
-                if (
-                    policy["template_sha256"] != row["template_sha256"]
-                    or policy["default_model"] != row["model"]
-                    or policy["revision"] != row["admission_revision"]
-                    or int(policy["epoch"]) != int(row["policy_epoch"])
-                    or int(row["creator_generation"]) != owner.enrollment_generation
-                ):
+                # The checks themselves live in ONE pure function (S-RSA-3),
+                # shared with the read slice's proof snapshot: this call site
+                # supplies the two rules that are about BEHAVIOUR here — a stale
+                # receipt is a miss (the caller may screen), a corrupt one is a
+                # typed refusal (a caller that re-screened behind it would
+                # DOUBLE-BILL the account for a verdict nobody can read).
+                # ``dict(...)`` because these are ``sqlite3.Row`` objects: they
+                # index but do not ``.get``, and the shared function takes mappings
+                # exactly as the read path's own decoded rows do.
+                decoded, damage = receipt_authority(owner, dict(policy), dict(row))
+                if damage == RECEIPT_CORRUPT:
+                    raise StoreRefused(
+                        "proof_corrupt", "the stored receipt failed its authority checks"
+                    )
+                if decoded is None:
                     return None
-                # EMPTY SQL TEXT is damaged proof, not an empty tuple
-                # (R7/Q2): coalescing it to [] would admit a receipt whose
-                # categories were never written. Only valid JSON survives —
-                # "[]" is the only legitimate empty.
-                try:
-                    decoded = _decode_categories_text(row["categories"])
-                except (TypeError, ValueError) as error:
-                    # A MATCHED row whose metadata cannot be decoded is
-                    # DAMAGED authority, not an absent proof: refusing (hold)
-                    # keeps the caller from re-screening and DOUBLE-BILLING
-                    # behind a corrupted receipt.
-                    raise StoreRefused("proof_corrupt", str(error)) from None
-                if (
-                    not isinstance(decoded, list)
-                    or not all(isinstance(item, str) for item in decoded)
-                    or not set(decoded) <= _CLOSED_CATEGORIES
-                ):
-                    # Unknown category strings (or wrong shapes) can never be
-                    # handed to a receipt: typed uncertainty, zero spend.
-                    raise StoreRefused("proof_corrupt", "categories failed validation")
-                if row["verdict"] not in ("allow", "reject"):
-                    raise StoreRefused("proof_corrupt", "unknown verdict")
-                if row["verdict"] == "allow" and decoded:
-                    # An ALLOW with rejection categories is internally
-                    # inconsistent (injection is a reject): fail closed
-                    # rather than deliver on damaged metadata. A reject with
-                    # an empty tuple is NOT forbidden and stays valid.
-                    raise StoreRefused("proof_corrupt", "allow verdict with categories")
-                return {
-                    "verdict": row["verdict"],
-                    "model": row["model"],
-                    "prompt_version": row["prompt_version"],
-                    "template_sha256": row["template_sha256"],
-                    "body_sha256": row["body_sha256"],
-                    "categories": decoded,
-                    "envelope_digest": row["envelope_digest"],
-                    "admission_revision": row["admission_revision"],
-                    "policy_epoch": row["policy_epoch"],
-                    "creator_generation": row["creator_generation"],
-                }
+                return decoded
         except sqlite3.Error as error:
             # An interleaved writer that could not take the lock (or any
             # engine-level failure) leaves the authority UNVERIFIED, which is

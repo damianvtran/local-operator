@@ -11,10 +11,12 @@ status cache.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -37,12 +39,19 @@ from local_operator.team_bridge.client import (
     BridgeSignInRequired,
     StatusCheck,
 )
+from local_operator.team_bridge.screening import validate_envelope
+
+# ``_owner_key`` is private, and deliberately reached for: it is the store's OWN
+# derivation of the key its rows are written under, and a copy of it here would be
+# a second spelling of the thing these fixtures must match.
 from local_operator.team_bridge.store import (
     OwnerReceipt,
     OwnerSnapshot,
     Store,
+    _owner_key,
     state_db_path,
 )
+from local_operator.team_bridge.types import ScreeningReceipt
 
 pytestmark = pytest.mark.asyncio
 
@@ -105,6 +114,23 @@ class FakeClient:
         if callable(during):
             during()
         return self._answer("inbox")
+
+    async def message(
+        self, message_id: str, *, tenant_id: str, access: Any = None
+    ) -> dict[str, Any]:
+        FakeClient.behavior["last_message_kwargs"] = {
+            "message_id": message_id,
+            "tenant_id": tenant_id,
+            "access": access,
+        }
+        # The single-message read's own in-flight hook, for the same reason the
+        # inbox has one: the window between the standing check and the post-await
+        # re-check is where a re-enrollment can land, and a cell that cannot move
+        # state inside it cannot prove the re-check is load-bearing.
+        during = FakeClient.behavior.get("during_message")
+        if callable(during):
+            during()
+        return self._answer("message")
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("settings")
@@ -229,7 +255,9 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["capability"] == 1
     assert result["availability"] == {
         "metadata_inbox": True,
-        "screened_detail": False,
+        # M1a: the detail read and the list excerpts EXIST on this build, and
+        # both answer only through the shared admission predicate.
+        "screened_detail": True,
         "read_ack": False,
         "local_events": False,
     }
@@ -675,6 +703,155 @@ def _owner(*, tenant_id: str = "tnt_1", generation: int = 5) -> OwnerSnapshot:
     )
 
 
+# --- M1a shared fixtures: the wire item and the proof that could admit it ---
+
+
+def _wire_item(
+    *,
+    message_id: str = "bmsg_1",
+    body: str = "could you approve the Q3 spend for the enrichment pod?",
+    state: str = "read",
+    type_: str = "note",
+    sender_name: str | None = "Priya Raman",
+    body_hash: str | None = None,
+    private_reason: str | None = None,
+) -> dict[str, Any]:
+    """ONE upstream item whose OWN hash matches — the shape the hub sends.
+
+    Every field the predicate reads is present, so a case that denies content can
+    only be denying it because of the term that case breaks, not because the
+    fixture was thin. ``private_reason``/body are the sentinels the privacy cells
+    put ON THE WIRE: nothing may ever return them verbatim.
+    """
+
+    text = body.encode("utf-8")
+    message: dict[str, Any] = {
+        "id": message_id,
+        "thread_id": "bth_1",
+        "tenant_id": "tnt_1",
+        "type": type_,
+        "seq": 4,
+        "origin": "ep_9",
+        "body": {"text": body},
+        "body_hash": body_hash or hashlib.sha256(text).hexdigest(),
+        "recipient": {"account_id": "acc_1", "endpoint_id": "ep_1"},
+    }
+    if private_reason is not None:
+        message["private_reason"] = private_reason
+    sender: dict[str, Any] = {"account_id": "acc_9", "endpoint_id": "ep_9"}
+    if sender_name is not None:
+        sender["name"] = sender_name
+    return {
+        "message": message,
+        "delivery": {"state": state, "state_at": None},
+        "thread": {"id": "bth_1", "status": "open", "tenant_id": "tnt_1"},
+        "sender": sender,
+    }
+
+
+def _plant_proof(
+    root: Path,
+    owner: OwnerSnapshot,
+    item: Mapping[str, Any],
+    **overrides: Any,
+) -> None:
+    """Plant the policy + receipt + CONFIRMED read intent that could admit ``item``.
+
+    The receipt's two hashes are DERIVED from the item with the product's own
+    validator, so the fixture cannot accidentally mint a tuple the pipeline would
+    never have written; each override then breaks exactly ONE term, which is what
+    makes a refusal cell discriminating rather than generic.
+    """
+
+    envelope, code = validate_envelope(owner, item)
+    assert code is None and envelope is not None, code
+    # The PUBLISHED policy and the RECEIPT can disagree in these three fields, and
+    # that disagreement is exactly what the currency terms exist to catch — so a
+    # case may set them apart rather than only moving the pair together.
+    template: str = overrides.pop("template", "ab" * 32)
+    model: str = overrides.pop("model", "m-1")
+    revision: str = overrides.pop("revision", "r-1")
+    policy_template: str = overrides.pop("policy_template", template)
+    policy_model: str = overrides.pop("policy_model", model)
+    policy_revision: str = overrides.pop("policy_revision", revision)
+    verdict: str = overrides.pop("verdict", "allow")
+    categories: tuple[str, ...] = overrides.pop("categories", ())
+    generation: int = overrides.pop("generation", owner.enrollment_generation)
+    intent: str | None = overrides.pop("intent", "confirmed")
+    receipt_body: str = overrides.pop("receipt_body", envelope.body_sha256)
+    receipt_envelope: str = overrides.pop("receipt_envelope", envelope.envelope_digest)
+    policy: bool = overrides.pop("policy", True)
+    with_receipt: bool = overrides.pop("receipt", True)
+    epoch_offset: int = overrides.pop("epoch_offset", 0)
+    categories_text: str | None = overrides.pop("categories_text", None)
+    hold: str | None = overrides.pop("hold", None)
+    intent_body: str = overrides.pop("intent_body", receipt_body)
+    assert not overrides, overrides
+
+    store = Store(root)
+    epoch = 0
+    if policy:
+        epoch = store.publish_screening_policy(
+            owner,
+            version="bridge-screen-v1",
+            template_sha256=policy_template,
+            default_model=policy_model,
+            revision=policy_revision,
+        )
+    if with_receipt:
+        with sqlite3.connect(state_db_path(root)) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, body_sha256, "
+                "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
+                "admission_revision, policy_epoch, creator_generation, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _owner_key(owner),
+                    str(item["message"]["id"]),
+                    receipt_body,
+                    template,
+                    "bridge-screen-v1",
+                    model,
+                    verdict,
+                    (
+                        categories_text
+                        if categories_text is not None
+                        else json.dumps(list(categories))
+                    ),
+                    receipt_envelope,
+                    revision,
+                    epoch + epoch_offset,
+                    generation,
+                    1_700_000_000.0,
+                ),
+            )
+    if hold is not None:
+        with sqlite3.connect(state_db_path(root)) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_holds "
+                "(owner_key, message_id, hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+                (_owner_key(owner), str(item["message"]["id"]), hold, None, 1_700_000_000.0),
+            )
+    if intent is not None:
+        # The intent's OWN tuple rides its own receipt object: a case that wants a
+        # tuple nobody could have written passes ``intent_body``.
+        planted = ScreeningReceipt(
+            verdict="allow",
+            model=model,
+            prompt_version="bridge-screen-v1",
+            template_sha256=template,
+            body_sha256=intent_body,
+            categories=categories,
+        )
+        intent_id = store.record_ack_intent(
+            owner, str(item["message"]["id"]), "read", planted, "r" * 36
+        )
+        if intent == "confirmed":
+            store.mark_ack_result(owner, intent_id, state="confirmed", error_code=None)
+        elif intent == "conflict":
+            store.mark_ack_result(owner, intent_id, state="conflict", error_code="conflict")
+
+
 def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
     """Commit the owner + consent receipt H4 commits, and set the local switch.
 
@@ -938,7 +1115,11 @@ async def test_the_inbox_read_answers_metadata_only_and_writes_nothing(api):
         "recipient",
         "request",
         "screening",
+        # The ONE field that may carry third-party text, and it is null unless
+        # the shared predicate admitted these bytes (M1a).
+        "content",
     }
+    assert result["items"][0]["content"] is None
     assert result["items"][0]["message_id"] == "bmsg_1"
     assert result["items"][0]["delivery"] == {"state": "unread", "state_at": None}
     assert result["items"][0]["screening"] == {
@@ -1258,3 +1439,229 @@ def test_the_read_capability_is_advertised_without_moving_its_sibling() -> None:
     flags = feature_flags()
     assert flags["team_bridge_read"] == 1
     assert flags["team_bridge"] == 1
+
+
+# --- M1a: the single-message detail read -------------------------------------
+
+DETAIL = "/v1/desktop/team-bridge/messages"
+
+
+async def test_the_detail_read_answers_metadata_only_without_proof(api):
+    """No local proof is the ORDINARY case, and it is not an error.
+
+    A machine that has never screened this message has nothing that may admit its
+    bytes, so the answer is the row plus ``content: null`` — a renderer draws the
+    message and says it cannot show the text, instead of the route inventing
+    either an error or a body.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    _enroll(root)
+    FakeClient.behavior["message"] = _wire_item(
+        private_reason="the model said the sender was pushy"
+    )
+
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["content"] is None
+    assert result["item"]["content"] is None
+    assert result["body_included"] is False
+    assert result["screening_detail_included"] is False
+    assert result["local_events"] is False
+    assert result["item"]["message_id"] == "bmsg_1"
+    assert result["item"]["screening"]["state"] == "unreviewed"
+    # The wire's own private field never rides any answer.
+    assert "pushy" not in response.text
+
+
+async def test_the_detail_read_serves_the_body_only_on_the_whole_tuple(api):
+    """The positive control beside the metadata cells: proof present, body served.
+
+    The text is the fetched body, labelled as inert third-party content; the same
+    predicate that refused the cells above is what let this one through, so the
+    pair of them is what proves the predicate — not the assertion, and not a
+    second code path that happens to return text.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    owner = _enroll(root)
+    item = _wire_item()
+    _plant_proof(root, owner, item)
+    FakeClient.behavior["message"] = item
+
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    body = item["message"]["body"]["text"]
+    assert result["content"]["text"] == body
+    assert result["content"]["content_trust"] == "untrusted_external"
+    assert result["content"]["content_format"] == "plain_text"
+    assert result["content"]["truncated"] is False
+    assert result["content"]["content_sha256"] == item["message"]["body_hash"]
+    assert result["body_included"] is True
+    assert result["screening_detail_included"] is True
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    # The last-but-one value is the ENCODED newline: it is the one ``re.match``
+    # would have accepted (``$`` matches before a trailing newline), so it is the
+    # value that proves the route's ``fullmatch``. It rides percent-encoded
+    # because a raw one cannot be put in a URL at all.
+    ["bmsg_", "msg_1", "bmsg_1;x", "bmsg_1%0A", "bmsg_" + "a" * 65, "bmsg_1."],
+)
+async def test_a_message_id_outside_the_grammar_is_a_404_before_any_request(api, bad_id):
+    """The id rides the PATH, so it is checked before the transport exists.
+
+    ``FakeClient.instances == []`` is the load-bearing half: a 404 alone would not
+    say whether the value reached the wire first. The trailing-newline value is
+    the one ``re.match`` would have ACCEPTED (``$`` matches before it), which is
+    why the route uses ``fullmatch``.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    _enroll(root)
+
+    response = await client.get(f"{DETAIL}/{bad_id}", params=_query())
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "message_not_found"
+    assert FakeClient.instances == [], "a malformed id reached the transport"
+
+
+async def test_the_detail_read_refuses_a_query_name_it_does_not_accept(api):
+    """An unknown name is refused, never dropped: a typo must not widen a read."""
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    _enroll(root)
+
+    response = await client.get(f"{DETAIL}/bmsg_1", params={**_query(), "threadId": "bth_1"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert "threadId" not in response.text, "the refused value was echoed back"
+    assert FakeClient.instances == []
+
+
+async def test_the_detail_read_refuses_a_missing_capture_and_a_foreign_tenant(api):
+    """Both scope terms are required, and the org is the enrollment, not a filter."""
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    _enroll(root)
+
+    missing = await client.get(f"{DETAIL}/bmsg_1", params={"tenant_id": "tnt_1"})
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.instances == [], "a query with no capture reached the transport"
+
+    foreign = await client.get(f"{DETAIL}/bmsg_1", params={**_query(), "tenant_id": "tnt_2"})
+    assert foreign.status_code == 422
+    assert foreign.json()["detail"]["code"] == "invalid_tenant"
+    # The wire object exists by then (§3 constructs it before the org check, the
+    # same order the page uses); what must NOT exist is a request on it.
+    assert FakeClient.behavior.get("last_message_kwargs") is None
+
+
+async def test_the_detail_read_is_zero_write(api):
+    """The same invariant the page has: state before == state after (M-9/M-10)."""
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    owner = _enroll(root)
+    item = _wire_item()
+    _plant_proof(root, owner, item)
+    FakeClient.behavior["message"] = item
+
+    before = _digest(root)
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+    after = _digest(root)
+
+    assert response.status_code == 200
+    assert before == after, "the detail read wrote to the bridge store"
+
+
+async def test_a_held_message_answers_no_body_and_no_reason(api):
+    """A hold outranks the receipt, and the stored code is reported COARSE.
+
+    ``ack_not_confirmed:pending`` is connector-written and outside the closed hold
+    vocabulary, so it is reported as ``unknown_hold``: the raw string could quote
+    provider text, and the private reason beside it must not appear either.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    owner = _enroll(root)
+    item = _wire_item(private_reason="quarantined for a reason")
+    _plant_proof(root, owner, item, hold="ack_not_confirmed:pending")
+    FakeClient.behavior["message"] = item
+
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["content"] is None
+    assert result["item"]["screening"]["state"] == "held"
+    assert result["item"]["screening"]["hold_code"] == "unknown_hold"
+    assert "ack_not_confirmed" not in response.text
+    assert "quarantined" not in response.text
+
+
+async def test_a_re_enrollment_during_the_detail_fetch_denies_the_body(api):
+    """The post-await fence is load-bearing on THIS path too.
+
+    Measured against its mutation: deleting the detail's ``_recheck`` leaves this
+    cell (and every other cell here) green, which is why the hook exists.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["access"] = _access()
+    owner = _enroll(root)
+    item = _wire_item()
+    _plant_proof(root, owner, item)
+    FakeClient.behavior["message"] = item
+
+    def move_owner() -> None:
+        Store(root).commit_enrollment(
+            _owner(generation=6), OwnerReceipt("bridge_consent_v1", "ref-2")
+        )
+
+    FakeClient.behavior["during_message"] = move_owner
+
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "owner_changed"
+
+
+async def test_the_detail_read_refuses_a_machine_with_no_retained_namespace(api):
+    """The detail's early refusal, and the store it must not leave behind.
+
+    A machine with nothing enrolled for the signed-in account answers typed and
+    unavailable — and it answers it WITHOUT creating the bridge store, which is
+    the half a "409 either way" assertion would miss: ``state.sqlite3`` is
+    ``mode=ro`` on an existing file or nothing at all, never a database this
+    route made to explain its own answer.
+    """
+
+    client, root, _discipline = api
+    (root / "config.yml").write_text(yaml.safe_dump({"values": {"team_bridge": {"enabled": True}}}))
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["message"] = _wire_item()
+
+    before = _digest(root)
+    response = await client.get(f"{DETAIL}/bmsg_1", params=_query())
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "history_context_unavailable"
+    assert FakeClient.behavior.get("last_message_kwargs") is None
+    assert not (root / "team_bridge").exists(), "a refused detail read created the bridge store"
+    assert not list(root.rglob("state.sqlite3"))
+    assert _digest(root) == before
