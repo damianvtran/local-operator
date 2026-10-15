@@ -14,12 +14,11 @@ from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Final
 
 import yaml
 
 from local_operator.config_writer import config_write_lock, serialized_config_write
-from local_operator.providers.account_policy import DEFAULT_ACCOUNT_SELECTION_POLICY
 from local_operator.ui_console.policy import (
     DEFAULT_LIVE_LIMIT,
     DEFAULT_OWNER_LIMIT,
@@ -31,6 +30,11 @@ from local_operator.web_defaults import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Configuration is imported by the lightweight CLI. Keep the scalar default
+# here; importing even a provider-policy module would load the engine namespace
+# on `lop --help`. Runtime policy code imports this SAME default, not a copy.
+DEFAULT_ACCOUNT_SELECTION_POLICY: Final = "reset-soonest"
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:

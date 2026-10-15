@@ -11,6 +11,7 @@ def test_rejected_policy_save_and_atomic_reset_keep_effective_memory_and_disk(tm
     root = tmp_path / "synthetic-config"
     manager = ConfigManager(root)
     row = settings_io.resolve_key("retry.accountSelectionPolicy")
+    assert row is not None, "the canonical routing setting must be registered"
     settings_io.write_setting(manager, row, "headroom")
     # A separate manager contributes an unrelated field; rollback must never
     # write an old snapshot over it, even after our original manager is stale.

@@ -61,10 +61,19 @@ def report(*limits, age=0):
     return UsageReport("anthropic", fetched_at=NOW - age, limits=list(limits))
 
 
+def deadline_candidate(account_id: int, field: str, deadline: int) -> ResetCandidate:
+    # Keep parameterized boundary coverage while naming the actual dataclass
+    # field: a generic **dict could also bind the unrelated `state` parameter.
+    assert field in ("weekly_ms", "five_hour_ms")
+    if field == "weekly_ms":
+        return ResetCandidate(account_id, weekly_ms=deadline)
+    return ResetCandidate(account_id, five_hour_ms=deadline)
+
+
 @pytest.mark.parametrize("delta,in_bucket", [(59_999, True), (60_000, True), (60_001, False)])
 @pytest.mark.parametrize("field", ["weekly_ms", "five_hour_ms"])
 def test_inclusive_fixed_minimum_tolerance(delta, in_bucket, field):
-    rows = [ResetCandidate(1, **{field: NOW + 1}), ResetCandidate(2, **{field: NOW + 1 + delta})]
+    rows = [deadline_candidate(1, field, NOW + 1), deadline_candidate(2, field, NOW + 1 + delta)]
     firsts = {reset_ranked_ids(rows, f"session-{i}")[0] for i in range(100)}
     assert firsts == ({1, 2} if in_bucket else {1})
 
@@ -72,7 +81,7 @@ def test_inclusive_fixed_minimum_tolerance(delta, in_bucket, field):
 @pytest.mark.parametrize("field", ["weekly_ms", "five_hour_ms"])
 def test_no_transitive_neighbour_chaining(field):
     rows = [
-        ResetCandidate(i + 1, **{field: NOW + offset})
+        deadline_candidate(i + 1, field, NOW + offset)
         for i, offset in enumerate((0, 59_000, 118_000))
     ]
     for i in range(100):

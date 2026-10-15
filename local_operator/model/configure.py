@@ -4513,22 +4513,18 @@ class SessionStreamFn:
         return self._settings if isinstance(self._settings, Mapping) else {}
 
     def _push_usage_aware_pick(self, settings: Mapping[str, Any] | None) -> None:
-        """Push ``retry.usageAwareAccountPick`` into the auth store.
+        """Push the centrally resolved account policy at construction and hot apply.
 
-        The operator's opt-out for the cascade's usage-ranked first pick
-        travels through here because this is the one place a session parses
-        ``retry.*``; the store itself defaults to ON and knows nothing about
-        config. Duck-typed (``getattr``) because the test doubles handed in as
-        ``auth_store`` implement only the failover protocol.
+        The auth store copies this preference rather than reading session config
+        per call. Rebinding the mapping alone can therefore report an applied
+        value while selection still uses the old policy. Constructor and hot
+        apply MUST share this helper; the resolver owns canonical precedence,
+        the reset-soonest default and strict legacy-boolean compatibility.
 
-        Factored out of ``__init__`` so :meth:`apply_settings` can re-push it
-        (review round 2, B1). This is the ONE ``retry.*`` key that is not read
-        back off the mapping per call — the store copies it into its own state
-        (``AuthStore._usage_aware_pick``) — so a rebind alone moves what
-        ``RetrySettings`` reports while leaving what the cascade actually does
-        unchanged. That gap is what made a live ``— applied`` notice untrue for
-        this key. Constructor and re-push share this method precisely so the
-        two cannot drift apart again.
+        Duck typing retains the older failover-store protocol: stores with the
+        enum setter receive all three policies, while older hosts receive only
+        the headroom compatibility flag. Neither path clears a valid affinity
+        lease or unrelated provider/model/effort route state.
         """
         from local_operator.providers.account_policy import (
             effective_account_selection_policy,

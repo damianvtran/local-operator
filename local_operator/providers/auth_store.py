@@ -3849,7 +3849,14 @@ class AuthStore:
             try:
                 from local_operator.providers.usage_cache import UsageCacheStore
 
-                self._usage_cache = UsageCacheStore()
+                # Selection reads cached evidence only. Bind the optional reader
+                # to THIS credential root, never an ambient machine's cache, and
+                # do not create a DB while merely resolving/inspecting an account.
+                # The default auth/cache files are siblings; explicit roots keep
+                # the same relationship. A supplied warmer handle remains reused.
+                self._usage_cache = UsageCacheStore(
+                    self._db_path.parent / "usage_cache.db", read_only=True
+                )
             except Exception:  # noqa: BLE001 -- no cache = hash order, never fatal
                 logger.debug("usage pick: cache unavailable", exc_info=True)
                 self._usage_cache = None

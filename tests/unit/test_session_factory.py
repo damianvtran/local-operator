@@ -2876,6 +2876,7 @@ async def test_account_affinity_never_replays_an_old_language_prefix(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
+    from local_operator.config_watch import process_watcher
     from local_operator.harness.types import ChatRequest, Message, ModelSpec
     from local_operator.providers.account_affinity import request_compatibility
     from local_operator.providers.clients import AnthropicClient
@@ -2885,6 +2886,17 @@ async def test_account_affinity_never_replays_an_old_language_prefix(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_config_dir))
     manager = ConfigManager(tmp_config_dir)
     manager.set_config_value("language", "en")
+    watcher = process_watcher(tmp_config_dir)
+
+    async def prefixes(session: object) -> list[str]:
+        provider = getattr(session, "_system_blocks_provider", None)
+        assert callable(provider), "real factory must expose its captured prefix builder"
+        produced = provider()
+        blocks = await produced if inspect.isawaitable(produced) else produced
+        assert isinstance(blocks, list)
+        assert all(isinstance(block, str) for block in blocks)
+        return blocks
+
     sessions = []
     client = AnthropicClient()
     try:
@@ -2892,18 +2904,19 @@ async def test_account_affinity_never_replays_an_old_language_prefix(
             _args(hosting="test", model="test", yolo=True), manager, AgentRegistry(tmp_config_dir)
         )
         sessions.append(first)
-        produced = first._system_blocks_provider()
-        english = await produced if inspect.isawaitable(produced) else produced
+        english = await prefixes(first)
         manager.set_config_value("language", "fr")
-        produced = first._system_blocks_provider()
-        active = await produced if inspect.isawaitable(produced) else produced
+        # Language reads the validated watcher snapshot, not raw file bytes.
+        # Accept this disk edit explicitly: Linux has polling, while macOS
+        # kqueue can deliver it during the next await. No timing-based sleep.
+        watcher.poll_now()
+        active = await prefixes(first)
         assert active[0] == english[0]
         second = await create_session(
             _args(hosting="test", model="test", yolo=True), manager, AgentRegistry(tmp_config_dir)
         )
         sessions.append(second)
-        produced = second._system_blocks_provider()
-        french = await produced if inspect.isawaitable(produced) else produced
+        french = await prefixes(second)
         assert "preferred language is French (fr)" in french[0]
         spec = ModelSpec(provider="anthropic", model_id="claude-sonnet-5")
         en_request = ChatRequest(

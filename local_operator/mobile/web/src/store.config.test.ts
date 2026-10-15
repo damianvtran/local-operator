@@ -9,6 +9,7 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
 class FakeEventSource {
@@ -42,12 +43,14 @@ describe("retainConfigStream", () => {
 		vi.stubGlobal("navigator", { language: "ur-PK", languages: ["ur-PK"] });
 		fresh.initializeLocaleMetadata();
 		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
-		// revision 2, not 0: the SPA's OWN English bundles (relay.shell and, since
-		// C2, relay.session) are registered at module init, and each same-locale
-		// content registration repaints through the one store channel. The
-		// semantic claims this test exists for — no device-language inference,
-		// no fetch, English/LTR UI under an unknown backend — are unchanged.
-		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: 2 });
+		// Each approved OWNED English namespace registers once through the
+		// existing repaint channel. Pin ownership identities independently, then
+		// derive the initial revision count; never suppress same-locale updates.
+		// The rebase unioned both branches' slices: relay.session (main, C2) and
+		// relay.account_policy (LOH-12) join relay.shell in OWNED_SPA_NAMESPACES.
+		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
+		expect(ownedNamespaces).toEqual(["relay.account_policy", "relay.session", "relay.shell"]);
+		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: ownedNamespaces.length });
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();
 	});

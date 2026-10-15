@@ -42,7 +42,9 @@ and model-family quota window gates eligibility.
   their five-hour deadlines with the same fixed-minimum tolerance, then stable
   session hashing. This is not transitive neighbour chaining. All relevant caps
   must still have capacity: one window reopening is only an opportunity to
-  recheck another spent cap, not proof the account is healthy.
+  recheck another spent cap, not proof the account is healthy. If several
+  applicable weekly windows exist, the earliest future refill is the next
+  useful preference; every other overlapping allowance still gates eligibility.
 - `headroom`: retain the cached-quota preference, spreading accounts within ten
   percentage points of the most remaining headroom.
 - `fair`: use a stable per-session spread, without ranking reset or headroom
@@ -69,8 +71,8 @@ A lease is a conservative routing hint, **not a guaranteed cache hit**. Built-in
 Anthropic requests use the actual 5m/1h cache markers. Exact modern public OpenAI
 Responses endpoints use the documented 30m default; legacy public retention and
 Codex OAuth use explicitly bounded heuristics (30m/5m for legacy Responses, 5m
-for Codex/chat). Unknown compatible gateways and unsupported adapters get no
-persistent lease. Endpoint/model/cache-prefix or known cache-affecting setting
+for Codex/chat). Unknown compatible gateways and unsupported adapters have a
+zero effective TTL and create no affinity lease. Endpoint/model/cache-prefix or known cache-affecting setting
 changes and compaction require compatible evidence again. Request content is
 always built anew; an account lease never replays an old language prefix/body.
 
@@ -78,8 +80,9 @@ Receipts live in a machine-local sidecar, namespaced by session, auth-store path
 and immutable account row creation identity, not in transported transcripts or
 credential DB schema. Resume keeps the original expiry; corrupt/future/rollback
 receipts are ignored. Persistence failure retains process memory only and loses
-restart continuity. Changing policy leaves a still-valid lease and unrelated
-provider/model/effort route pins intact; the preference applies after expiry.
+restart continuity. Policy saves hot-apply without invalidating a still-valid
+lease or unrelated provider/model/effort route pins. The new preference applies
+to the next unanchored request or expired lease, not by moving a live anchor.
 
 For compatibility only, an explicitly stored legacy `usageAwareAccountPick`
 strict boolean selects `headroom` when true and `fair` when false, **only when

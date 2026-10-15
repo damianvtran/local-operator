@@ -8,7 +8,7 @@ import asyncio
 import json
 import socket
 import time
-from types import SimpleNamespace
+from collections.abc import AsyncGenerator
 
 import httpx
 import pytest
@@ -151,6 +151,7 @@ async def test_actual_api_mode_change_rejects_incompatible_lease_in_both_directi
             receipt = store._account_affinity_store().get(
                 "synthetic-mode", "openai", req.model.model_id, request_compatibility(req)
             )
+            assert receipt is not None
             assert receipt.account_id == rows[0].id
             remaining[:] = [0.2, 0.9]
             assert (await send(second))[-1].type == "end"
@@ -238,6 +239,7 @@ async def test_nested_isolated_stream_cannot_replace_parent_wire_facts(
                     elif child_outcome == "close":
                         pending = stream(child)
                         await anext(pending)
+                        assert isinstance(pending, AsyncGenerator)
                         await pending.aclose()
                         await asyncio.sleep(0)
                     else:
@@ -292,6 +294,7 @@ async def test_capture_is_not_ambient_across_yield_and_closes_sync_optional_hook
     set_wire_hint(req, "anthropic:messages", 3_600_000, "explicit-wire")
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+    assert capture.hint is not None
     assert source.closed and capture.hint.ttl_ms == 300_000
     clear_wire_hint()
 
@@ -389,11 +392,12 @@ async def test_external_session_preflight_then_real_request_uses_current_model_e
 
         # Exercise the genuine Session public wrapper without constructing TUI,
         # tools or live subscriptions; only context-display refresh is a stub.
-        receiver = SimpleNamespace(
-            _stream_fn=stream,
-            _model=ModelSpec(provider="anthropic", model_id="claude-fable-5"),
-            _refresh_context_metadata=refresh_metadata,
-        )
+        # Keep the genuine self/interface without booting a transcript, TUI or
+        # subscriptions: preflight only needs these explicitly supplied fields.
+        receiver = object.__new__(Session)
+        receiver._stream_fn = stream
+        receiver._model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+        monkeypatch.setattr(receiver, "_refresh_context_metadata", refresh_metadata)
         try:
             await Session.preflight_usage(receiver)
             assert set(probes) == {row.id for row in rows}

@@ -47,6 +47,12 @@ def get(store, **overrides):
     return store.get(**values)
 
 
+def require_receipt(store, **overrides) -> affinity.AccountAffinityReceipt:
+    receipt = get(store, **overrides)
+    assert receipt is not None, "successful compatible request must leave a valid receipt"
+    return receipt
+
+
 def test_reading_never_creates_or_renews(clock, tmp_path):
     store = affinity.AccountAffinityStore(tmp_path / "auth.db")
     assert get(store) is None
@@ -55,7 +61,7 @@ def test_reading_never_creates_or_renews(clock, tmp_path):
     original = store.path_for("synthetic-session").read_bytes()
     for elapsed in (1, 59_999, 299_999):
         clock.update(wall=NOW + elapsed, mono=1000 + elapsed / 1000)
-        receipt = get(store)
+        receipt = require_receipt(store)
         assert receipt.account_id == 2
         assert receipt.expires_at_ms == NOW + 300_000
         assert store.path_for("synthetic-session").read_bytes() == original
@@ -69,13 +75,13 @@ def test_resume_preserves_original_expiry_and_namespace(clock, tmp_path):
     assert record(first)
     clock.update(wall=NOW + 200_000, mono=1200)
     resumed = affinity.AccountAffinityStore(path)
-    assert get(resumed).expires_at_ms == NOW + 300_000
+    assert require_receipt(resumed).expires_at_ms == NOW + 300_000
     assert get(resumed, session_id="copied-session") is None
     other = affinity.AccountAffinityStore(tmp_path / "different.db")
     assert get(other) is None
     assert record(other, account_id=1, sent_at_ms=NOW + 100_000, sent_monotonic=1100)
-    assert get(other).account_id == 1
-    assert get(resumed).account_id == 2
+    assert require_receipt(other).account_id == 1
+    assert require_receipt(resumed).account_id == 2
     assert first.path_for("synthetic-session") != other.path_for("synthetic-session")
     clock.update(wall=NOW + 300_000, mono=1300)
     assert get(resumed) is None
@@ -110,8 +116,8 @@ def test_late_completion_never_overwrites_newer_success(clock, tmp_path):
     clock.update(wall=NOW + 5000, mono=1005)
     assert record(store, sent_at_ms=NOW + 4000, sent_monotonic=1004)
     assert not record(store, account_id=1, completed_at_ms=NOW + 5000)
-    assert get(store).account_id == 2
-    assert get(store).expires_at_ms == NOW + 304_000
+    assert require_receipt(store).account_id == 2
+    assert require_receipt(store).expires_at_ms == NOW + 304_000
 
 
 @pytest.mark.parametrize(
@@ -153,7 +159,7 @@ def test_failed_persistence_degrades_to_memory_without_replay(clock, tmp_path, m
         affinity.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("fixture"))
     )
     assert record(store)
-    assert get(store).account_id == 2
+    assert require_receipt(store).account_id == 2
     assert get(affinity.AccountAffinityStore(tmp_path / "auth.db")) is None
     assert not list(store.root.glob(".affinity-*"))
 
@@ -163,9 +169,23 @@ def test_maximum_same_identity_expiry_survives_shorter_and_late_completions(cloc
     clock.update(wall=NOW + 5000, mono=1005)
     assert record(store, sent_at_ms=NOW + 4000, sent_monotonic=1004)
     assert record(store, hint=hint(3_600_000))
-    assert get(store).expires_at_ms == NOW + 3_600_000
+    assert require_receipt(store).expires_at_ms == NOW + 3_600_000
     assert not record(store, sent_at_ms=NOW + 5000, sent_monotonic=1005)
-    assert get(store).expires_at_ms == NOW + 3_600_000
+    assert require_receipt(store).expires_at_ms == NOW + 3_600_000
+
+
+@pytest.mark.parametrize(
+    "session_id", ["../../sessions/live/messages.jsonl", "/absolute/session", "a/b", ".."]
+)
+def test_opaque_session_ids_cannot_choose_cache_or_transcript_paths(tmp_path, session_id):
+    store = affinity.AccountAffinityStore(tmp_path / "credentials" / "auth.db")
+    path = store.path_for(session_id)
+    assert path.parent == store.root
+    assert path.suffix == ".json"
+    assert len(path.stem) == 64
+    assert all(character in "0123456789abcdef" for character in path.stem)
+    assert store.root.parent == tmp_path / "credentials" / "account-affinity"
+    assert not (tmp_path / "sessions").exists()
 
 
 def test_own_failed_attempt_can_invalidate_receipt(clock, tmp_path):

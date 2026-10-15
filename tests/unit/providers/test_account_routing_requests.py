@@ -6,12 +6,19 @@ actual Anthropic bodies while the real stream parser supplies terminal events.
 
 import json
 import time
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import replace
 
 import httpx
 import pytest
 
-from local_operator.harness.types import ChatRequest, Message, ModelSpec
+from local_operator.harness.types import (
+    ChatRequest,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamEvent,
+)
 from local_operator.providers import account_affinity as affinity
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.clients import AnthropicClient
@@ -225,7 +232,10 @@ async def test_real_stream_boundary_cleans_up_completion_exception_and_close(
     monkeypatch.setattr(stream_fn, "_stream_account_request", inner)
     stream = stream_fn(request(), None)
     try:
-        assert (await anext(stream)).delta == "synthetic"
+        first = await anext(stream)
+        assert isinstance(first, StreamTextDelta)
+        assert first.delta == "synthetic"
+        assert isinstance(stream, AsyncGenerator)
         if finish == "close":
             await stream.aclose()
         else:
@@ -233,6 +243,7 @@ async def test_real_stream_boundary_cleans_up_completion_exception_and_close(
                 await anext(stream)
         assert "synthetic-session" not in store._account_request_boundaries
     finally:
+        assert isinstance(stream, AsyncGenerator)
         await stream.aclose()
         await stream_fn.close()
 
@@ -348,7 +359,7 @@ async def test_resume_original_expiry_and_new_settings_signature(routing, monkey
             access = await resumed.get_oauth_access(
                 "anthropic", "synthetic-session", model_id="claude-sonnet-5"
             )
-        assert access.credential_id == rows[0].id
+        assert access is not None and access.credential_id == rows[0].id
         french = request().model_copy(
             update={"system_blocks": ["Synthetic French prefix", "Synthetic volatile tail"]}
         )
@@ -370,9 +381,11 @@ async def test_refusal_empty_and_isolated_do_not_create_receipt(routing):
     assert not path.exists()
 
     class Empty:
-        async def stream(self, request, key, oauth_access=None):
+        async def stream(
+            self, request: ChatRequest, api_key: str | None, oauth_access=None
+        ) -> AsyncIterator[StreamEvent]:
             if False:
-                yield None
+                yield StreamEndEvent(stop_reason="stop")
 
     async def client_for(spec):
         return Empty()
@@ -393,7 +406,9 @@ async def test_failure_after_terminal_does_not_anchor_or_renew(routing):
     path = store._account_affinity_store().path_for("synthetic-session")
 
     class LateFailure:
-        async def stream(self, request, key, oauth_access=None):
+        async def stream(
+            self, request: ChatRequest, api_key: str | None, oauth_access=None
+        ) -> AsyncIterator[StreamEvent]:
             # Use the same real marker computation as a built-in transport.
             async with httpx.AsyncClient(
                 transport=httpx.MockTransport(lambda request: httpx.Response(200))

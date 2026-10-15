@@ -1857,7 +1857,7 @@ class TestADemotionNeverMovesASessionOffItsValidLease:
         store.deprioritize_credential("anthropic", a.id)
         store.release_session_credential("anthropic", "s1")
         access = await store.get_oauth_access("anthropic", "s1", model_id="claude-test")
-        assert access.credential_id == a.id
+        assert access is not None and access.credential_id == a.id
 
     async def test_a_read_only_resolve_also_stays_on_the_demoted_sticky(
         self, tmp_path: Any

@@ -12,6 +12,12 @@ from local_operator.providers.clients import (
 )
 
 
+def required_wire_hint():
+    hint = wire_hint()
+    assert hint is not None, "this built-in request must publish its actual wire hint"
+    return hint
+
+
 def test_nested_tool_input_cannot_invent_a_cache_lifetime():
     body = {
         "messages": [
@@ -59,7 +65,7 @@ async def test_anthropic_threshold_matches_actual_request_markers(hint, threshol
     ) as http:
         client = AnthropicClient(http_client=http, cache_ttl_1h_min_context_tokens=threshold)
         body = client._build_body(request(context_tokens_hint=hint))
-    actual = wire_hint()
+    actual = required_wire_hint()
     assert actual.ttl_ms == ttl
     assert actual.ttl_source == "explicit-wire"
 
@@ -114,8 +120,8 @@ async def test_public_responses_documented_default_vs_legacy_heuristic(model, tt
         OpenAICompatClient("https://api.openai.com/v1", http_client=http)._build_responses_body(
             request("openai", model)
         )
-    assert wire_hint().ttl_ms == ttl
-    assert wire_hint().ttl_source == source
+    assert required_wire_hint().ttl_ms == ttl
+    assert required_wire_hint().ttl_source == source
 
 
 @pytest.mark.asyncio
@@ -127,9 +133,9 @@ async def test_codex_and_legacy_chat_are_explicitly_short_heuristics():
         clear_wire_hint()
         body = client._build_codex_responses_body(request("openai-device", "gpt-5"))
         assert "prompt_cache_retention" not in body
-        assert wire_hint().ttl_ms == 300_000
-        assert wire_hint().ttl_source == "bounded-heuristic"
+        assert required_wire_hint().ttl_ms == 300_000
+        assert required_wire_hint().ttl_source == "bounded-heuristic"
         clear_wire_hint()
         client._build_body(request("openai", "gpt-4o"))
-        assert wire_hint().ttl_ms == 300_000
-        assert wire_hint().endpoint_mode == "openai:chat"
+        assert required_wire_hint().ttl_ms == 300_000
+        assert required_wire_hint().endpoint_mode == "openai:chat"

@@ -14,11 +14,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast
 
+from local_operator.config import DEFAULT_ACCOUNT_SELECTION_POLICY
+
 if TYPE_CHECKING:
     from local_operator.providers.usage import UsageReport
 
 AccountSelectionPolicy = Literal["reset-soonest", "headroom", "fair"]
-DEFAULT_ACCOUNT_SELECTION_POLICY: AccountSelectionPolicy = "reset-soonest"
 ACCOUNT_SELECTION_POLICIES = ("reset-soonest", "headroom", "fair")
 # A fixed-minimum bucket absorbs vendor second/report-relative jitter without
 # letting a chain of near-neighbours turn minutes of difference into one tie.
