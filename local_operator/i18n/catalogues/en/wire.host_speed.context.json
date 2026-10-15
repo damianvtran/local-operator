@@ -1,0 +1,13 @@
+{
+  "wire.host_speed.retire_below_tps.label": {
+    "role": "OpenRouter settings numeric row label/help in TUI and connected settings UI",
+    "tone": "concise, neutral",
+    "note": "Label fits the 29-cell label budget (maxCells 29). Harness-side routing check, not an OpenRouter wire key. English-only until independently translated and audited; missing namespaces use English fallback. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.host_speed.retire_below_tps.help": {
+    "role": "OpenRouter settings numeric row label/help in TUI and connected settings UI",
+    "tone": "concise, neutral",
+    "note": "Harness-side routing check, not an OpenRouter wire key. English-only until independently translated and audited; missing namespaces use English fallback. No ICU arguments."
+  }
+}

@@ -561,6 +561,8 @@
  "wire.settings.providers_openrouter_require_parameters.choice.unset.label": "default",
  "wire.settings.providers_openrouter_require_parameters.help": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.",
  "wire.settings.providers_openrouter_require_parameters.label": "require parameters",
+ "wire.settings.providers_openrouter_retire_below_tps.help": "Experimental, off by default: evidence is from one model/run. A positive floor stops pinning a host after three long replies below this output-token/sec rate, excluding local consumer time. 0 clears speed exclusions on the next request; cache-miss exclusions remain. Moving hosts may start a cold prompt cache.",
+ "wire.settings.providers_openrouter_retire_below_tps.label": "retire slow host (tok/s)",
  "wire.settings.providers_openrouter_sort.choice.latency.description": "lowest response latency first",
  "wire.settings.providers_openrouter_sort.choice.latency.label": "latency",
  "wire.settings.providers_openrouter_sort.choice.price.description": "cheapest host first",
