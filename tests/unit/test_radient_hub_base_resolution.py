@@ -114,6 +114,36 @@ def test_agents_delete_addresses_the_versioned_hub_path(
     assert mock_delete.call_args[0][0] == f"{DEFAULT_RADIENT_API_BASE_URL}/agents/{agent_id}"
 
 
+def test_agents_delete_an_org_target_uses_the_tenant_route(
+    isolated_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: ``--org`` routes the delete through the documented tenant path.
+
+    The public route answers 404 for an org-scoped agent (observed on the
+    acceptance pass: the product method 404'd, the documented tenant route
+    answered 204). The public default is untouched -- the test above pins it.
+    """
+    agent_id = "8f14e45f-ceea-467a-9c1c-1f0e2f0a1234"
+    monkeypatch.setattr(
+        radient_credentials,
+        "resolve_radient_credential_sync",
+        lambda *args, **kwargs: SecretStr("test-key"),
+    )
+    response = MagicMock()
+    response.status_code = 204
+    response.text = ""
+    with patch("requests.delete", return_value=response) as mock_delete:
+        result = agents_delete_command(
+            Namespace(name=None, agent_id=agent_id, org="tenant-9"),
+            MagicMock(),
+            isolated_config_dir,
+        )
+    assert result == 0
+    assert mock_delete.call_args[0][0] == (
+        f"{DEFAULT_RADIENT_API_BASE_URL}/tenants/tenant-9/agents/{agent_id}"
+    )
+
+
 def test_the_environment_tier_is_completed_where_it_is_produced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
