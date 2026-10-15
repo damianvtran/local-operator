@@ -30,11 +30,6 @@ from local_operator.team_bridge.asks_bridge import (
 from tests.unit.asks.test_queue import BASE, FakeSession
 
 SENDER = "Priya Raman (Acme Research)"
-#: The thread locator. It stays on the issuance ledger as provenance (S-3), but
-#: D3 (design round 2, PR #2378) took it OUT of the question text: a locator is
-#: not a summary a human decides on, and on the card's single question row it
-#: competed with the request the decision is actually about.
-THREAD_LOCATOR = "th-9"
 
 
 def test_the_question_carries_the_human_required_carriage() -> None:
