@@ -846,24 +846,34 @@ class BrowserResource:
             else None
         )
 
+        # Match initialize's identity precedence without initializing or rereading
+        # the lease/journal: on a resumed owner's FIRST browser action, the
+        # captured execution lease is current and the detached journal is previous.
+        # Using the journal for both sides would label an old scope as current.
+        generation = self.generation or self._lease_at_creation or snapshot.get("generation")
+        previous_generation = (
+            self.previous_generation if self.generation else snapshot.get("generation", "")
+        )
+
         def valid_string(value: Any, maximum: int) -> bool:
             return isinstance(value, str) and 0 < len(value) <= maximum
 
         if (
             not valid_string(snapshot.get("proof"), 128)
-            or not valid_string(self.generation or snapshot.get("generation"), 128)
+            or not valid_string(generation, 128)
             or not isinstance(chain, list)
             or len(chain) > MAX_REPLAY_GENERATIONS
             or not all(valid_string(value, 128) for value in chain)
             or len(self.session_id) > 248
-            or len(self.previous_generation) > 128
+            or not isinstance(previous_generation, str)
+            or len(previous_generation) > 128
         ):
             return {"version": 1, "error_code": "ownership_inspection_invalid"}
         params = {
             "requester": f"session:{self.session_id}",
             "owner_proof": snapshot.get("proof"),
-            "owner_generation": self.generation or snapshot.get("generation"),
-            "previous_generation": self.previous_generation,
+            "owner_generation": generation,
+            "previous_generation": previous_generation,
             "previous_generations": chain,
         }
         try:

@@ -737,6 +737,9 @@ the caller's current, previous, or bounded ancestry. It returns only booleans an
 an input-ancestry count. A missing local record is reported without creating one;
 a missing remote scope is distinct from a same-proof session mismatch. Unknown
 proofs reveal no other scope, and foreign sessions receive no scope counts.
+A missing local record or remote scope is not proof that no tab, approval,
+retained scope or other ownership obligation remains; inspection is not an
+all-host inventory or authorization to activate an extension update.
 
 Inspection does not recover, repair, retry, allocate, close, select a host, grant
 access, or change local/extension ownership records. It targets only the existing

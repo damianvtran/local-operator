@@ -43,6 +43,18 @@ def peer(monkeypatch: pytest.MonkeyPatch):
             assert self.path == "/rpc"
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["calls"].append(request)
+            if "scope_generation" in state:
+                params = request["params"]
+                stored = state["scope_generation"]
+                state["result"] = {
+                    "version": 1,
+                    "scope_missing": False,
+                    "session_match": True,
+                    "generation_current": params["owner_generation"] == stored,
+                    "generation_previous": params["previous_generation"] == stored,
+                    "generation_ancestry": stored in params["previous_generations"],
+                    "request_ancestry_count": len(params["previous_generations"]),
+                }
             response = {"id": request["id"], "ok": "error" not in state}
             response["error" if "error" in state else "result"] = state.get(
                 "error", state["result"]
@@ -286,3 +298,81 @@ def test_malformed_peer_results_are_typed(
     }
     assert len(peer["calls"]) == 1
     assert resource.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("identity", ["resumed", "unleased", "initialized"])
+def test_inspection_uses_existing_execution_identity_without_initializing(
+    tmp_path: Path, peer: dict[str, Any], monkeypatch: pytest.MonkeyPatch, identity: str
+) -> None:
+    """First-action resume must compare the scope to the captured lease, not itself."""
+    old, lease = "synthetic-journal-generation", "synthetic-captured-lease"
+    directory = tmp_path / "synthetic-resume"
+    directory.mkdir()
+    row = {
+        "session_id": "synthetic-resume",
+        "generation": old,
+        "proof": "q" * 40,
+        "bridge_generations": [old],
+    }
+    path = directory / resources.RESOURCE_NAME
+    path.write_text(json.dumps(row))
+    monkeypatch.setattr(
+        resources.BrowserResource,
+        "_lease_generation",
+        lambda _self: "" if identity == "unleased" else lease,
+    )
+    resource = resources.BrowserResource(directory, "synthetic-resume")
+    if identity == "initialized":
+        resource.generation = "synthetic-already-current"
+        resource.previous_generation = "synthetic-already-previous"
+    expected_current = resource.generation or (lease if identity == "resumed" else old)
+    expected_previous = resource.previous_generation if identity == "initialized" else old
+    peer["scope_generation"] = old
+    ctx = ToolContext(cwd=str(tmp_path))
+    ctx.browser = BrowserSurface(resource)
+    for name in ("initialize", "params", "_save", "_lease_generation", "select_host", "recover"):
+        monkeypatch.setattr(resource, name, forbid)
+    monkeypatch.setattr(resources.secrets, "token_urlsafe", forbid)
+    before = path.read_bytes()
+    memory = resource.__dict__.copy()
+    memory["record"] = copy.deepcopy(resource.record)
+    result = call(ctx)
+    request = peer["calls"][0]["params"]
+    assert request["owner_generation"] == expected_current
+    assert request["previous_generation"] == expected_previous
+    assert result["generation_current"] == (expected_current == old)
+    assert result["generation_previous"] == (expected_previous == old)
+    assert len(peer["calls"]) == 1
+    assert path.read_bytes() == before
+    assert resource.__dict__ == memory
+
+
+@pytest.mark.parametrize("previous", [None, 42, "x" * 129])
+def test_captured_lease_does_not_hide_invalid_detached_previous_generation(
+    tmp_path: Path, peer: dict[str, Any], monkeypatch: pytest.MonkeyPatch, previous: Any
+) -> None:
+    directory = tmp_path / "synthetic-invalid-previous"
+    directory.mkdir()
+    path = directory / resources.RESOURCE_NAME
+    path.write_text(
+        json.dumps(
+            {
+                "session_id": "synthetic-invalid-previous",
+                "generation": previous,
+                "proof": "q" * 40,
+                "bridge_generations": [],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        resources.BrowserResource, "_lease_generation", lambda _self: "synthetic-current-lease"
+    )
+    resource = resources.BrowserResource(directory, "synthetic-invalid-previous")
+    ctx = ToolContext(cwd=str(tmp_path))
+    ctx.browser = BrowserSurface(resource)
+    before = path.read_bytes()
+    assert call(ctx) == {"version": 1, "error_code": "ownership_inspection_invalid"}
+    assert not peer["calls"]
+    assert path.read_bytes() == before
+    assert resource.generation == resource.previous_generation == ""
+    assert resource.record == {}
