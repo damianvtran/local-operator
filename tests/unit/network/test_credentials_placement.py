@@ -11,11 +11,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from tests.unit.network.test_credentials_private_paths import write_envelope  # noqa: F401 — fixture
 
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials import store as mesh_store
@@ -1981,3 +1984,66 @@ def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: 
     quiet = client.request_grant_sync("openai", session_id="s-1")
     assert isinstance(quiet, BrokerError), quiet
     assert "rate-limited for now" in quiet.message, quiet.message
+
+
+# These additional boundary controls deliberately use the same whole-envelope
+# write guard as the full inheritance regression. Do not run an old unsafe helper
+# against a real HOME to obtain a before frame/result.
+
+
+def test_configured_root_none_is_selected_per_public_call(
+    write_envelope: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = write_envelope / "profile-a", write_envelope / "profile-b"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(first))
+    path_a = placement_mod.credentials_dir_for(NETWORK)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(second))
+    path_b = placement_mod.credentials_dir_for(NETWORK)
+    assert path_a == first.resolve() / "network" / "credentials" / NETWORK
+    assert path_b == second.resolve() / "network" / "credentials" / NETWORK
+    assert path_a != path_b
+
+
+def test_relative_alias_root_is_retained_by_stateful_document(
+    write_envelope: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cwd = write_envelope / "cwd"
+    cwd.mkdir()
+    actual = cwd / "profile"
+    actual.mkdir()
+    alias = cwd / "configured-alias"
+    if os.name != "nt":
+        alias.symlink_to(actual, target_is_directory=True)
+        supplied = Path("configured-alias")
+    else:
+        # Windows symlink creation may require privileges; this control covers a
+        # trusted lexical alias, not a fabricated native junction/UNC result.
+        supplied = Path("profile") / ".." / "profile"
+    monkeypatch.chdir(cwd)
+    document = placement_mod.PlacementDocument(NETWORK, root=supplied)
+    assert document.root == actual.resolve()
+    elsewhere = write_envelope / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(elsewhere / "not-selected"))
+    document.save()
+    assert document.path == (
+        actual / "network" / "credentials" / NETWORK / placement_mod.PLACEMENT_FILENAME
+    )
+    assert document.path.exists()
+    assert not (elsewhere / "not-selected").exists()
+
+
+def test_path_constructors_and_readers_never_initialize_missing_profile(
+    write_envelope: Path,
+) -> None:
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.credentials.sync import SyncState
+
+    absent = write_envelope / "absent-parent" / "absent-profile"
+    assert placement_mod.placement_path(NETWORK, absent).is_absolute()
+    assert placement_mod.placement_state_path(NETWORK, absent).is_absolute()
+    placement_mod.PlacementDocument.load(NETWORK, absent)
+    PlacementState.load(NETWORK, absent)
+    SyncState.load(NETWORK, root=absent)
+    assert not absent.parent.exists()
