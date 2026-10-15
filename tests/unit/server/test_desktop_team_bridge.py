@@ -1079,6 +1079,69 @@ async def test_a_read_over_a_bound_field_refuses_without_echoing_the_value(api):
     assert FakeClient.instances == []
 
 
+async def test_a_damaged_store_is_refused_typed_and_left_alone(api):
+    """M2-1: a store file that is not a database refuses typed, and is not repaired.
+
+    The read-only accessors map any ``sqlite3.Error`` to ``state_unreadable``
+    (review R-7), and until this cell that mapping had no test of its own: the
+    reviewer's throw-away probe was the only thing that had ever reached it.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    damaged = b"this is not a database" * 32
+    store_file = state_db_path(root)
+    store_file.write_bytes(damaged)
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "state_unreadable"
+    assert detail["message"] == desktop_team_bridge.STATE_UNREADABLE
+    assert store_file.read_bytes() == damaged, "the read repaired the store it refused"
+    assert not list(root.rglob("state.sqlite3-wal"))
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+
+
+async def test_the_read_path_never_reaches_a_write_capable_store_accessor(api, monkeypatch):
+    """Q6 / R-1: swapping a writable accessor into the read path must fail here.
+
+    The review's mutation put the writable ``Store.active_owner`` back inside
+    ``_receive_fence`` and the whole suite stayed green: on that path the store
+    already exists, so nothing observable changes and the main-file bytes are
+    identical either way. No state-based assertion can pin that, so this cell
+    pins the STRUCTURE — every write-capable reader this slice replaced raises if
+    the read path reaches it — and then drives both the ordinary page and the
+    nothing-enrolled refusal through it.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the read path called a write-capable store accessor")
+
+    for name in ("active_owner", "owner_consent_receipt", "screening_hold", "receipt_for_message"):
+        monkeypatch.setattr(Store, name, forbidden)
+    with pytest.raises(AssertionError):
+        # The guard is live, not a silently failing patch of a renamed method.
+        Store(root).active_owner()
+
+    read = await client.get(INBOX, params=_query())
+    assert read.status_code == 200
+    assert read.json()["result"]["items"][0]["screening"]["state"] == "unreviewed"
+
+    # With the store gone, the refusal path must not reach them either.
+    state_db_path(root).unlink()
+    absent = await client.get(INBOX, params=_query())
+    assert absent.status_code == 409
+    assert absent.json()["detail"]["code"] == "history_context_unavailable"
+
+
 async def test_a_machine_with_the_local_switch_off_reads_retained_history_read_only(api):
     """Paused/disabled: the same participant may READ what already arrived."""
     client, root, _discipline = api

@@ -155,6 +155,14 @@ class TeamBridgeAllowlistPut(_Strict):
 #: the bounds and the closed sets.
 INVALID_READ_QUERY = "this read named a value the agent-messages read surface does not accept"
 
+#: What a read that cannot open this machine's store is told (review R-7). It
+#: says what happened to THIS READ and diagnoses nothing: a perfectly healthy
+#: store lands here when the process cannot create its WAL side file (a
+#: read-only config directory), so "it needs repair" was wrong for a benign case
+#: (review M2-3). Fail-closed is the same either way — the read is refused, never
+#: repaired and never worked around.
+STATE_UNREADABLE = "this machine's agent-messages store cannot be read right now"
+
 
 class TeamBridgeInboxQuery(_Strict):
     """The inbox read query (§6.1), STRICT and grammar-checked before any I/O.
@@ -261,10 +269,7 @@ def _raise_sign_in(exc: Exception) -> NoReturn:
 #: ``_raise_bridge`` unchanged (this table is the LOCAL read path's vocabulary).
 _READ_REFUSALS: dict[str, tuple[int, str]] = {
     "bridge_signin_required": (401, "sign in to Radient and try again"),
-    "state_unreadable": (
-        409,
-        "this machine's agent-messages store could not be read; it needs repair",
-    ),
+    "state_unreadable": (409, STATE_UNREADABLE),
     "no_access": (401, "sign in to Radient and try again"),
     "not_signed_in": (401, "sign in to Radient and try again"),
     "account_mismatch": (
