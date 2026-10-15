@@ -133,6 +133,12 @@ server = [
 # pyjwt[crypto]), a JSON Schema validator with a Rust-backed store, an
 # OpenTelemetry API, an ASGI server, and the entire pywin32 bundle on Windows.
 mcp = ["mcp>=1.2"]
+# `lop acp`, the Agent Client Protocol agent (docs/design/acp-agent.md). Pure
+# Python, Apache-2.0, and its only dependency is pydantic, which the base
+# install already pins. Kept OUT of `all` on purpose for the POC: the ACP
+# schema is still moving (1.0 release candidates are published), so the pin
+# is narrow and nobody's ordinary install should resolve it yet.
+acp = ["agent-client-protocol>=0.12,<0.13"]
 # HEIC/HEIF image attachment decoding. Both wheels are compiled, and
 # pillow-heif in particular is the most likely thing to have no wheel for a
 # freshly released CPython on Windows.
@@ -163,6 +169,9 @@ fetch = ["markdownify"]
 all = ["local-operator[server,mcp,images,tokenizer,fetch,lsp]"]
 dev = [
     "local-operator[all]",
+    # The `acp` extra is not in `all` (see above), so the dev install names it
+    # for the agent's unit and e2e tests.
+    "local-operator[acp]",
     # PINNED TO THE VERSION CI RUNS (`.github/workflows/ci.yml` lint job). The
     # documented gate — `.venv/bin/python -m flake8 .` in AGENTS.md, `make lint`
     # in the Makefile — used to fail with `No module named flake8` on a fresh

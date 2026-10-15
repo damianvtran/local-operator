@@ -32,6 +32,7 @@ EXTRAS: dict[str, str] = {
     "tokenizer": "exact BPE token counting for context management",
     "lsp": "Python symbol-aware navigation and rename previews (jedi)",
     "fetch": "clean HTML→markdown rendering for web_fetch (markdownify)",
+    "acp": "the `lop acp` Agent Client Protocol agent (agent-client-protocol)",
     "all": "every optional feature",
 }
 
