@@ -319,6 +319,10 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    DescribeVolumes, TerminateInstances, CreateTags`, `scheduler:CreateSchedule,
    DeleteSchedule, ListSchedules`, and `iam:PassRole` on the TTL role. An admin
    key works but should not be the one a worker subprocess holds.
+   **Optional, read-only:** `ec2:GetConsoleOutput` and `ec2:GetConsoleScreenshot`
+   let the adapter save the guest's console tail and screen when the guest goes
+   unreachable (see "Lost-guest evidence" below). A key without them loses
+   nothing else: the capture records `denied` and the episode proceeds.
 5. **Guest settings** → infra `OSWORLD_CLIENT_PASSWORD`, `OSWORLD_FILE_BASE_URL`;
    optional `OSWORLD_INPUTS_ROOT` (default `~/worktrees/osworld`) and
    `OSWORLD_TTL_SECONDS` (default 7200). The password must be one the IMAGE
@@ -693,3 +697,34 @@ it must print `[]`.**
 
 Multi-task run orchestration, leaderboard reporting/aggregation, and any CLI
 or TUI surface.
+
+## Lost-guest evidence
+
+When the guest's control server stops answering, the instance is terminated
+moments later and the reason the server died is otherwise unrecoverable (two
+such losses in ~19 guest-hours were; EC2 status checks, CPU, network and disk
+all read healthy). The AWS provider therefore saves what EC2 can still tell us
+without the guest's help, **before** anything terminates it:
+
+- `guest-console-observe.json` / `guest-console-execute.json` (plus a matching
+  `-screenshot.jpg`) in the episode cache root, beside `guest-preparation.json`.
+  `observe` is written the first time a screenshot read comes back frameless;
+  `execute` when a batch's transport fails. Each stage is written at most once.
+- The record holds `ec2:GetConsoleOutput(Latest=True)` text (the tail, scrubbed
+  of credentials by the harness's shared credential-shape table plus the
+  provider's own secret values, **before** it is size-bounded; withheld
+  entirely if it cannot be vouched for) and, where the instance type supports
+  it, `ec2:GetConsoleScreenshot`. Each artifact has a closed `status`
+  (`captured` / `denied` / `timeout` / `error` / `empty` / `oversize` /
+  `withheld`). `GetConsoleScreenshot` is called with `WakeUp` unset, so it never
+  sends a keystroke to the guest.
+- It cannot fail an episode or delay teardown: every call is bounded (10 s
+  total), abandoned rather than awaited, and any failure becomes a status.
+
+`execute` also now says whether a failed batch was **sent**. A connection that
+was never established (refused, connect timeout, name resolution) sent no byte:
+the message reads `guest action N was not sent (...)` and carries
+`delivery=not_sent`. Everything else (a read timeout, a dropped or reset
+connection, an HTTP error) stays `outcome is unknown ... delivery=ambiguous`
+and is never replayed. Neither verdict triggers a retry: with the control
+server gone a retry cannot succeed.
