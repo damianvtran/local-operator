@@ -8,11 +8,15 @@ logical turn's tool output or final answer contain structured numeric data -- an
 **evidence datasets** the generator (lane C1b) is limited to: it may plot only what it
 declares, and the validator requires every numeric cell to appear here (§2.10).
 
-THE THREE FORMS (a Boolean OR; any one makes the signal true):
+THE FORMS (a Boolean OR; any one makes the signal true):
 
 * (a) a markdown / CSV / TSV table with >= 3 data rows and a NUMERIC column;
 * (b) a JSON array of >= 3 objects sharing >= 1 numeric key;
-* (c) >= 4 numbers sharing one unit token inside one paragraph of the final answer.
+* (c) >= 4 numbers sharing one unit token inside one paragraph of the final answer;
+* (d) a list-structured final answer with four distinct, explicit operational entity counts
+  (comments / profiles / links / matches), extracted as a TABLE-ONLY labelled summary.
+  These are not comparable measurements: no common-axis bars or invented totals. A single
+  count, version, unlabelled number or ordinary paragraph still contributes no dataset.
 
 A "numeric column" excludes a strictly sequential 1..n index: a row-numbered list of names is
 not data to chart. The answer's prose is not otherwise trusted -- (c) needs a shared unit, so
@@ -86,6 +90,8 @@ class Dataset:
     rows: tuple[tuple[str, ...], ...]
     n_rows: int
     numeric_columns: tuple[str, ...]
+    #: Heterogeneous counts are a labelled table, NOT a comparable series for bars/axes.
+    presentation: str = "auto"
 
     def shape(self) -> str:
         """``12 rows x 4 cols (region, p50, p99, ...)`` -- the vendor-safe description."""
@@ -307,6 +313,77 @@ def _unit_paragraph(text: str) -> bool:
     return False
 
 
+# Operational summaries often mix counts of different entities. Admit a narrow,
+# explicit noun-labelled set, not arbitrary numbers in prose: at least four distinct
+# entity units, taken only from actual bullet lines. Repeated identical counts agree;
+# conflicting counts fail closed rather than mixing historical/current values. A table
+# is meaningful; bars comparing comments against profiles are not.
+# Only unsigned point counts are evidence here, never a suffix of a delta/range,
+# date or identifier. Case-fold only our explicit vocabulary: a global IGNORECASE
+# would turn the acronym modifier into arbitrary words ("101 covers comments").
+_SUMMARY_COUNT: Final = re.compile(
+    r"(?<![\w.,+\-−–—/:#=@~≈<>≤≥])(?P<value>\d{1,3}(?:,\d{3})+|\d+)[ \t]+"
+    r"(?:(?:(?i:supplementary|production|run-closed)|[A-Z]{2,12})[ \t]+){0,3}"
+    r"(?P<unit>(?i:comments|profiles|links|matches))\b"
+)
+_SUMMARY_AMBIGUOUS_PREFIX: Final = re.compile(
+    r"[+\-−–—][ \t]*$|\d[\d,]*[ \t]+(?:to|through)[ \t]*$", re.IGNORECASE
+)
+
+
+# This optional dataset is for exact counts, not a general natural-language parser.
+# If a count-containing bullet signals a bound/range/estimate, refuse the ENTIRE
+# summary rather than repeatedly teaching an endpoint regex English range synonyms.
+# False negatives are safe: the answer still carries the original qualified numbers.
+_SUMMARY_UNCERTAINTY: Final = re.compile(
+    r"\b(?:between|up\s+to|at\s+(?:least|most)|about|roughly|approximately|approx|"
+    r"around|over|under|more\s+than|less\s+than|fewer\s+than|greater\s+than|"
+    r"nearly|almost|estimated?|estimates|forecast|ranges?|from[ \t]+\d[\d,]*[ \t]+to)\b",
+    re.IGNORECASE,
+)
+_SUMMARY_ENTITY: Final = re.compile(r"\b(?:comments|profiles|links|matches)\b", re.IGNORECASE)
+
+
+def _labelled_summary(answer: str) -> Dataset | None:
+    counts: dict[str, str] = {}
+    # Do not let a single list marker elsewhere license arbitrary historical prose.
+    # Scan the actual bullet lines only (the real replay repeats all four counts in
+    # its operational/check bullets). Strip the marker before checking numeric signs,
+    # so "- 296 comments" is a positive count rather than a negative delta.
+    for bullet in re.finditer(r"(?m)^[ \t]*[-*][ \t]+([^\n]+)", answer[:65_536]):
+        text = bullet.group(1)
+        if (
+            _SUMMARY_ENTITY.search(text)
+            and re.search(r"\d", text)
+            and _SUMMARY_UNCERTAINTY.search(text)
+        ):
+            return None
+        for match in _SUMMARY_COUNT.finditer(text):
+            # Only the immediate prefix can qualify a number; bound this check
+            # so a long bullet with many numeric mentions stays linear in size.
+            if _SUMMARY_AMBIGUOUS_PREFIX.search(text[max(0, match.start() - 128) : match.start()]):
+                continue
+            unit = match.group("unit").lower()
+            value = match.group("value").replace(",", "")
+            # Conflicting point counts for the same entity are ambiguous history,
+            # not permission to silently pick whichever one the regex saw first.
+            if unit in counts and counts[unit] != value:
+                return None
+            counts[unit] = value
+    if len(counts) < 4:
+        return None
+    rows = tuple((unit, value) for unit, value in counts.items())
+    return Dataset(
+        "Operational counts (distinct units; table only)",
+        "answer",
+        ("entity (distinct units)", "count"),
+        rows,
+        len(rows),
+        ("count",),
+        "table-only",
+    )
+
+
 def extract(items: Iterable[TurnItem], answer_text: str) -> Evidence:
     """The structured-data signal and datasets over the logical turn.
 
@@ -337,6 +414,10 @@ def extract(items: Iterable[TurnItem], answer_text: str) -> Evidence:
                 if built:
                     forms.append(form)
                     datasets.extend(built)
+        summary = _labelled_summary(answer_text)
+        if summary is not None:
+            datasets.append(summary)
+            forms.append("labelled-summary")
         if _unit_paragraph(answer_text):
             forms.append("units")
     except Exception:  # noqa: BLE001 — a heuristic's failure is "no signal", never a crash

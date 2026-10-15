@@ -123,13 +123,22 @@ def test_a_path_in_the_answer_prose_is_tier_three_and_needs_a_deliverable_extens
 def test_the_answers_own_code_span_or_link_dedups_the_candidate(tmp_path: Path) -> None:
     target = _write(tmp_path / "reports" / "q3.md")
     items = [call("write", path=str(target))]
-    assert _run(items, "Wrote `reports/q3.md` for you.", tmp_path).candidates == ()
-    assert _run(items, "See [the report](reports/q3.md).", tmp_path).candidates == ()
-    assert _run(items, f"Saved to `{target}`.", tmp_path).candidates == ()
+    # A WRITTEN deliverable the answer links is kept and flagged (recall), not deduped.
+    for answer in (
+        "Wrote `reports/q3.md` for you.",
+        "See [the report](reports/q3.md).",
+        f"Saved to `{target}`.",
+    ):
+        (only,) = _run(items, answer, tmp_path).candidates
+        assert (only.path, only.linked_in_answer) == ("reports/q3.md", True), answer
+    # ...while a linked file the turn only MENTIONED (tier 3) or a linked script still dedups.
+    assert _run([], "See [the report](reports/q3.md).", tmp_path).candidates == ()
+    script = _write(tmp_path / "tool.py")
+    assert _run([call("write", path=str(script))], "Wrote `tool.py`.", tmp_path).candidates == ()
     # The twin: the same file merely mentioned in plain prose is still visible only as text
     # the fold hides, so it is NOT deduped.
     kept = _run(items, "I wrote the q3 report.", tmp_path)
-    assert [c.path for c in kept.candidates] == ["reports/q3.md"]
+    assert [(c.path, c.linked_in_answer) for c in kept.candidates] == [("reports/q3.md", False)]
     assert (
         _run(items, "Wrote reports/q3.md for you.", tmp_path).rejected.get("already-visible")
         is None
@@ -280,3 +289,227 @@ def test_the_prefilter_meets_its_five_millisecond_target_on_a_busy_turn(tmp_path
         items.append(result("row,1\n" * 20_000, f"c{index}"))
     out = _run(items, "x " * 5_000, tmp_path)
     assert len(out.candidates) <= cand.MAX_CONSIDERED
+
+
+# -- bash recall: cd tracking, heredocs, copies, the touched-directory sweep ---------------------
+#
+# The incident these pin: a turn did ``cd ~/workspace/x; cp A b.jsonl; python3 - <<PY ...
+# open('RUN-RECORD.md','w')`` then ``shasum ... > SHA256SUMS`` and ended with no Highlights,
+# because the old parser lexed the whole command with ``shlex`` (a python heredoc's quotes
+# raise), never tracked the ``cd`` and read ``cp`` as no output at all.
+
+
+def _bash(tmp_path: Path, command: str, **kw):
+    return _run([call("bash", command=command)], "done", tmp_path, **kw)
+
+
+def test_a_cd_then_redirect_resolves_against_the_cd_directory(tmp_path: Path) -> None:
+    _write(tmp_path / "proj" / "out.csv")
+    out = _bash(tmp_path, "cd proj && echo a,b > out.csv")
+    assert [(c.path, c.tier) for c in out.candidates] == [("proj/out.csv", 2)]
+
+
+def test_a_home_relative_cd_makes_the_file_display_home_relative_when_cwd_is_elsewhere(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """(c) A project cwd that is NOT home, a deliverable under ``~/workspace``.
+
+    The fixture tree lives under a temp root, which the scratch rule would (rightly) refuse for
+    a file outside the cwd; a real home is not scratch, so the rule is lifted for this cell.
+    """
+    monkeypatch.setattr(cand, "_scratch_roots", lambda: [])
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / "workspace" / "pkg" / "RUN-RECORD.md")
+    command = "cd ~/workspace/pkg; python3 - <<'PY'\nopen('RUN-RECORD.md','w').write('x')\nPY"
+    out = prefilter([call("bash", command=command)], "ok", cwd=str(project), home=str(home))
+    assert [(c.path, c.kind) for c in out.candidates] == [
+        ("~/workspace/pkg/RUN-RECORD.md", "markdown")
+    ]
+    assert not os.path.isabs(out.candidates[0].path)
+    # A file under the cwd keeps the cwd-relative spelling even when the cwd is inside home.
+    inner = _write(project / "r.md")
+    assert cand._display_path(str(inner), str(project), str(home)) == "r.md"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cd d; cp "$LOCAL_OPERATOR_SCRATCHPAD/led.jsonl" copy.jsonl',
+        "cd d; cp a.jsonl copy.jsonl",
+        "cd d && mv a.jsonl copy.jsonl",
+        "cd d; cat a.jsonl | tee copy.jsonl",
+        "cd d; curl -o copy.jsonl https://example.test/x",
+        "cd d; python3 - <<'PY'\nimport json\njson.dump({}, open('copy.jsonl', 'w'))\nPY",
+        "cd d; python3 - <<'PY'\ns = \"it's\"\nopen('copy.jsonl','w').write(s)\nPY",
+        "cd d; python3 -c \"open('copy.jsonl','w').write('x')\"",
+        "(cd d; echo x > copy.jsonl)",
+    ],
+)
+def test_bash_destinations_resolve_against_the_cd_directory(command: str, tmp_path: Path) -> None:
+    _write(tmp_path / "d" / "copy.jsonl")
+    out = _bash(tmp_path, command)
+    assert [c.path for c in out.candidates] == ["d/copy.jsonl"], command
+
+
+def test_a_heredoc_body_that_is_file_text_is_not_scanned_for_python_writes(tmp_path: Path) -> None:
+    """``cat > f <<EOF`` bodies are the FILE's content; only an interpreter's stdin is code."""
+    _write(tmp_path / "f.md")
+    _write(tmp_path / "decoy.md")
+    out = _bash(tmp_path, "cat > f.md <<'EOF'\nopen('decoy.md','w')\nEOF")
+    assert [c.path for c in out.candidates] == ["f.md"]
+
+
+def test_an_unknowable_cd_drops_relative_names_instead_of_guessing(tmp_path: Path) -> None:
+    _write(tmp_path / "out.csv")  # exists at the session cwd, but the shell was NOT there
+    out = _bash(tmp_path, 'cd "$WORK"; echo x > out.csv')
+    assert out.candidates == (), "a guess against the session cwd would feature the wrong file"
+
+
+def test_a_failed_bash_call_wrote_nothing(tmp_path: Path) -> None:
+    _write(tmp_path / "out.csv")
+    items = [call("bash", "b1", command="echo x > out.csv"), result("boom", "b1", error=True)]
+    assert _run(items, "failed", tmp_path).candidates == ()
+
+
+def test_checksum_manifests_are_text_deliverables_but_other_bare_names_are_not(
+    tmp_path: Path,
+) -> None:
+    assert cand.kind_of("SHA256SUMS") == "text" and cand.kind_of("sha256sums") == "text"
+    assert cand.kind_of("pkg.tar.gz.sha256") == "text"
+    for name in ("LICENSE", "Makefile", "README", "CHECKS", "Dockerfile"):
+        assert cand.kind_of(name) == "other", name
+    _write(tmp_path / "SHA256SUMS")
+    out = _bash(tmp_path, "shasum -a 256 *.csv > SHA256SUMS")
+    assert [(c.path, c.kind, c.deliverable) for c in out.candidates] == [
+        ("SHA256SUMS", "text", True)
+    ]
+
+
+def test_the_sweep_finds_files_written_through_a_variable_path_and_only_those(
+    tmp_path: Path,
+) -> None:
+    """``json.dump(d, open(p, 'w'))`` names no literal; the cd directory is listed instead."""
+    import time
+
+    work = tmp_path / "w"
+    old = _write(work / "old.json")
+    os.utime(old, (1.0, 1.0))
+    _write(work / "fresh.json")
+    _write(work / ".hidden.json")
+    _write(work / "run.log")
+    _write(work / "notes.py")
+    _write(work / "sub" / "deep.json")
+    (work / "adir.json").mkdir()
+    command = "cd w; python3 - <<'PY'\np = pick()\nopen(p, 'w').write('x')\nPY"
+    out = _bash(tmp_path, command, since=time.time() - 60)
+    assert [c.path for c in out.candidates] == ["w/fresh.json"]
+    # No turn start recorded -> the sweep is OFF (listing "everything" would over-match).
+    assert _bash(tmp_path, command).candidates == ()
+
+
+def test_a_command_with_only_named_outputs_does_not_arm_the_sweep(tmp_path: Path) -> None:
+    import time
+
+    _write(tmp_path / "w" / "named.md")
+    _write(tmp_path / "w" / "bystander.md")
+    out = _bash(tmp_path, "cd w; echo x > named.md", since=time.time() - 60)
+    assert [c.path for c in out.candidates] == ["w/named.md"]
+
+
+def test_the_sweep_is_bounded_in_entries_and_files(tmp_path: Path) -> None:
+    import time
+
+    work = tmp_path / "w"
+    for index in range(cand.SWEEP_MAX_ENTRIES + 50):
+        _write(work / f"f{index:03d}.json", "x")
+    command = "cd w; python3 - <<'PY'\nopen(p, 'w').write('x')\nPY"
+    out = _bash(tmp_path, command, since=time.time() - 60)
+    assert 0 < len(out.candidates) <= cand.SWEEP_MAX_FILES
+
+
+def test_recall_keeps_every_privacy_rule(tmp_path: Path, monkeypatch) -> None:
+    """Negative controls: the new doors cannot admit what the old ones refused."""
+    import time
+
+    scratch = tmp_path / "scratchpad"
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(scratch))
+    outside = tmp_path / "outside"
+    cwd = tmp_path / "proj"
+    home = tmp_path / "proj"  # cwd == home: the "outside" tree is under neither
+    _write(cwd / "w" / ".env", "TOKEN=1")
+    _write(cwd / "w" / "debug.log")
+    _write(cwd / "w" / "credentials.json")
+    _write(outside / "stolen.csv")
+    _write(scratch / "ledger.jsonl")
+    command = (
+        f"cd w; echo a > .env; echo b > debug.log; echo c > credentials.json;"
+        f" cp x {outside}/stolen.csv; cp x {scratch}/ledger.jsonl;"
+        " python3 - <<'PY'\nopen(p, 'w').write('x')\nPY"
+    )
+    out = prefilter(
+        [call("bash", command=command)], "ok", cwd=str(cwd), home=str(home), since=time.time() - 60
+    )
+    assert out.candidates == (), [c.path for c in out.candidates]
+    assert out.rejected.get("outside-roots", 0) >= 1
+
+
+def test_a_linked_name_without_a_path_still_flags_the_written_file(tmp_path: Path) -> None:
+    """The answer says ```RUN-RECORD.md``` in backticks beside the folder: flagged, kept."""
+    _write(tmp_path / "pkg" / "RUN-RECORD.md")
+    items = [call("bash", command="cd pkg; echo x > RUN-RECORD.md")]
+    (only,) = _run(items, "Receipt: `RUN-RECORD.md` in `pkg/`.", tmp_path).candidates
+    assert only.linked_in_answer is True and only.path == "pkg/RUN-RECORD.md"
+
+
+@pytest.mark.parametrize("command", ["cd -; echo x > r.md", "cd -- -; echo x > r.md"])
+def test_unknown_previous_directory_never_features_home_decoy(tmp_path, command):
+    _write(tmp_path / "r.md", "STALE DECOY")
+    assert _bash(tmp_path, command).candidates == ()
+
+
+def test_home_parent_is_expanded_before_normalising(tmp_path, monkeypatch):
+    monkeypatch.setattr(cand, "_scratch_roots", lambda: [])
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    home.mkdir()
+    cwd.mkdir()
+    _write(tmp_path / "r.md", "correct parent")
+    _write(cwd / "r.md", "decoy")
+    # Parent of home lies outside both roots, and must not be reinterpreted as cwd.
+    out = prefilter(
+        [call("bash", command="cd ~; cd ..; echo x > r.md")], "ok", cwd=str(cwd), home=str(home)
+    )
+    assert out.candidates == ()
+    assert out.rejected.get("outside-roots")
+
+
+@pytest.mark.parametrize("flag", ["-t out", "--target-directory out", "--target-directory=out"])
+def test_unsupported_copy_target_directory_never_promotes_source(tmp_path, flag):
+    _write(tmp_path / "in.csv")
+    _write(tmp_path / "out" / "in.csv")
+    assert _bash(tmp_path, f"cp {flag} in.csv").candidates == ()
+
+
+def test_quoted_heredoc_marker_does_not_swallow_later_outputs(tmp_path):
+    _write(tmp_path / "b.csv")
+    _write(tmp_path / "c.md")
+    out = _bash(tmp_path, 'echo "see <<EOF notes"\ncp a.csv b.csv\necho x > c.md')
+    assert {c.path for c in out.candidates} == {"b.csv", "c.md"}
+
+
+def test_nul_directory_cannot_abort_prefilter(tmp_path):
+    assert _bash(tmp_path, 'cd ~/a\x00b; python3 -c "df.to_csv(p)"', since=1).candidates == ()
+
+
+def test_shared_parser_refuses_oversized_commands_before_any_parse(monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("unbounded command reached lexer")
+
+    monkeypatch.setattr(cand, "_lift_heredocs", forbidden)
+    assert cand.bash_effects("open(" * 20_000).outputs == ()
+
+
+def test_variable_write_detector_repeated_open_tokens_is_not_a_write():
+    assert cand._variable_write("open(" * 20_000) is False
