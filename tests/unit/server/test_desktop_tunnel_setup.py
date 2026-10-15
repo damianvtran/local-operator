@@ -17,9 +17,12 @@ from fastapi import FastAPI
 
 from local_operator.config_writer import nonblocking_file_claim
 from local_operator.server.routes import desktop_tunnel_setup as routes
-from local_operator.tunnels import api, config, install, report, setup
+from local_operator.tunnels import api, cli, config, install, report, setup
 
 TOKEN = "synthetic-desktop-capability"
+# The production prerequisite check, captured BEFORE the `upstream` fixture stubs it,
+# so one test can prove the real thing refuses on a host with no cloudflared.
+REAL_CLOUDFLARED_PREFLIGHT = setup._cloudflared_preflight
 ORIGIN = "http://desktop.fixture.test"
 PATH = "/v1/desktop/tunnel/setup"
 
@@ -133,6 +136,13 @@ def upstream(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEFAULT_GATEWAY_PORT", server.server_port)
     monkeypatch.setattr(setup.supervisors, "supervisor", lambda: "launchctl")
     monkeypatch.setattr(setup, "_cloudflared_preflight", lambda path: "/synthetic/cloudflared")
+    # The run path ALSO dispatches the real `tunnel install`, whose own lookup
+    # (cli.cloudflared_binary -> shutil.which) is a second, independent check. A
+    # developer host has cloudflared on PATH, so stubbing only the preflight
+    # passes there while a CI runner without it fails the install and never
+    # reaches `verified`. Both seams are synthetic here; the real check has its own
+    # test below.
+    monkeypatch.setattr(cli, "cloudflared_binary", lambda configured=None: "/synthetic/cloudflared")
     monkeypatch.setattr(setup.report, "login_verdict", AsyncMock(return_value={"state": "ok"}))
     monkeypatch.setattr(setup.mobile_install, "health", lambda port: {"ok": True})
     monkeypatch.setattr(setup.mobile_install, "gate_closed", lambda port: True)
@@ -374,6 +384,25 @@ async def test_fresh_plan_and_wrong_price_never_mutate(desktop, upstream):
     assert result["step"] == "quote_changed" and result["blocked_on"] == "quote"
     assert not any(c[0] == "POST" for c in upstream.calls)
     assert not (config.directory() / "config.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_real_cloudflared_preflight_refuses_before_any_mutation(
+    desktop, upstream, monkeypatch
+):
+    """Q2 on a host WITHOUT cloudflared (what a Linux CI runner is): refuse, write nothing."""
+    client, _app, _root = desktop
+    monkeypatch.setattr(setup, "_cloudflared_preflight", REAL_CLOUDFLARED_PREFLIGHT)
+    # No binary anywhere, whatever the host has installed.
+    monkeypatch.setattr("shutil.which", lambda name, *a, **k: None)
+    result = (await client.post(PATH, json={"action": "run", "credential_id": 17})).json()["result"]
+    assert result["step"] == "cloudflared" and result["blocked_on"] == "cloudflared"
+    assert result["verified"] is False
+    assert result["remedy"]["kind"] == "install_cloudflared"
+    assert not any(c[0] == "POST" for c in upstream.calls)
+    assert not upstream.installs
+    assert not (config.directory() / "config.json").exists()
+    assert not (config.directory() / "create.json").exists()
 
 
 @pytest.mark.asyncio
