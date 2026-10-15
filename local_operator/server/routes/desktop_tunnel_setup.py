@@ -69,6 +69,7 @@ def _refusal(status: int, code: str) -> HTTPException:
         "setup_in_progress": _wd.in_progress,
         "setup_deadline": _wd.deadline,
         "setup_unavailable": _wd.unavailable,
+        "setup_intent_corrupt": _wd.corrupt_intent,
     }
     return HTTPException(status, messages[code]().envelope(code=code))
 
@@ -212,6 +213,8 @@ async def local_plan(
                 },
             )
         return reply(result)
+    except setup.CorruptSetupIntent:
+        raise _refusal(503, "setup_intent_corrupt") from None
     except (ValueError, OSError):
         raise _refusal(503, "setup_unavailable") from None
 
@@ -259,6 +262,8 @@ async def setup_action(body: SetupRequest, request: Request) -> CRUDResponse[Any
         return reply(await join_owned(waiter))
     except setup.SetupInProgress:
         raise _refusal(409, "setup_in_progress") from None
+    except setup.CorruptSetupIntent:
+        raise _refusal(503, "setup_intent_corrupt") from None
     except asyncio.TimeoutError:
         raise _refusal(504, "setup_deadline") from None
     except (ValueError, OSError, KeyError, TypeError):

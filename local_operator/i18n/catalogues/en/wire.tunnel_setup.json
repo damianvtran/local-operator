@@ -2,5 +2,6 @@
   "wire.tunnel_setup.in_progress": "Phone access setup is already in progress. Check its status before retrying.",
   "wire.tunnel_setup.deadline": "The setup response deadline elapsed after its owned work was drained. Check status and completed steps before retrying.",
   "wire.tunnel_setup.unavailable": "Phone access setup could not finish this response. Check the current state before retrying; do not assume rollback.",
-  "wire.tunnel_setup.checking": "Checking the selected account and required preparation before changes."
+  "wire.tunnel_setup.checking": "Checking the selected account and required preparation before changes.",
+  "wire.tunnel_setup.corrupt_intent": "The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made."
 }

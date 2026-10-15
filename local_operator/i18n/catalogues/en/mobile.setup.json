@@ -73,5 +73,6 @@
   "mobile.setup.title_stopped": "Phone access is deliberately turned off",
   "mobile.setup.unexpected_failure": "Phone access could not finish. Check /mobile status for the current blocker; completed steps have not been undone.",
   "mobile.setup.in_progress": "Phone access setup is already in progress; check its status before retrying.",
-  "mobile.setup.quote_unread": "Check the fresh account and quote before enabling phone access."
+  "mobile.setup.quote_unread": "Check the fresh account and quote before enabling phone access.",
+  "mobile.setup.corrupt_intent": "The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made."
 }

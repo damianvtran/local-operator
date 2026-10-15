@@ -94,6 +94,10 @@ def consent(*, amount: str) -> Msg:
     return Msg("mobile.setup.consent", {"amount": amount})
 
 
+def corrupt_intent() -> Msg:
+    return Msg("mobile.setup.corrupt_intent", {})
+
+
 def credential_ids(*, ids: str) -> Msg:
     return Msg("mobile.setup.credential_ids", {"ids": ids})
 
