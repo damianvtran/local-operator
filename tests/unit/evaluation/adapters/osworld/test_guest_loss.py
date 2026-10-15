@@ -131,7 +131,13 @@ class _OneShotServer:
             if self.mode == "sleep":
                 # Say nothing until the CLIENT gives up (its read timeout
                 # closes the socket, which ends this ``recv``): event-driven,
-                # so the test costs the client's timeout and not a fixed sleep.
+                # so the test costs the client's deadline and not a fixed
+                # sleep. The caller's deadline MUST comfortably exceed
+                # connect+send on a loaded CI runner, or the client abandons
+                # mid-write and the close below turns this into a RESET
+                # instead of the read timeout the case means to exercise --
+                # that is exactly what a 50ms deadline did on shard 3 of run
+                # 38745006530 (ConnectionResetError, not ReadTimeout).
                 connection.recv(1)
             elif self.mode == "reset":
                 connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -168,7 +174,7 @@ def test_a_refused_connection_is_not_sent_and_names_its_kind() -> None:
 @pytest.mark.parametrize(
     ("mode", "client_timeout", "expected_type"),
     [
-        ("sleep", 0.05, requests.ReadTimeout),
+        ("sleep", 0.5, requests.ReadTimeout),
         ("close", 2.0, requests.ConnectionError),  # RemoteDisconnected
         ("reset", 2.0, requests.ConnectionError),  # ConnectionResetError
         ("500", 2.0, requests.HTTPError),
@@ -575,7 +581,7 @@ class _OkHandler(BaseHTTPRequestHandler):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "client_timeout"),
-    [("sleep", 0.05), ("close", 2.0), ("reset", 2.0), ("500", 2.0)],
+    [("sleep", 0.5), ("close", 2.0), ("reset", 2.0), ("500", 2.0)],
 )
 async def test_an_ambiguous_failure_is_never_replayed(
     mode: str, client_timeout: float, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1472,7 +1478,7 @@ async def test_a_slow_screenshot_read_is_not_called_not_sent(tmp_path: Path) -> 
 
     server = _OneShotServer("sleep")
     try:
-        slow = _post(f"http://127.0.0.1:{server.port}/screenshot", 0.05)
+        slow = _post(f"http://127.0.0.1:{server.port}/screenshot", 0.5)
     finally:
         server.close()
     with _Stubs() as stubs:
