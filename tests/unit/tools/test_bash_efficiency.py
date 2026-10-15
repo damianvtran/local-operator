@@ -141,6 +141,8 @@ async def test_bash_resolved_memory_is_authoritative_before_spawn(monkeypatch, t
 
     Abort at its real subprocess binding: no synthetic PID is ever queried or
     signalled. The builder still executes the real allowlist/exclude policy.
+    Filtering must precede the budget's potentially quarantining config read;
+    otherwise malformed configuration can silently downgrade credential policy.
     """
     import errno
     from types import SimpleNamespace
@@ -163,6 +165,7 @@ async def test_bash_resolved_memory_is_authoritative_before_spawn(monkeypatch, t
     policy_type = builtin.shell_env.ShellEnvironmentPolicy
 
     def environment(policy, *, injections):
+        events.append("filter")
         controlled = policy_type(
             mode="allowlist", exclude=frozenset({key}) if excluded else frozenset()
         )
@@ -179,7 +182,7 @@ async def test_bash_resolved_memory_is_authoritative_before_spawn(monkeypatch, t
     )
 
     async def spawn(*argv, **kwargs):
-        assert events == ["resolve"], "budget was not resolved before the actual spawn boundary"
+        assert events == ["filter", "resolve"], "policy must be latched before the budget read"
         assert kwargs["env"][key] == "48"
         events.append("spawn")
         raise OSError(errno.ENOENT, "controlled budget spawn stop", argv[0])
@@ -195,4 +198,4 @@ async def test_bash_resolved_memory_is_authoritative_before_spawn(monkeypatch, t
         ToolContext(cwd=str(tmp_path)),
     )
     assert result.is_error
-    assert events == ["resolve", "spawn"]
+    assert events == ["filter", "resolve", "spawn"]

@@ -65,8 +65,10 @@ The command's own status; `124` when the bound fired (what `timeout(1)` reports,
 so existing callers keep reading the same code); `128 + signum` when a signal
 ended it — forwarded to the group here, or delivered to the child by someone
 else (a `kill -9`, the OOM killer, a job runner), which a shell would report the
-same way; `125` when the command could not be started at all — never 0 for a
-gate that did not run.
+same way; `137` for a measured owned-group memory breach, identified by the
+`MEMORY LIMIT EXCEEDED` diagnostic (status 137 alone also covers an external
+SIGKILL); `125` when the command could not start or its memory budget was refused
+before spawn — never 0 for a gate that did not run.
 
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
 parseable output and the suite's `-q` output is parsed too (the same rule the
@@ -104,7 +106,7 @@ NODE_HEAP_MB = 6144
 #: be read as a passing gate.
 EXIT_NOT_STARTED = 125
 
-#: A measured owned-group memory breach is SIGKILL, not the timeout124 path.
+#: A measured owned-group memory breach is SIGKILL, not the timeout 124 path.
 EXIT_MEMORY = 128 + signal.SIGKILL
 
 #: How long a signalled process group gets before SIGKILL. The analyzer needs a
@@ -184,20 +186,25 @@ def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
         raise ValueError("--memory-mb must be nonnegative integer MiB")
     if inherited is not None and inherited > 0:
         if override_mb is not None and (override_mb == 0 or override_mb > inherited):
-            raise ValueError("--memory-mb cannot disable or widen a positive inherited ceiling")
+            raise ValueError(
+                f"--memory-mb cannot disable or widen inherited {inherited} MiB; "
+                f"choose a positive value no higher than {inherited}, or raise the "
+                "granting caller's ceiling (memory_mb on the outer bash tool call)"
+            )
         ceiling = inherited if override_mb is None else override_mb
-        source = "inherited" if override_mb is None else "explicit tightening of inherited"
+        source = "inherited" if override_mb is None else "explicit, capped by inherited"
     elif override_mb is not None:
         ceiling = override_mb
         source = "explicit"
     elif inherited is not None:
         ceiling = inherited
-        source = "inherited disable"
+        source = "inherited: guard off"
     else:
         budget = memory_guard.compute_budget()
         if budget.source == "disabled":
             raise ValueError(
-                "auto memory budget unavailable; use an explicit ceiling or --memory-mb 0"
+                "auto memory budget unavailable; set --memory-mb N to an explicit positive "
+                "MiB ceiling (--memory-mb 0 deliberately disables protection)"
             )
         return budget, "auto"
     return memory_guard.compute_budget(override_mb=ceiling), source
@@ -223,7 +230,7 @@ def run(
     try:
         budget, budget_source = _memory_budget(memory_mb)
         if budget.ceiling_mb > 0 and not hasattr(os, "killpg"):
-            raise ValueError("an owned-PG memory ceiling requires POSIX process groups")
+            raise ValueError("a child process-group memory ceiling requires POSIX process groups")
     except ValueError as exc:
         stream.write(f"[run_bounded] memory budget refused before spawn: {exc}\n")
         return EXIT_NOT_STARTED
@@ -421,6 +428,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_bounded.py",
         description="Run a gate command in its own process group and reap the group.",
+        # The short description deliberately does not use the whole module doc;
+        # callers consulting --help still need the diagnostic that distinguishes
+        # our memory stop from another process delivering SIGKILL (same status).
+        epilog=(
+            "Exit status: child status normally; 124 on timeout; 125 on start or "
+            "budget refusal; 137 with MEMORY LIMIT EXCEEDED on a measured memory "
+            "breach. Status 137 alone can also mean external SIGKILL; inspect stderr."
+        ),
     )
     parser.add_argument(
         "--timeout",
@@ -440,8 +455,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=None,
         help=(
-            "owned child PG ceiling in MiB; only tighten positive inherited budgets; "
-            "0 disables only without one"
+            "child process-group ceiling in MiB (default: bash tool's resolved budget, "
+            "otherwise auto); positive inherited budgets can only be tightened; "
+            "0 disables only without a positive inherited budget"
         ),
     )
     parser.add_argument(

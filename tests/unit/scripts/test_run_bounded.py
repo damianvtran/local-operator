@@ -392,6 +392,8 @@ def test_child_memory_cannot_widen_inherited_positive_before_spawn(
         == 125
     )
     assert "refused before spawn" in output.getvalue()
+    assert "inherited 48 MiB" in output.getvalue()
+    assert "memory_mb on the outer bash tool call" in output.getvalue()
 
 
 @pytest.mark.parametrize("raw", ["", "-1", "text", "nan", "1.5", "inf"])
@@ -560,3 +562,20 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
         assert output.getvalue().count("advisory only") == 1
     if mode == "unknown":
         assert "no measured cap proof" in output.getvalue()
+
+
+def test_help_describes_memory_exit_status_and_budget_defaults(memory_wrapper, capsys):
+    """Users read argparse output, not the source-only module contract.
+
+    The old help exited successfully while hiding the reason needed to tell a
+    measured memory breach from an external SIGKILL with the same status 137.
+    """
+    with pytest.raises(SystemExit) as stopped:
+        memory_wrapper.main(["--help"])
+    assert stopped.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "default: bash tool's resolved budget, otherwise auto" in help_text
+    assert "child process-group ceiling in MiB" in help_text
+    assert "137 with MEMORY LIMIT EXCEEDED" in help_text
+    assert "137 alone can also mean external SIGKILL" in help_text
+    assert "124 on timeout" in help_text and "125 on start or budget refusal" in help_text

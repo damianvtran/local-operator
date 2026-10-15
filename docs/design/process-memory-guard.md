@@ -631,8 +631,12 @@ that child's memory. A measured 64MiB payload escaped an outer 48MiB tool budget
 through the old runner; the identical same-PG control was stopped. SELF RSS
 from that experiment is not a measured aggregate group peak.
 
-The tool now resolves its existing budget **before spawn**, uses that same Budget
-for its own Guard, and sets the nonsecret reserved
+The tool first latches and filters shell policy, then resolves its existing budget
+**before spawn** and uses that same Budget for its own Guard. This ordering matters:
+the budget's ConfigManager read can quarantine malformed YAML; probing shell policy
+after that recovery sees an absent file and would silently inherit credentials.
+The existing policy reader must observe the unreadable file first and fail closed.
+The tool sets the nonsecret reserved
 `LOCAL_OPERATOR_RESOLVED_MEMORY_MB` after shell-policy filtering/user extras.
 A policy exclusion cannot silently remove this one resource control. This does
 not change which credential/environment grants ordinary shell policy allows.
@@ -641,10 +645,12 @@ The runner uses the canonical `memory_guard.Guard.sample_sync`/`should_kill` for
 its own new child PG, including the existing footprint/RSS membership logic.
 There is no new ps-only engine or macOS virtual-address-space limit. A soft
 notice is advisory only. A measured hard breach kills/reaps the exact owned PG,
-returns137, and names MEMORY LIMIT EXCEEDED; timeout remains124, not-started or
-refused budget125, ordinary child status/stdout unchanged, forwarded signals
-128+signal. Signals remain forwarded until cleanup ends. Unknown measurements
-are disclosed and never fabricated into a kill or a claim of enforcement.
+returns 137, and names MEMORY LIMIT EXCEEDED. Status 137 alone also covers an
+external SIGKILL, so the diagnostic identifies a measured memory breach. Timeout
+remains 124; not-started or refused budget is 125. Ordinary child status/stdout and
+forwarded signals (128 + signal) are unchanged. Signals remain forwarded until
+cleanup ends. Unknown measurements are disclosed and never fabricated into a kill
+or a claim of enforcement.
 
 ### Budget resolution and isolated callers
 
@@ -653,7 +659,8 @@ Absent an inherited resolved value and explicit flag, the runner reuses the
 existing auto-budget calculation. If auto cannot resolve a ceiling, it refuses
 before starting the payload; an explicit supported ceiling or an intentional
 `--memory-mb 0` is required. A positive owned-PG ceiling requires POSIX groups.
-An inherited zero preserves the tool's resolved disabled state and reports it.
+An inherited zero preserves and reports the tool's resolved disabled state unless
+an explicit positive flag adds a ceiling; adding protection is still allowed.
 
 `--memory-mb N` may tighten or equal a positive inherited ceiling; it cannot
 widen it, and zero cannot disable it. Such attempts, malformed/negative inherited
