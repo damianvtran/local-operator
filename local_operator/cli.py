@@ -2237,6 +2237,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     add_search_subparser(subparsers, parent_parser)
     add_fetch_subparser(subparsers, parent_parser)
 
+    # `lop acp`: an Agent Client Protocol agent on stdio, for clients (editors,
+    # Qwen Audio Agent's Gateway) that spawn their agent. Takes no arguments
+    # of its own; --hosting/--model arrive through the global-flag copy below.
+    subparsers.add_parser(
+        "acp",
+        help="Serve the Agent Client Protocol (ACP) on stdin/stdout for an ACP client",
+        parents=[parent_parser],
+    )
+
     # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
     # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
     # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
@@ -14592,6 +14601,24 @@ def main() -> int:
         # a no-op everywhere else. Placed after the parse so `--version` and
         # `--help` (which argparse exits from inside `parse_args`) never pay it.
         _maybe_brand_process(args)
+
+        # `lop acp` owns fd 0/1 for its JSON-RPC stream, so it is dispatched
+        # BEFORE every other startup step: the login-shell PATH probe and the
+        # startup migrations below can print, and anything printed to stdout
+        # once a client is reading it corrupts the protocol (design D4).
+        if args.subcommand == "acp":
+            from local_operator.acp_agent.stdio import claim_stdio
+
+            stdio = claim_stdio()
+            # A login-shell PATH, as exec gets: the agent's tools run commands.
+            setup_cross_platform_environment()
+            from local_operator.acp_agent.main import run as run_acp
+
+            return run_acp(
+                hosting=getattr(args, "hosting", None),
+                model=getattr(args, "model", None),
+                stdio=stdio,
+            )
 
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all
