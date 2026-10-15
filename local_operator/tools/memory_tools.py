@@ -272,7 +272,10 @@ def build_memory_tool():
                 "scope": {
                     "type": "string",
                     "enum": ["session", "team", "agent", "global"],
-                    "description": "session=this conversation; global=future sessions; team/agent=shared work/profile",
+                    "description": (
+                        "session=this conversation; global=future sessions; "
+                        "team/agent=shared work/profile"
+                    ),
                 },
                 "text": {"type": "string", "description": "Fact or query"},
             },
