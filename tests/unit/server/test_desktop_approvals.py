@@ -214,8 +214,8 @@ async def test_the_router_is_bearer_gated(api: Any) -> None:
     assert response.status_code in (401, 403), response.text
 
 
-def test_the_three_frozen_paths_are_the_whole_surface() -> None:
-    """Exactly the frozen three routes — and ``features.approvals`` advertises them."""
+def test_frozen_paths_remain_and_onboarding_is_additive() -> None:
+    """The old decision surface survives; new request/run routes have their own key."""
     from local_operator.server.features import feature_flags
 
     routes = {
@@ -226,8 +226,14 @@ def test_the_three_frozen_paths_are_the_whole_surface() -> None:
         ("/v1/desktop/approvals", ("GET",)),
         ("/v1/desktop/approvals/{approval_id}/approve", ("POST",)),
         ("/v1/desktop/approvals/{approval_id}/deny", ("POST",)),
+        ("/v1/desktop/approvals/probe", ("POST",)),
+        ("/v1/desktop/approvals/request", ("POST",)),
+        ("/v1/desktop/approvals/{approval_id}", ("GET",)),
+        ("/v1/desktop/approvals/{approval_id}/run", ("POST",)),
+        ("/v1/desktop/approvals/{approval_id}/approve-network-enrollment", ("POST",)),
     }
     assert feature_flags()["approvals"] == 1
+    assert feature_flags()["mesh_onboard"] == 1
 
 
 def _app_root() -> str:

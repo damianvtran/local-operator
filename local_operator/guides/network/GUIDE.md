@@ -22,6 +22,29 @@ rendering is not a contract.
 
 ## When the user asks to set it up
 
+Desktop clients advertising `mesh_onboard: 1` expose the existing signed SSH
+runner through a **restricted network-enrollment-only** Add remote server path:
+public host-key observation, a new `apn_` unsigned card, the same human presence
+signer with an exact network-only snapshot acknowledgment, then backend-owned
+run and durable receipts. The new mode shares no account logins or broker access;
+its provision stage is explicitly skipped. Legacy `ap_` cards keep their original
+policy and are not silently converted. The probe's fingerprint is **observed (TOFU)**,
+not independently verified; edits need a corrected card. There is no new trust
+engine or automatic grant. Capability absent means use the existing CLI/agent
+path below, not a fabricated button. Backend contract: `docs/DESKTOP_API.md`,
+“Signed remote-server onboarding”. Normal Radient tunnel/phone access is a
+separate, unchanged path; adding a mesh device is not enrolling a phone tunnel.
+For the new CLI equivalent, explicitly select the existing network and bootstrap
+reference: `lop network approvals request --network-only --host <host> --network
+<network> --credential-ref <reference>`. Review the exact card/digest, then use
+`lop network approvals approve-network-enrollment <apn_id> --request-digest
+<displayed_digest>` before `lop network approvals run <apn_id>`. Generic Approve
+refuses these cards; never fall back to a legacy provisioning request. A failed
+changed-host-key run points to a corrected unsigned card: review that one rather
+than repeating the old facts. Enrollment verified does not mean task-ready; git,
+model and MCP/tooling warnings remain visible and do not trigger secret sharing.
+
+
 For a reachable SSH target, use the existing **signed remote onboarding** path
 below: `lop network approvals request` proposes a `device_onboard` record, the
 human approves the existing presence-gated card, and `lop network approvals run`
