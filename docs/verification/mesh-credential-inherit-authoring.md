@@ -39,7 +39,7 @@ precondition (`reconcile.transport_gap`, one owner for the broker-row words).
 ## Evidence
 Software-signer, isolated roots. **Touch ID / a live second host is not exercised and is not
 claimed.** Real-path cells: `tests/unit/network/test_credential_inherit.py` (CLI entrypoints
-request -> approve -> apply -> status; 40 cells including every negative) and
+request -> approve -> apply -> status; 46 cells including every negative) and
 `tests/unit/network/test_credential_inherit_link.py` (3 cells; two real relays + rotating IdP: the
 authored permission, then a same-account re-login, heals a RUNNING session on the 15 s
 cadence with one IdP POST and no `credential share`/pull/restart; a new account costs zero
