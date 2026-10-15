@@ -27945,6 +27945,12 @@ class OperatorApp(App[None]):
         if submitted:
             session = self._queued_ask_session()
             outcome: Any = self._deliver_owner_answer(session, row, ask_id, answers)
+            # THE VIEWER'S DOOR IS A COROUTINE, and this is where that is
+            # handled: `_handle_ask_outcome` raises a worker for an awaitable
+            # and renders the verdict when it lands, so a bridge decision from a
+            # paired device is reported in the owner's words too. `is not None`
+            # is the right test (a coroutine is not None) and an inline `await`
+            # here would block the keypress on the wire.
             if outcome is not None:
                 self._handle_ask_outcome(outcome, toast=False)
             self._ask_drafts.pop(ask_id, None)
@@ -28012,7 +28018,10 @@ class OperatorApp(App[None]):
 
         ``None`` means the session offers neither door — the reduced harnesses
         the surface tests build — and nothing is delivered, exactly as the old
-        ``callable(reader)`` guard behaved.
+        ``callable(reader)`` guard behaved. An owner's op answers with the verdict
+        dict; a viewer's is a COROUTINE (it crosses the wire), and the caller
+        hands either to ``_handle_ask_outcome``, which reports an awaitable from
+        the worker it raises rather than blocking the key.
         """
         target = bridge_decision_target(row, answers or {}) if row is not None else None
         decider: Any = getattr(session, "bridge_decide", None)
@@ -57678,7 +57687,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 146
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 147
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
