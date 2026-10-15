@@ -1581,7 +1581,9 @@ async def test_the_fleet_rows_carry_their_own_handles_at_the_doors_own_width(
         assert "All conversations" not in listing.header_text(width)
 
 
-async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(enabled, isolated_index):
+async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(
+    enabled, isolated_index, monkeypatch
+):
     """F20: the scope can change in THREE places, and the clock has to follow all.
 
     `_sync_ask_tick` reads the ACTIVE scope's rows (F14), and the fleet loaders
@@ -1595,8 +1597,32 @@ async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(enabl
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
         app._ask_session = app._session
+        indexed, release, waiting = (asyncio.Event() for _ in range(3))
+        native_thread = asyncio.to_thread
+
+        async def held_index(function, *args, **kwargs):
+            result = await native_thread(function, *args, **kwargs)
+            if function is store.index_asks and not indexed.is_set():
+                # Hold publication of the REAL read, not fabricated rows. Six
+                # idle turns never joined this producer; unrelated clock polls
+                # or a second load would hide the ordering defect instead.
+                indexed.set()
+                await release.wait()
+            return result
+
+        monkeypatch.setattr(asyncio, "to_thread", held_index)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        ready = asyncio.create_task(_fleet_list_ready(app, "o1", waiting))
+        try:
+            async with asyncio.timeout(30):
+                await indexed.wait()
+                await waiting.wait()
+                assert not ready.done(), "fleet publication barrier did not join its producer"
+                release.set()
+                await ready
+        finally:
+            release.set()
+            await asyncio.gather(ready, return_exceptions=True)
         assert app._ask_tick is not None
         app._collapse_asks()
         await _settle(pilot)
