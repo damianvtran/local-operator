@@ -241,11 +241,13 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # A literal, and updating it is the review prompt: a command that
             # lands in this set without a decision to withhold it is a command
             # silently missing from the desktop.
+            # /memory inspection is CLI/TUI-only; no desktop panel/adapter ships.
             assert withheld == {
                 "highlights",
                 "hub",
                 "keys",
                 "links",
+                "memory",
                 "mobile",
                 "network",
                 "notifications",
