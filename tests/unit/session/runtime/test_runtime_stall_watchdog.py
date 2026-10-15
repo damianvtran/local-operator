@@ -5961,6 +5961,60 @@ pathlib.Path(sys.argv[2]).write_text("wait returned", encoding="utf-8")
 """
 
 
+def _assert_frozen_workload_not_executing(pid: int, directory: Path, text: str) -> None:
+    """Judge the frozen plane, not every historical stretch in the dump.
+
+    The fixture intentionally keeps SERVING healthy while WORKLOAD parks. The
+    reader preserves each plane's historical stretches, including duplicates;
+    accepting healthy SERVING evidence must not accept a moving WORKLOAD frame.
+    """
+    assert stall_watchdog.WORKLOAD not in stall_watchdog.executing_planes(
+        pid, directory
+    ), f"a frozen frame was recorded as an executing loop: {text[:2000]!r}"
+
+
+def test_frozen_workload_assertion_allows_healthy_serving_history(tmp_path: Path) -> None:
+    """The healthy serving ticker is independent of the deliberately parked workload.
+
+    CI retained two SERVING stretches, not a WORKLOAD stretch. Read actual marker
+    bytes rather than replacing the reader with a tuple or suppressing evidence.
+    Historical duplicates must remain visible; this is not an active-plane query.
+    """
+    dump, handle = _observed_dump(tmp_path, SYNTH_PID)
+    with handle:
+        for _ in range(2):
+            handle.write(f"{stall_watchdog.EXECUTING_MARKER}{stall_watchdog.SERVING} in tick\n")
+        handle.write(f"{stall_watchdog.FIRED_MARKER}\n")
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.executing_planes(SYNTH_PID, tmp_path) == (
+        stall_watchdog.SERVING,
+        stall_watchdog.SERVING,
+    )
+    _assert_frozen_workload_not_executing(SYNTH_PID, tmp_path, text)
+
+
+@pytest.mark.parametrize(
+    "planes",
+    [
+        (stall_watchdog.WORKLOAD,),
+        (stall_watchdog.SERVING, stall_watchdog.WORKLOAD, stall_watchdog.SERVING),
+    ],
+)
+def test_frozen_workload_assertion_rejects_workload_history(
+    tmp_path: Path, planes: tuple[str, ...]
+) -> None:
+    """Do not turn accepting healthy SERVING history into blanket marker acceptance."""
+    dump, handle = _observed_dump(tmp_path, SYNTH_PID)
+    with handle:
+        for plane in planes:
+            handle.write(f"{stall_watchdog.EXECUTING_MARKER}{plane} in tick\n")
+        handle.write(f"{stall_watchdog.FIRED_MARKER}\n")
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.executing_planes(SYNTH_PID, tmp_path) == planes
+    with pytest.raises(AssertionError, match="frozen frame"):
+        _assert_frozen_workload_not_executing(SYNTH_PID, tmp_path, text)
+
+
 def test_a_frozen_frame_is_dumped_while_the_sampler_keeps_sampling(tmp_path: Path) -> None:
     """A frozen frame is dumped without turning diagnosis into retirement.
 
@@ -5984,9 +6038,7 @@ def test_a_frozen_frame_is_dumped_while_the_sampler_keeps_sampling(tmp_path: Pat
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, text[:2000]
-    assert (
-        stall_watchdog.executing_planes(pid, tmp_path / "logs") == ()
-    ), f"a frozen frame was recorded as an executing loop: {text[:2000]!r}"
+    _assert_frozen_workload_not_executing(pid, tmp_path / "logs", text)
 
 
 #: The 2026-09-20 shape in mechanism: a C call that holds the GIL for its whole
