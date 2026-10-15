@@ -48,6 +48,8 @@ def test_capture_ignores_prose_ratios_and_internal_uri_fragments(text):
     "text,expected",
     [
         (USEFUL_LOCATORS, USEFUL_BODIES),
+        ("URL:https://example.invalid/colon", {"https://example.invalid/colon"}),
+        ("docs/説明.md branch: 修正/測定", {"docs/説明.md", "branch: 修正/測定"}),
         (
             "(/repo/proof.md) docs/proof.md src/task.py",
             {"/repo/proof.md", "docs/proof.md", "src/task.py"},
@@ -65,6 +67,24 @@ def test_capture_keeps_complete_useful_locators_without_checking_existence(text,
     rows = extract(text)
     assert {row["body"] for row in rows} == expected
     assert all(set(row) == {"title", "body", "tags"} and row["tags"] == ["locator"] for row in rows)
+
+
+@pytest.mark.parametrize("kind,part", [("branch", "feature/"), ("thread", "topic/")])
+def test_oversized_reference_never_persists_or_recalls_a_prefix(store, kind, part):
+    text = f"{kind}: " + part * 24 + "trailing"
+    rows = extract(text)
+    persist(store, "oversized-reference", rows, "ok")
+    # Exercise retention before asserting: the old parser really wrote and
+    # recalled an invented prefix, not just a different intermediate list.
+    assert store.search("trailing " + part.rstrip("/")) == []
+    assert watermark(store, "oversized-reference") == ("ok", 0)
+    assert store.inventory("session")["items"] == []
+    assert rows == []
+
+
+def test_reference_at_the_identifier_limit_stays_complete():
+    text = "branch: " + "r" * 128
+    assert [row["body"] for row in extract(text)] == [text]
 
 
 def test_capture_noise_does_not_displace_useful_locators():
@@ -119,12 +139,16 @@ def test_explicit_store_associations_keep_whole_uris_and_relative_paths(store):
     # internal resource even though best-effort auto-capture ignores those URIs.
     store.put(
         "session",
-        {"title": "Resource evidence", "body": "guide://memory/docs/example ./proof.md"},
+        {
+            "title": "Resource evidence",
+            "body": "guide://memory/docs/example ./proof.md URL:https://example.invalid/colon",
+        },
     )
     with store.connection() as db:
         assert {row[0] for row in db.execute("SELECT locator FROM associations")} == {
             "guide://memory/docs/example",
             "./proof.md",
+            "https://example.invalid/colon",
         }
 
 
