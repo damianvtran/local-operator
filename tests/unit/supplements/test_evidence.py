@@ -100,3 +100,30 @@ def test_units_only_signal_is_not_drawable_without_datasets() -> None:
     assert apply_graphics(Yes(), found) == (0.95, False)
     table = ev.extract([], "| r | ms |\n|---|---|\n| a | 12 |\n| b | 40 |\n| c | 7 |\n")
     assert drawable(table) and apply_graphics(Yes(), table) == (0.95, True)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "No changes were needed.",
+        "- Added 296 comments.",
+        "There are 296 comments, 225 profiles, 325 links and 3194 matches.",
+        "- Count 1.2.3; 2026-10-14; version 325; ticket 3194.",
+    ],
+)
+def test_labelled_summary_does_not_admit_unstructured_or_single_counts(answer):
+    from local_operator.supplements.evidence import extract
+
+    assert not extract([], answer).structured
+
+
+def test_labelled_summary_generator_payload_requires_table_not_comparable_axes():
+    from local_operator.supplements.evidence import extract
+    from local_operator.supplements.generator import evidence_block
+
+    answer = "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    evidence = extract([], answer)
+    assert evidence.structured and evidence.datasets[0].presentation == "table-only"
+    payload = evidence_block(evidence.datasets, user_text="summarise", answer_text=answer)
+    assert "table-only" in payload and "distinct entity units" in payload
+    assert all(value in payload for value in ("296", "225", "325", "3194"))

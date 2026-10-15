@@ -461,3 +461,55 @@ def test_a_linked_name_without_a_path_still_flags_the_written_file(tmp_path: Pat
     items = [call("bash", command="cd pkg; echo x > RUN-RECORD.md")]
     (only,) = _run(items, "Receipt: `RUN-RECORD.md` in `pkg/`.", tmp_path).candidates
     assert only.linked_in_answer is True and only.path == "pkg/RUN-RECORD.md"
+
+
+@pytest.mark.parametrize("command", ["cd -; echo x > r.md", "cd -- -; echo x > r.md"])
+def test_unknown_previous_directory_never_features_home_decoy(tmp_path, command):
+    _write(tmp_path / "r.md", "STALE DECOY")
+    assert _bash(tmp_path, command).candidates == ()
+
+
+def test_home_parent_is_expanded_before_normalising(tmp_path, monkeypatch):
+    monkeypatch.setattr(cand, "_scratch_roots", lambda: [])
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    home.mkdir()
+    cwd.mkdir()
+    _write(tmp_path / "r.md", "correct parent")
+    _write(cwd / "r.md", "decoy")
+    # Parent of home lies outside both roots, and must not be reinterpreted as cwd.
+    out = prefilter(
+        [call("bash", command="cd ~; cd ..; echo x > r.md")], "ok", cwd=str(cwd), home=str(home)
+    )
+    assert out.candidates == ()
+    assert out.rejected.get("outside-roots")
+
+
+@pytest.mark.parametrize("flag", ["-t out", "--target-directory out", "--target-directory=out"])
+def test_unsupported_copy_target_directory_never_promotes_source(tmp_path, flag):
+    _write(tmp_path / "in.csv")
+    _write(tmp_path / "out" / "in.csv")
+    assert _bash(tmp_path, f"cp {flag} in.csv").candidates == ()
+
+
+def test_quoted_heredoc_marker_does_not_swallow_later_outputs(tmp_path):
+    _write(tmp_path / "b.csv")
+    _write(tmp_path / "c.md")
+    out = _bash(tmp_path, 'echo "see <<EOF notes"\ncp a.csv b.csv\necho x > c.md')
+    assert {c.path for c in out.candidates} == {"b.csv", "c.md"}
+
+
+def test_nul_directory_cannot_abort_prefilter(tmp_path):
+    assert _bash(tmp_path, 'cd ~/a\x00b; python3 -c "df.to_csv(p)"', since=1).candidates == ()
+
+
+def test_shared_parser_refuses_oversized_commands_before_any_parse(monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("unbounded command reached lexer")
+
+    monkeypatch.setattr(cand, "_lift_heredocs", forbidden)
+    assert cand.bash_effects("open(" * 20_000).outputs == ()
+
+
+def test_variable_write_detector_repeated_open_tokens_is_not_a_write():
+    assert cand._variable_write("open(" * 20_000) is False

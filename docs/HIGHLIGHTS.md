@@ -10,7 +10,10 @@ exclusion rules. Generated media stays in its existing transcript tiles.
 ## Automatic graphics
 
 Automatic graphics remain evidence-driven: a numeric table/data result can justify
-a chart, ordinary prose alone cannot. `supplements.model: auto` prefers the resolved
+a chart. A list-structured answer with four explicit operational entity counts
+(comments / profiles / links / matches) can also justify a small labelled summary table:
+heterogeneous units are marked table-only, never a comparable bar series or a total.
+Single numbers, versions and ordinary prose still cannot. `supplements.model: auto` prefers the resolved
 operator `hi` tier (including its full provider-qualified model id), then a shipped
 registry-known design model, then the effective conversation model. Credential
 presence is not current quota availability.
