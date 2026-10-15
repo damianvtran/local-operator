@@ -231,3 +231,83 @@ def test_suggestion_guard_suppresses_generic_one_word_and_filters_scope(store):
     assert not store.search("how do I create a new branch", suggest=True, tokens=180)
     foreign = MemoryStore(store.root.parent, MemoryIdentity("other", "other", "other"))
     assert not foreign.search("Mercury deployment", suggest=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy,images",
+    [("context-full", False), ("snapcompact", True)],
+    ids=["context-full", "snapcompact"],
+)
+async def test_three_chained_real_compactions_capture_store_restart_retrieve(
+    tmp_path, strategy, images
+):
+    """store -> compact x3 -> restart -> retrieve over a REAL Session, both strategies.
+
+    snapcompact returns no model text, so only locators may be captured there; the
+    explicit store must survive either way, and no chained pass may wake the owner.
+    """
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "config.yml").write_text(
+        '{"values":{"memory":{"enabled":true,"capture":true,"suggest":true}}}'
+    )
+    requests = []
+
+    def stream(request, signal):
+        requests.append(request)
+
+        async def events():
+            yield StreamTextDelta(delta="# Goal\n- Ship release\n# Key Decisions\n- Keep prefix")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    directory = root / "sessions" / f"chain-{strategy}"
+    transcript = Transcript(directory)
+    model = ModelSpec(
+        provider="test", model_id="deterministic", context_window=100000, supports_images=images
+    )
+    session = Session(
+        model=model,
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable"],
+        session_id=f"chain-{strategy}",
+        compaction_settings=CompactionSettings(keep_recent_tokens=40, strategy=strategy),
+    )
+    session._config_dir = root
+    memory = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
+    explicit = memory.put("session", {"title": "Release decision", "body": "Decision: ship Friday"})
+    markers = []
+    try:
+        for n in range(3):
+            for m in range(3):
+                await session.prompt(f"Round {n}.{m} see docs/chain{n}.md " + "detail " * 35)
+            outcome = await session.compact_now()
+            assert outcome.ran, (strategy, n)
+            entry = transcript.latest_entry("compaction")
+            markers.append(entry.id)
+            # Control that the arms really differ: snapcompact's summary is the
+            # deterministic archive (no model text); context-full is model-written.
+            archived = str(entry.payload.get("summary", "")).startswith("Resume prior conversation")
+            assert archived == (strategy == "snapcompact"), entry.payload.get("summary", "")[:80]
+            for task in list(session._background_tasks):
+                await asyncio.wait_for(task, 5)
+        assert len(set(markers)) == 3
+        assert all(watermark(memory, marker) for marker in markers)
+        before = len(requests)
+    finally:
+        await session.dispose()
+    # Restart: a fresh store handle over the same disk state still retrieves.
+    reopened = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
+    assert reopened.show("session", explicit["id"])["fact"]["body"] == "Decision: ship Friday"
+    assert reopened.search("chain0")
+    assert before >= 9
+    print("CHAIN", strategy, "markers", len(markers), "captured", len(reopened.search("docs")))
