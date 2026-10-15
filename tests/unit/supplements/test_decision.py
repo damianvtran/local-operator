@@ -630,6 +630,7 @@ def test_comparable_chart_precision_threshold_is_unchanged(probability, allowed)
 
 def test_table_hint_or_mixed_datasets_do_not_lower_chart_threshold():
     from dataclasses import replace
+
     from local_operator.supplements.evidence import extract
 
     table = extract(
