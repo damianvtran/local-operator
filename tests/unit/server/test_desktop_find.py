@@ -184,9 +184,7 @@ async def test_find_reports_truncation_at_the_limit(harness: _Harness) -> None:
         session_id,
         [Message.user(f"needle number {index}") for index in range(3)],
     )
-    response = await _find(harness, session_id, q="needle", limit=2)
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = await _published_find_result(harness, session_id, q="needle", limit=2)
     assert len(result["hits"]) == 2
     assert result["truncated"] is True
 
@@ -272,14 +270,33 @@ async def test_find_bounds_are_the_declared_ones(harness: _Harness) -> None:
     assert over.status_code == 422, over.text
 
 
+async def _published_find_result(
+    harness: _Harness, session_id: str, *, q: str, **params: Any
+) -> dict[str, Any]:
+    # D9 allows a cold first paint to be building/partial with no previous hits.
+    # Hit shape and truncation assertions need a published generation, not a
+    # lucky <200ms scan. Cold/partial/latency tests must still query it directly.
+    # Await the actual single-flight publication task; never retry until a hit.
+    task, _started = transcript_index.start_refresh(harness.root, session_id)
+    async with asyncio.timeout(30):  # Deadlock guard, not a latency expectation.
+        built = await asyncio.shield(task)
+    assert built is not None and built.journal_generation
+    published = transcript_index.read_index(harness.root, session_id)
+    assert published is not None and published.journal_generation == built.journal_generation
+    response = await _find(harness, session_id, q=q, **params)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["state"] == "ready" and result["partial"] is False, result
+    assert result["hits"], f"ready index missing requested {q} hit"
+    return result
+
+
 @pytest.mark.asyncio
 async def test_find_response_model_matches_the_d9_shape(harness: _Harness) -> None:
     """Every key D9 names is present, and nothing rides outside it."""
     session_id = await harness.create_session()
     await _seed(harness.root, session_id, [Message.user("deploy")])
-    response = await _find(harness, session_id, q="deploy")
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = await _published_find_result(harness, session_id, q="deploy")
     assert set(result) == {"query", "state", "partial", "hits", "truncated"}
     assert set(result["hits"][0]) == {"id", "role", "ts", "snippet", "ranges", "tier"}
 
@@ -328,3 +345,47 @@ async def test_hidden_cross_session_hides_peer_rows_from_the_route(
     hide_cross_session(False)
     result = (await _find(harness, session_id, q="green")).json()["result"]
     assert [hit["id"] for hit in result["hits"]] == ["p1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,count,limit", [("deploy", 1, 1), ("needle", 3, 2)])
+async def test_ready_hit_assertions_wait_for_publication_not_first_paint(
+    harness, monkeypatch, query, count, limit
+):
+    import threading
+
+    session_id = await harness.create_session()
+    await _seed(
+        harness.root,
+        session_id,
+        [Message.user(query if count == 1 else f"{query} number {n}") for n in range(count)],
+    )
+    refresh = transcript_index.refresh_index
+    release = threading.Event()
+
+    def held_refresh(*args, **kwargs):
+        assert release.wait(30), "test publication gate never released"
+        return refresh(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_index, "refresh_index", held_refresh)
+    try:
+        response = await _find(harness, session_id, q=query, limit=limit)
+        result = response.json()["result"]
+        assert response.status_code == 200
+        assert result["state"] == "building" and result["partial"] is True
+        assert result["hits"] == []  # Original hits[0] assertion fails at this boundary.
+    finally:
+        release.set()
+    published = await _published_find_result(harness, session_id, q=query, limit=limit)
+    assert len(published["hits"]) == limit
+    assert published["truncated"] is (count > limit)
+    assert query in published["hits"][0]["snippet"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["deploy", "needle"])
+async def test_ready_publication_wait_does_not_hide_a_missing_seed(harness, query):
+    session_id = await harness.create_session()
+    await _seed(harness.root, session_id, [Message.user("unrelated fixture")])
+    with pytest.raises(AssertionError, match=f"ready index missing requested {query} hit"):
+        await _published_find_result(harness, session_id, q=query)
