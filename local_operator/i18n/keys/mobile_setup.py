@@ -94,6 +94,10 @@ def consent(*, amount: str) -> Msg:
     return Msg("mobile.setup.consent", {"amount": amount})
 
 
+def corrupt_intent() -> Msg:
+    return Msg("mobile.setup.corrupt_intent", {})
+
+
 def credential_ids(*, ids: str) -> Msg:
     return Msg("mobile.setup.credential_ids", {"ids": ids})
 
@@ -112,6 +116,10 @@ def failure_stage(*, stage: str) -> Msg:
 
 def identity_unavailable() -> Msg:
     return Msg("mobile.setup.identity_unavailable", {})
+
+
+def in_progress() -> Msg:
+    return Msg("mobile.setup.in_progress", {})
 
 
 def installed() -> Msg:
@@ -164,6 +172,10 @@ def quote() -> Msg:
 
 def quote_changed(*, current: str, accepted: str) -> Msg:
     return Msg("mobile.setup.quote_changed", {"current": current, "accepted": accepted})
+
+
+def quote_unread() -> Msg:
+    return Msg("mobile.setup.quote_unread", {})
 
 
 def reservation_existing() -> Msg:
