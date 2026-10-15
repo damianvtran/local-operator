@@ -3854,8 +3854,11 @@ class AuthStore:
                 # do not create a DB while merely resolving/inspecting an account.
                 # The default auth/cache files are siblings; explicit roots keep
                 # the same relationship. A supplied warmer handle remains reused.
+                # Immutable display snapshots skip committed WAL and can rank
+                # a spent account as healthy. SQL-ro routing must see committed
+                # frames; SQLite coordination sidecars remain possible here.
                 self._usage_cache = UsageCacheStore(
-                    self._db_path.parent / "usage_cache.db", read_only=True
+                    self._db_path.parent / "usage_cache.db", read_only=True, wal_aware=True
                 )
             except Exception:  # noqa: BLE001 -- no cache = hash order, never fatal
                 logger.debug("usage pick: cache unavailable", exc_info=True)
