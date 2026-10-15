@@ -765,3 +765,37 @@ async def test_a_receipt_lost_after_the_install_still_reconciles(api, monkeypatc
     third = await client.post("/v1/desktop/hub/skills/pull", json=body)
     assert third.status_code == 200
     assert third.json()["result"].get("replayed") is True
+
+
+async def test_a_too_large_local_rendering_never_leaks_a_staged_grant(api) -> None:
+    client, root, holder = api
+    # The REMOTE skill's SKILL.md sits exactly AT the 200 KiB file bound and its
+    # remote name is one character. A 64-character local alias re-renders that
+    # scalar and pushes the SAME file past the bound, so the local proposal
+    # itself must refuse -- BEFORE any policy or grant is staged (R2/Q1b).
+    remote = manifest(name="a", body="")
+    md_index = next(i for i, f in enumerate(remote["files"]) if f["path"] == "SKILL.md")
+    current_bytes = len(remote["files"][md_index]["content"].encode())
+    remote["files"][md_index]["content"] += "x" * (200 * 1024 - current_bytes)
+    assert len(remote["files"][md_index]["content"].encode()) == 200 * 1024
+    holder["anon"] = SkillClient(BASE, envelope(remote))
+    attest_skill_capability(root)
+    before = read_config_values(root)
+    alias64 = "b" * 64
+
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True, local_alias=alias64),
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "skill-validation"
+
+    # NOTHING was staged: no policy entry, no public grant, no baseline, no file.
+    assert read_config_values(root) == before
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+    values = read_config_values(root) or {}
+    assert pol.stored_link_policy(values, identity.link_id) is None
+    assert pol.read_policy(values, identity).public_egress_grant is None
+    assert list(prov.iter_baselines(root)) == []
+    assert nothing_installed(root, alias64)

@@ -2159,6 +2159,28 @@ def install_skill(
         #     its commit; if the transaction then refuses, the staged entry is
         #     reverted below -- but only while its revision is still ours (a
         #     newer writer's value is never rolled back).
+        #
+        #     THE FULL LOCAL PROPOSAL IS VALIDATED FIRST (R2/Q1b): rendering the
+        #     alias can itself refuse -- e.g. the rename pushes SKILL.md past the
+        #     200 KiB bound -- and nothing may be staged until every local
+        #     refusal has had its chance. Everything that can fail locally runs
+        #     before the staging below; the only operations after it are the
+        #     content transaction (whose refusal paths revert the staged entry)
+        #     and the success response.
+        try:
+            local_write = SkillDocument.from_json(canonical).with_name(alias)
+        except SkillValidationError as error:
+            raise LinkError("skill-validation", str(error)) from None
+        baseline = prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "pull")
+        baseline = replace(
+            baseline,
+            identity=identity,
+            local_alias=alias,
+            remote_revision=revision,
+            lineage="clean",
+            legacy_subscribe_hint=subscribe,
+        )
+
         values = read_config_values(ctx.config_dir)
         if values is None and (ctx.config_dir / "config.yml").exists():
             raise LinkError("invalid-link-policy", "configuration is unreadable")
@@ -2207,24 +2229,11 @@ def install_skill(
             values = read_config_values(ctx.config_dir)
             current = pol.read_policy(values or {}, identity)
 
-        # 7d. The content transaction: alias-rendered bytes, canonical remote
-        #     baseline (carrying the subscribe hint), revision, and the policy
-        #     revision CASed through commit. The storage finalizes baseline +
-        #     materialized policy in the SAME transaction, so "baseline moved,
-        #     bytes did not" stays impossible.
-        try:
-            local_write = SkillDocument.from_json(canonical).with_name(alias)
-        except SkillValidationError as error:
-            raise LinkError("skill-validation", str(error)) from None
-        baseline = prov.make_record("skill", local_id, hub_id, tenant_id, canonical, "pull")
-        baseline = replace(
-            baseline,
-            identity=identity,
-            local_alias=alias,
-            remote_revision=revision,
-            lineage="clean",
-            legacy_subscribe_hint=subscribe,
-        )
+        # 7e. The content transaction: the alias-rendered bytes and the
+        #     canonical remote baseline (carrying the subscribe hint) validated
+        #     above, with the policy revision CASed through commit. The storage
+        #     finalizes baseline + materialized policy in the SAME transaction,
+        #     so "baseline moved, bytes did not" stays impossible.
 
         def _revert_staged() -> None:
             # Best-effort by design: the refusal that brought us here is the
