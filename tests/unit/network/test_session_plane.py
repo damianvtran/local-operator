@@ -407,15 +407,21 @@ class _RealServed:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
 
     def transcript_entries(self) -> list[dict[str, Any]]:
-        """Every journalled line of this session's transcript, as parsed dicts."""
+        """Read complete on-disk JSONL records, including unrelated peer writes.
+
+        A concurrent append may stop inside JSON or a UTF-8 codepoint. Cut the
+        byte snapshot at its last LF BEFORE decoding; only the unfinished tail
+        is pending. LF is record publication, not an fsync/durability promise.
+        Complete corrupt records must still raise rather than silently vanish.
+        """
         path = Path(self.session.transcript.path)
         if not path.exists():
             return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        data = path.read_bytes()
+        complete = data[: data.rfind(b"\n") + 1]
+        # Only LF delimits JSONL. Unicode splitlines would split a perfectly
+        # valid literal U+2028 inside a JSON string into two malformed records.
+        return [json.loads(line) for line in complete.decode("utf-8").split("\n") if line.strip()]
 
     def naming_state(self) -> dict[str, Any]:
         """The newest ``conversation_name`` entry's payload — the transcript's OWN
