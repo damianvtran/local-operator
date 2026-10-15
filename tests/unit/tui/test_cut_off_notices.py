@@ -26,6 +26,7 @@ import pytest
 
 from local_operator.session.attention import AttentionStore
 from local_operator.tui.app import OperatorApp
+from tests.unit.tui.conftest import BOOT_DEADLOCK_GUARD_S, await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_attention import _notice_texts  # the established helper
 
@@ -305,17 +306,50 @@ async def test_an_interrupted_outcome_keeps_its_own_spelling(tmp_path, monkeypat
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(200):
-            if app._session is not None:
-                break
-            await pilot.pause()
-            await asyncio.sleep(0.01)
+    completion_timers: list[Any] = []
+    ancillary_adoptions: list[OutcomeSession] = []
+    real_set_interval = app.set_interval
+
+    def no_mobile_producers(adopted: Any) -> None:
+        # Spelling depends on real adoption/store/poller/render, not the
+        # unrelated viewer/mobile listeners this hook normally publishes.
+        # Keep this boundary on this wording-only App, not the class or factory.
+        assert adopted is session
+        ancillary_adoptions.append(adopted)
+
+    monkeypatch.setattr(app, "_mobile_adopted", no_mobile_producers)
+
+    def own_completion_interval(interval: float, callback: Any, *args: Any, **kwargs: Any) -> Any:
+        timer = real_set_interval(interval, callback, *args, **kwargs)
+        if (
+            getattr(callback, "__self__", None) is app
+            and getattr(callback, "__func__", None) is OperatorApp._poll_completion_attention
+        ):
+            # The private poll returns while another invocation owns its read.
+            # Pause only this App's periodic callers BEFORE either mount site
+            # can acquire it; this wording test owns one real post-publish poll.
+            timer.pause()
+            completion_timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(app, "set_interval", own_completion_interval)
+    async with app.run_test(size=(100, 30)):
+        await await_session_boot(app)
+        assert app._session is session
+        assert ancillary_adoptions, "the instance producer boundary was not reached"
+        assert app._viewer_server is None
+        assert app._mobile_handle is None and app._mobile_registrant is None
+        assert completion_timers, "the periodic consumer was not captured"
+        assert not getattr(app, "_attention_poll_pending", False)
         session.publish(
             "interrupted", cause="user-stop", reason="the session was stopped by the user"
         )
         await app._poll_completion_attention()
-        await pilot.pause()
+        rendered = asyncio.Event()
+        app.call_after_refresh(rendered.set)
+        await asyncio.wait_for(rendered.wait(), BOOT_DEADLOCK_GUARD_S)
+        # The real App context remains the only timer/shutdown owner. No manual
+        # timer close races its exit; unrelated periodic callbacks stay real.
         # The deliberate stop keeps the existing spelling: the reason is for a
         # cut-off the user did not ask for, and appending "stopped by the user"
         # to a row that already says Interrupted is noise.
