@@ -77,6 +77,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
+        OPENROUTER_RETIRE_BELOW_TPS,
     )
 
     # The mesh audit log's three bounds, taken from the module that READS them:
@@ -338,6 +339,11 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.openrouter.preferred_max_latency": (
             DEFAULT_CONFIG.values["providers"]["openrouter"]["preferred_max_latency"]
         ),
+        # Three restatements of one number (registry literal, DEFAULT_CONFIG, the
+        # consumer constant): the registry default is checked against the
+        # constant here, and DEFAULT_CONFIG against it in
+        # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
+        "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -1389,7 +1395,7 @@ def test_openrouter_defaults_mean_no_opinion() -> None:
         for key in settings_io.BY_KEY
         if key.startswith("providers.openrouter.")
     }
-    assert len(defaults) == 14
+    assert len(defaults) == 15
     # STILL None with all 14 defaults present, including the ON-by-default
     # ``provider_affinity``. That is the point of asserting it here: that key is
     # a HARNESS switch read by ``SessionStreamFn._affinity_enabled``, and it is
