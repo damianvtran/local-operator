@@ -26,6 +26,14 @@ from typing import Any, Mapping
 #: never the wire payload, and never a raw account id (see the module docstring).
 GENERIC_CARD_SUBJECT = "an organization member"
 
+#: ONE spelling for ONE absence: the excerpt is not derivable on this side. Both
+#: human surfaces that compose this feature's copy state it rather than leaving
+#: the body slot silent — silence reads as "the sender sent nothing", where an
+#: empty excerpt can equally mean the preview could not be derived here (the
+#: byte-fitter trims it, an empty screened body has none, and the render-time
+#: lookup degrades to "" by design). `asks_bridge` states the same absence.
+NO_PREVIEW_TEXT = "(no preview available)"
+
 
 def _first_line(value: Any) -> str:
     """One bounded line: a carriage's fields are single-line by contract, but a
@@ -73,21 +81,21 @@ def bridge_card_text(details: Mapping[str, Any] | None) -> str:
     The predicate is the identity column's OWN — ``bridge_card_sender``, which
     ``TeamBridgeBlock._sender_name`` reads — so the two surfaces cannot disagree
     about whether a member was named. When a name resolved, this returns the
-    excerpt alone (the row composes ``identity · body`` in
-    ``PeerMessageBlock._build_row``; an enriched carriage with no excerpt is
-    therefore the identity alone, the shape every body-less peer receipt takes).
+    excerpt, or — D9 (design round 3, PR #2378) — :data:`NO_PREVIEW_TEXT` when the
+    excerpt is empty. An identity-only row asserts something the surface cannot
+    know (that the sender sent nothing), and the row's own budget has room for
+    the absence (52 cells against the 82-cell collapsed budget at 100 columns).
 
     When NO name resolved the subject is the only place a human is named at all
     (the generic sentence, or a name that arrived without an organization), so
-    the old subject-prefixed form is kept byte-for-byte for that carriage — its
-    pins stay true.
+    that carriage keeps the old ``<subject> — <excerpt>`` subject-prefixed form.
     """
     meta = (details or {}).get("bridge") or {}
     excerpt = _first_line(meta.get("excerpt"))
     if bridge_card_sender(details).get("name"):
-        return excerpt
+        return excerpt or NO_PREVIEW_TEXT
     subject = bridge_card_subject(details)
-    return f"{subject} — {excerpt}" if excerpt else f"{subject} — (no preview available)"
+    return f"{subject} — {excerpt}" if excerpt else f"{subject} — {NO_PREVIEW_TEXT}"
 
 
 def bridge_card_sender(details: Mapping[str, Any] | None) -> dict[str, Any]:

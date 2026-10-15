@@ -22,6 +22,13 @@ ROUND 15 (D3) ADDS THE QUESTION LINE. The card bounds the question to one row
 answers from: it must carry who is asking and what they are deciding on. The
 §11.1 clause no longer leads it — the clause rides the carriers a MODEL reads
 (see ``tests/unit/asks/test_render.py`` for the timeout listing's own pin).
+
+ROUND 16 (D9) STATES THE ABSENCE. An empty excerpt is a real carriage (the
+byte-fitter trims it, a screened body can be empty, the render-time lookup
+degrades to ""), and the card must say the request text is unavailable here
+rather than ask a member to approve nothing. The mount below pins all three
+carriages — unnamed-with-request, unnamed-no-preview, named-no-preview — each
+drawn as one uncut row.
 """
 
 from __future__ import annotations
@@ -205,25 +212,49 @@ async def test_a_real_bridge_row_mounts_the_card_with_the_cross_member_title(
         assert [option["label"] for option in dumped["options"]] == ["Approve", "Deny"]
 
 
+@pytest.mark.parametrize(
+    ("sender", "excerpt", "expected"),
+    [
+        # D3: no validated name, so the human's line names a generic asker.
+        (
+            "",
+            "could you approve the Q3 spend for the enrichment pod?",
+            "another member of your organization: could you approve the Q3 spend for the "
+            "enrichment pod?",
+        ),
+        # D9 (design round 3, PR #2378): no name AND no excerpt — the `who`-alone
+        # shape is unreachable; the absence is stated.
+        ("", "", "another member of your organization: (no preview available)"),
+        # D9: the carriage the round-15 fix answered with a bare identity — the
+        # identity resolved, the excerpt is empty (byte-fit, empty body, or the
+        # render-time lookup degrading). The card says so.
+        ("Priya Raman (Acme Research)", "", "Priya Raman (Acme Research): (no preview available)"),
+    ],
+    ids=["unnamed-with-request", "unnamed-no-preview", "named-no-preview"],
+)
 @pytest.mark.asyncio
-async def test_a_carriage_with_no_validated_name_mounts_the_generic_asker_line(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_the_mounted_card_states_the_asker_and_any_missing_preview(
+    monkeypatch: pytest.MonkeyPatch, sender: str, excerpt: str, expected: str
 ) -> None:
-    """D3: with no validated member name the card still names an asker.
+    """D3/D9: the question line names the asker and never leaves the slot silent.
 
     A no-meta carriage is a real shape (``screening`` tolerates a missing sender
     block as unknown provenance), and the issuer sends "" for it rather than a
     raw account id — which would put this side's own owner, or an ``acc_…`` the
-    member cannot place, in front of the person answering. Same production mount
-    as the test above; only the question line differs.
+    member cannot place, in front of the person answering. An empty excerpt is a
+    real shape too (the byte-fitter trims it, a screened body can be empty, the
+    render-time lookup degrades to "" by design), and a card asking a member to
+    approve nothing — with no sign that the request text is merely unavailable
+    here — is the failure class D3 was about. Same production mount as the test
+    above; only the question line differs.
     """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
     monkeypatch.setattr(ask_open_policy, "AUTO_OPEN", False)
 
     question = bridge_request_question(
         message_id="bmsg_2378",
-        sender="",
-        excerpt="could you approve the Q3 spend for the enrichment pod?",
+        sender=sender,
+        excerpt=excerpt,
         scope={"delivery_ref": "dref_1"},
     )
     rows = ask_rows([_stored_record(question)])
@@ -239,8 +270,8 @@ async def test_a_carriage_with_no_validated_name_mounts_the_generic_asker_line(
             await pilot.pause()
         card = app._ask_card
         assert card is not None, "the degraded carriage still mounts its card"
-        assert card.question.question == (
-            "another member of your organization: could you approve the Q3 spend for the "
-            "enrichment pod?"
-        )
+        assert card.question.question == expected
         assert "acc_" not in card.question.question
+        # One uncut row at 100x30 for all three carriages (the longest is 83
+        # cells against the card's 94-cell question width).
+        assert card._layout().question == (expected,), card._layout().question
