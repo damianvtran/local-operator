@@ -28,9 +28,13 @@ importantly — what it must NOT do:
   movement, and the incident's runtime reported all three for the two hours it
   was stuck;
 * the bound does NOT end the runtime: it abandons the handover, releases the
-  latch so the session takes work again, publishes the failure, and keeps serving
-  the work in flight — a build move never cuts a turn (the operator's rule, and
-  the behaviour this file was rewritten for).
+  latch so the session takes work again, re-admits whatever the departure queued,
+  and keeps serving the work in flight — a build move never cuts a turn (the
+  operator's rule, and the behaviour this file was rewritten for). It publishes NO
+  FAILURE (operator ask, 2026-10-15): the departure stays committed and lands at
+  the first idle instant, so the runtime is healthy and an error-like notice here
+  was the false alarm busy sessions showed. The window arm keeps publishing
+  (``test_update_window.py``), which is the split;
 
 Fakes in the style of ``test_process_build_bound.py``, with the four motion
 signals on the session double so each can be moved on its own.
@@ -360,8 +364,11 @@ async def test_a_drain_whose_work_stops_moving_ABANDONS_the_move(
       tools and a successor is not coming;
     * the LATCH IS RELEASED, so a runtime that keeps serving can take work again —
       the property that makes "abandon" different from "hold forever";
-    * the failure is PUBLISHED, which is what turns a stuck handover from a silent
-      hold into something reportable (the operator's own requirement);
+    * NOTHING IS PUBLISHED AS A FAILURE, and this is the operator's ask of 2026-10-15
+      superseding the earlier requirement that this arm report one: the departure is
+      still committed (the drain object stays, so it lands at the first idle instant)
+      and the runtime is healthy, so an error-like notice was a FALSE ALARM. The
+      record's ordinary build phrase is the whole account;
     * the phrase the record carries stays the ordinary build one, because a departure
       that did not happen may not wear a departure's words.
 
@@ -400,11 +407,17 @@ async def test_a_drain_whose_work_stops_moving_ABANDONS_the_move(
     assert rig.session.handed_wakes == 0, "the wakes belong to no successor here"
     assert rig.handle._turn_journal.exits == [], "no exit was journalled"
     assert rig.drain.progress is not None and rig.drain.progress.abandoned is True
-    assert rig.runtime.failures, "the abandoned handover was never published"
-    assert rig.runtime.failures[0][0] == NEW.label()
-    assert rig.runtime.failures[0][1] == BOUND, (
-        "the failure was published without the bound it ran out of, so no surface can "
-        "say why the update did not happen"
+    # THE OPERATOR'S ASK (2026-10-15), and the assertion that used to stand here is
+    # its inverse — `failures[0][0] == NEW.label()` and `failures[0][1] == BOUND` —
+    # which the drain rung no longer satisfies: a departure this arm abandons keeps
+    # its commitment (`LEAVING_FOR_BUILD` stays, the departure lands at the first
+    # idle instant), so the runtime is healthy and publishing a failure here is the
+    # false alarm busy sessions showed. The window arm is the negative control
+    # (`test_update_window.py`), and the discriminator lives in
+    # `test_drain_progress_bound.py`.
+    assert rig.runtime.failures == [], (
+        "the drain rung published a failure for a runtime that is healthy and still "
+        "committed to the newer build: operator ask, 2026-10-15"
     )
     assert rig.handle.update_failed == "", (
         "the handle remembered the pair, which is the WINDOW rung's memo for not burning "
@@ -667,24 +680,29 @@ async def test_every_probe_reads_a_field_the_real_classes_still_have() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_abandon_publishes_the_bound_and_brands_no_cut_off(rig) -> None:
+async def test_the_abandon_publishes_no_failure_and_brands_no_cut_off(rig) -> None:
     """What a successor and a reader can learn about a handover that did not happen.
 
     THIS CELL USED TO PIN THE EXIT'S PROVENANCE (a journal row carrying
     ``BUILD_DRAIN_OVERDUE_CAUSE`` and a cut-off note carrying the why-now re-read at
     the exit). Both are gone with the cut they described, and their absence is now
     the assertion: a runtime that keeps serving must not hand a successor a cut-off
-    note for a turn nobody cut, and must not journal an exit it did not take. What
-    it owes instead is the FAILURE — the pair and the bound it ran out of — because
-    that is the fact a person acts on ("the update did not happen, and here is
-    why"), and it is published under ``UPDATE_FAILED_CAUSE`` by the runtime itself.
+    note for a turn nobody cut, and must not journal an exit it did not take.
+
+    IT ALSO USED TO PIN THE PUBLISHED FAILURE — the pair and the bound under
+    ``UPDATE_FAILED_CAUSE`` — and THAT inverse is now the assertion (operator ask,
+    2026-10-15): this arm's departure stays committed (the drain object remains, so it
+    lands at the first idle instant), which makes the runtime healthy and a published
+    failure a false alarm. What a reader gets instead is the ``LEAVING_FOR_BUILD``
+    phrase the record keeps, asserted on the abandon cells above.
     """
     rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False
     assert await _tick(rig, T0 + BOUND) is False
-    assert rig.runtime.failures == [
-        (NEW.label(), BOUND)
-    ], "the abandoned handover was not published with the pair and the bound"
+    assert rig.runtime.failures == [], (
+        "the drain rung published a failure for a departure it still commits to: "
+        "operator ask, 2026-10-15"
+    )
     assert rig.handle._turn_journal.exits == [], "a runtime that kept serving journalled an exit"
     assert (
         getattr(rig.handle, "_retiring_cause", "") == ""
@@ -722,25 +740,28 @@ async def test_a_spooled_message_resets_the_clock(rig) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_raising_readmission_still_leaves_the_failure_published(
+async def test_a_raising_readmission_still_releases_the_latch(
     rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """THE ORDER THE ABANDON OWES, pinned by the one failure it has to survive.
+    """WHAT THE DRAIN ARM STILL OWES once the re-admission raises.
 
-    ``_keep_loaded_build`` publishes the failure BEFORE the spooled work comes back in
-    (QA round 1, Q-2), because the re-admission can run real turns for 27-37 s while the
-    reaper may exit a tick after they land — published second, the record's account of the
-    failure could be missed entirely. Round 2 measured that NOTHING pinned that order:
-    putting the two steps back left 86 cells green across the five abandon-rung files.
+    ``_keep_loaded_build`` used to publish the failure BEFORE the spooled work came
+    back in (QA round 1, Q-2), and this cell pinned that ORDER: the reaper can exit a
+    tick after a re-admission that ran real turns, so a publish written after it could
+    be lost with the record.
 
-    This cell is the pin, and it is shaped so the reverted order cannot pass it: the
-    re-admission RAISES, so on the reverted tree the publish is exactly what the raise
-    skips. Both claims are required — the failure is published with the bound the arm ran
-    out of, and the raise reaches the caller, which is what makes the first claim
-    discriminating rather than incidental. Nothing here argues the escape is desirable:
-    ``_drain_inbox_into`` swallows per-ROW failures and this is a step-level one, and the
-    cell records that shape so a later change which swallows it fails here instead of
-    quietly restoring the order that could lose the record's account.
+    THE DRAIN ARM NO LONGER PUBLISHES ANYTHING (operator ask, 2026-10-15), so the order
+    is not a property IT has any more — and the surviving pin of that ordering belongs to
+    the WINDOW arm, which still publishes (``test_update_window.py::
+    test_the_abandon_arm_runs_the_spool_on_a_pristine_session`` and its neighbours).
+    What this cell keeps is the shape the drain arm genuinely still has: the latch is
+    released BEFORE either step, so an abandoned drain admits work again even when the
+    re-admission itself fails, and a step-level raise from the re-admission still reaches
+    the caller. Recording the raise here means a later change that swallows it fails here
+    rather than quietly hiding a lost spool.
+
+    Nothing here argues the escape is desirable: ``_drain_inbox_into`` swallows per-ROW
+    failures and this is a step-level one.
     """
     rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False, "the drain takes its clock here"
@@ -756,18 +777,15 @@ async def test_a_raising_readmission_still_leaves_the_failure_published(
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
     ), "the staleness arm never ran, so this cell measured nothing"
-    assert rig.runtime.failures, (
-        "the failure was never published: the publish runs AFTER the re-admission again, "
-        "so a re-admission that raises takes the record's account with it (QA round 1, "
-        "Q-2; agent review round 2, R2-MINOR-1)"
-    )
-    assert rig.runtime.failures[0][1] == BOUND, (
-        "the failure was published without the bound it ran out of, so no surface can "
-        "say why the update did not happen"
+    # The drain rung publishes NOTHING, raise or no raise: the inverse of this
+    # assertion is what this cell pinned before the operator's ask of 2026-10-15.
+    assert rig.runtime.failures == [], (
+        "the drain rung published a failure although its departure is still committed "
+        "and nothing failed: operator ask, 2026-10-15"
     )
     assert rig.handle.draining is False, (
-        "the latch is released before either step runs, which is what makes the failure "
-        "reportable rather than the state it was abandoned from"
+        "the latch is released before either step runs, which is what makes this arm "
+        "admit work again rather than the state it was abandoned from"
     )
 
 
@@ -812,10 +830,13 @@ async def test_a_lane_that_keeps_stepping_is_abandoned_at_the_dwell(
 
     What the dwell asserts is the whole arm: the latch is RELEASED (the double CALLS
     the production ``end_drain`` — see ``FakeHandle`` — so a tree that kept refusing
-    admissions fails here), the failure is PUBLISHED with the bound it actually ran out
-    of, the turn in flight is NOT cut and the process is NOT ended, and the departure
-    still happens at the first idle instant afterwards — an abandoned handover is a
-    handover retried, never one given up for good.
+    admissions fails here), NOTHING IS PUBLISHED AS A FAILURE (operator ask, 2026-10-15:
+    the departure stays committed — the drain object remains and the handover lands at
+    the first idle instant — so the runtime is healthy and the earlier requirement that
+    this arm report one was the false alarm busy sessions showed), the turn in flight is
+    NOT cut and the process is NOT ended, and the departure still happens at the first
+    idle instant afterwards — an abandoned handover is a handover retried, never one
+    given up for good.
 
     The WARNING is asserted too, because it is the only account of WHICH bound fired
     that a production log carries: it has to name the dwell, the build pair, and that
@@ -858,10 +879,15 @@ async def test_a_lane_that_keeps_stepping_is_abandoned_at_the_dwell(
     )
     assert rig.handle.draining is False, "the latch was counted but never taken off"
     assert rig.handle.releases == 1
-    assert rig.runtime.failures, "the abandoned handover was never published"
-    assert rig.runtime.failures[0][1] == pytest.approx(DWELL), (
-        "the incident row has to name the bound the runtime actually ran out of, and "
-        "this arm ran out of the dwell rather than the staleness bound"
+    # THE OPERATOR'S ASK (2026-10-15) superseded what stood here: an assertion that
+    # `failures[0][1] == DWELL`, i.e. that this arm published the bound it ran out of.
+    # The drain rung publishes nothing now — a committed departure on a healthy runtime
+    # is a deferral, not a failure — so the discriminating evidence is the ABSENCE, and
+    # the dwell/staleness discriminator is read off the log line and the progress clock
+    # below rather than off an incident row.
+    assert rig.runtime.failures == [], (
+        "the dwell arm published a failure for a runtime that is healthy and still "
+        "committed to the newer build: operator ask, 2026-10-15"
     )
     assert rig.handle.update_failed == "", (
         "the handle remembered the pair, which is the WINDOW rung's memo for not "
@@ -997,18 +1023,21 @@ async def test_an_idle_instant_still_wins_over_the_backstop(rig, disk) -> None:
 @pytest.mark.asyncio
 async def test_the_abandon_is_taken_once_per_drain(rig) -> None:
     """A later tick (the signal drain's loop can ask in principle) is answered
-    without a second release, a second publish or a second announcement.
+    without a second release, a second re-admission or a second announcement.
 
-    The guard is what keeps a runtime that cannot reach idle from reporting its
-    failure on every ``REAP_CHECK_S`` tick — four times a minute, forever, on a
-    surface a person reads. The retry belongs to the WATCH, which re-commits a
-    fresh drain on its own terms, not to the rung being re-entered.
+    The guard is what keeps a runtime that cannot reach idle from re-admitting the
+    spooled work - and, before the operator's ask of 2026-10-15, from re-publishing
+    its failure - on every ``REAP_CHECK_S`` tick, four times a minute, forever. The
+    retry belongs to the WATCH, which re-commits a fresh drain on its own terms, not
+    to the rung being re-entered.
     """
     rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False
     assert await _tick(rig, T0 + BOUND) is False
     assert await _tick(rig, T0 + BOUND + 1) is False
-    assert len(rig.runtime.failures) == 1, rig.runtime.failures
+    assert (
+        rig.runtime.failures == []
+    ), "the drain rung published a failure for a deferral: operator ask, 2026-10-15"
     assert rig.handle.releases == 1, "the latch was released more than once"
     assert rig.runtime.retiring == [], "the abandon announced a departure it did not take"
 
@@ -1039,8 +1068,10 @@ async def test_the_reaper_abandons_a_stalled_drain_and_retries_it(
 
     A permanently busy runtime declines a newer build, latches the drain, and its
     work reports nothing for the bound. What must happen then is the change this
-    file is about: the handover is ABANDONED — the latch released, the failure
-    published, the process still serving — and the next check re-commits a fresh
+    file is about: the handover is ABANDONED — the latch released, NOTHING
+    PUBLISHED as a failure (operator ask, 2026-10-15: the departure stays committed,
+    so this runtime is healthy and the record's ``LEAVING_FOR_BUILD`` phrase is the
+    whole account), the process still serving — and the next check re-commits a fresh
     drain, so a build that cannot land while the work is stuck keeps being asked
     about instead of taking the turn with it.
 
@@ -1063,17 +1094,19 @@ async def test_the_reaper_abandons_a_stalled_drain_and_retries_it(
     assert runtime.retiring == [("stale-build", NEW.label(), True, LEAVING_FOR_BUILD)]
     assert not stop.is_set() and not handle.disposed, "in-flight work is not aborted on the latch"
 
-    assert await _wait_for(lambda: runtime.failures), (
-        "the stalled drain was never abandoned: the failed handover is what says why "
-        "this runtime is still serving the build it loaded"
+    assert await _wait_for(lambda: handle.releases == 1), (
+        "the stalled drain was never abandoned: releasing the latch is what lets this "
+        "runtime take work again, and it is the observable step that precedes the "
+        "re-admission the drain arm still owes"
     )
-    # ORDERED AFTER THE PUBLISH ON PURPOSE. ``_abandon_move`` releases the latch
-    # BEFORE it publishes, so waiting on the release and then reading ``failures``
-    # raced the publish on a loaded worker (measured: green in this file alone, red
-    # inside the runtime slice). Waiting on the publish proves both happened.
     assert (
         handle.releases == 1
     ), "the latch was never released, so this runtime cannot take work again"
+    assert runtime.failures == [], (
+        "the reaper published a failure for a drain that is a deferral: the departure "
+        "stays committed and lands at the first idle instant, so nothing failed "
+        "(operator ask, 2026-10-15)"
+    )
     # THE COMMITMENT OUTLIVES THE ABANDON, and both halves are asserted because a
     # re-latch would break the first without failing the second: the drain object
     # stays (a second ``begin_drain`` re-runs ``Session.retire_wakes_to_inbox``,

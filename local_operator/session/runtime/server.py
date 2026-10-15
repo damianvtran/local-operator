@@ -4886,22 +4886,21 @@ class RuntimeServer:
         must not put a staged write and rename on the far side of a signal.
 
         A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
-        rule one rung over (its NIT 4) and is required here for the same reason plus
-        one of its own. The reason is the window's: without it the record keeps
-        describing an abandoned move after the runtime has started a NEW one, so a
-        fleet row reads "update failed" about a session that is moving right now.
+        rule one rung over (its NIT 4): without it the record keeps describing an
+        abandoned move after the runtime has started a NEW one, so a fleet row reads
+        "update failed" about a session that is moving right now.
 
-        The reason it has one of its own is that the record's OTHER half,
-        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
-        keeps the ordinary build phrase by design (``process._abandon_move``), so
-        that field is the only thing separating a handover still waiting from one
-        that was given up, and its readers are the fleet surfaces that print the two
-        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
-        row). A stale failure left beside a freshly latched drain makes that pair
-        report the new attempt as the abandoned one. Cleared here rather than only on
-        a change of phrase, because the second attempt at the same build announces
-        the same words — the case that matters would otherwise be the one it got
-        wrong.
+        WHAT THE SUPERSEDE IS STILL FOR, now that the drain arm publishes no failure
+        (operator ask, 2026-10-15: a drain abandon keeps its departing commitment, so
+        only the WINDOW arm records ``update_failed`` — see :meth:`note_update_failed`).
+        The stale case is a WINDOW failure left on the record when the watch later
+        latches a fresh drain for the same session: ``update_failed`` is the window
+        arm's field alone, so without the clear it would sit beside the new departure
+        phrase and the two columns a fleet surface prints side by side
+        (``info.collect``, ``cli``'s UPDATING cell, the incident row) would report the
+        new attempt as the abandoned one. Cleared here rather than only on a change of
+        phrase, because the second attempt at the same build announces the same words —
+        the case that matters would otherwise be the one it got wrong.
 
         WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
         ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
@@ -4912,8 +4911,9 @@ class RuntimeServer:
         ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
         rung's ONE permitted retry: the pair is refused only once ``_update_retried``
         already holds it, so the memo stops a THIRD attempt rather than "re-opening a
-        window that burned its bound") and the drain rung deliberately does
-        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
+        window that burned its bound"); the drain rung never writes it
+        (agent review round 1, NIT-2; round 2, R2-NIT-1), and since the operator's ask
+        it does not write the record's field either.
         """
         superseded = bool(phrase) and bool(self._record.update_failed)
         if superseded:
@@ -4996,11 +4996,14 @@ class RuntimeServer:
         from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
 
         # THE BOUND THE CALLER ACTUALLY ENFORCED, which is why it is a parameter
-        # (design review round 1, D2): two arms publish this token with two different
-        # bounds, and the shared sentence names none of them, so the failure reports
-        # its own number here or it reports no number at all. Rendering the window's
-        # constant instead told the operator that an update which had spent fifteen
-        # minutes in the drain gave up "within 5s".
+        # (design review round 1, D2): the shared sentence names no bound, so the
+        # failure reports its own number here or it reports no number at all.
+        # ONE ARM REACHES HERE (operator ask, 2026-10-15): the bounded update WINDOW
+        # with ``buildwatch.UPDATE_LOCK_S``. The build DRAIN's two bounds used to be
+        # the other two callers — rendering the window's constant for them told the
+        # operator that an update which had spent fifteen minutes in the drain gave up
+        # "within 5s" — and they now publish nothing, so the parameter is a fact about
+        # the caller rather than a list of arms.
         rendered = incidents.render_cut_off_reason(
             UPDATE_FAILED_CAUSE, detail=incidents.update_failed_detail(pair, bound)
         )

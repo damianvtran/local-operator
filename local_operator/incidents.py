@@ -435,7 +435,8 @@ DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE}
 #:
 #: WHICH RUNTIMES CAN STILL RECORD THIS TOKEN: only ones that ran a build BEFORE the
 #: force-cut was removed. No arm records it any more — ``process._abandon_move``
-#: keeps the build it loaded and publishes ``UPDATE_FAILED_CAUSE`` instead — and the
+#: keeps the build it loaded, and since the operator's ask of 2026-10-15 it publishes
+#: nothing at all (a deferral, not a failure: the departure stays committed) — and the
 #: sentence STAYS for the reason the phrase does (see
 #: ``types.LEAVING_FOR_BUILD_OVERDUE``): a row written by an older runtime is read by
 #: this one, and ``death_verdict`` rung 2 narrates whatever token a row carries.
@@ -490,17 +491,19 @@ def _update_failed_cause_sentence() -> str:
     one sentence would tell a reader to go looking for a handover that never occurred.
 
     IT NAMES NO NUMBER, and that is a correction rather than an omission (design
-    review round 1, D2). THREE arms publish this token with THREE different bounds —
-    the bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds), the build DRAIN
-    whose work went SILENT (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) and the
-    build drain that was HELD with work still in flight
-    (``types.BUILD_DRAIN_DWELL_S``, thirty minutes; ``process._abandon_move``'s dwell
-    arm, which is the second bound the drain can run out of) — so a sentence rendered
-    from any one constant is wrong for the other two by construction: an update that
-    spent half an hour in the dwell reported that it "did not finish within 5s". The
-    bound is known at the only place that can name it, so it rides the incident's
-    DETAIL (``RuntimeServer.note_update_failed`` renders it from the argument its
-    caller passed), and this sentence says the thing that is true of every arm.
+    review round 1, D2). The arm that still publishes this token names a bound the
+    shared sentence cannot carry — the bounded update WINDOW
+    (``buildwatch.UPDATE_LOCK_S``, seconds) — so a sentence rendered from that
+    constant would be wrong for any other arm that ever publishes it: an update that
+    spent half an hour in a slow handover reported that it "did not finish within 5s".
+    (The two build-DRAIN bounds used to be the other two arms here —
+    ``types.BUILD_DRAIN_PROGRESS_S`` and ``types.BUILD_DRAIN_DWELL_S`` — and since
+    the operator's ask of 2026-10-15 they publish nothing at all: a drain abandon
+    keeps its departing commitment, so it is a deferral rather than a failure. The
+    no-number rule outlives them, because the bound is still known at the only place
+    that can name it.) It rides the incident's DETAIL
+    (``RuntimeServer.note_update_failed`` renders it from the argument its caller
+    passed), and this sentence says the thing that is true of every arm.
     """
     return (
         "the update to the build on disk did not finish within its bound; the runtime "
@@ -512,11 +515,12 @@ def update_failed_detail(pair: str, bound: float) -> str:
     """The detail a failed handover's incident carries: the pair, and the bound spent.
 
     A HELPER RATHER THAN AN INLINE JOIN, because the bound is the fact that was
-    silently wrong until design review round 1 (D2): the sentence names none (three
-    arms publish this token with three different bounds), so this is the ONLY place a
-    reader can learn which bound the runtime actually ran out of — 5 s for the bounded
-    update window, fifteen minutes for a drain whose work went silent, thirty minutes
-    for a drain held with work still in flight (``types.BUILD_DRAIN_DWELL_S``).
+    silently wrong until design review round 1 (D2): the sentence names none, so this
+    is the ONLY place a reader can learn which bound the runtime actually ran out of —
+    ``buildwatch.UPDATE_LOCK_S`` (seconds) for the bounded update window, which since
+    the operator's ask of 2026-10-15 is the ONLY arm that reaches here (the two
+    build-DRAIN bounds no longer publish a failure: a drain abandon keeps its
+    departure committed, so it is a deferral rather than a failure).
     ``bound`` of 0 means the caller did not say, and then no number is claimed rather
     than a default being invented.
     """
@@ -613,6 +617,10 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # ``runtime-retired``, which is what a handover that SUCCEEDED records — a failed
     # update narrated as an ordinary retirement is invisible in exactly the durable
     # account an operator opens to ask why a session is still on yesterday's build.
+    # THE WINDOW IS THE ONLY RUNTIME THAT RECORDS IT (operator ask, 2026-10-15). A
+    # build DRAIN that gave up no longer does: it keeps its departing commitment, so
+    # the record's ``LEAVING_FOR_BUILD`` phrase is its whole account and a failure row
+    # here would be a false alarm on a healthy runtime.
     "runtime-update-failed": _update_failed_cause_sentence(),
     KILL_CAUSE: (
         # The trailing clause is the POST-MARKER meaning of this token, and it

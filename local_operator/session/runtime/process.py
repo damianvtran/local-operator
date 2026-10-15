@@ -1923,10 +1923,12 @@ async def _refresh_for(
     * the bound expires — ``UPDATE_LOCK_S`` with no heartbeat. The rung then
       ABANDONS the handover rather than waiting on it: the lock is released, the
       build this runtime loaded is KEPT, the failure is published with
-      ``types.UPDATE_FAILED_CAUSE``, and the messages this window queued are
-      drained back in and run HERE (``_abandon_update_window``). That last part is
-      what makes the queue safe: a receipt for a successor that never comes would
-      be the same broken promise, one layer down.
+      ``types.UPDATE_FAILED_CAUSE`` — the ONLY arm that publishes it, because a
+      window that gave up has no departing commitment covering it, unlike the
+      build drain's abandon (``_abandon_move``) — and the messages this window
+      queued are drained back in and run HERE (``_abandon_update_window``). That
+      last part is what makes the queue safe: a receipt for a successor that
+      never comes would be the same broken promise, one layer down.
 
     The bound is on the window's OWN work, enforced by ``_await_live_window`` against the
     LOCK's dead-or-alive deadline rather than by a total-duration timeout — so a stalled
@@ -2196,44 +2198,61 @@ async def _pump_update_heartbeat(handle: object, *, interval: float) -> None:
         return
 
 
-async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: float) -> None:
+async def _keep_loaded_build(
+    handle: object, runtime: object, pair: str, bound: float, *, publish_failure: bool = True
+) -> None:
     """The half every arm that KEEPS the build this runtime loaded has in common.
 
-    Two steps, and they are the same two wherever a handover gives up: the failure is
-    PUBLISHED, on the record and as an incident row carrying ``types.UPDATE_FAILED_CAUSE``
-    (the operator's own requirement: "indicate that the update failed so that it can be
-    reported as an issue and addressed"), and the messages the departure queued come back
-    IN — they run here, on the build the operator still has, rather than leaving a receipt
-    for a successor that is not coming.
+    Two steps, and the SECOND is the same wherever a handover gives up: the messages the
+    departure queued come back IN — they run here, on the build the operator still has,
+    rather than leaving a receipt for a successor that is not coming. The FIRST step, the
+    PUBLICATION of a failure (on the record and as an incident row carrying
+    ``types.UPDATE_FAILED_CAUSE``), is conditional, and ``publish_failure`` is the switch.
 
-    PUBLISH FIRST, AND THAT ORDER IS THE REPAIR RATHER THAN A TIDY (QA round 1, Q-2). The
-    re-admission can run the spooled owner prompts — real turns, measured at 27-37 s — and
-    the reaper may find the work done ONE TICK after it lands (``REAP_CHECK_S``), at which
-    point this runtime exits and the record is withdrawn with it. Published second, the
-    failure was therefore observable on the fleet row for as little as a second, or not at
-    all, which is the operator's requirement failing in exactly the state it was written
-    for. The two steps touch DISJOINT state — one delivers the inbox, the other writes the
-    record and an incident row — so neither can read the other's output, no invariant is
-    ordered by it, and the publish is strictly more reliable here: it no longer depends on
-    the drain returning at all (:func:`_drain_inbox_into` is best-effort per row and
-    swallows its own failures, but nothing about that should be able to take the record's
-    account down with it).
+    WHY IT IS CONDITIONAL AT ALL (operator ask, 2026-10-15; this supersedes the earlier
+    reading that both give-up arms publish). The two callers are NOT two shapes of one
+    decision, which the first cut of this function assumed:
 
-    FACTORED OUT rather than written twice because the two callers are the two
-    shapes of the same decision — the update window that ran out of its bound
-    (:func:`_abandon_update_window`) and the build drain that could not reach idle
-    (:func:`_abandon_move`) — and a second copy of the publish step is how one of
-    them would end up reporting a failure under a token no surface renders.
+    * the update WINDOW (:func:`_abandon_update_window`) has NOTHING covering its
+      departure. It gave up on a handover and left the runtime idle on the build it
+      loaded, so the failure is real and reportable, and it calls this with the default;
+    * the build DRAIN (:func:`_abandon_move`) KEEPS its commitment: the drain object
+      stays latched, the record deliberately keeps ``LEAVING_FOR_BUILD``, and the
+      departure is retried every tick and lands at the first idle instant. Nothing
+      failed — the runtime is healthy and still on its way to the newer build — so a
+      published failure is a FALSE ALARM, which is what busy runtimes showed (11
+      sessions, 2026-10-15: an error-like notice for a session that was working and
+      would switch builds when its turn ended). It calls this with ``publish_failure=
+      False``; the ``leaving`` phrase the record already carries is the true, neutral
+      story, and no reader needs a second token that contradicts it.
+
+    PUBLISH FIRST, AND THAT ORDER IS THE REPAIR RATHER THAN A TIDY (QA round 1, Q-2), on
+    every call that publishes. The re-admission can run the spooled owner prompts — real
+    turns, measured at 27-37 s — and the reaper may find the work done ONE TICK after it
+    lands (``REAP_CHECK_S``), at which point this runtime exits and the record is
+    withdrawn with it. Published second, the failure was therefore observable on the fleet
+    row for as little as a second, or not at all, which is the operator's requirement
+    failing in exactly the state it was written for. The two steps touch DISJOINT state —
+    one delivers the inbox, the other writes the record and an incident row — so neither
+    can read the other's output, no invariant is ordered by it, and the publish is
+    strictly more reliable here: it no longer depends on the drain returning at all
+    (:func:`_drain_inbox_into` is best-effort per row and swallows its own failures, but
+    nothing about that should be able to take the record's account down with it).
+
+    FACTORED OUT rather than written twice because the re-admission half is genuinely
+    common — the publish is what is not, and a second copy of the re-admission is how the
+    two arms would drift apart on what they give back to the session they keep.
 
     The runtime is never killed here. That is the whole contract of this module's
     give-up arms: a failed update leaves a working session on the build it loaded.
     """
-    note = getattr(runtime, "note_update_failed", None)
-    if callable(note):
-        try:
-            await cast("Callable[..., Awaitable[None]]", note)(pair, bound)
-        except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
-            logger.warning("could not publish the failed update", exc_info=True)
+    if publish_failure:
+        note = getattr(runtime, "note_update_failed", None)
+        if callable(note):
+            try:
+                await cast("Callable[..., Awaitable[None]]", note)(pair, bound)
+            except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
+                logger.warning("could not publish the failed update", exc_info=True)
     await _drain_inbox_into(handle)
     await _reconcile_owed_asks(handle)
 
@@ -2308,7 +2327,10 @@ async def _abandon_update_window(handle: object, runtime: object, pair: str, bou
        BEFORE the queued messages come back in, for the reason
        :func:`_keep_loaded_build` states: the re-admission can run real turns,
        and a runtime that exits a tick after it lands would take the record's
-       account of the failure with it;
+       account of the failure with it. THIS ARM IS THE ONLY PUBLISHER OF THAT
+       TOKEN (operator ask, 2026-10-15): the build drain's abandon keeps its
+       departing commitment, so it is a deferral rather than a failure, and it
+       calls :func:`_keep_loaded_build` with ``publish_failure=False``;
     4. the messages the window QUEUED are drained back IN, so they run here, on
        the build the operator still has — the alternative is a receipt for a
        successor that never boots.
@@ -3492,9 +3514,11 @@ async def _drain_for(
     parked behind a child process, both of which can hold for hours, and a drain
     that holds forever takes its session with it (measured: 2 h and still refusing,
     ``state=wedged``, three lanes stalled behind a 23-minute bash child). And a
-    stale hold that cannot be waited out is now RECORDED rather than cut: the
-    bound abandons the handover, publishes the failure, and leaves the session
-    running on the build it loaded.
+    stale hold that cannot be waited out is no longer cut, and no longer reported as an
+    update failure either: the bound abandons the handover — it releases the latch so
+    the session takes work again, keeps the departure committed so the newer build still
+    lands at the first idle instant — and the ``LEAVING_FOR_BUILD`` phrase on the record
+    is the whole account, because nothing failed (the operator's ask of 2026-10-15).
 
     THE SECOND BOUND IS THE DWELL, and it exists because the first one cannot be
     reached by the state that wedged this host: ``_work_motion`` is reset by the
@@ -3622,15 +3646,25 @@ async def _abandon_move(
     releases the transcript lease. Every part of that is still true, and none of it
     makes the CUT the answer: the runtime was willing to hold, the work was real,
     and the thing the bound was really bounding is the OPERATOR's wait for a
-    successor. A runtime that cannot reach idle is a runtime someone should look
-    at — which is what it now becomes, with the failure recorded where ``lop
-    sessions`` and the incident row can both read it, and with the build it loaded
-    still serving the session in the meantime.
+    successor. A runtime that cannot reach idle is a runtime someone should look at
+    — and what they have to look at is the RETAINED ``LEAVING_FOR_BUILD`` phrase
+    (the commitment that survived) and this arm's own WARNING line, not a failure
+    row: since the operator's ask of 2026-10-15 no incident is written for this
+    arm, because a departure it still commits to and still retries is a deferral
+    rather than a failure. The build it loaded keeps serving the session in the
+    meantime.
 
-    WHAT IT KEEPS: the message spool the drain swallowed comes back in, and the
-    failure is published under ``types.UPDATE_FAILED_CAUSE`` — both through
-    :func:`_keep_loaded_build`, the same half :func:`_abandon_update_window` uses,
-    so the two give-up arms cannot drift apart in what they report. The latch is
+    WHAT IT KEEPS: the message spool the drain swallowed comes back in, through
+    :func:`_keep_loaded_build`. It does NOT publish a failure, and that is the
+    operator's ask of 2026-10-15 rather than an oversight: the departure is not
+    lost — the latch is released and the drain object stays — so this runtime is
+    healthy and still on its way to the newer build, and a published failure was a
+    FALSE ALARM (measured on this host: busy runtimes showed an error-like notice
+    although nothing had failed). The ``LEAVING_FOR_BUILD`` phrase the record keeps
+    is the true, neutral story, and this arm is therefore the ONE give-up arm that
+    does not reach :func:`_keep_loaded_build`'s publish step
+    (``publish_failure=False``); the WINDOW rung (:func:`_abandon_update_window`)
+    has no departing commitment covering it, so it still publishes. The latch is
     released through ``ServingSessionHandle.end_drain``: admissions resume, because
     the alternative — refusing work for the rest of the process's life — is the
     wedge this arm exists to end rather than to create.
@@ -3662,32 +3696,38 @@ async def _abandon_move(
     rather than a leftover (agent review round 1, MINOR-2; design round 1, D4 read the
     same pair from the rendered frame): the COMMITMENT is what survives — the drain
     object stays latched, so this runtime still leaves at the first idle instant — and
-    the phrase is therefore true of it. A row showing it beside "update failed" tells
-    the reader two true things about one runtime, which is what the record is for;
-    clearing it would produce the one lie of the pair, a runtime that exits with no
-    departure phrase on its record, which is the silently-leaving runtime the phrase
-    exists to prevent.
+    the phrase is therefore true of it. It is also the WHOLE of what the record says
+    about this abandon, which is what the operator's ask leaves it: there is no second
+    token beside it, because a runtime that is healthy, still serving and still
+    committed to the newer build has nothing failed to report. Clearing the phrase
+    would produce a runtime that exits with no departure phrase on its record, which
+    is the silently-leaving runtime the phrase exists to prevent.
 
     ONCE PER DRAIN, and the guard is written where the drain object lives rather than
     at the caller: the reaper ticks every ``REAP_CHECK_S`` and a released refusal
     does not stop ``_drain_for`` being called again, so without it a runtime that
-    cannot reach idle would publish its failure four times a minute.
+    cannot reach idle would re-run the re-admission four times a minute.
 
     WHAT IS DELIBERATELY NOT UNDONE: the ``retiring`` frame the drain sent to
     attached viewers. There is no "staying" op on the wire, and inventing one is a
     protocol change rather than part of this decision — so a viewer that already
     went cold has engaged a successor, which cannot take the transcript lease while
     this runtime keeps serving and retries. The RECORD is where a reader learns the
-    truth (``update_failed`` plus the build still running), which is the same split
-    the update window's abandon already relies on.
+    truth (the retained ``LEAVING_FOR_BUILD`` phrase plus the build still running),
+    which is the same split the update window's abandon already relies on.
+
+    ONE LOG LINE PER ARM, AND THEY ARE THE ACCOUNT OF THIS ABANDON (the record no
+    longer carries a failure to point at): both name the arm's own bound, the pid
+    and the build pair, and both say the departure still lands at the first idle
+    instant, because that is the fact an operator greps for.
     """
     progress = drain.progress
     if progress is not None:
-        # ONCE PER DRAIN, and the flag is the guard rather than a caller's check:
-        # the reaper ticks every ``REAP_CHECK_S`` and a released latch does not
-        # stop ``_drain_for`` being called with the SAME drain object, so without
-        # this a runtime that cannot reach idle would publish its failure four
-        # times a minute.
+        # ONCE PER DRAIN, and the flag is the guard rather than a caller's check: the
+        # reaper ticks every ``REAP_CHECK_S`` and a released latch does not stop
+        # ``_drain_for`` being called with the SAME drain object, so without this a
+        # runtime that cannot reach idle would re-admit the spooled work four times a
+        # minute (and, before the operator's ask, re-publish its failure with it).
         if progress.abandoned:
             return
         progress.abandoned = True
@@ -3704,8 +3744,9 @@ async def _abandon_move(
         logger.warning(
             "session runtime: the build drain for %s was latched for %.0fs with work "
             "still in flight (dwell bound %.0fs, handover to %s, pid %d); ABANDONING the "
-            "handover, releasing the latch and keeping %s — the work continues and this "
-            "runtime keeps serving it",
+            "handover, releasing the latch and keeping %s — the work continues, this "
+            "runtime keeps serving it, and the departure still lands at the first "
+            "idle instant",
             drain.reason,
             spent,
             bound,
@@ -3722,7 +3763,8 @@ async def _abandon_move(
         bound = BUILD_DRAIN_PROGRESS_S
         logger.warning(
             "session runtime: the build drain for %s held with no movement for %.0fs "
-            "(bound %.0fs, pid %d); ABANDONING the handover and keeping %s",
+            "(bound %.0fs, pid %d); ABANDONING the handover and keeping %s — the "
+            "departure still lands at the first idle instant",
             drain.reason,
             spent,
             bound,
@@ -3739,7 +3781,7 @@ async def _abandon_move(
             end()
         except Exception:  # noqa: BLE001 — a failed release must not stop the report
             logger.debug("could not release the drain latch", exc_info=True)
-    await _keep_loaded_build(handle, runtime, drain.to, bound)
+    await _keep_loaded_build(handle, runtime, drain.to, bound, publish_failure=False)
 
 
 async def _hand_wakes_to_successor(handle: object) -> int:
