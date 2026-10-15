@@ -216,3 +216,36 @@ async def test_host_denial_prevents_the_named_tool_from_writing(tmp_path):
     assert denied == ["memory"]
     assert any(m.is_error for m in result if isinstance(m, Message) and m.role == "tool")
     assert not (tmp_path / "memory").exists()
+
+
+def test_scope_schema_defines_lifetimes_instead_of_bare_enum():
+    docs = build_memory_tool().parameters["properties"]["scope"]["description"]
+    assert "session=this conversation" in docs
+    assert "global=future sessions" in docs
+    assert "team/agent=shared work/profile" in docs
+
+
+@pytest.mark.asyncio
+async def test_explicit_global_store_is_recalled_by_a_fresh_identity_without_scope_override(
+    tmp_path,
+):
+    first = ToolContext(session_id="first", memory_config_dir=str(tmp_path))
+    second = ToolContext(session_id="fresh", memory_config_dir=str(tmp_path))
+    stored = await execute_fact_memory(
+        "s",
+        {"op": "store", "scope": "global", "text": "Kestrel rollout ships Friday"},
+        context=first,
+    )
+    assert not stored.is_error
+    recall = await execute_fact_memory(
+        "r", {"op": "recall", "scope": "global", "text": "Kestrel rollout"}, context=second
+    )
+    assert not recall.is_error and "ships Friday" in str(recall.content)
+    local = await execute_fact_memory(
+        "local", {"op": "store", "scope": "session", "text": "Private session note"}, context=first
+    )
+    assert not local.is_error
+    hidden = await execute_fact_memory(
+        "h", {"op": "recall", "scope": "session", "text": "Private session note"}, context=second
+    )
+    assert not hidden.is_error and "Private session note" not in str(hidden.content)

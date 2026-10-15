@@ -261,16 +261,20 @@ def build_memory_tool():
         name="memory",
         label="Memory",
         description=(
-            "Store/recall nonsecret facts, goals and locations. Sensitive values belong in secret; "
-            "memory holds NAMES only. Inspect/correct via read/edit memory://."
+            "Store/recall facts; use secret for secret values/IDs, NAMEs only here. "
+            "Inspect/correct: memory://."
         ),
         parameters={
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "op": {"type": "string", "enum": ["store", "recall"]},
-                "scope": {"type": "string", "enum": ["session", "team", "agent", "global"]},
-                "text": {"type": "string", "description": "Fact to store or recall query"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["session", "team", "agent", "global"],
+                    "description": "session=this conversation; global=future sessions; team/agent=shared work/profile",
+                },
+                "text": {"type": "string", "description": "Fact or query"},
             },
             "required": ["op", "scope", "text"],
         },
