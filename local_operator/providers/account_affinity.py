@@ -9,20 +9,23 @@ lifetime; selection/inspection are read-only and cannot create sliding leases.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
 import os
 import tempfile
 import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ChatRequest
+    from local_operator.providers.auth_store import OAuthAccess
 
 logger = logging.getLogger(__name__)
 _SCHEMA = 1
@@ -49,6 +52,12 @@ _selection_signature: ContextVar[str | None] = ContextVar(
 _wire_hint: ContextVar[CacheAffinityHint | None] = ContextVar("account_wire_affinity", default=None)
 _selection_policy: ContextVar[str | None] = ContextVar("account_selection_policy", default=None)
 _isolated_request: ContextVar[bool] = ContextVar("account_isolated_request", default=False)
+EndpointModeResolver = Callable[["OAuthAccess"], str | None]
+_selection_endpoint: ContextVar[EndpointModeResolver | None] = ContextVar(
+    "account_selection_endpoint", default=None
+)
+_wire_attempt: ContextVar[WireHintCapture | None] = ContextVar("account_wire_attempt", default=None)
+_StreamItem = TypeVar("_StreamItem")
 
 
 @dataclass
@@ -64,6 +73,7 @@ class AccountRequestBoundary:
     model_id: str
     compatibility: str
     picks: dict[str, int] = field(default_factory=dict)
+    endpoint_mode: EndpointModeResolver | None = None
 
 
 def request_compatibility(request: "ChatRequest") -> str:
@@ -99,16 +109,23 @@ def request_compatibility(request: "ChatRequest") -> str:
 
 
 @contextmanager
-def selection_context(request: "ChatRequest", policy: str | None = None):
+def selection_context(
+    request: "ChatRequest",
+    policy: str | None = None,
+    *,
+    endpoint_mode: EndpointModeResolver | None = None,
+):
     token = _selection_signature.set(request_compatibility(request))
     policy_token = _selection_policy.set(policy)
     isolated_token = _isolated_request.set(request.isolated)
+    endpoint_token = _selection_endpoint.set(endpoint_mode)
     try:
         yield
     finally:
         _selection_signature.reset(token)
         _selection_policy.reset(policy_token)
         _isolated_request.reset(isolated_token)
+        _selection_endpoint.reset(endpoint_token)
 
 
 def current_selection_signature() -> str | None:
@@ -123,12 +140,75 @@ def current_request_isolated() -> bool:
     return _isolated_request.get()
 
 
+def current_selection_endpoint() -> EndpointModeResolver | None:
+    return _selection_endpoint.get()
+
+
+def endpoint_mode_resolver(client: object, request: "ChatRequest") -> EndpointModeResolver:
+    """Use the actual client's mode decision, including credential-specific Codex.
+
+    Capability flags alone cannot distinguish a Responses-capable model sent
+    through Chat Completions. Unknown/custom clients fail closed on affinity.
+    """
+
+    def resolve(access: "OAuthAccess") -> str | None:
+        method = getattr(client, "account_cache_endpoint_mode", None)
+        mode = method(request, access) if callable(method) else None
+        return mode if isinstance(mode, str) and mode in _LIFETIMES else None
+
+    return resolve
+
+
+@dataclass
+class WireHintCapture:
+    """One attempt's wire facts; never the last ambient nested request's hint."""
+
+    hint: CacheAffinityHint | None = None
+
+
+@contextmanager
+def _bind_wire_capture(capture: WireHintCapture):
+    token = _wire_attempt.set(capture)
+    try:
+        yield
+    finally:
+        _wire_attempt.reset(token)
+
+
+async def capture_wire_stream(
+    stream: AsyncIterator[_StreamItem], capture: WireHintCapture
+) -> AsyncIterator[_StreamItem]:
+    # Bind ONLY while advancing/closing the provider iterator, never across a
+    # yield to its consumer. Nested same-coroutine streams get their own owner;
+    # closing from another task cannot reset a token created before a yield.
+    try:
+        while True:
+            with _bind_wire_capture(capture):
+                try:
+                    item = await anext(stream)
+                except StopAsyncIteration:
+                    return
+            yield item
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            with _bind_wire_capture(capture):
+                closed = close()
+                if inspect.isawaitable(closed):
+                    await closed
+
+
 def clear_wire_hint() -> None:
-    _wire_hint.set(None)
+    capture = _wire_attempt.get()
+    if capture is not None:
+        capture.hint = None
+    else:
+        _wire_hint.set(None)
 
 
 def wire_hint() -> "CacheAffinityHint | None":
-    return _wire_hint.get()
+    capture = _wire_attempt.get()
+    return capture.hint if capture is not None else _wire_hint.get()
 
 
 def set_wire_hint(
@@ -139,7 +219,14 @@ def set_wire_hint(
 ) -> None:
     if source not in ("explicit-wire", "documented-default", "bounded-heuristic"):
         return
-    _wire_hint.set(CacheAffinityHint(endpoint_mode, request_compatibility(request), ttl_ms, source))
+    hint = CacheAffinityHint(endpoint_mode, request_compatibility(request), ttl_ms, source)
+    capture = _wire_attempt.get()
+    if capture is not None:
+        capture.hint = hint
+    else:
+        # Retain direct-builder inspection for existing callers, but public
+        # requests never consume this unowned inspection slot as cache proof.
+        _wire_hint.set(hint)
 
 
 @dataclass(frozen=True)
@@ -272,6 +359,12 @@ class AccountAffinityStore:
         now_ms: int | None = None,
         monotonic: float | None = None,
     ) -> AccountAffinityReceipt | None:
+        """Read lifetime/model/prefix-compatible metadata without renewing it.
+
+        AuthStore must additionally compare endpoint_mode using the actual
+        client and candidate identity before this receipt can select an account.
+        A raw inspection has neither of those concrete dispatch inputs.
+        """
         receipt = self._load(session_id).get(provider)
         now = int(time.time() * 1000) if now_ms is None else now_ms
         mono = time.monotonic() if monotonic is None else monotonic

@@ -93,6 +93,7 @@ if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
         AccountAffinityStore,
         AccountRequestBoundary,
         CacheAffinityHint,
+        EndpointModeResolver,
     )
     from local_operator.providers.usage import QuotaHealth, UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
@@ -3579,6 +3580,8 @@ class AuthStore:
         session_id: str | None,
         boundary: "AccountRequestBoundary | None",
         request: "ChatRequest",
+        *,
+        endpoint_mode: "EndpointModeResolver | None" = None,
     ) -> None:
         current = getattr(self, "_account_request_boundaries", {}).get(session_id)
         if current is not None and current is boundary:
@@ -3589,6 +3592,7 @@ class AuthStore:
             current.provider = self._storage_id(request.model.provider)
             current.model_id = request.model.model_id
             current.compatibility = request_compatibility(request)
+            current.endpoint_mode = endpoint_mode
 
     def end_account_request(
         self, session_id: str | None, boundary: "AccountRequestBoundary | None"
@@ -3597,10 +3601,25 @@ class AuthStore:
         if session_id and boundaries.get(session_id) is boundary:
             boundaries.pop(session_id, None)
 
+    @staticmethod
+    def _selection_identity(row: StoredCredential) -> OAuthAccess:
+        # Mode decisions need only credential metadata, never a bearer refresh.
+        # These are the same kind/org fields get_oauth_access passes to clients.
+        return OAuthAccess(
+            access_token="",
+            credential_id=row.id,
+            kind="oauth" if row.credential_type == "oauth" else "api_key",
+            org_id=row.data.get("org_id"),
+            api_endpoint=row.data.get("api_endpoint"),
+        )
+
     def _tentative_credential_id(
         self, rows: list[StoredCredential], provider: str, session_id: str | None
     ) -> int | None:
-        from local_operator.providers.account_affinity import current_request_isolated
+        from local_operator.providers.account_affinity import (
+            current_request_isolated,
+            current_selection_endpoint,
+        )
 
         boundary = getattr(self, "_account_request_boundaries", {}).get(session_id)
         selected = boundary.picks.get(self._storage_id(provider)) if boundary is not None else None
@@ -3608,7 +3627,16 @@ class AuthStore:
             # Decorative helpers borrow the main pointer read-only; they cannot
             # turn it into evidence for a later MAIN request or move it.
             selected = self.session_credential_id(provider, session_id)
-        return selected if any(row.id == selected for row in rows) else None
+        chosen = next((row for row in rows if row.id == selected), None)
+        if chosen is not None and boundary is not None and boundary.endpoint_mode is not None:
+            current_mode = current_selection_endpoint()
+            if current_mode is not None:
+                identity = self._selection_identity(chosen)
+                if current_mode(identity) != boundary.endpoint_mode(identity):
+                    # A hot API-mode change between preflight and dispatch may
+                    # not carry the old endpoint's tentative selection forward.
+                    return None
+        return selected if chosen is not None else None
 
     def _account_affinity_store(self) -> "AccountAffinityStore":
         from local_operator.providers.account_affinity import AccountAffinityStore
@@ -3625,6 +3653,7 @@ class AuthStore:
         self, rows: list[StoredCredential], provider: str, session_id: str | None, model_id: str
     ) -> int | None:
         from local_operator.providers.account_affinity import (
+            current_selection_endpoint,
             current_selection_signature,
         )
 
@@ -3642,10 +3671,25 @@ class AuthStore:
         receipt = self._account_affinity_store().get(
             session_id, self._storage_id(provider), model_id, signature
         )
-        if receipt is not None and any(
-            row.id == receipt.account_id and row.created_at == receipt.account_created_at
-            for row in rows
-        ):
+        if receipt is not None:
+            chosen = next(
+                (
+                    row
+                    for row in rows
+                    if row.id == receipt.account_id and row.created_at == receipt.account_created_at
+                ),
+                None,
+            )
+            if chosen is None:
+                return None
+            endpoint = current_selection_endpoint() or (
+                boundary.endpoint_mode if boundary is not None else None
+            )
+            if (
+                endpoint is not None
+                and endpoint(self._selection_identity(chosen)) != receipt.endpoint_mode
+            ):
+                return None
             return receipt.account_id
         return None
 
@@ -3735,12 +3779,12 @@ class AuthStore:
             return []
         tie_order = None
         if not session_id:
-            # Preserve round-robin ONLY for ties/unknowns; no session must not
-            # bypass measured eligibility or a comparable reset deadline.
+            # Non-session callers retain round-robin among eligible siblings;
+            # a conversation policy cannot repeatedly bind an anonymous caller.
             provider_key = f"{provider}:any"
             start = self._round_robin.get(provider_key, 0) % len(rows)
             self._round_robin[provider_key] = start + 1
-            tie_order = {row.id: index for index, row in enumerate(rows[start:] + rows[:start])}
+            return rows[start:] + rows[:start]
         eligible_ids = reset_ranked_ids(candidates, session_id, tie_order=tie_order)
         anchored_id = self._affinity_credential_id(rows, provider, session_id, model_id)
         if anchored_id is not None:
@@ -3973,11 +4017,10 @@ class AuthStore:
         from local_operator.providers.account_affinity import current_selection_policy
 
         def spread(group: list[StoredCredential]) -> list[StoredCredential]:
-            return (
-                sorted(group, key=lambda row: tie_order[row.id])
-                if tie_order is not None
-                else self._hash_order(group, session_id or "")
-            )
+            if tie_order is not None:
+                ranks = tie_order
+                return sorted(group, key=lambda row: ranks[row.id])
+            return self._hash_order(group, session_id or "")
 
         fallback = spread(rows)
         enabled = current_selection_policy() == "headroom" or self._usage_aware_pick
@@ -4090,9 +4133,11 @@ class AuthStore:
         """Point a session's sticky selection at ``credential_id``.
 
         The public half of :meth:`_set_sticky`, for callers that have just
-        PROBED a specific account and must route the session to the account
-        the quota verdict was about. Quota-aware preflight re-checks blocked
-        siblings one by one; without pinning, the cascade's round-robin /
+        PROBED an account inside the active request boundary. The boundary
+        keeps that request coherent with its quota verdict; an unscoped
+        diagnostic pointer is neither a future request plan nor a cache lease.
+        Quota-aware preflight re-checks blocked siblings one by one; without
+        pinning, the cascade's round-robin /
         stickiness could hand the request to a different row than the one
         whose usage was just read, and the session would keep failing on an
         account the recovery walk had already judged. A no-op without a

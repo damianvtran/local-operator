@@ -289,16 +289,22 @@ async def test_real_configurator_preflight_uses_the_fitted_cache_lineage(routing
             await stream_fn.close()
 
 
-async def test_no_session_still_ranks_resets_and_excludes_spent_accounts(routing):
+async def test_no_session_rotates_eligible_rows_without_session_reset_preference(routing):
     store, rows, reports, clock = routing
-    first = await store.get_oauth_access("anthropic", model_id=request().model.model_id)
-    assert first.credential_id == rows[0].id
+    selected = [
+        (await store.get_oauth_access("anthropic", model_id=request().model.model_id)).credential_id
+        for _ in range(4)
+    ]
+    assert selected == [rows[0].id, rows[1].id] * 2
     reports[rows[0].id] = replace(
         reports[rows[0].id],
         limits=[replace(reports[rows[0].id].limits[0], amount=UsageAmount(used_fraction=1.0))],
     )
-    second = await store.get_oauth_access("anthropic", model_id=request().model.model_id)
-    assert second.credential_id == rows[1].id
+    survivors = [
+        (await store.get_oauth_access("anthropic", model_id=request().model.model_id)).credential_id
+        for _ in range(2)
+    ]
+    assert survivors == [rows[1].id] * 2
 
 
 async def test_default_reset_beats_headroom_then_success_lease_expires(routing):

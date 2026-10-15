@@ -4242,11 +4242,15 @@ async def stream_with_failover(
                     None, signal.reason or "aborted", retryable=False, kind="aborted"
                 )
             if not retry_same_key:
-                from local_operator.providers.account_affinity import selection_context
+                from local_operator.providers.account_affinity import (
+                    endpoint_mode_resolver,
+                    selection_context,
+                )
 
                 with selection_context(
                     current_request,
                     retry.account_selection_policy if settings is not None else None,
+                    endpoint_mode=endpoint_mode_resolver(client, current_request),
                 ):
                     access = await _resolve_access_for_provider(
                         auth,
@@ -4422,17 +4426,19 @@ async def stream_with_failover(
             # title), which the caller was going to hold in full regardless.
             buffered: list[StreamEvent] | None = [] if current_request.replayable else None
             from local_operator.providers.account_affinity import (
-                clear_wire_hint,
-                wire_hint,
+                WireHintCapture,
+                capture_wire_stream,
             )
 
-            clear_wire_hint()
+            attempt_hint = WireHintCapture()
             sent_at_ms = int(time.time() * 1000)
             sent_monotonic = time.monotonic()
             successful_terminal = False
             failed_terminal = False
             try:
-                async for event in client.stream(current_request, key, oauth_access=access):
+                async for event in capture_wire_stream(
+                    client.stream(current_request, key, oauth_access=access), attempt_hint
+                ):
                     if isinstance(event, StreamEndEvent):
                         successful_terminal = (
                             event.stop_reason in ("stop", "length", "toolUse") and not event.error
@@ -4503,7 +4509,7 @@ async def stream_with_failover(
                     _clear_demotion(auth, provider, access)
                     if failed_terminal:
                         _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
-                    hint = wire_hint()
+                    hint = attempt_hint.hint
                     retain = getattr(auth, "record_account_success", None)
                     if (
                         successful_terminal

@@ -80,7 +80,6 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
-    from local_operator.providers.account_affinity import AccountRequestBoundary
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
@@ -6496,7 +6495,7 @@ class SessionStreamFn:
         self,
         request: ChatRequest,
         signal: AbortSignal | None,
-        boundary: "AccountRequestBoundary | None" = None,
+        boundary: object | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         # A session's old hint describes its preceding request, not this one.
         # Only the counted boundary held by this conversation can reconcile it
@@ -6664,7 +6663,18 @@ class SessionStreamFn:
         request = self._apply_cache_affinity(request)
         update_boundary = getattr(self._auth_store, "update_account_request", None)
         if boundary is not None and callable(update_boundary):
-            update_boundary(self._session_id, boundary, request)
+            from local_operator.providers.account_affinity import endpoint_mode_resolver
+
+            # Snapshot the SAME fitted client factory's actual API decision for
+            # preflight. This constructs no request/refresh; a capability flag
+            # cannot tell an explicitly selected Chat route from Responses.
+            mode_client = self._client_for(request.model)
+            update_boundary(
+                self._session_id,
+                boundary,
+                request,
+                endpoint_mode=endpoint_mode_resolver(mode_client, request),
+            )
 
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message

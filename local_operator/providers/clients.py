@@ -3193,6 +3193,26 @@ class OpenAICompatClient:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
 
+    def account_cache_endpoint_mode(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None" = None
+    ) -> str | None:
+        """Selection-time compatibility uses the same decision as the wire.
+
+        Codex is credential-derived and ignores the public API setting; a
+        Responses-capable model can still be explicitly sent through Chat.
+        """
+        if not request.model.supports_prompt_cache or not request.prompt_cache_key:
+            return None
+        if self._codex_responses_mode(oauth_access):
+            return "codex:responses"
+        if self._base_url != "https://api.openai.com/v1":
+            return None
+        return (
+            "openai:responses"
+            if self._public_responses_mode(request, oauth_access)
+            else "openai:chat"
+        )
+
     def _codex_responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
         """Whether this credential is a ChatGPT subscription OAuth grant."""
         return bool(
@@ -4397,6 +4417,11 @@ class AnthropicClient:
         for block in message_targets:
             if isinstance(block, dict):
                 block["cache_control"] = self._cache_control(ttl)
+
+    def account_cache_endpoint_mode(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None" = None
+    ) -> str | None:
+        return "anthropic:messages" if self._base_url == ANTHROPIC_API_URL else None
 
     def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
