@@ -24,7 +24,11 @@ description: "Remember and recall scoped files, links, contacts, names, goals an
   Passport/licence/SSN/card numbers and credential values belong in `lop secret`,
   not memory. Never bulk-ingest transcripts, environment variables or private
   credential paths. Shape checks are heuristic, not proof all free-text secrets
-  can be recognised. Scope filtering is not a filesystem sandbox.
+  can be recognised: they refuse recognised ID/card/IBAN/tax-id numbers, credential
+  shapes, `password is …` prose and unnamed long hex/base64 tokens, but an unlabelled
+  secret can still be stored, journaled and synced. When unsure, keep the value in
+  `lop secret` and write only its NAME (for example `uses secret GITHUB_TOKEN`).
+  Scope filtering is not a filesystem sandbox.
 
 ## Existing read/write/edit tools
 
@@ -53,6 +57,8 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
 - Follow **one** explicit association hop:
   `read("memory://session/ID?related=true")` gives at most three same-scope
   locator/subject/source-linked neighbours. No automatic graph spreading.
+  A fact replaced with `replaces` is hidden from search; read the **replacement**
+  with `?related=true` to reach its predecessor (history is not searchable).
 - Inspect a conflict/revision with `read("memory://session/ID?version=REV")`.
 - Correct with `edit(path="memory://session/ID", old_text="REV",
   new_text=<replacement JSON string>)`. Read again on conflict; do not retry a
@@ -98,7 +104,11 @@ No live-peer interoperability claim follows from isolated loopback tests.
 Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
 `.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
 for policy, quotas and peer exclusions. Human inspection/correction uses
-`lop memory` / `/memory`: list, show, search, edit, forget and status.
+`lop memory` / `/memory`: list, show, search, edit, forget and status. Rows print
+a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
+authorised for (`--session ID` adds a session), and items are labelled `captured`
+(automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
+changes only the named fields; `--json` prints machine-readable output.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.
