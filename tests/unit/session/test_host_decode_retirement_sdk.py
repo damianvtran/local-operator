@@ -29,6 +29,7 @@ from typing import Any, AsyncIterator
 import httpx
 import pytest
 import requests
+import requests.adapters
 import yaml
 
 from local_operator.harness.types import (
@@ -217,11 +218,14 @@ async def _converse(world: Any, plan: list[str], monkeypatch: pytest.MonkeyPatch
     notices: list[str] = []
     spec = SessionSpec(hosting="openrouter", model=MODEL, approvals=ApprovalPolicy.auto())
     async with sdk.open_session(spec, roots=world["roots"]) as session:
-        session.subscribe(
-            lambda event: (
-                notices.append(event.text) if getattr(event, "type", "") == "notice" else None
-            )
-        )
+
+        def collect(event: Any) -> None:
+            # ``Any``: the subscriber is handed the session's event union, and only
+            # a NoticeEvent carries ``text``.
+            if getattr(event, "type", "") == "notice":
+                notices.append(event.text)
+
+        session.subscribe(collect)
         for index in range(len(plan)):
             await session.prompt(f"turn {index + 1}")
     return router, notices
