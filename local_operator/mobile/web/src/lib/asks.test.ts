@@ -14,6 +14,7 @@ import {
 	durationLabel,
 	headAsk,
 	isAnswerable,
+	isLapsed,
 	orderedForDisplay,
 	outstandingAsks,
 	questionProgress,
@@ -51,10 +52,12 @@ describe("askStateLine", () => {
 		);
 	});
 
-	it("keeps the timed-out state honest: moved on AND still answerable", () => {
+	it("states a timed-out ask as lapsed: the agent took its default", () => {
+		/* Ben's report (2026-10-15): "you can still answer" invited an answer to a
+		   question the agent had already settled for itself. */
 		const line = askStateLine(ask({ status: "timed_out" }), 1);
-		expect(line.text).toBe("Timed out — the agent moved on; you can still answer");
-		expect(line.tone).toBe("attention");
+		expect(line.text).toBe("Lapsed — the agent took its default and moved on");
+		expect(line.tone).toBe("gone");
 	});
 
 	it("names a dismissal as no reply at all, and an expiry as unfixable", () => {
@@ -73,10 +76,12 @@ describe("askStateLine", () => {
 		expect(isAnswerable("withdrawn")).toBe(false);
 	});
 
-	it("does not claim a deadline that has already passed locally is still counting", () => {
+	it("states an open ask past its deadline on the phone's clock as lapsed", () => {
+		/* The index keeps reporting `open` for a runtime stopped before its
+		   deadline, so the phone's clock is the check (`isLapsed`). */
 		const line = askStateLine(ask({ expires_at: 500 }), 1000);
-		expect(line.text).toBe("Queued — the agent is continuing; deadline passed");
-		expect(line.tone).toBe("attention");
+		expect(line.text).toBe("Lapsed — the agent took its default and moved on");
+		expect(line.tone).toBe("gone");
 	});
 });
 
@@ -146,6 +151,16 @@ describe("outstanding / answerable", () => {
 			ask({ ask_id: "d", status: "dismissed" }),
 		];
 		expect(outstandingAsks(rows).map((row) => row.ask_id)).toEqual(["o", "t"]);
+	});
+
+	it("reads a lapse from timed_out, or from an open ask past its deadline — and nothing else", () => {
+		expect(isLapsed(ask({ status: "timed_out" }), 1)).toBe(true);
+		expect(isLapsed(ask({ expires_at: 500 }), 500)).toBe(true);
+		expect(isLapsed(ask({ expires_at: 500 }), 499)).toBe(false);
+		/* No deadline is not a passed deadline. */
+		expect(isLapsed(ask({ expires_at: 0 }), 1000)).toBe(false);
+		/* A settled ask past its deadline is settled, not lapsed. */
+		expect(isLapsed(ask({ status: "answered", expires_at: 500 }), 1000)).toBe(false);
 	});
 
 	it("treats a timed-out ask as answerable and an answered one as not", () => {

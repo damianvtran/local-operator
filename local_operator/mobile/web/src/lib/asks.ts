@@ -51,12 +51,14 @@ export type AskStatus =
  *  `open` — the honest intermediate, never shown as settled. */
 export type AskTone = "waiting" | "settled" | "gone" | "attention";
 
-/** Whether the card offers answer controls for this state.
+/** Whether the STORE still accepts an answer in this state.
  *
- *  `timed_out` IS answerable and that is the point of the state: the agent moved
- *  on, but the user's answer still reaches it as a `late` response. Everything
- *  already settled (answered/late/declined/dismissed/withdrawn) and everything
- *  too old to carry (expired) is not.
+ *  `timed_out` is answerable on the wire: the queue still takes a late answer
+ *  and delivers it as a `late` response. The phone's card no longer offers one
+ *  there — a lapsed ask (`isLapsed`) is shown read-only — but this predicate
+ *  states the store's contract, which the outstanding count and the dock still
+ *  follow. Everything already settled (answered/late/declined/dismissed/
+ *  withdrawn) and everything too old to carry (expired) is not answerable.
  */
 export function isAnswerable(status: string): boolean {
 	return status === "open" || status === "timed_out";
@@ -71,6 +73,27 @@ export function isAnswerable(status: string): boolean {
 export function isOutstanding(status: string): boolean {
 	return isAnswerable(status);
 }
+
+/** Whether an ask's deadline has passed — the agent took its default and moved
+ *  on — so the card shows the question read-only instead of offering options.
+ *
+ *  `timed_out` is the runtime's own word for it. The `open` half exists because
+ *  `asks/store.py` `index_asks` returns the status the runtime last WROTE and
+ *  never re-folds it against the clock: a session stopped before its deadline
+ *  keeps reporting `open` past it until its runtime runs again and reconciles
+ *  (the asks in Ben's 2026-10-15 report lapsed while their runtime was stopped).
+ *  The phone's clock is the only check that runs without a turn. An absent or
+ *  zero `expires_at` means no deadline, never a lapsed one. */
+export function isLapsed(row: PendingAsk, nowMs: number): boolean {
+	const status = String(row.status || "open");
+	if (status === "timed_out") return true;
+	if (status !== "open") return false;
+	const expires = Number(row.expires_at) || 0;
+	return expires > 0 && expires <= nowMs;
+}
+
+/** The one line a lapsed ask (`isLapsed`) states, whichever status carried it. */
+const LAPSED_LINE = "Lapsed — the agent took its default and moved on";
 
 /** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
  *
@@ -157,14 +180,15 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 	const left = remainingMs(row, nowMs);
 	switch (status) {
 		case "open": {
+			if (isLapsed(row, nowMs)) {
+				/* The runtime has not folded the deadline yet — for seconds while it
+				   is live, indefinitely while it is stopped (see `isLapsed`). Either
+				   way the agent's deadline is over, so the line is the timed-out one. */
+				return { text: LAPSED_LINE, tone: "gone" };
+			}
 			if (left <= 0) {
-				/* The runtime has not folded the deadline yet (it folds on its own
-				   ≤60s tick), so this is a race window measured in seconds — but it
-				   is also the user's real situation, and claiming "expires in 0 m"
-				   or silently showing the pre-deadline line would both be untrue.
-				   The ask is still answerable either way, so the remedy is the same
-				   answer the timed-out line gives. */
-				return { text: "Queued — the agent is continuing; deadline passed", tone: "attention" };
+				/* `expires_at` absent or zero: no deadline to count down. */
+				return { text: "Queued — the agent is continuing", tone: "waiting" };
 			}
 			return {
 				text: `Queued — the agent is continuing; expires in ${durationLabel(left)}`,
@@ -196,10 +220,7 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 				tone: "gone",
 			};
 		case "timed_out":
-			return {
-				text: "Timed out — the agent moved on; you can still answer",
-				tone: "attention",
-			};
+			return { text: LAPSED_LINE, tone: "gone" };
 		default:
 			/* A status from a newer runtime. Passing it through as its own word is
 			   the same rule the projects sheet follows for an unknown project
