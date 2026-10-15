@@ -18736,6 +18736,7 @@ BROWSER_ACTIONS = (
     "request_access",
     "await_access",
     "cancel_access",
+    "inspect_ownership",
     "recover",
     "retain",
     "release",
@@ -23171,6 +23172,16 @@ async def execute_browser(
     confinement = confinement_of(context)
     if confinement is not None:
         return _error(tool_call_id, "browser", confinement.network_refusal("browser"))
+    # A diagnostic must precede host selection, initialization, recovery, the
+    # approval gate and update-note bookkeeping: all can write owner state.
+    if str(args.get("action", "")).strip().lower() == "inspect_ownership":
+        resource = getattr(getattr(context, "browser", None), "resource", None)
+        result = (
+            await resource.inspect_ownership()
+            if resource is not None
+            else {"version": 1, "local_scope_missing": True}
+        )
+        return _text(tool_call_id, "browser", json.dumps(result, sort_keys=True), details=result)
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -23990,8 +24001,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # `local_operator/browser_files.py`, which runs unconditionally, plus this
         # describer naming what the call will do.
         approval_tier="write",
+        # Inspection is a true read: the harness must not ask for a write
+        # approval before it can reach the deliberately effect-free dispatcher.
         call_approval_tier=lambda args: (
-            "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+            "read"
+            if str(args.get("action") or "").strip().lower() == "inspect_ownership"
+            else "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
         ),
         concurrency="shared",
         interruptible=False,

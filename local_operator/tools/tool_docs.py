@@ -238,6 +238,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
+                op="inspect_ownership",
+                blurb=(
+                    "Read-only extension ownership snapshot; "
+                    "no recovery, allocation or approval changes."
+                ),
+            ),
+            ToolDocOp(
                 op="request_access",
                 blurb="Raise the site-approval prompt for a not-yet-allowed origin.",
             ),

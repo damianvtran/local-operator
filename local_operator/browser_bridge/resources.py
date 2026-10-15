@@ -809,6 +809,110 @@ class BrowserResource:
         if all(per_lane.get(lane) == [self.generation] for lane in _REPLAY_LANES):
             self.record["bridge_generations"] = [self.generation]
 
+    async def inspect_ownership(self) -> dict[str, Any]:
+        """Read only the existing extension identity, without initializing a lane.
+
+        ``params()`` initializes and saves, and ``client()`` resolves a mutable
+        lane: neither is safe for inspection. Use a detached disk snapshot and
+        the extension transport directly; never recover, retry, or update caches.
+        The response is allowlisted because peers are not a logging boundary.
+        """
+        # Bound the sidecar before decoding: an inspection cannot spend unbounded
+        # CPU/memory on a corrupt journal, nor create a missing directory.
+        try:
+            with self.path.open() as stream:
+                raw = stream.read(65537)
+            if len(raw) > 65536:
+                return {"version": 1, "error_code": "ownership_inspection_invalid"}
+            snapshot = json.loads(raw)
+            if not isinstance(snapshot, dict) or snapshot.get("session_id") != self.session_id:
+                return {"version": 1, "error_code": "ownership_inspection_invalid"}
+        except FileNotFoundError:
+            snapshot = {}
+        except (OSError, ValueError, RecursionError):
+            return {"version": 1, "error_code": "ownership_inspection_invalid"}
+        if not snapshot:
+            return {"version": 1, "local_scope_missing": True}
+        if (
+            self.host not in ("", HOST_BRIDGE)
+            or snapshot.get("host", "") not in ("", HOST_BRIDGE)
+            or surface_host(str(snapshot.get("surface_id", ""))) == HOST_UI
+        ):
+            return {"version": 1, "error_code": "ownership_inspection_unsupported"}
+        lanes = snapshot.get("lane_generations", {})
+        chain = (
+            lanes.get(HOST_BRIDGE, snapshot.get("bridge_generations", []))
+            if isinstance(lanes, dict)
+            else None
+        )
+
+        def valid_string(value: Any, maximum: int) -> bool:
+            return isinstance(value, str) and 0 < len(value) <= maximum
+
+        if (
+            not valid_string(snapshot.get("proof"), 128)
+            or not valid_string(self.generation or snapshot.get("generation"), 128)
+            or not isinstance(chain, list)
+            or len(chain) > MAX_REPLAY_GENERATIONS
+            or not all(valid_string(value, 128) for value in chain)
+            or len(self.session_id) > 248
+            or len(self.previous_generation) > 128
+        ):
+            return {"version": 1, "error_code": "ownership_inspection_invalid"}
+        params = {
+            "requester": f"session:{self.session_id}",
+            "owner_proof": snapshot.get("proof"),
+            "owner_generation": self.generation or snapshot.get("generation"),
+            "previous_generation": self.previous_generation,
+            "previous_generations": chain,
+        }
+        try:
+            async with asyncio.timeout(10):
+                result = await BridgeClient().call("owner_inspect", params)
+        except BridgeError as exc:
+            unsupported = exc.code in (
+                ErrorCode.UNSUPPORTED_METHOD,
+                ErrorCode.CAPABILITY_UNSUPPORTED,
+                ErrorCode.INTERNAL,
+            )
+            return {
+                "version": 1,
+                "error_code": (
+                    "ownership_inspection_unsupported"
+                    if unsupported
+                    else "ownership_inspection_unavailable"
+                ),
+            }
+        except Exception:  # noqa: BLE001 - never echo a peer's secret-bearing error
+            return {"version": 1, "error_code": "ownership_inspection_unavailable"}
+        if (
+            not isinstance(result, dict)
+            or type(result.get("version")) is not int
+            or result.get("version") != 1
+            or type(result.get("session_match")) is not bool
+        ):
+            return {"version": 1, "error_code": "ownership_inspection_unsupported"}
+        clean: dict[str, Any] = {"version": 1, "session_match": result["session_match"]}
+        # No scope-derived fields cross a foreign-session boundary, even if a
+        # buggy peer sends them. Counts are only of bounded caller input.
+        keys = (
+            ("scope_missing",)
+            if not result["session_match"]
+            else (
+                "scope_missing",
+                "generation_current",
+                "generation_previous",
+                "generation_ancestry",
+            )
+        )
+        for key in keys:
+            if type(result.get(key)) is bool:
+                clean[key] = result[key]
+        count = result.get("request_ancestry_count")
+        if result["session_match"] and type(count) is int and 0 <= count <= MAX_REPLAY_GENERATIONS:
+            clean["request_ancestry_count"] = count
+        return clean
+
     def params(self) -> dict[str, Any]:
         self.initialize()
         return {
