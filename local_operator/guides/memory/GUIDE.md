@@ -30,15 +30,20 @@ description: "Read guide://memory to save or recall goals, files, channels, thre
   `lop secret` and write only its NAME (for example `uses secret GITHUB_TOKEN`).
   Scope filtering is not a filesystem sandbox.
 
-## Deliberate store and recall
+## Durable personal helper; scoped work URLs
 
-Use `memory(op="store", scope="session", text="Kestrel rollout ships Friday; runbook docs/kestrel.md")`
-for an atomic fact, and `memory(op="recall", scope="session", text="Kestrel rollout")` to find it.
-Choose `global` for an explicit future-session durability request or deliberately cross-session
-user facts; never override the selected scope automatically. `session` is the
-current conversation, not a cross-session address. The tool uses the same guard,
-quotas and provenance as the URLs below. Explicit role tool allowlists are never widened:
-if `memory` is absent, use the existing read/write/edit protocol.
+`memory(op="store", text="My colleague Elara lives in Dunedin")` deliberately retains
+nonsecret personal/user knowledge in **global** memory, across sessions. Recall with
+`memory(op="recall", text="Elara location")`. Both operations are bound to global;
+there is **no scope argument**. Old scope-bearing calls are refused, never stripped
+or reinterpreted. This is a declared personal-only convenience, not a content
+classifier or a guarantee that a model will always choose the right tool.
+
+Temporary work, checkpoints and team/profile knowledge use the explicit URLs below:
+`memory://session`, `memory://team`, `memory://agent`, or `memory://global` when
+intentionally durable. Existing session rows are not promoted or rewritten. Guards,
+quotas, provenance and host approvals are shared. Explicit role allowlists are never
+widened; when the helper is absent, use read/write/edit URLs.
 
 The human CLI verbs are `list`, `show`, `search`, `edit`, `forget`, `status` — there
 are no `lop memory remember` or `recall` CLI commands.

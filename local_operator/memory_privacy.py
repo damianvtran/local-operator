@@ -84,8 +84,6 @@ def retained_arguments(
             if isinstance(arguments, dict):
                 if arguments.get("op") in ("store", "recall"):
                     safe["op"] = arguments["op"]
-                if arguments.get("scope") in ("global", "session", "team", "agent"):
-                    safe["scope"] = arguments["scope"]
         else:
             path = arguments["path"]
             try:

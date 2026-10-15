@@ -4077,12 +4077,27 @@ class AgentLoop:
 
         _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
         if sensitive_memory:
+            from local_operator.memory import (
+                MEMORY_TOOL_CONTRACT_ERROR,
+                valid_memory_tool_arguments,
+            )
+
+            invalid_contract = call.name == "memory" and not valid_memory_tool_arguments(
+                call.arguments
+            )
             return _PlannedCall(
                 call=call,
                 tool=tool,
                 failure=self._synthetic_result(
                     call,
-                    "Sensitive value refused. Use lop secret; memory may hold its NAME only.",
+                    (
+                        MEMORY_TOOL_CONTRACT_ERROR
+                        if invalid_contract
+                        else (
+                            "Sensitive value refused. Use lop secret; "
+                            "memory may hold its NAME only."
+                        )
+                    ),
                     details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
                 ),
             )

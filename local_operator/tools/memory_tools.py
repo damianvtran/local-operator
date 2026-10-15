@@ -16,9 +16,10 @@ from urllib.parse import quote
 
 from local_operator.harness.types import TextContent, ToolContext, ToolResult
 from local_operator.memory import (
+    MEMORY_TOOL_CONTRACT_ERROR,
     MEMORY_TOOL_OPS,
     MEMORY_TOOL_REQUIRED,
-    MEMORY_TOOL_SCOPES,
+    RECALL_TOKENS,
     MemoryError,
     MemoryIdentity,
     MemoryStore,
@@ -214,11 +215,12 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
     try:
         guard_encoded(args)
         if not valid_memory_tool_arguments(args):
-            raise MemoryError(
-                "Use memory op=store|recall, scope=session|team|agent|global, text=fact/query."
-            )
+            raise MemoryError(MEMORY_TOOL_CONTRACT_ERROR)
         text = args["text"]
-        path = "memory://" + args["scope"]
+        # The tool's declared domain is durable personal knowledge, bound to
+        # the global bank. Scope-bearing calls are INVALID above, never silently
+        # stripped/promoted. Work/checkpoints keep explicit four-scope URLs.
+        path = "memory://global"
         if args["op"] == "store":
             guard(text, opaque=True)
             payload = {
@@ -233,6 +235,21 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
             result = await execute_memory(
                 call_id, "read", {"path": path + "?q=" + quote(text)}, context
             )
+        if not result.is_error:
+            value = json.loads(str(getattr(result.content[0], "text", "")))
+            if args["op"] == "store":
+                value.update(uri=path + "/" + value["id"], lifetime="global/across sessions")
+            else:
+                value = {"bank": "global/across sessions", "items": value}
+                # Count the actual lifetime-labelled receipt inside the existing
+                # recall ceiling. Drop whole return candidates only, never bodies
+                # or stored facts; report paging rather than hiding that reduction.
+                from local_operator.compaction.tokens import count_text_tokens
+
+                while value["items"] and count_text_tokens(json.dumps(value)) > RECALL_TOKENS:
+                    value["items"].pop()
+                    value["truncated"] = True
+            result = result.model_copy(update={"content": [TextContent(text=json.dumps(value))]})
         return result.model_copy(update={"tool_name": "memory"})
     except (MemoryError, ValueError, TypeError, OSError, sqlite3.Error) as exc:
         return ToolResult(
@@ -259,30 +276,26 @@ def build_memory_tool():
         name="memory",
         label="Memory",
         description=(
-            "Store/recall facts; use secret for secret values/IDs, NAMEs only here. "
-            "Inspect/correct: memory://."
+            "Store/recall durable personal facts across sessions: user/colleague names, "
+            "locations, contacts. Temporary work: read/write/edit memory://session "
+            "(or team/agent). "
+            "Secrets/IDs: use secret; NAMEs only here."
         ),
         parameters={
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "op": {"type": "string", "enum": list(MEMORY_TOOL_OPS)},
-                "scope": {
-                    "type": "string",
-                    "enum": list(MEMORY_TOOL_SCOPES),
-                    "description": (
-                        "session=work state; global=user facts/future sessions; "
-                        "team/agent=role knowledge"
-                    ),
-                },
-                "text": {"type": "string", "description": "Fact or query"},
+                "text": {"type": "string", "description": "Durable personal fact or query"},
             },
             "required": list(MEMORY_TOOL_REQUIRED),
         },
         approval_tier="write",
         call_approval_tier=lambda args: "read" if args.get("op") == "recall" else "write",
         describe_approval=lambda args, _context: (
-            "Store a scoped memory fact" if args.get("op") == "store" else "Recall scoped memory"
+            "Store durable personal fact in global memory (across sessions)"
+            if args.get("op") == "store"
+            else "Recall global personal memory"
         ),
         concurrency="exclusive",
         interruptible=False,

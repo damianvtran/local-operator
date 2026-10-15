@@ -70,7 +70,7 @@ def test_undecodable_memory_raw_is_fail_closed_but_private_and_nonmemory_bytes_s
         )
         assert retained_message(ordinary) is ordinary
         assert retained_arguments("echo", {}, raw) == ({}, raw, False)
-    valid = {"op": "store", "scope": "global", "text": "Uses secret GITHUB_TOKEN"}
+    valid = {"op": "store", "text": "Uses secret GITHUB_TOKEN"}
     assert retained_arguments("memory", valid, json.dumps(valid)) == (
         valid,
         json.dumps(valid),
@@ -152,3 +152,50 @@ def test_parser_warning_never_echoes_raw_or_provider_controlled_tool_name(caplog
     assert call.raw_arguments == raw and call.name == name
     assert "does not parse" in caplog.text
     assert "123-45-6789" not in caplog.text and "malformed-name" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["global", "session", "team", "agent"])
+async def test_real_session_legacy_scope_shape_is_redacted_without_promotion(tmp_path, scope):
+    text = "Synthetic legacy personal locator must not be promoted"
+    args = {"op": "store", "scope": scope, "text": text}
+    raw = json.dumps(args)
+    calls = 0
+    events = []
+
+    def stream(request, signal):
+        nonlocal calls
+        calls += 1
+
+        async def produce():
+            if calls == 1:
+                yield StreamToolCallDelta(index=0, id="legacy", name="memory", argument_delta=raw)
+                yield StreamEndEvent(stop_reason="toolUse", provider_payload={"alternate": raw})
+            else:
+                yield StreamTextDelta(delta="Rejected legacy shape")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return produce()
+
+    transcript = Transcript(tmp_path / "sessions" / "legacy")
+    session = Session(
+        model=ModelSpec(provider="test", model_id="deterministic", context_window=100000),
+        stream_fn=stream,
+        tools=[build_memory_tool()],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable"],
+        session_id="legacy",
+        yolo=True,
+        cwd=str(tmp_path),
+    )
+    session.subscribe(events.append)
+    try:
+        await session.prompt("Exercise synthetic compatibility refusal")
+        assert calls == 2
+        retained = json.dumps([e.payload for e in transcript.entries()])
+        published = json.dumps([e.model_dump(mode="json") for e in events], default=str)
+        assert text not in retained + published and "memory_arguments_redacted" in retained
+        assert "Invalid memory contract" in retained and "No scope argument" in retained
+        assert not (session._config_dir / "memory").exists()
+    finally:
+        await session.dispose()
