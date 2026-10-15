@@ -24,7 +24,7 @@ description: "Remember and recall scoped files, links, contacts, names, goals an
   Passport/licence/SSN/card numbers and credential values belong in `lop secret`,
   not memory. Never bulk-ingest transcripts, environment variables or private
   credential paths. Shape checks are heuristic, not proof all free-text secrets
-  can be recognised: they refuse recognised ID/card/IBAN/tax-id numbers, credential
+  can be recognized: they refuse recognized ID/card/IBAN/tax-id numbers, credential
   shapes, `password is …` prose and unnamed long hex/base64 tokens, but an unlabelled
   secret can still be stored, journaled and synced. When unsure, keep the value in
   `lop secret` and write only its NAME (for example `uses secret GITHUB_TOKEN`).
@@ -52,7 +52,7 @@ and optional `replaces` (an explicit old ID in the same scope).
 Never mark an inference as observed. Captures are candidates, not confirmed facts.
 
 - Search: `read("memory://session?q=deployment+proof&tokens=1200")`; omit scope
-  to search current authorised scopes. Default 1200, hard 2000 tokens.
+  to search current authorized scopes. Default 1200, hard 2000 tokens.
 - Inspect: `read("memory://session/ID")`; note `version`, source, age and conflicts.
 - Follow **one** explicit association hop:
   `read("memory://session/ID?related=true")` gives at most three same-scope
@@ -106,7 +106,7 @@ Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
 for policy, quotas and peer exclusions. Human inspection/correction uses
 `lop memory` / `/memory`: list, show, search, edit, forget and status. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
-authorised for (`--session ID` adds a session), and items are labelled `captured`
+authorized for (`--session ID` adds a session), and items are labelled `captured`
 (automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`
 changes only the named fields; `--json` prints machine-readable output.
 
