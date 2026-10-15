@@ -41,12 +41,19 @@ MEMORY_DEFAULT_ENABLED = True
 # Hex ids stop at 12 characters (short git SHAs) and need a digit: longer bare hex is
 # indistinguishable from an API key and is deliberately NOT captured (review R4).
 _LOCATOR = re.compile(
-    r"https?://[^\s<>\"']{1,400}"
+    # Consume other URI schemes atomically too: ignoring guide:// must not
+    # leave its //tail available to the path alternative. A window is <=4096.
+    # A label colon (URL:https://...) is punctuation, not a URI tail. Real
+    # scheme:// tokens are consumed by this alternative before their contents.
+    r"(?<![\w/])(?P<uri>[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s<>\"'`]{1,4096})"
     r"|(?<![\w.+-])[\w.+-]{1,64}@[\w.-]{1,255}\.[A-Za-z]{2,24}"
-    r"|(?:~?/|\b(?:src|docs|tests|local_operator)/)[^\s<>\"']{1,400}"
+    # A slash inside a ratio, URI or another path is not a new absolute root.
+    r"|(?<![\w:/~.-])(?:~?/|\.\.?/|(?:src|docs|tests|local_operator)/)[^\s<>\"'`]{1,400}"
     r"|\bsecret\s{1,8}[A-Z][A-Z0-9_]{2,63}\b|(?<!\w)#[\w-]{2,64}"
     r"|\b(?=[0-9a-f]{7,12}\b)[0-9a-f]*\d[0-9a-f]*\b"
-    r"|\b(?:branch|thread)[: ]{1,3}[\w./-]{3,128}"
+    # The finite bound is a rejection limit, not permission to publish a
+    # prefix of a longer branch/thread identifier into memory or associations.
+    r"|(?P<reference>\b(?:branch|thread)(?:\s{0,3}:\s{0,3}|\s{1,3})[\w./-]{3,128}(?![\w./-]))"
 )
 #: The regex never sees more than this many characters at once. Bounded quantifiers make
 #: each call linear; windowing makes the worst case independent of input size, and lets
@@ -116,12 +123,34 @@ def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
     counts: Counter[str] = Counter()
     last: dict[str, int] = {}
     index = 0
+    offset = 0
     for window in windows(text[:2000000]):
         if time.monotonic() - started > 2:
             raise TimeoutError("memory capture budget")
+        start = offset
+        offset += len(window)
+        if start and not text[start - 1].isspace():
+            # A forced window cut can bisect an oversized URI/path. Do not
+            # reinterpret its continuation as an independent locator; traversal
+            # is still bounded by the unchanged scan window, with no I/O.
+            prefix = next((i for i, char in enumerate(window) if char.isspace()), len(window))
+            window = window[prefix:]
         for match in _LOCATOR.finditer(window):
             index += 1
-            locator = match.group().rstrip(".,;:)]}")[:200]
+            if match.end() == len(window) and offset < len(text) and not text[offset].isspace():
+                continue  # neither a forced cut nor the input cap publishes a whole token
+            locator = match.group().rstrip(".,;:)]}")
+            if len(locator) > 200:
+                continue  # dropping an oversized candidate is safer than persisting a fragment
+            if match.lastgroup == "uri" and not locator.lower().startswith(("http://", "https://")):
+                continue
+            if match.lastgroup == "reference" and ":" not in locator:
+                identifier = locator.split(maxsplit=1)[1]
+                # Without an explicit delimiter, ordinary prose ("branch that",
+                # "thread about") is not evidence of an identifier. Slash refs
+                # and numeric thread IDs remain useful without inventing facts.
+                if "/" not in identifier and not any(char.isdigit() for char in identifier):
+                    continue
             try:
                 guard(locator)
             except MemoryError:

@@ -15,6 +15,93 @@ from local_operator.memory_capture import (
     watermark,
 )
 
+NOISY_LOCATORS = (
+    "Ratio 9/1, see guide://credentials and skill://software-development. "
+    "The branch that we discussed is ready."
+)
+USEFUL_LOCATORS = (
+    "Evidence saved at ~/tools/widget/docs/proof.md; contact user@example.invalid; "
+    "ticket https://example.invalid/task/25; branch: fix/memory-capture."
+)
+USEFUL_BODIES = {
+    "~/tools/widget/docs/proof.md",
+    "user@example.invalid",
+    "https://example.invalid/task/25",
+    "branch: fix/memory-capture",
+}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        NOISY_LOCATORS,
+        "See guide://memory/docs/example and scratchpad://notes/proof.md",
+        "The thread about the branch that we discussed is ready.",
+        "Ratios 9/1 and 3/4 are not absolute paths.",
+    ],
+)
+def test_capture_ignores_prose_ratios_and_internal_uri_fragments(text):
+    assert extract(text) == []
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (USEFUL_LOCATORS, USEFUL_BODIES),
+        ("URL:https://example.invalid/colon", {"https://example.invalid/colon"}),
+        ("docs/説明.md branch: 修正/測定", {"docs/説明.md", "branch: 修正/測定"}),
+        (
+            "(/repo/proof.md) docs/proof.md src/task.py",
+            {"/repo/proof.md", "docs/proof.md", "src/task.py"},
+        ),
+        ("./proof.md ../docs/proof.md", {"./proof.md", "../docs/proof.md"}),
+        (
+            "branch fix/capture thread: 1700000000.123456",
+            {"branch fix/capture", "thread: 1700000000.123456"},
+        ),
+        ("thread 1700000000.123456 branch: main", {"thread 1700000000.123456", "branch: main"}),
+        ("secret GITHUB_TOKEN #LOH-25 abc123def", {"secret GITHUB_TOKEN", "#LOH-25", "abc123def"}),
+    ],
+)
+def test_capture_keeps_complete_useful_locators_without_checking_existence(text, expected):
+    rows = extract(text)
+    assert {row["body"] for row in rows} == expected
+    assert all(set(row) == {"title", "body", "tags"} and row["tags"] == ["locator"] for row in rows)
+
+
+@pytest.mark.parametrize("kind,part", [("branch", "feature/"), ("thread", "topic/")])
+def test_oversized_reference_never_persists_or_recalls_a_prefix(store, kind, part):
+    text = f"{kind}: " + part * 24 + "trailing"
+    rows = extract(text)
+    persist(store, "oversized-reference", rows, "ok")
+    # Exercise retention before asserting: the old parser really wrote and
+    # recalled an invented prefix, not just a different intermediate list.
+    assert store.search("trailing " + part.rstrip("/")) == []
+    assert watermark(store, "oversized-reference") == ("ok", 0)
+    assert store.inventory("session")["items"] == []
+    assert rows == []
+
+
+def test_reference_at_the_identifier_limit_stays_complete():
+    text = "branch: " + "r" * 128
+    assert [row["body"] for row in extract(text)] == [text]
+
+
+def test_capture_noise_does_not_displace_useful_locators():
+    noise = " ".join(f"guide://example/item-{n} ratio 9/{n}" for n in range(100))
+    assert {row["body"] for row in extract(USEFUL_LOCATORS + " " + noise)} == USEFUL_BODIES
+
+
+def test_capture_never_turns_a_long_token_or_scan_cut_into_a_path():
+    from local_operator.memory_capture import SCAN_WINDOW
+
+    # Put a slash at a forced window boundary, then genuine source after the
+    # oversized token. The continuation is data, not a fresh absolute path.
+    long_uri = "guide://" + "x" * (SCAN_WINDOW - len("guide://")) + "/invented/proof.md"
+    assert {row["body"] for row in extract(long_uri + " docs/real.md")} == {"docs/real.md"}
+    assert extract("https://example.invalid/" + "x" * 500) == []
+    assert extract("/repo/" + "x" * 500) == []
+
 
 @pytest.fixture
 def store(tmp_path):
@@ -45,6 +132,24 @@ def test_bounded_snapshot_ignores_images():
     bounded = snapshot(messages)
     assert len(bounded.encode()) <= 2000000
     assert "/src/needle.py" in bounded
+
+
+def test_explicit_store_associations_keep_whole_uris_and_relative_paths(store):
+    # _reindex also consumes the shared matcher. Explicit facts may reference an
+    # internal resource even though best-effort auto-capture ignores those URIs.
+    store.put(
+        "session",
+        {
+            "title": "Resource evidence",
+            "body": "guide://memory/docs/example ./proof.md URL:https://example.invalid/colon",
+        },
+    )
+    with store.connection() as db:
+        assert {row[0] for row in db.execute("SELECT locator FROM associations")} == {
+            "guide://memory/docs/example",
+            "./proof.md",
+            "https://example.invalid/colon",
+        }
 
 
 def test_capture_idempotence_watermark_and_semantic_reuse(store):
@@ -186,7 +291,9 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path):
         '{"values":{"memory":{"enabled":true,"capture":true,"suggest":true}}}'
     )
     transcript = Transcript(root / "sessions" / "restart-session")
-    await transcript.append_message(Message.user("Old source docs/recovered.md"))
+    await transcript.append_message(
+        Message.user("Old source docs/recovered.md " + NOISY_LOCATORS + " " + USEFUL_LOCATORS)
+    )
     kept = await transcript.append_message(Message.user("Kept turn"))
     marker = await transcript.append_compaction("# Goal\n- Recover committed goal", kept.id, 100)
     # No capture writes: this is the exact crash window after marker fsync.
@@ -216,6 +323,13 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path):
     assert (state := watermark(memory, marker.id)) is not None
     assert state[0] == "ok"
     assert memory.search("recovered")
+    assert state == ("ok", 6)  # recovered path + four locators + reused semantic goal
+    assert {item["body"] for item in memory.search("proof")} == {"~/tools/widget/docs/proof.md"}
+    assert not memory.search("software-development")
+    # Recall is OR-based: the valid branch may match "branch", but the prose
+    # fragment must not have become its own persisted fact.
+    assert {item["body"] for item in memory.search("branch that")} == {"branch: fix/memory-capture"}
+    assert not memory.search("/1")
     assert requests == []
     assert "memory_hint" in await capture.session_tail(reopened)
     await reopened.dispose()
