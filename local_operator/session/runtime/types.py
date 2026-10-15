@@ -1055,8 +1055,11 @@ def update_short(phase: str, pair: str = "") -> str:
         # PHASE ONLY, and the missing pair is the point rather than an omission: the
         # move this names did NOT happen, so the build pair belongs to the failure
         # notice ("could not move to X"), never to a fleet cell that would read as
-        # "went to X". Which build the row is actually on is the neighbouring version
-        # column's job, and it is already there.
+        # "went to X". THE HUMAN FLEET SURFACES HAVE NO VERSION COLUMN to fall back on
+        # — ``lop sessions`` prints STATE/PID/.../UPDATING/STALLED and ``info``
+        # likewise, neither carrying a build — so the reader who needs the loaded build
+        # gets it from the failure notice's own text and from the ``--json`` row; the
+        # cell deliberately does not invent one (design review round 1, D3).
         return "update failed"
     return ""
 

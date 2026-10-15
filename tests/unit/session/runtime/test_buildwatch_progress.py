@@ -751,17 +751,14 @@ async def test_a_raising_readmission_still_releases_the_latch(
     be lost with the record.
 
     THE DRAIN ARM NO LONGER PUBLISHES ANYTHING (operator ask, 2026-10-15), so the order
-    is not a property IT has any more — and the surviving pin of that ordering belongs to
-    the WINDOW arm, which still publishes (``test_update_window.py::
-    test_the_abandon_arm_runs_the_spool_on_a_pristine_session`` and its neighbours).
-    What this cell keeps is the shape the drain arm genuinely still has: the latch is
-    released BEFORE either step, so an abandoned drain admits work again even when the
-    re-admission itself fails, and a step-level raise from the re-admission still reaches
-    the caller. Recording the raise here means a later change that swallows it fails here
-    rather than quietly hiding a lost spool.
-
-    Nothing here argues the escape is desirable: ``_drain_inbox_into`` swallows per-ROW
-    failures and this is a step-level one.
+    is not a property IT has any more. THE ORDER IS STILL PINNED, on the WINDOW arm —
+    the only publisher left — by
+    ``test_update_window.py::test_the_WINDOW_arm_publishes_BEFORE_the_re_admission``,
+    which raises the re-admission and asserts the publish landed anyway. What this cell
+    keeps is the shape the drain arm genuinely still has: the latch is released BEFORE
+    either step, so an abandoned drain admits work again even when the re-admission
+    itself fails, and a step-level raise from the re-admission still reaches the caller,
+    so a later change that swallows it fails here rather than quietly hiding a lost spool.
     """
     rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
     assert await _tick(rig, T0) is False, "the drain takes its clock here"
