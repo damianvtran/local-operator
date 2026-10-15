@@ -4536,6 +4536,115 @@ def test_anthropic_drops_empty_assistant_turns() -> None:
     assert [m["role"] for m in body["messages"]] == ["user", "user"]
 
 
+def test_anthropic_drops_empty_text_blocks_on_every_message() -> None:
+    """#2460: Anthropic 400s the WHOLE request with "messages: text content
+    blocks must be non-empty" over one empty block, and the message holding it
+    is in history, so it is resent on every later turn — one image-only send
+    killed a session permanently.
+
+    A whitespace-only block is refused the same way and carries nothing a
+    model can read, so it is dropped by the same rule.
+    """
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text=""),
+            TextContent(text="  \n"),
+            TextContent(text="real"),
+            ImageContent(data="aGk=", mime_type="image/png"),
+        ],
+    )
+    blocks = AnthropicClient._message_blocks(message)
+    assert blocks == [
+        {"type": "text", "text": "real"},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+        },
+    ]
+
+
+def test_anthropic_recovers_a_transcript_that_already_stores_the_empty_block() -> None:
+    """The render-side repair, on the EXACT row the issue reports.
+
+    An image-only desktop send persisted ``content: [{}, {attachment...}]``.
+    The ``{}`` parses back as an empty ``TextContent`` (pydantic's smart union
+    takes the leftmost member, which ignores unknown keys), so the fix has to
+    drop it at body-build time to recover sessions already poisoned on disk —
+    a write-side fix alone cannot reach them.
+    """
+    stored = {
+        "id": "row-1",
+        "role": "user",
+        "input_mode": "typed",
+        "content": [{}, {"data": "aGk=", "mime_type": "image/png"}],
+    }
+    message = Message.model_validate(stored)
+    assert [type(block).__name__ for block in message.content] == [
+        "TextContent",
+        "ImageContent",
+    ], "the empty dict decodes to an empty TextContent — the poison this guards"
+
+    body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic", model_id="claude-opus-5-5"),
+            messages=[message],
+        )
+    )
+    # The cache marker is placed on the message's LAST block by
+    # ``_message_cache_breakpoints``, so it rides the image now that the empty
+    # text block is gone — that it lands on the image is itself proof the text
+    # block was dropped, since the marker would otherwise sit on the empty one.
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+    for entry in body["messages"]:
+        for block in entry["content"]:
+            assert block.get("type") != "text" or block["text"].strip(), (
+                "an empty text block is the 400 this issue is about"
+            )
+
+
+def test_anthropic_never_sends_a_message_whose_blocks_all_dropped() -> None:
+    """Dropping every block must not leave an empty content array behind: that
+    is a 400 of its own, for the same reason ``_is_empty_assistant`` skips an
+    errored turn instead of sending it empty."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        messages=[
+            Message(role="user", content=[TextContent(text="")]),
+            Message(role="user", content=[TextContent(text="   ")]),
+            Message.user("the actual question"),
+        ],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert body["messages"][0]["content"] == [
+        {"type": "text", "text": "the actual question", "cache_control": {"type": "ephemeral"}}
+    ]
+
+
+def test_anthropic_still_carries_an_image_only_turn() -> None:
+    """The drop is surgical: an image-only message IS content and must reach
+    the wire with its image, just without the empty text block beside it."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        messages=[Message.user("", images=[ImageContent(data="aGk=", mime_type="image/png")])],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert [block["type"] for block in body["messages"][0]["content"]] == ["image"]
+
+
 def test_google_drops_whitespace_only_assistant_turns() -> None:
     """Google's builder already skipped no-part assistant turns; the shared
     predicate extends that to whitespace-only text so all three clients agree

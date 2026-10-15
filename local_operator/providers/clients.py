@@ -4122,9 +4122,29 @@ class AnthropicClient:
 
     @staticmethod
     def _message_blocks(message: Message) -> list[dict[str, Any]]:
+        """Render one message's content blocks for the Anthropic wire.
+
+        An empty or whitespace-only text block is DROPPED, never shipped:
+        Anthropic refuses the whole request with "messages: text content
+        blocks must be non-empty", so one such block fails every turn that
+        replays the message — and a message in history is replayed on every
+        later turn of the session. This is the render-side half of #2460;
+        #448 fixed the same 400 for assistant tool-only turns by not writing
+        the block in the first place. Repairing it HERE rather than in the
+        transcript is deliberate, for the reason ``_is_empty_assistant``
+        documents one layer down: rows are already stored on disk holding the
+        empty block (an image-only send persisted ``[{}, {attachment...}]``),
+        and a render-side drop recovers those sessions without a hand-edited
+        transcript.
+
+        Whitespace counts as empty because a blank block is refused exactly
+        like an empty one and carries nothing a model can read.
+        """
         blocks: list[dict[str, Any]] = []
         for block in message.content:
             if isinstance(block, TextContent):
+                if not block.text.strip():
+                    continue
                 blocks.append({"type": "text", "text": block.text})
             elif isinstance(block, ImageContent):
                 blocks.append(
@@ -4258,7 +4278,18 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                messages.append({"role": message.role, "content": self._message_blocks(message)})
+                blocks = self._message_blocks(message)
+                # A message whose every block was dropped carries nothing to
+                # send: no text, no image, no tool call, and nothing
+                # referencing it (a tool result answers a TOOL call, and those
+                # took the branch above). Sending its remaining empty array is
+                # a 400, so the message is skipped — the same treatment, for
+                # the same reason, `_is_empty_assistant` gives an errored
+                # model turn. Whitespace-only text must not become an
+                # operator turn the model reads as silence and answers.
+                if not blocks:
+                    continue
+                messages.append({"role": message.role, "content": blocks})
 
         body: dict[str, Any] = {
             "model": request.model.model_id,

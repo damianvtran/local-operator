@@ -45,6 +45,38 @@ def transcript(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_image_only_send_stores_no_empty_text_block(transcript):
+    """#2460 end to end, on the write side: the durable row an image-only
+    desktop send produces must carry the attachment and NOT an empty text
+    block.
+
+    ``Transcript.append_message`` is the real persistence path (not a
+    hand-built payload), so this pins what the product actually writes. The
+    empty block is the defect: it is in history, so every later turn resends
+    it, and Anthropic rejects the whole request over it — the session was
+    broken until the operator edited the transcript by hand.
+    """
+    from local_operator.harness.types import ImageContent
+
+    message = Message.user(
+        "", images=[ImageContent(data="aGk=", mime_type="image/png")], input_mode="typed"
+    )
+    await transcript.append_message(message)
+
+    payload = json.loads(transcript.path.read_text().splitlines()[-1])["payload"]
+    assert payload["content"] == [{"data": "aGk="}], (
+        "an empty text block is dumped as {} and poisons every later turn"
+    )
+    assert payload["input_mode"] == "typed"
+
+    # And the replayed message must not resurrect one.
+    (replayed,) = [
+        m for m in transcript.build_llm_history() if getattr(m, "role", None) == "user"
+    ]
+    assert [type(block).__name__ for block in replayed.content] == ["ImageContent"]
+
+
+@pytest.mark.asyncio
 async def test_append_message_writes_jsonl(transcript):
     message = Message.user("hello")
     entry = await transcript.append_message(message)
