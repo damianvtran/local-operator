@@ -311,3 +311,72 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
     assert reopened.search("chain0")
     assert before >= 9
     print("CHAIN", strategy, "markers", len(markers), "captured", len(reopened.search("docs")))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_capture_is_retried_at_the_next_boundary_without_a_restart(
+    tmp_path, monkeypatch
+):
+    """QA Q5: a capture cancelled in-process left no watermark until the process restarted.
+
+    The committed marker is the authority, so the next prompt boundary re-runs the same
+    recovery a restart would. No wake: the retry rides an ordinary user turn.
+    """
+    import local_operator.memory_capture as capture
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "config.yml").write_text('{"values":{"memory":{"enabled":true,"capture":true}}}')
+
+    def stream(request, signal):
+        async def events():
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    directory = root / "sessions" / "cancel-s"
+    transcript = Transcript(directory)
+    session = Session(
+        model=ModelSpec(provider="test", model_id="d", context_window=100000),
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable"],
+        session_id="cancel-s",
+        compaction_settings=CompactionSettings(keep_recent_tokens=40, strategy="context-full"),
+    )
+    session._config_dir = root
+    real_finish = capture.finish
+    calls = {"n": 0}
+
+    async def cancelled_once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise asyncio.CancelledError
+        return await real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(capture, "finish", cancelled_once)
+    store = MemoryStore(root, MemoryIdentity("cancel-s", "", "main"), directory)
+    try:
+        for m in range(4):
+            await session.prompt(f"Round {m} see docs/cancel.md " + "detail " * 35)
+        assert (await session.compact_now()).ran
+        marker = transcript.latest_entry("compaction")
+        for task in list(session._background_tasks):
+            try:
+                await asyncio.wait_for(task, 5)
+            except asyncio.CancelledError:
+                pass
+        assert calls["n"] == 1 and watermark(store, marker.id) is None, "cancelled: no watermark"
+        await session.prompt("Ordinary next turn")  # the next boundary re-arms recovery
+        for task in list(session._background_tasks):
+            await asyncio.wait_for(task, 5)
+        assert calls["n"] == 2
+        assert watermark(store, marker.id) is not None, "retried without a process restart"
+    finally:
+        await session.dispose()
