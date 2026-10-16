@@ -10320,7 +10320,7 @@ class OperatorApp(App[None]):
                 # AND NO SPINNER ON STALE OR NEVER: a spinner claims something is
                 # arriving, and neither state has anything coming. COMING keeps the
                 # glyph, exactly as the connect path does.
-                connecting = verdict is not OwnerLiveness.COMING
+                connecting = verdict is OwnerLiveness.COMING
         if self._status is not None:
             self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
