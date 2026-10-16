@@ -1,0 +1,123 @@
+# Scope-fit guard tests (LOH-25 global-memory hygiene): a deterministic refusal on
+# GLOBAL writes whose content is work/lane/progress state, which belongs in session scope.
+"""Global writes must refuse work-progress content; personal facts must still store."""
+import json
+
+import pytest
+
+from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, scope_fit
+
+WORK = {
+    "title": "Release cut",
+    "body": "Merge PR #2463 after CI goes green; next step: cut the release and tag v1.2.3",
+}
+
+
+def _store(tmp_path):
+    return MemoryStore(tmp_path, MemoryIdentity("s1", "t1", "a1"))
+
+
+def test_work_progress_refused_at_global_write(tmp_path):
+    """A work-shaped global put is refused BEFORE any DB/index/oplog write."""
+    store = _store(tmp_path)
+    with pytest.raises(MemoryError) as exc:
+        store.put("global", dict(WORK))
+    assert "memory://session" in str(exc.value)
+    # Refusal precedes every write: no store root, no db, no rows.
+    assert not store.root.exists()
+    assert store.inventory()["items"] == []
+
+
+def test_refusal_is_value_free(tmp_path):
+    """The offending text and its identifiers are never echoed in the error."""
+    store = _store(tmp_path)
+    body = "Merge PR #2463 after CI goes green; next step: cut the release"
+    with pytest.raises(MemoryError) as exc:
+        store.put("global", {"title": "Release cut", "body": body})
+    message = str(exc.value)
+    assert "#2463" not in message
+    assert body not in message
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "MR !1234 is green; next step: tag v1.2.3",
+        "commit 8f3ac21 merged, CI green",
+        "HOLD pending review",
+        "next step: cut the release window",
+        "PR #99 CHANGES",
+    ],
+)
+def test_scope_fit_refuses_work_shapes(text):
+    with pytest.raises(MemoryError):
+        scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
+
+
+@pytest.mark.parametrize(
+    "fact",
+    [
+        {
+            "title": "Elara Venn",
+            "body": "Elara Venn lives in Dunedin; contact elara@example.invalid",
+        },
+        {"title": "Preferences", "body": "Prefer conventional commit messages"},
+        {"title": "Colleagues", "body": "Mira Vale owns the Pergamon contact"},
+        {"title": "Location", "body": "Damian is based in Auckland"},
+    ],
+)
+def test_durable_personal_fact_still_stores_to_global(tmp_path, fact):
+    """NEGATIVE control: the deliberate personal-helper contract must keep working."""
+    store = _store(tmp_path)
+    payload = {**fact, "tags": [], "aliases": [], "subject": ""}
+    done = store.put("global", payload)
+    assert done["scope"] == "global"
+
+
+def test_explicit_session_path_unaffected(tmp_path):
+    """NEGATIVE control: the same work text is legal in session/team/agent scope."""
+    store = _store(tmp_path)
+    payload = {**WORK, "tags": [], "aliases": [], "subject": ""}
+    assert store.put("session", dict(payload))["scope"] == "session"
+    assert store.put("team", dict(payload))["scope"] == "team"
+
+
+def test_forget_never_blocked(tmp_path):
+    """Forget is a removal, never refused by the scope-fit guard."""
+    store = _store(tmp_path)
+    seeded = store.put("global", {"title": "Old", "body": "A personal note", "tags": []})
+    store.put(
+        "global",
+        {},
+        entity=seeded["id"],
+        expected_version=seeded["version"],
+        forget=True,
+    )
+    assert not any(i["id"] == seeded["id"] for i in store.inventory()["items"])
+
+
+def test_global_write_via_prepare_fact_is_guarded(tmp_path):
+    """prepare_fact alone cannot be used to smuggle work content into global."""
+    store = _store(tmp_path)
+    with pytest.raises(MemoryError):
+        scope_fit("global", store.prepare_fact(dict(WORK)))
+    assert not store.root.exists()
+
+
+def _memory_guide() -> str:
+    from local_operator.guides import discover_guides, make_guide_resolver
+
+    guides = {guide.name: guide for guide in discover_guides()}
+    body = make_guide_resolver(guides)("guide://memory")
+    assert body is not None, "the shipped memory guide must actually resolve"
+    return " ".join(body.split())
+
+
+def test_guide_reworded_for_bounded_scope_fit():
+    """The guide must state the bounded, shape-only nature honestly."""
+    body = _memory_guide()
+    assert "memory://session" in body
+    # The old absolute claim is gone; the bounded nature is stated.
+    assert "not a content classifier" not in body
+    assert "narrow locator" in body
+    _ = json
