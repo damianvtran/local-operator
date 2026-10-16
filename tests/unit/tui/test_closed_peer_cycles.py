@@ -30,13 +30,16 @@ def quiet(call_id="quiet", **extra):
 def certificate(records=None):
     records = rows() if records is None else records
     start = begin_peer_cycle(records, IDENTITY, "quiet")
-    return close_peer_cycle(start, records, IDENTITY, "quiet", "no_reply", quiet())
+    close = close_peer_cycle(start, records, IDENTITY, "quiet", "no_reply", quiet())
+    assert close is not None
+    return close
 
 
 def test_one_completed_exchange_counts_sources_not_outgoing_as_incoming():
     records = rows()
     close = certificate(records)
     group = closed_peer_cycle_candidate(records, close)
+    assert group is not None
     assert (group.count, group.actions, group.failed, group.open) == (1, 1, 0, False)
     assert group.row_ids == ("peer:0", "tool:send:0")
     assert close.owner_kind == "peer_cycle"
@@ -124,7 +127,10 @@ def test_truncated_replay_without_starting_peer_never_borrows_head_authority(cut
 
 def test_two_cycles_have_disjoint_frozen_members_and_no_raw_certificate_trust():
     messages = raw_cycle() + raw_cycle("peer-two", "send-two", "quiet-two")
-    messages[0].details["peer_cycle"] = {"version": 1, "member_ids": ["forged"]}
+    from local_operator.harness.types import CustomMessage
+    peer = messages[0]
+    assert isinstance(peer, CustomMessage)
+    peer.details["peer_cycle"] = {"version": 1, "member_ids": ["forged"]}
     projector = PeerCycleReplay(IDENTITY)
     closed = [close for message in messages if (close := projector.step(message)) is not None]
     assert [close.member_ids for close in closed] == [("peer:0", "tool:send:0"), ("peer-two:0", "tool:send-two:0")]
@@ -146,12 +152,14 @@ def test_neutral_contextual_corpus_is_separate_from_default_quiet_parity():
 def test_actual_raw_negative_shapes_never_mint_a_certificate(fault):
     from local_operator.harness.types import CustomMessage
     messages = raw_cycle()
+    peer = messages[0]
+    assert isinstance(peer, CustomMessage)
     if fault == "genuine-user":
         messages.insert(3, Message.user("A genuine reader redirect."))
     elif fault == "steered-peer":
-        messages[0].details["steer"] = True
+        peer.details["steer"] = True
     elif fault == "attention-peer":
-        messages[0].details["is_error"] = True
+        peer.details["is_error"] = True
     elif fault == "partial-send":
         messages[2] = Message.tool_result(ToolResult(tool_call_id="send", tool_name="send", details={"partial_result": True}))
     elif fault == "missing-quiet-call":
@@ -192,6 +200,7 @@ def test_real_replay_and_split_pages_join_only_when_every_original_source_loads(
     bars = [block for block in combined if isinstance(block, QuietGroupBlock)]
     assert len(bars) == 1
     assert (bars[0].group.count, bars[0].group.actions) == (1, 1)
+    assert bars[0]._work_identity is not None
     assert bars[0]._work_identity.owner_kind == "peer_cycle"
     assert bars[0]._work_identity.user_id is None
     assert [work_record_of_block(block).source_id for block in bars[0]._members] == ["peer:0", "tool:send:0"]
@@ -238,6 +247,8 @@ async def test_two_real_cycles_freeze_prior_counts_and_preserve_reader_open_stat
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle_for_session(pilot, app)
         view = app.query_one(TranscriptView)
+        first = None
+        first_ids = None
         for number in (1, 2):
             await _deliver(pilot, app, session, "neutral", f"cycle-peer-{number}")
             _send_card(app, f"cycle-send-{number}", "ack")
@@ -253,6 +264,7 @@ async def test_two_real_cycles_freeze_prior_counts_and_preserve_reader_open_stat
                 first_ids = first.group.row_ids
         bars = _quiet_bars(app)
         assert len(bars) == 2
+        assert first is not None and first_ids is not None
         assert bars[0] is first and first._expanded and first.group.row_ids == first_ids
         assert [(bar.group.count, bar.group.actions) for bar in bars] == [(1, 1), (1, 1)]
         assert not set(bars[0].group.row_ids) & set(bars[1].group.row_ids)
@@ -278,8 +290,9 @@ async def test_actual_session_receipt_id_matches_persisted_message_not_sender_or
         messages = raw_cycle()
         # Use the ACTUAL decoder: the writer omits id from payload, and the
         # decoder restores it from the entry envelope before custom validation.
-        messages[0] = _entry_to_message(persisted[0])
-        assert messages[0] is not None
+        decoded = _entry_to_message(persisted[0])
+        assert decoded is not None
+        messages[0] = decoded
         assert messages[0].id == delivered[0].message_id
         projector = PeerCycleReplay(IDENTITY)
         closed = [close for message in messages if (close := projector.step(message)) is not None]

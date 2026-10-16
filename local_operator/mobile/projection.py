@@ -2096,13 +2096,34 @@ class ProjectionFold:
             if row is not None:
                 row.text_complete = False
         if isinstance(event, PeerMessageDeliveredEvent):
-            if event.message_id:
-                self.note_peer_message(event.body, sender=event.sender, message_id=event.message_id)
-                self._peer_replay.delivered_peer(event.message_id, event.sender)
+            # Delivery shares an event class with receiver-authored bridge
+            # cards. Only the declared peer kind (or its legacy empty default)
+            # grants ownership; a bridge is an explicit boundary and also
+            # retires any pending candidate, so a foreign delivery can never be
+            # certified against an earlier genuine peer. The typed body stays
+            # visible through the notice row below either way.
+            if event.custom_type in ("", PEER_MESSAGE_MESSAGE_TYPE):
+                if event.message_id:
+                    self.note_peer_message(event.body, sender=event.sender, message_id=event.message_id)
+                    self._peer_replay.delivered_peer(event.message_id, event.sender)
+            else:
+                self._peer_replay.reset_pending()
+                self.note_nonpeer_delivery(event.body, sender=event.sender,
+                                           message_id=event.message_id)
+        elif isinstance(event, ToolExecutionEndEvent):
+            # The live stream settles a call with a typed END EVENT; the
+            # persisted ``role="tool"`` Message never reaches this fold, so the
+            # same shared replay arm is fed the result object directly. Without
+            # it no live cycle could ever close and the phone diverged from its
+            # own history replay.
+            if isinstance(event.result, ToolResult):
+                closed = self._peer_replay.step_live_result(event.result)
+                if closed is not None:
+                    remember_peer_cycle_certificate(self._peer_certificates, closed)
         elif isinstance(event, MessageEndEvent):
             # The typed delivery already supplied this receipt. Only ACTUAL
-            # assistant/tool Messages feed the live replay; no fake model row.
-            if getattr(event.message, "role", None) is not None:
+            # assistant Messages feed the live replay; no fake model row.
+            if getattr(event.message, "role", None) == "assistant":
                 closed = self._peer_replay.step(event.message)
                 if closed is not None:
                     remember_peer_cycle_certificate(self._peer_certificates, closed)
@@ -2642,6 +2663,34 @@ class ProjectionFold:
         self._append(entry)
         if message_id:
             self._pending_user_echoes[message_id] = entry
+        self._bump()
+
+    def note_nonpeer_delivery(self, text: str, *, sender: dict[str, Any] | None = None,
+                              message_id: str | None = None) -> None:
+        """Keep a NON-peer typed delivery visible as its own boundary row.
+
+        A ``team_bridge_message`` (or any future custom kind) travels the same
+        event class as a peer delivery, but it is a receiver-authored card, not
+        peer provenance: it must never open or extend a peer cycle. Dropping it
+        entirely hid a real delivery from the phone (the observed C1-2 RED), so
+        it paints as a notice carrying its own message id, sender and ORIGINAL
+        custom kind. It is never a ``peer_message`` row, never participates in
+        proof, and any reserved ``peer_cycle`` stamp is stripped."""
+        if cross_session_hidden():
+            return
+        if message_id and any(row.id == message_id for row in self.projection.transcript):
+            return
+        details = {"notice_kind": "cross_session_boundary"}
+        if isinstance(sender, dict) and sender:
+            details["sender"] = dict(sender)
+        self._append(
+            TranscriptEntry(
+                id=message_id or f"nonpeer-{time.time_ns()}",
+                kind="notice",
+                text=_compact(text, _NOTICE_CHARS),
+                details=details,
+            )
+        )
         self._bump()
 
     def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None,

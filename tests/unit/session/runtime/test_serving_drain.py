@@ -31,6 +31,7 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
 from local_operator.harness.types import ImageContent
 from local_operator.harness.wake import WakeSchedule, WakeScheduler
 from local_operator.mobile.command_reservation import CommandReservations
+from local_operator.mobile.types import SessionProjection
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime.inbox import (
     INBOX_NAME,
@@ -129,6 +130,10 @@ class DrainHost:
         self._update_failed = ""
         self._update_lock = UpdateLock()
         self._applied_update = ""
+        # The real handle always creates this projection before its fold. This
+        # borrowed-method host must carry that same legacy/negotiated contract,
+        # not hide a missing production attribute behind a defaulting getter.
+        self._projection = SessionProjection(session_id="drain-fixture", pid=0)
         self._fold = SimpleNamespace(note_peer_message=lambda *_a, **_k: None)
 
     def may_refresh(self) -> str:

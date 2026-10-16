@@ -7,9 +7,14 @@ from local_operator.harness.types import (
 )
 
 
-def exercise(*, child_name="no_reply", failed=False, unknown_child=False):
+def exercise(*, child_name="no_reply", failed=False, unknown_child=False,
+             peer_custom_type="", interrupt_custom_type=None):
     fold = DisplayCycleAccumulator("display-test", "epoch-test")
-    fold.observe(PeerMessageDeliveredEvent(message_id="peer-test", body="private incoming", sender={}))
+    fold.observe(PeerMessageDeliveredEvent(message_id="peer-test", body="private incoming", sender={},
+                                          custom_type=peer_custom_type))
+    if interrupt_custom_type is not None:
+        fold.observe(PeerMessageDeliveredEvent(message_id="bridge-test", body="private boundary", sender={},
+                                              custom_type=interrupt_custom_type))
     parent = Message(id="parent-test", role="assistant", tool_calls=[
         ToolCall(id="send-root", name="send", arguments={"message": "reply"}),
         ToolCall(id="quiet-root", name="eval", arguments={"code": "not parsed"}),
@@ -34,6 +39,31 @@ def exercise(*, child_name="no_reply", failed=False, unknown_child=False):
     fold.observe(ToolExecutionEndEvent(tool_name="eval", tool_call_id="quiet-root",
         result=ToolResult(tool_name="eval", tool_call_id="quiet-root", details={"kernel_generation": "opaque"}), is_error=False))
     return fold
+
+
+@pytest.mark.parametrize("custom_type", ["", "peer_message"])
+def test_legacy_and_explicit_peer_provenance_still_publish_one_record(custom_type):
+    fold = exercise(peer_custom_type=custom_type)
+    assert len(fold.records) == 1
+    assert fold.records[0]["member_ids"] == ["peer-test:0", "tool:send-root:0", "tool:quiet-root:0"]
+    assert fold.records[0]["logical_actions"] == 1
+
+
+@pytest.mark.parametrize("position", ["opener", "pending"])
+@pytest.mark.parametrize("custom_type", ["team_bridge_message", "future_custom_kind"])
+def test_nonpeer_typed_delivery_never_opens_or_extends_display_publication(position, custom_type):
+    from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
+
+    # The event class is shared by transport, not an ownership grant: the real
+    # bridge discriminator must invalidate an earlier peer before tools execute.
+    kind = TEAM_BRIDGE_MESSAGE_TYPE if custom_type == "team_bridge_message" else custom_type
+    if position == "opener":
+        fold = exercise(peer_custom_type=kind)
+    else:
+        fold = exercise(interrupt_custom_type=kind)
+    assert fold.peer_id is None
+    assert fold.records == []
+    assert fold.roots == {} and fold.quiet is None
 
 
 def test_mixed_seals_on_actual_quiet_root_end_without_later_final():

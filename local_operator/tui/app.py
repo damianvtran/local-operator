@@ -14874,7 +14874,10 @@ class OperatorApp(App[None]):
             loaded_history = getattr(session, "display_history_window", None)
             # Remote validation may use already-loaded page neighbors; local
             # replay never asks for another whole history to join proof rows.
-            proof_history = (loaded_history()[-4096:] if local_transcript is None and callable(loaded_history) else history[-4096:])
+            loaded_proof = loaded_history() if local_transcript is None and callable(loaded_history) else None
+            # A callable alone promises no sequence. Unknown facade responses
+            # cannot authorise proof; keep the existing loaded-window fallback.
+            proof_history = loaded_proof[-4096:] if isinstance(loaded_proof, (list, tuple)) else history[-4096:]
             projected = project_settled_rows(
                 self, history, bound=bound, start=start, fold_width=fold_width,
                 display_records=self._peer_display_records_for(history, bound=bound, start=start),
@@ -37880,6 +37883,12 @@ class OperatorApp(App[None]):
         if old.navigation_anchor_id and not block.navigation_anchor_id:
             block.navigation_anchor_id = old.navigation_anchor_id
             block.navigation_anchor_part = old.navigation_anchor_part
+        # A richer same-source projection inherits its actual seat's view, just
+        # as append stamps its destination. Unmarked replacements otherwise look
+        # foreign during ordered reconciliation and split a formerly valid run.
+        # Never overwrite explicit provenance supplied by a different source.
+        if block.work_view_identity is None:
+            block.work_view_identity = old.work_view_identity
         if self._block_sink is not None:
             try:
                 index = self._block_sink.index(old)
@@ -37936,6 +37945,11 @@ class OperatorApp(App[None]):
                 block.navigation_anchor_part = self._projection_part
             self._projection_part += 1
         block.ends_empty_state = True
+        # This is a newly projected PART of the same source seat, not a foreign
+        # page. Carry its anchor's known view before insertion re-plans the run;
+        # unlike append, the ordered insertion does not pass note_append's stamp.
+        if block.work_view_identity is None:
+            block.work_view_identity = anchor.work_view_identity
         if self._block_sink is not None:
             self._block_sink.append(block)
             return
@@ -58151,7 +58165,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 147
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 148
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

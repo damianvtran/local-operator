@@ -17,6 +17,15 @@ from local_operator.harness.peer_cycles import (
 )
 from local_operator.tui.quiet_groups import QuietGroup, QuietGroupSender, quiet_sender_label
 
+# Existing callers import the neutral API through this adapter; make that
+# compatibility surface explicit instead of dropping apparently unused names.
+__all__ = [
+    "MAX_PEER_CYCLE_ROWS", "MAX_PENDING_PEER_CYCLES",
+    "PeerCycleCertificate", "PeerCycleReplay", "PeerCycleRow", "PeerCycleStart",
+    "begin_peer_cycle", "close_peer_cycle", "closed_peer_cycle_candidate",
+    "peer_cycle_sources_match",
+]
+
 
 def closed_peer_cycle_candidate(records: Sequence[PeerCycleRow], close_certificate: PeerCycleCertificate | None) -> QuietGroup | None:
     """Reuse the existing summary shape, with truthful one-receipt arithmetic."""

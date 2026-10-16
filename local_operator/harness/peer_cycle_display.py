@@ -10,14 +10,20 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from typing import Any
+
+# Keep live and cold provenance on the harness vocabulary: a function-local
+# import in the validator cannot bind the observer, and importing app code here
+# would make a body-free display proof depend on the UI it is meant to serve.
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
 from local_operator.harness.peer_cycles import (
     current_peer_communication_succeeded, is_peer_communication_call,
 )
 from local_operator.harness.types import (
     FAULT_KEY, OUTPUT_LIMIT_KEY, QUIET_TURN_KEY, AgentEvent,
-    MessageStartEvent, MessageUpdateEvent, MessageEndEvent,
+    Message, MessageStartEvent, MessageUpdateEvent, MessageEndEvent,
     PeerMessageDeliveredEvent, ToolExecutionStartEvent, ToolExecutionEndEvent,
     ProviderTurnStartEvent, ReasoningDeltaEvent, ToolCallComposeEvent, ToolExecutionUpdateEvent,
 )
@@ -67,7 +73,7 @@ class DisplayCycleAccumulator:
     eval's code, a sender label, idle, or later final response. Unknown work
     invalidates the candidate instead of being hidden inside a successful bar.
     """
-    def __init__(self, session_id: str, epoch: str, redact: Any = None) -> None:
+    def __init__(self, session_id: str, epoch: str, redact: Callable[[str], str] | None = None) -> None:
         self.redact = redact
         self.session_id = session_id
         self.epoch = epoch
@@ -86,6 +92,12 @@ class DisplayCycleAccumulator:
     def observe(self, event: AgentEvent[Any]) -> dict[str, Any] | None:
         kind = event.type
         if isinstance(event, PeerMessageDeliveredEvent):
+            # Delivery shares an event class with receiver-authored bridge
+            # cards. Only the declared peer kind (or its legacy empty default)
+            # grants ownership; a bridge also ends any earlier peer candidate.
+            if event.custom_type not in ("", PEER_MESSAGE_MESSAGE_TYPE):
+                self._reset()
+                return None
             peer_id = getattr(event, "message_id", None)
             self._reset(peer_id if isinstance(peer_id, str) and peer_id else None)
             return None
@@ -113,7 +125,7 @@ class DisplayCycleAccumulator:
                     for part in getattr(message, "content", ())))):
                 self._reset()
                 return None
-            if kind != "message_end" or getattr(message, "role", None) != "assistant":
+            if kind != "message_end" or not isinstance(message, Message) or message.role != "assistant":
                 return None
             if not message.tool_calls:
                 # Even an empty genuine answer is a boundary, not an implied
@@ -295,7 +307,6 @@ def validate_record(record: Any, messages: Any, session_id: str) -> dict[str, An
     plausible success with an invented unavailable payload. Raw details stamps
     are deliberately not an input to this function.
     """
-    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
     from local_operator.harness.types import ToolResult
     try:
         if (not isinstance(record, dict) or type(record.get("version")) is not int or record.get("version") != 1
@@ -317,7 +328,7 @@ def validate_record(record: Any, messages: Any, session_id: str) -> dict[str, An
             return None
         peer = by_id.get(record["peer_id"])
         details = getattr(peer, "details", None)
-        if (getattr(peer, "custom_type", None) != PEER_MESSAGE_MESSAGE_TYPE
+        if (peer is None or getattr(peer, "custom_type", None) != PEER_MESSAGE_MESSAGE_TYPE
                 or not isinstance(details, dict)
                 or any(details.get(key) for key in ("held", "steer", "is_error", "images", "attachments"))
                 or members[0] != {"source_id": f"{peer.id}:0", "role": "peer"}):
@@ -338,7 +349,7 @@ def validate_record(record: Any, messages: Any, session_id: str) -> dict[str, An
         final_position = peer_position
         for root in roots:
             parent = by_id.get(root["parent_id"])
-            if (getattr(parent, "role", None) != "assistant" or parent.content
+            if (not isinstance(parent, Message) or parent.role != "assistant" or parent.content
                     or not parent.tool_calls):
                 return None
             parent_ids.add(parent.id)
@@ -543,7 +554,9 @@ def discover_records(transcript: Any, messages: Any, session_id: str, *, max_byt
     cut_rows = [index.journal_rows.get(message.id) for message in messages]
     if not cut_rows or any(row is None for row in cut_rows):
         return {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
-    cut = max(cut_rows)
+    # The complete-page guard above refuses missing seats; expose that exact
+    # invariant to the type checker rather than asserting away optional rows.
+    cut = max(row for row in cut_rows if row is not None)
     existing = [key for key in candidates if key in index.journal_rows
                 and index.journal_rows[key] <= cut]
     if not existing:

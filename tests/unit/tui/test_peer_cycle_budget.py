@@ -39,8 +39,10 @@ def test_65_cycles_in_one_actual_loaded_replay_keep_first_closure_and_open_prefe
     owners = [identity_of_work_group(bar.group, bar._members, expanded=number == 0)
               for number, bar in enumerate(bars)]
     assert all(owner is not None for owner in owners)
+    known_owners = [owner for owner in owners if owner is not None]
+    assert len(known_owners) == len(owners)
     ids = [source_id for pair in expected for source_id in pair]
-    snapshot = capture_work_groups(owners, ids)
+    snapshot = capture_work_groups(known_owners, ids)
     _, rebuilt = _project(history, prepared.view)
     assert len(rebuilt) == 65
     current = identity_of_work_group(rebuilt[0].group, rebuilt[0]._members)

@@ -34,7 +34,8 @@ def test_cold_overlay_has_exact_original_source_inventory_and_truthful_counts(wr
     assert len(finals) == 1 and finals[0].display
     assert work_record_of_block(finals[0]).source_id not in bars[0].group.row_ids
     if wrapped_send:
-        child = next(block for block in members if getattr(block, "tool_name", None) == "send")
+        from local_operator.tui.widgets.tool_card import ToolCard
+        child = next(block for block in members if isinstance(block, ToolCard) and block.tool_name == "send")
         assert child._args["message"] == "[redacted]"
         assert "SYNTHETIC_SECRET" not in str(child._args)
 
@@ -91,8 +92,12 @@ async def test_mounted_cold_page_join_keeps_exact_payload_open_and_focused_sourc
                           through_id=all_rows[-1].id, max_wire_bytes=8192 + tail_cost)
     assert page.start == 1 and page.has_more
     assert [row.id for row in page.messages] == [row.id for row in all_rows[1:]]
-    session = FakeSession()
-    session._transcript = transcript
+    class PersistedSession(FakeSession):
+        def __init__(self, source: Transcript) -> None:
+            super().__init__()
+            self._transcript = source
+
+    session = PersistedSession(transcript)
     evidence = os.environ.get("OWNED_WORK_EVIDENCE_DIR")
     if evidence:
         monkeypatch.setenv("OWNED_WORK_EVIDENCE_DIR", str(Path(evidence) / ("cold-eval" if wrapped_send else "cold-mixed")))
@@ -124,6 +129,7 @@ async def test_mounted_cold_page_join_keeps_exact_payload_open_and_focused_sourc
             await pilot.wait_for_scheduled_animations()
             await pilot.pause()
             _capture_mounted_frame(app, view, "cold-before-page")
+            assert app._welcome is not None
             assert not app._welcome_visible and app._welcome.region.height == 0
             assert view.max_scroll_y > 0 and not view.is_following_tail
             assert root.has_focus and 0 <= root.region.y - view.scrollable_content_region.y < view.scrollable_content_region.height

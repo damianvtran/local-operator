@@ -405,6 +405,7 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
         shown = "\n".join(_renderable_plain(getattr(block, "renderable", "")) for block in blocks if block.display)
 
     assert len(dormant) == 1
+    assert dormant[0].internal_work_payload is not None
     assert dormant[0].internal_work_payload["job_id"] == "rev-r6"
     assert dormant[0].ends_empty_state is False
     assert len(notices) == 1, f"exactly the held row paints: {[b._text for b in notices]}"

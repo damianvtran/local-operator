@@ -71,8 +71,16 @@ async def test_optional_display_archive_on_all_three_real_routes(tmp_path, route
         else:
             assert "peer_cycle_display_records" not in window
             # Actual old schema, not a model that silently ignores extras.
-            fields = {name: (field.annotation, copy.deepcopy(field)) for name, field in DisplayHistoryWindow.model_fields.items()
-                      if name != "peer_cycle_display_records"}
+            from pydantic.fields import FieldInfo
+            from typing_extensions import TypeForm
+
+            fields: dict[str, tuple[TypeForm[object], FieldInfo]] = {}
+            for name, field in DisplayHistoryWindow.model_fields.items():
+                if name == "peer_cycle_display_records":
+                    continue
+                annotation = field.annotation
+                assert annotation is not None, f"old DTO field {name} must retain its actual type"
+                fields[name] = (annotation, copy.deepcopy(field))
             old = create_model("OldDisplayWindow", __config__=ConfigDict(extra="forbid"), **fields)
             old.model_validate(window)
     finally:

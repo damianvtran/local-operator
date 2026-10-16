@@ -9,10 +9,11 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
+from local_operator.harness.types import AgentMessage, CustomMessage, Message, TextContent, ToolCall
 from local_operator.tui.internal_work_membership import WorkRecord, owned_work_clauses, project_internal_work
 from local_operator.tui.quiet_groups import QuietGroupRecord, quiet_groups_of
 from local_operator.tui.session_presentation import PreparedReplay, project_settled_rows
@@ -22,7 +23,7 @@ from local_operator.tui.widgets.transcript import NoticeBlock, QuietGroupBlock, 
 CORPUS = json.loads((Path(__file__).parent / "fixtures/owned-work.context.json").read_text())
 
 
-def _mounted_geometry(app, view) -> dict:
+def _mounted_geometry(app, view) -> dict[str, object]:
     """Read primitive source-owned state; never format a widget on failure."""
     def source(block):
         return getattr(block, "tool_call_id", None) or getattr(block, "navigation_anchor_id", None) or type(block).__name__
@@ -75,7 +76,7 @@ def _capture_mounted_frame(app, view, name: str) -> None:
         print("MOUNTED_GEOMETRY", json.dumps(facts))
 
 
-def _record(raw: dict) -> WorkRecord:
+def _record(raw: dict[str, Any]) -> WorkRecord:
     details = raw.get("details", {})
     return WorkRecord(
         source_id=raw["id"], kind=raw["kind"], tool_name=raw.get("toolName", ""),
@@ -86,6 +87,67 @@ def _record(raw: dict) -> WorkRecord:
         direction=details.get("direction", ""), expects_reply=details.get("expects_reply"),
         steer=details.get("steer"), held=details.get("held", False),
     )
+
+
+@pytest.mark.parametrize("is_bridge", [False, True])
+def test_bridge_subclass_keeps_its_boundary_in_contextual_projection(is_bridge) -> None:
+    from local_operator.tui.quiet_groups import group_splitter_of
+    from local_operator.tui.widgets.transcript import (
+        PeerMessageBlock, TeamBridgeBlock, peer_cycle_rows_of_blocks,
+        quiet_group_record_of, work_record_of_block,
+    )
+
+    block = (TeamBridgeBlock if is_bridge else PeerMessageBlock)("Original typed receipt")
+    block.navigation_anchor_id = "typed-receipt"
+    block.navigation_anchor_part = 0
+    block.work_view_identity = ("bridge-kind-test", 7)
+    assert isinstance(block, PeerMessageBlock)  # The actual upstream inheritance collision.
+    assert quiet_group_record_of(block).kind == ("bridge" if is_bridge else "peer")
+    record = work_record_of_block(block)
+    members = project_internal_work([
+        WorkRecord("human-opener", "user"),
+        WorkRecord("real-tool", "tool", tool_name="bash"),
+        record,
+    ])
+    block.internal_work_membership = members[record.source_id]
+    contextual = quiet_group_record_of(block)
+    assert contextual.kind == ("bridge" if is_bridge else "peer")
+    assert block.internal_work_membership.role == ("boundary" if is_bridge else "receipt")
+    assert group_splitter_of(contextual) is is_bridge
+    assert peer_cycle_rows_of_blocks([block])[0].kind == ("boundary" if is_bridge else "peer")
+
+
+@pytest.mark.parametrize("is_bridge", [False, True])
+def test_tracker_peer_role_admission_excludes_the_typed_bridge_subclass(monkeypatch, is_bridge) -> None:
+    from local_operator.tui.widgets.transcript import PeerMessageBlock, QuietGroupTracker, TeamBridgeBlock, TranscriptView
+
+    view = TranscriptView()
+    view.bind_work_source("bridge-admission-test")
+    identity = view.work_identity
+    first = (TeamBridgeBlock if is_bridge else PeerMessageBlock)("Original first receipt")
+    second = PeerMessageBlock("Original second receipt")
+    for block, key in ((first, "first"), (second, "second")):
+        block.navigation_anchor_id, block.navigation_anchor_part = key, 0
+        block.work_view_identity = identity
+    view._blocks = [first, second]
+    tracker = QuietGroupTracker(view)
+    admitted = []
+
+    def renderer_boundary(certificate, members):
+        # This test owns admission only; mounted grouping/focus has a separate
+        # real-app gate and is not proved by replacing this rendering boundary.
+        admitted.append((certificate.member_ids, members))
+        return True
+
+    monkeypatch.setattr(tracker, "_apply_peer_cycle", renderer_boundary)
+    ids = ["first:0", "second:0"]
+    record = {"version": 1, "session_id": identity[0], "quiet_call_id": "typed-quiet",
+              "member_ids": ids, "members": [{"source_id": key, "role": "peer"} for key in ids]}
+    assert tracker.apply_display_record(record) is (not is_bridge)
+    assert len(admitted) == (0 if is_bridge else 1)
+    if admitted:
+        assert list(admitted[0][0]) == ids
+        assert admitted[0][1] == [first, second]
 
 
 def test_context_corpus_is_one_ordered_group_and_receipts_are_not_actions() -> None:
@@ -104,13 +166,13 @@ def test_context_corpus_is_one_ordered_group_and_receipts_are_not_actions() -> N
 
 
 def _history(*, held: bool = False, failed: bool = False, with_user: bool = True):
-    rows = [Message(role="user", id="user-replay", content=[TextContent(text="Investigate the sanitised deployment.")])] if with_user else []
+    rows: list[AgentMessage] = [Message(role="user", id="user-replay", content=[TextContent(text="Investigate the sanitised deployment.")])] if with_user else []
     for at in range(3):
         rows.extend([
             Message(role="assistant", id=f"decl-{at}", tool_calls=[ToolCall(id=f"call-{at}", name="bash", arguments={"command": "printf safe"})]),
             Message(role="tool", id=f"result-{at}", tool_call_id=f"call-{at}", tool_name="bash", content=[TextContent(text="safe")]),
         ])
-    details = {"job_id": "job-replay", "text": "Sanitised ORIGINAL child report.\nEvery original line remains available."}
+    details: dict[str, object] = {"job_id": "job-replay", "text": "Sanitised ORIGINAL child report.\nEvery original line remains available."}
     if held:
         details["held"] = True
     if failed:
@@ -126,6 +188,7 @@ def test_real_replay_preserves_delivered_payload_inside_owned_scope_without_inve
     reports = [b for b in replay.blocks if getattr(b, "internal_work_source", None) is not None]
     assert len(reports) == 1
     assert reports[0].internal_work_payload == details
+    assert isinstance(reports[0], NoticeBlock)
     assert reports[0]._text == details["text"]
     folded = fold_quiet_group_list(replay.blocks)
     bars = [b for b in folded if isinstance(b, QuietGroupBlock)]
@@ -162,8 +225,10 @@ def test_typed_failed_result_and_unknown_generic_notice_split_context_not_payloa
     unknown = NoticeBlock("Sanitised provenance-sensitive notice", kind="warning")
     replay.blocks.append(unknown)
     project_work_blocks(replay.blocks)
+    assert reports[0].internal_work_membership is not None
     assert reports[0].internal_work_membership.attention == "required"
     assert reports[0].internal_work_payload == details
+    assert unknown.internal_work_membership is not None
     assert unknown.internal_work_membership.role == "boundary"
 
 
@@ -235,6 +300,7 @@ def test_tool_adapter_keeps_never_sent_faults_distinct_from_executed_failures() 
             block.work_view_identity = identity
         project_work_blocks([user, tool, report], identity)
         assert report.work_dormant is not sent
+        assert report.internal_work_membership is not None
         assert report.internal_work_membership.role == ("receipt" if sent else "boundary")
 
 
@@ -260,7 +326,7 @@ def test_bounded_core_upgrade_refuses_owner_epoch_topology_and_pinned_changes() 
 
 
 def test_prepend_reclassifies_dormant_original_report_before_mount_without_duplicate_payload() -> None:
-    from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+    from local_operator.tui.widgets.transcript import UserBlock
     history, details = _history(with_user=False)
     replay = PreparedReplay()
     replay.view.bind_work_source("synthetic-owned-page")
@@ -280,6 +346,7 @@ def test_prepend_reclassifies_dormant_original_report_before_mount_without_dupli
     assert len(bars) == 1
     assert reports[0] in bars[0]._members and not reports[0].work_dormant
     assert reports[0].internal_work_payload == details
+    assert isinstance(reports[0], NoticeBlock)
     assert reports[0]._text == details["text"]
     count = len(reports)
     project_settled_rows(replay, history, fold_width=100)
@@ -509,7 +576,14 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
         assert len(bars) == 1
         assert [work_record_of_block(b).source_id for b in bars[0]._members] == [work_record_of_block(b).source_id for b in expected]
         assert new.expanded and tools[1].has_focus
-        assert owned_work_clauses([work_record_of_block(b) for b in expected], {work_record_of_block(b).source_id: b.internal_work_membership for b in expected}) == ("4 shell actions", "2 incoming messages", "1 job result")
+        memberships = {}
+        for block in expected:
+            membership = block.internal_work_membership
+            assert membership is not None
+            memberships[work_record_of_block(block).source_id] = membership
+        assert owned_work_clauses(
+            [work_record_of_block(block) for block in expected], memberships
+        ) == ("4 shell actions", "2 incoming messages", "1 job result")
         # Capture BEFORE the assertion, so any real jump has its full source
         # state and styled frame rather than only a pytest region value.
         _capture_mounted_frame(app, view, "upgrade-next-live")

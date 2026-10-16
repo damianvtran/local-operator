@@ -1614,6 +1614,7 @@ class TestQuietGroupFold:
             assert not any(isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks())
             assert "single-peer" in app._live_peer_receipts
             assert send.state == "success"
+            assert app._welcome is not None
             assert not app._welcome_visible and app._welcome.region.height == 0
             app.post_message(ToolStarted(ToolExecutionStartEvent(
                 tool_call_id="single-quiet", tool_name="no_reply", args={},
