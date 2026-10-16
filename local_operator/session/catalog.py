@@ -204,6 +204,34 @@ class CatalogEntry:
         return tier, wake_rank, -self.row.created_at, self.id
 
     @property
+    def activity_key(self) -> tuple[int, float, str]:
+        """``(active_first, -mtime, id)`` -- the SIDEBAR HEAD's own order.
+
+        WHY A SECOND KEY, and its scope. The desktop sidebar's contract is a
+        time-binned list: its sections partition by the ACTIVITY clock, its
+        ceiling is the operator's own "show the latest 10", and its drawn
+        order re-reads that same clock. The ``rank`` above answers a different
+        surface's question -- the picker's status bands, where a wake leads the
+        cold rows -- and on a store whose cold population is dominated by
+        scheduled conversations the two disagree in a way a reader feels: the
+        wake band fills the first page, and the conversation the reader JUST
+        USED falls outside it entirely. This key keeps the membership rule the
+        sidebar actually needs: a row that needs the reader (``active`` --
+        pending, unseen, or holding a live runtime) always fits, and everything
+        else is as recent as its own last movement.
+
+        A PROPERTY beside ``rank`` rather than a second ordering authority:
+        both keys live on the catalogue entry, ``catalogue_page`` picks one per
+        request (``sort=``), and the cursor records which one minted it, so one
+        order's position can never be replayed against the other.
+
+        ``mtime`` carries the sign here and rides the wire POSITIVE, exactly as
+        ``-created_at`` does in ``rank`` above (#800: the immutable ordering
+        fact stays readable in the token, and the negation happens here).
+        """
+        return (0 if self.active else 1, -self.row.mtime, self.id)
+
+    @property
     def active(self) -> bool:
         """Section membership is independent of the number of ordering categories."""
         return bool(self.row.pending or self.unseen or self.row.live_state)
@@ -721,6 +749,35 @@ def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
 #: the key can change shape later without a wire break.
 CURSOR_VERSION = 1
 
+#: The two orders a catalogue page can be read in, and which one a cursor was
+#: minted under. ``rank`` is :attr:`CatalogEntry.rank` -- the default, and the
+#: only order that existed before the activity head. ``activity`` is
+#: :attr:`CatalogEntry.activity_key`, the desktop sidebar's membership rule
+#: (``sort=activity``): active rows first, then everything else
+#: newest-activity-first. The order rides the token because a position in one
+#: order is meaningless in the other, and the documented remedy for a token
+#: that cannot be used -- a first page -- is exactly what a cross-order replay
+#: must get.
+CURSOR_ORDER_RANK = "rank"
+CURSOR_ORDER_ACTIVITY = "activity"
+
+#: The ``sort`` values :func:`catalogue_page` accepts. ``""`` (the route's
+#: default) means ``rank``; the route refuses anything else BY NAME before the
+#: store is touched, so a client that asked for an order this build does not
+#: know is told, rather than being served a different one silently.
+CATALOGUE_SORT_ACTIVITY = "activity"
+CATALOGUE_SORTS: tuple[str, ...] = (CATALOGUE_SORT_ACTIVITY,)
+
+#: The token version per order. v1 is the shipped rank shape, kept
+#: byte-for-byte because a token an older build minted must keep resuming for a
+#: newer one; the activity key mints v2, which an older decoder -- refusing any
+#: ``v`` it does not know -- answers as a first page instead of resuming the
+#: wrong order.
+CURSOR_VERSIONS: dict[str, int] = {
+    CURSOR_ORDER_RANK: CURSOR_VERSION,
+    CURSOR_ORDER_ACTIVITY: 2,
+}
+
 #: The route refuses a longer token by name; stated here too, where it is minted.
 CURSOR_MAX_LENGTH = 256
 
@@ -764,10 +821,18 @@ class CatalogueCursor:
     """
 
     scope: CatalogueScope | None
-    key: tuple[int, int, float, str]
+    key: tuple[int, int, float, str] | tuple[int, float, str]
+    #: Which order minted ``key``. Defaulted so every existing construction and
+    #: assertion over a bare ``CatalogueCursor(scope, key)`` keeps its meaning,
+    #: and named so a resume can refuse a position from the other order.
+    order: str = CURSOR_ORDER_RANK
 
 
-def encode_cursor(scope: CatalogueScope | None, key: tuple[int, int, float, str]) -> str:
+def encode_cursor(
+    scope: CatalogueScope | None,
+    key: tuple[int, int, float, str] | tuple[int, float, str],
+    order: str = CURSOR_ORDER_RANK,
+) -> str:
     """The position of a page's LAST row, opaque to the client.
 
     ``scope`` is ``None`` for the unscoped head listing, which is a scope of its
@@ -778,13 +843,32 @@ def encode_cursor(scope: CatalogueScope | None, key: tuple[int, int, float, str]
     forged one can only ask for a page it could ask for anyway. Anything
     unparseable is answered as a first page, which is the same answer a client
     gets with no cursor at all.
+
+    THE ORDER RIDES THE TOKEN (``o``, with the version that implies): a
+    position in the rank order and a position in the activity order are not
+    comparable, so the token says which key minted it, and a walk that switches
+    orders is answered as a first page rather than resumed from the wrong key.
+    The rank order keeps the shipped v1 shape byte-for-byte.
     """
-    tier, wake_rank, negative_birth, session_id = key
-    payload = {
-        "v": CURSOR_VERSION,
-        "s": None if scope is None else [scope.kind, scope.name],
-        "k": [tier, wake_rank, -negative_birth, session_id],
-    }
+    if order == CURSOR_ORDER_ACTIVITY:
+        cold, negative_mtime, session_id = key  # type: ignore[misc]
+        payload = {
+            "v": CURSOR_VERSIONS[CURSOR_ORDER_ACTIVITY],
+            "o": CURSOR_ORDER_ACTIVITY,
+            "s": None if scope is None else [scope.kind, scope.name],
+            # The conversion is an annotation aid only: the activity key's
+            # middle slot is a float by construction (``-mtime``), and the
+            # union spelling of the two key shapes is what the unpack leaves
+            # behind.
+            "k": [cold, -float(negative_mtime), session_id],
+        }
+    else:
+        tier, wake_rank, negative_birth, session_id = key  # type: ignore[misc]
+        payload = {
+            "v": CURSOR_VERSIONS[CURSOR_ORDER_RANK],
+            "s": None if scope is None else [scope.kind, scope.name],
+            "k": [tier, wake_rank, -float(negative_birth), session_id],
+        }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -808,8 +892,9 @@ def decode_cursor(token: str) -> CatalogueCursor | None:
     except (ValueError, UnicodeDecodeError):
         # ``binascii.Error`` is a ``ValueError``; so is a JSON parse failure.
         return None
-    if not isinstance(payload, dict) or payload.get("v") != CURSOR_VERSION:
+    if not isinstance(payload, dict):
         return None
+    version = payload.get("v")
     raw_scope = payload.get("s")
     if raw_scope is None:
         scope: CatalogueScope | None = None
@@ -822,22 +907,48 @@ def decode_cursor(token: str) -> CatalogueCursor | None:
     else:
         return None
     raw_key = payload.get("k")
-    if not isinstance(raw_key, list) or len(raw_key) != 4:
-        return None
-    tier, wake_rank, birth, session_id = raw_key
-    # ``bool`` is an ``int`` in Python, so a JSON ``true`` would otherwise pass as
-    # a tier and compare as 0 or 1 against the sort's own integers.
-    if (
-        isinstance(tier, bool)
-        or not isinstance(tier, int)
-        or isinstance(wake_rank, bool)
-        or not isinstance(wake_rank, int)
-        or isinstance(birth, bool)
-        or not isinstance(birth, (int, float))
-        or not isinstance(session_id, str)
-    ):
-        return None
-    return CatalogueCursor(scope, (tier, wake_rank, -float(birth), session_id))
+    if version == CURSOR_VERSIONS[CURSOR_ORDER_RANK]:
+        if not isinstance(raw_key, list) or len(raw_key) != 4:
+            return None
+        tier, wake_rank, birth, session_id = raw_key
+        # ``bool`` is an ``int`` in Python, so a JSON ``true`` would otherwise pass as
+        # a tier and compare as 0 or 1 against the sort's own integers.
+        if (
+            isinstance(tier, bool)
+            or not isinstance(tier, int)
+            or isinstance(wake_rank, bool)
+            or not isinstance(wake_rank, int)
+            or isinstance(birth, bool)
+            or not isinstance(birth, (int, float))
+            or not isinstance(session_id, str)
+        ):
+            return None
+        return CatalogueCursor(scope, (tier, wake_rank, -float(birth), session_id))
+    if version == CURSOR_VERSIONS[CURSOR_ORDER_ACTIVITY]:
+        # The order is part of the position's meaning, so the key is read only
+        # under the declaration that explains it.
+        if payload.get("o") != CURSOR_ORDER_ACTIVITY:
+            return None
+        if not isinstance(raw_key, list) or len(raw_key) != 3:
+            return None
+        cold, mtime, session_id = raw_key
+        # The same bool-is-an-int guard as the rank branch: a JSON ``true`` must
+        # not pass as the cold flag and compare as 0 or 1 against the order's
+        # own integers.
+        if (
+            isinstance(cold, bool)
+            or not isinstance(cold, int)
+            or isinstance(mtime, bool)
+            or not isinstance(mtime, (int, float))
+            or not isinstance(session_id, str)
+        ):
+            return None
+        return CatalogueCursor(
+            scope, (cold, -float(mtime), session_id), CURSOR_ORDER_ACTIVITY
+        )
+    # An unknown version -- including one a NEWER build minted -- is answered as
+    # a first page, exactly as every unreadable token is.
+    return None
 
 
 def in_scope(binding: tuple[str, str], scope: CatalogueScope) -> bool:
@@ -2126,6 +2237,7 @@ def catalogue_page(
     pinned_off_page: Sequence[str] = (),
     pinned_hidden_ids: Sequence[str] = (),
     exclude_ids: Collection[str] = (),
+    sort: str = "",
 ) -> CatalogPage:
     """One scope's page, its resume position, and (opt-in) the group census.
 
@@ -2145,10 +2257,24 @@ def catalogue_page(
     head page's top row), and filtering the page would answer "this team's chats"
     with whatever of them the global page carried.
 
+    ``sort`` NAMES THE ORDER THE PAGE IS TAKEN IN. ``""`` is ``rank`` --
+    byte-for-byte the listing every caller read before this parameter existed --
+    and ``"activity"`` is :attr:`CatalogEntry.activity_key`, the desktop
+    sidebar's head order: rows that need the reader first (``active``), then
+    everything else newest-activity-first, so the conversations a reader has
+    just used stay inside the page on a store whose cold population a wake band
+    would otherwise fill. IT IS DELIBERATELY NOT A SECOND AUTHORITY over the
+    rank: both keys live on the entry (one property each), this function picks
+    one per request, and the cursor records which one minted it -- so the order
+    is orthogonal to a scope (either may be read in either order) while
+    remaining one key per order, minted and resumed in the same place.
+
     A CURSOR IS A POSITION, NOT AN IDENTITY: the resume is ``entry.rank >
-    cursor.key``, so the row the cursor was minted from may be deleted between
-    pages without breaking the walk. See this section's header for the
-    duplicate/skip exposure that comes with a key that moves under a poll.
+    cursor.key``
+    (or the activity key's own comparison when ``sort=activity``), so the row
+    the cursor was minted from may be deleted between pages without breaking
+    the walk. See this section's header for the duplicate/skip exposure that
+    comes with a key that moves under a poll.
 
     AN UNUSABLE OR FOREIGN CURSOR IS NOT AN ERROR: the answer is the scope's first
     page with ``cursor_missing: true``. An empty scope is not an error either --
@@ -2195,13 +2321,40 @@ def catalogue_page(
             counts = _census(ranked, bindings)
     if scope is not None:
         ranked = [entry for entry in ranked if in_scope(bindings[entry.id], scope)]
+    if sort and sort not in CATALOGUE_SORTS:
+        # The route refuses a bad ``sort`` by name BEFORE the store is touched;
+        # a direct caller handing one through is a bug, and answering it as
+        # "whatever the rank order says" would be a silent wrong answer.
+        raise ValueError(f"unknown catalogue sort: {sort!r}")
+    # THE ORDER THE PAGE IS TAKEN IN, chosen once and read by the slice, the
+    # resume and the mint below -- a resume predicate that disagreed with the
+    # sort would skip or repeat rows at every page edge, which is why the key
+    # function is ONE local rather than an expression restated per use.
+    order = (
+        CURSOR_ORDER_ACTIVITY if sort == CATALOGUE_SORT_ACTIVITY else CURSOR_ORDER_RANK
+    )
+
+    def key_of(
+        entry: CatalogEntry,
+    ) -> tuple[int, int, float, str] | tuple[int, float, str]:
+        return entry.activity_key if order == CURSOR_ORDER_ACTIVITY else entry.rank
+
+    if order == CURSOR_ORDER_ACTIVITY:
+        # AFTER the scope filter, BEFORE the window: membership is
+        # order-independent, and slicing the requested order is the point.
+        ranked = sorted(ranked, key=key_of)
     position = decode_cursor(cursor) if cursor else None
     # A FOREIGN cursor is refused the same way an unreadable one is: the scope is
     # part of the token, so a page resumed with another scope's position would
     # otherwise silently answer a filtered list from an unfiltered position.
-    cursor_missing = bool(cursor) and (position is None or position.scope != scope)
+    # THE ORDER IS PART OF IT TOO (one predicate, so the two can never drift):
+    # a token minted for the rank order resumes nothing in the activity order,
+    # and vice versa -- the keys are from two different total orders.
+    cursor_missing = bool(cursor) and (
+        position is None or position.scope != scope or position.order != order
+    )
     if position is not None and not cursor_missing:
-        ranked = [entry for entry in ranked if entry.rank > position.key]
+        ranked = [entry for entry in ranked if key_of(entry) > position.key]
     # ``limit + 1`` is the truncation probe and nothing else -- one row beyond the
     # page answers "did the scope hold more", and nothing in the scan is bounded
     # by the number (it is limit-independent), so the extra row costs one rank
@@ -2215,7 +2368,9 @@ def catalogue_page(
     # at least 1 on the route, which is why it refuses ``limit=0`` by name -- and
     # the emptiness check is here so a direct caller that ignored that
     # precondition gets no cursor rather than an ``IndexError``.
-    next_cursor = encode_cursor(scope, entries[-1].rank) if entries and truncated else None
+    next_cursor = (
+        encode_cursor(scope, key_of(entries[-1]), order) if entries and truncated else None
+    )
     if pinned_off_page and scope is None and (position is None or cursor_missing):
         # FIRST PAGE OF THE HEAD ONLY, and the position clause is the half QA's
         # walk found missing: the extras are appended from ``ranked[limit:]``,
