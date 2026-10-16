@@ -1045,6 +1045,101 @@
       },
       "status": "passed",
       "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE, changed-keys-only: the old 10 are carried from the preserved Wave-3 entry (source bc4e3f558a065106dfbe264755001d48008b218124f44334bfed90bb8535dfdd, target b0db12cc31ceae30ad58ba3ef8a05c3502ef9df6ff7903b1a358734b46e5e258, translator i18n-translator/deepseek-flash 2026-10-11, auditor i18n-auditor/deepseek-flash 2026-10-11) and were re-verified byte-identical to current main, so no old value byte moved. The new 7 are the audited candidate hi-tui-transcript-17.candidate.json, whole-file SHA-256 1a18ae78d2e4a7c812ba6bfcba1a654d7971999e38631e84b84a8cfa3e7ec91a (the algorithm named because the earlier note said sha1 while quoting the SHA-256 digest), authored by session d4cb588a0c16 (actual generation usage openai/gpt-6.1-sol, 2026-10-12); the independent NEW-7 audit ran in a DIFFERENT session (session 40ebf772a478, job 3fadc9c0a018; actual usage openai/gpt-6.1-sol, 2026-10-12) with attestation hi-transcript-independent-attestation.json sha256 d0b6e9318c3511083eadb86874b9be830d5e5b7fb37cf1b6c109149c5057955d and validation log hi-transcript-independent-validation.log sha256 b3a2d498b1f3ed2f2f954e183d36be1911c008a5b3e350abe9cf7049a4ef1157; verdict passed, findings 0, coverage semantic_new7 + old_raw_value_bytes10. NO full-17 audit is claimed - the union is transitive. The auditor's 85 renders / opaque-identity parser proof is audit evidence, not live-app render or design sign-off: source-consumer/generator/Hi-target real frames plus review and QA are still required."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "1bf55380720a231664c146e1d70cb455a693be4fdbf677c305061c307236f8da",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-15",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[6]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target bcc5239f7d9649e61a837350819c61ea4ae2ee8d3507181c0e9d147445bcb940"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "1bf55380720a231664c146e1d70cb455a693be4fdbf677c305061c307236f8da",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-15",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[16]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target fbc89876b745e8b78c2217373bf9a8f494380857e1d9fe96be7140702b449846"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "1bf55380720a231664c146e1d70cb455a693be4fdbf677c305061c307236f8da",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-15",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[49]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target 26f058e852c8a0c19516a9c1570ef5f95313b347547df020af7c3846c91c65f6"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "1bf55380720a231664c146e1d70cb455a693be4fdbf677c305061c307236f8da",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-15",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[38]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target af28b69ae44b1c771bdb11fe90dc85f7f995353829c21fa8800d366329de7be8"
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "1bf55380720a231664c146e1d70cb455a693be4fdbf677c305061c307236f8da",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-15",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[39]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target 37b2fddb15d5530787ecf22c1657e5ad53bf38ca49598879c474f6d7f864004f"
     }
   ]
 }
