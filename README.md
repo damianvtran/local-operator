@@ -95,8 +95,8 @@ pooled, load-balanced, and used with the prompt cache in mind.
   daemon keeps every session reachable from your phone.
 - **Every subscription you already pay for.** Sign in to ChatGPT, Claude,
   Kimi, Grok, Z.AI, and Qwen with the accounts you already have. Have two
-  Claude or ChatGPT accounts? They're pooled: new sessions start on the one
-  with the most quota left, a rate-limit moves the request to the other, and
+  Claude or ChatGPT accounts? They're pooled: eligible accounts default to
+  cached reset-soonest selection, a rate-limit tries a sibling, and
   only when both are exhausted does it fall back to the next model you've
   listed.
 - **Cheaper long sessions.** The prompt is laid out so your provider's prompt
@@ -609,14 +609,17 @@ best-effort). API keys and local servers sit alongside.
 **What this means for you.** With one account per provider, Local Operator
 uses that account's plan quota (no API bill) and, when it is rate-limited,
 falls back to the next model you listed. With two or more accounts on the
-same provider, it spreads your sessions across them so you hit the
-5-hour/weekly limits later, and it deliberately does *not* hop accounts to
-balance load mid-conversation, because each provider caches your conversation
-per account and a hop would re-pay to rebuild it.
+same provider, it spreads your sessions across eligible siblings using cached
+quota evidence. A compatible, expiring lease from a successful request keeps a
+warm account preferred; after expiry the policy reselects even in the same
+conversation. This is a local routing hint, not a guaranteed provider cache hit.
 
-- **Accounts on one provider form a rotation pool.** New sessions start on
-  the account with the most remaining quota, and concurrent sessions fan out
-  across those accounts instead of herding onto one.
+- **Accounts on one provider form a rotation pool.** The default
+  `retry.accountSelectionPolicy: reset-soonest` prefers the nearest fresh
+  weekly reset, five-hour reset within one-minute ties, then stable spreading.
+  Unknown reports stay neutral; ranking makes no extra blocking probes.
+  `headroom` and `fair` retain alternative preferences within the same
+  credential tier, never cross-provider or paid-tier promotion.
 - **Failover follows a fixed order.** On a quota, auth, or 5xx failure the
   request rotates to a sibling account first. Only when the pool is spent
   does it walk your **model fallback chain** (`retry.fallbackChains` in
@@ -630,12 +633,14 @@ per account and a hop would re-pay to rebuild it.
   record (`pinned X, ran on Y`). The `/settings` row is `Pinned child
   fallback` — **allow cross-vendor** (`cross-family`) by default; **same
   family only** (`same-family`) restores the strict refusal.
-- **Cache-aware stickiness.** A session prefers the account it started on,
-  because the provider's prompt cache is per account and moving would rewrite
-  the whole conversation prefix at cache-write price. With the default
-  config a quota, auth, or 5xx failure still rotates to a sibling; with
-  `retry.usageAwareFallback: true` a low account is never an eviction; only
-  a depleted one moves a running session.
+- **Success-derived account affinity.** Every policy honors a compatible,
+  unexpired local account lease before ranking. Resolve/preflight/inspection
+  never renews it; failures, cancellation, empty streams and isolated errands
+  do not renew it either. Expiry is request-start plus the actual wire lifetime
+  or an explicitly bounded endpoint heuristic. Resume preserves the original
+  expiry, not a new lease. Low-but-usable accounts retain a valid lease; hard
+  depletion, own failure, incompatibility or expiry can reselect. Changing
+  policy leaves unrelated model/effort fallback pins alone.
 - **Opt-in proactive switching.** `retry.usageAwareFallback` spends one
   lightweight quota request per user message to leave a provider *before* it
   fails, with `retry.usageReservePercent` (default 10) as the headroom floor.

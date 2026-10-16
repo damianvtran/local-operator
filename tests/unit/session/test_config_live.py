@@ -88,7 +88,12 @@ class FakeAuthStore:
     """
 
     def __init__(self) -> None:
-        self._usage_aware_pick = True  # the real store defaults ON
+        self._usage_aware_pick = False
+        self._account_selection_policy = "reset-soonest"
+
+    def configure_account_selection_policy(self, policy: str) -> None:
+        self._account_selection_policy = policy
+        self._usage_aware_pick = policy == "headroom"
 
     def configure_usage_aware_pick(self, enabled: bool) -> None:
         self._usage_aware_pick = bool(enabled)
@@ -101,6 +106,18 @@ class RebindableStream:
         self._settings: Any = settings
         self.applied: list[Any] = []
         self.auth_store = FakeAuthStore()
+        # Production pushes settings at construction AND hot apply. Leaving
+        # this at a historical True invents a change on every unrelated rebind.
+        self._push_account_policy(settings)
+
+    def _push_account_policy(self, values) -> None:
+        from local_operator.providers.account_policy import (
+            effective_account_selection_policy,
+        )
+
+        self.auth_store.configure_account_selection_policy(
+            effective_account_selection_policy(values)
+        )
 
     @property
     def routing_settings(self):
@@ -109,13 +126,7 @@ class RebindableStream:
     def apply_settings(self, values) -> None:
         self.applied.append(values)
         self._settings = values
-        # Mirrors the real ``SessionStreamFn.apply_settings``, which re-pushes
-        # this one key rather than relying on the rebind.
-        from local_operator.providers.failover import RetrySettings
-
-        self.auth_store.configure_usage_aware_pick(
-            RetrySettings.from_settings(values).usage_aware_account_pick
-        )
+        self._push_account_policy(values)
 
     def __call__(self, request: ChatRequest, signal: AbortSignal | None):
         async def gen():
@@ -616,6 +627,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # per call; this one is pushed into the store, which then owns the value.
     # Probing the mapping here would have passed while the cascade kept using
     # the stale flag — the exact false-green the finding described.
+    "retry.accountSelectionPolicy": (
+        "headroom",
+        lambda s, w: s._stream_fn.auth_store._account_selection_policy,
+    ),
     "retry.usageAwareAccountPick": (
         False,
         lambda s, w: s._stream_fn.auth_store._usage_aware_pick,
@@ -943,6 +958,16 @@ async def test_a_write_from_another_process_reaches_the_running_session(
     # the common case — a bare ``model_name`` edit with ``hosting`` unchanged —
     # and resolves to a provider that needs no network.
     ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    if key == "retry.usageAwareAccountPick":
+        # This row proves an actually legacy configuration. An explicit
+        # canonical policy must win over legacy edits, so do not accidentally
+        # test the old flag underneath a freshly materialized canonical value.
+        manager = ConfigManager(config_dir)
+        retry = dict(manager.get_config_value("retry"))
+        retry.pop("accountSelectionPolicy", None)
+        retry.pop("account_selection_policy", None)
+        retry["usageAwareAccountPick"] = True
+        manager.set_config_value("retry", retry)
 
     stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))
     session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
@@ -1060,6 +1085,7 @@ async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_pa
             _openai_api_mode(session.routing_settings),
             _anthropic_cache_ttl_1h_min_context_tokens(session.routing_settings),
             stream.auth_store._usage_aware_pick,
+            stream.auth_store._account_selection_policy,
         )
 
     try:

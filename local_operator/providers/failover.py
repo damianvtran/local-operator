@@ -58,6 +58,10 @@ from local_operator.model.effort import (
     SUPPORTED_EFFORTS,
     resolve_effort_in,
 )
+from local_operator.providers.account_policy import (
+    DEFAULT_ACCOUNT_SELECTION_POLICY,
+    AccountSelectionPolicy,
+)
 
 if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
@@ -2911,6 +2915,9 @@ class RetrySettings:
     #: session-less resolve, so a store built outside a session (login CLI,
     #: MCP auth) has nothing for the flag to switch off.
     usage_aware_account_pick: bool = True
+    # Canonical policy preserves legacy presence during parsing; it does not
+    # change the provider/model/effort fallback route.
+    account_selection_policy: AccountSelectionPolicy = DEFAULT_ACCOUNT_SELECTION_POLICY
     fallback_chains: Mapping[str, Sequence[Any]] = dataclasses.field(default_factory=dict)
     #: What a PINNED child may descend onto when no same-family route can
     #: serve — ``DEFAULT_PINNED_FALLBACK`` (walk the chain family-first with
@@ -2955,6 +2962,11 @@ class RetrySettings:
         pinned_fallback = raw_pinned.strip() if isinstance(raw_pinned, str) else ""
         if pinned_fallback not in PINNED_FALLBACK_VALUES:
             pinned_fallback = DEFAULT_PINNED_FALLBACK
+        from local_operator.providers.account_policy import (
+            effective_account_selection_policy,
+        )
+
+        account_policy = effective_account_selection_policy(settings)
         return RetrySettings(
             enabled=bool(retry.get("enabled", True)),
             max_retries=int(retry.get("maxRetries", retry.get("max_retries", 10))),
@@ -2966,9 +2978,8 @@ class RetrySettings:
                 retry.get("usageAwareFallback", retry.get("usage_aware_fallback", False))
             ),
             usage_reserve_percent=reserve_percent,
-            usage_aware_account_pick=bool(
-                retry.get("usageAwareAccountPick", retry.get("usage_aware_account_pick", True))
-            ),
+            usage_aware_account_pick=account_policy == "headroom",
+            account_selection_policy=account_policy,
             # Normalized HERE, at the one place config crosses into the module,
             # so every consumer downstream can rely on the declared type.
             fallback_chains=_normalize_chains(chains),
@@ -4231,16 +4242,26 @@ async def stream_with_failover(
                     None, signal.reason or "aborted", retryable=False, kind="aborted"
                 )
             if not retry_same_key:
-                access = await _resolve_access_for_provider(
-                    auth,
-                    provider,
-                    session_id,
-                    state,
-                    error,
-                    read_only=request.isolated,
-                    model_id=spec.model_id,
-                    scoped_blocks=retry.usage_aware_fallback,
+                from local_operator.providers.account_affinity import (
+                    endpoint_mode_resolver,
+                    selection_context,
                 )
+
+                with selection_context(
+                    current_request,
+                    retry.account_selection_policy if settings is not None else None,
+                    endpoint_mode=endpoint_mode_resolver(client, current_request),
+                ):
+                    access = await _resolve_access_for_provider(
+                        auth,
+                        provider,
+                        session_id,
+                        state,
+                        error,
+                        read_only=request.isolated,
+                        model_id=spec.model_id,
+                        scoped_blocks=retry.usage_aware_fallback,
+                    )
                 token = access.access_token if access is not None else None
                 if token != current_token:
                     if not exhausted_budget_restored:
@@ -4404,8 +4425,25 @@ async def stream_with_failover(
             # discarded whole. Bounded by the errand's own output (a summary, a
             # title), which the caller was going to hold in full regardless.
             buffered: list[StreamEvent] | None = [] if current_request.replayable else None
+            from local_operator.providers.account_affinity import (
+                WireHintCapture,
+                capture_wire_stream,
+            )
+
+            attempt_hint = WireHintCapture()
+            sent_at_ms = int(time.time() * 1000)
+            sent_monotonic = time.monotonic()
+            successful_terminal = False
+            failed_terminal = False
             try:
-                async for event in client.stream(current_request, key, oauth_access=access):
+                async for event in capture_wire_stream(
+                    client.stream(current_request, key, oauth_access=access), attempt_hint
+                ):
+                    if isinstance(event, StreamEndEvent):
+                        successful_terminal = (
+                            event.stop_reason in ("stop", "length", "toolUse") and not event.error
+                        )
+                        failed_terminal = failed_terminal or not successful_terminal
                     if spec.provider == "meta-muse" and isinstance(event, StreamEndEvent):
                         # Muse's quota arrives passively on the serving stream.
                         # Keep it on this store/account, never a default-home
@@ -4469,11 +4507,38 @@ async def stream_with_failover(
                 # priority is as much a routing decision as removing it.
                 if not request.isolated:
                     _clear_demotion(auth, provider, access)
+                    if failed_terminal:
+                        _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
+                    hint = attempt_hint.hint
+                    retain = getattr(auth, "record_account_success", None)
+                    if (
+                        successful_terminal
+                        and not failed_terminal
+                        and hint is not None
+                        and callable(retain)
+                    ):
+                        # Only the completed attempt's immutable access identity
+                        # may anchor; a clean empty iterator is not a success.
+                        try:
+                            retain(
+                                provider,
+                                session_id,
+                                access,
+                                current_request,
+                                hint,
+                                sent_at_ms,
+                                sent_monotonic,
+                            )
+                        except Exception:
+                            # Local bookkeeping must never replay a served turn.
+                            logger.warning("Account affinity receipt could not be retained")
                 if buffered is None:
                     return  # clean completion; a buffered stream flushes below
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:
+                if not request.isolated:
+                    _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
                 if exc.fail_closed:
                     # A local generated-output envelope is not bad credentials
                     # or provider weather: replaying it on another account/route
@@ -4884,6 +4949,8 @@ async def stream_with_failover(
                     raise exc
                 break  # non-retryable for this provider
             except Exception as exc:  # network errors et al.
+                if not request.isolated:
+                    _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
                 wrapped = wrap_transport_error(exc)
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
@@ -5454,6 +5521,16 @@ async def _resolve_access_for_provider(
 
         record = OAuthAccess(access_token=token, credential_id=0, kind="api_key")
     return record
+
+
+def _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms):
+    invalidate = getattr(auth, "record_account_failure", None)
+    if callable(invalidate):
+        try:
+            invalidate(provider, session_id, access, sent_at_ms)
+        except Exception:
+            # Failure bookkeeping must not hide the original provider error.
+            logger.warning("Account affinity failure could not be recorded")
 
 
 def _clear_demotion(auth: FailoverAuthStore, provider: str, access: "OAuthAccess | None") -> None:

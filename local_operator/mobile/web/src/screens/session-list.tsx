@@ -1358,6 +1358,11 @@ export function SessionListScreen() {
 				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
 				</h1>
+				<button type="button" onClick={() => navigate("/settings/account-routing")}
+					className="ml-auto min-h-11 shrink-0 rounded-md border border-control px-3 text-body-sm text-ink-muted"
+					aria-label={messageRuntime.t("relay.account_policy.title")}>
+					{messageRuntime.t("relay.account_policy.entry")}
+				</button>
 				{/* OFFLINE, QUIETLY (mobile UX batch 2, U11). `connected === false` on
 				    this screen used to change nothing once rows were on it: the list
 				    kept painting a frozen frame as though it were live. The chip is

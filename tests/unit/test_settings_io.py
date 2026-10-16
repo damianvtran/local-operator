@@ -201,6 +201,7 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageAwareFallback": retry.usage_aware_fallback,
         "retry.usageReservePercent": retry.usage_reserve_percent,
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
+        "retry.accountSelectionPolicy": retry.account_selection_policy,
         "retry.fallbackChains": dict(retry.fallback_chains),
         "retry.pinnedFallback": DEFAULT_PINNED_FALLBACK,
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than

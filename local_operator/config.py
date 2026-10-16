@@ -14,7 +14,7 @@ from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Final
 
 import yaml
 
@@ -30,6 +30,11 @@ from local_operator.web_defaults import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Configuration is imported by the lightweight CLI. Keep the scalar default
+# here; importing even a provider-policy module would load the engine namespace
+# on `lop --help`. Runtime policy code imports this SAME default, not a copy.
+DEFAULT_ACCOUNT_SELECTION_POLICY: Final = "reset-soonest"
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
@@ -589,7 +594,7 @@ DEFAULT_CONFIG = Config(
                 "modelFallback": True,
                 "usageAwareFallback": False,
                 "usageReservePercent": 10,
-                "usageAwareAccountPick": True,
+                "accountSelectionPolicy": DEFAULT_ACCOUNT_SELECTION_POLICY,
                 "fallbackChains": {},
             },
             # Search is useful on first run without a credential: DuckDuckGo
@@ -1225,5 +1230,10 @@ class ConfigManager:
 
         settings_io._reload_before_write(self)
 
-        self.config.set_value(key, value)
-        self._write_config(vars(self.config))
+        # Stage the candidate after the locked disk reload. A rejected atomic
+        # write must not leave the process believing a value it never saved;
+        # restore-by-writing would also clobber another writer's later change.
+        candidate = deepcopy(self.config)
+        candidate.set_value(key, value)
+        self._write_config(vars(candidate))
+        self.config = candidate

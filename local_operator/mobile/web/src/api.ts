@@ -96,6 +96,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return (await res.json()) as T;
 }
 
+export type AccountRoutingPayload = {
+	capability: "account-routing-v1";
+	setting: {
+		key: "retry.accountSelectionPolicy";
+		label: string;
+		help: string;
+		kind: "enum";
+		value: string;
+		default: string;
+		is_default: boolean;
+		choices: { value: string; label: string; description: string }[];
+	};
+};
+
+export function isAccountRoutingPayload(payload: unknown): payload is AccountRoutingPayload {
+	if (!payload || typeof payload !== "object") return false;
+	const result = payload as Partial<AccountRoutingPayload>;
+	const row = result.setting;
+	return result.capability === "account-routing-v1" && row?.key === "retry.accountSelectionPolicy" && row.kind === "enum"
+		&& typeof row.label === "string" && typeof row.help === "string" && typeof row.value === "string"
+		&& Array.isArray(row.choices) && row.choices.length > 0
+		&& row.choices.every(choice => typeof choice?.value === "string" && typeof choice.label === "string" && typeof choice.description === "string")
+		&& row.choices.some(choice => choice.value === row.value);
+}
+
+export function getAccountRouting(): Promise<AccountRoutingPayload> {
+	return request("/api/settings/account-routing");
+}
+
+export function setAccountRouting(value: string): Promise<AccountRoutingPayload> {
+	return request("/api/settings/account-routing", {
+		method: "PATCH",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ value }),
+	});
+}
+
 export function getSessions(): Promise<{
 	sessions: SessionSummary[];
 	capabilities?: Capabilities;
