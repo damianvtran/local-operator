@@ -4480,7 +4480,34 @@ async def delete_session_route(session_id: str, body: ConfirmDeletion, request: 
         )
         if remote is not None:
             return reply(remote)
-        return reply(await host(request).delete(session_id))
+        result = await host(request).delete(session_id)
+    if result.get("deleted"):
+        await _release_voice_slot(request, session_id)
+    return reply(result)
+
+
+async def _release_voice_slot(request: Request, session_id: str) -> None:
+    """Clear the voice slot if the conversation just deleted held it.
+
+    Best effort, never the answer: the delete already happened, and the voice
+    routes treat a slot naming a missing directory as empty anyway. Clearing
+    the file is what moves the machine feed's ``voice`` frame, so other windows
+    learn voice is off without polling.
+    """
+    from local_operator.voice import slot as voice_slot
+
+    config_dir = request.app.state.config_manager.config_dir
+    # An unlocked read first, and the common answer ends here: on a machine that
+    # never used voice this creates no ``voice/`` directory or lock file, and a
+    # delete never waits on the slot lock (up to ``LOCK_WAIT_S``) for a session
+    # that does not hold it. ``disable`` re-reads under the lock, so a slot that
+    # moved after this read is left alone.
+    if not voice_slot.is_voice_session(config_dir, session_id):
+        return
+    try:
+        await asyncio.to_thread(voice_slot.disable, config_dir, session_id)
+    except Exception:  # noqa: BLE001 - a busy or unreadable slot must not fail a delete
+        logger.warning("voice slot not cleared after deleting %s", session_id, exc_info=True)
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

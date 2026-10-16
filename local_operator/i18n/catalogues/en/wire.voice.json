@@ -1,0 +1,16 @@
+{
+  "wire.voice.title": "Voice mode",
+  "wire.voice.description": "Talk hands-free to one conversation at a time. That conversation's own agent answers, and its reply is read aloud. Read on the next spoken reply.",
+  "wire.voice.max_spoken_chars.label": "longest spoken reply",
+  "wire.voice.max_spoken_chars.help": "Replies longer than this many characters are cut at a sentence and end with \"The rest is on screen.\" Code blocks and links are never read aloud.",
+  "wire.voice.not_enabled": "Voice mode is not on for this conversation. Turn it on for this conversation first.",
+  "wire.voice.unknown_session": "There is no conversation with id {session_id}.",
+  "wire.voice.unknown_source": "There is nothing to read aloud for that reference.",
+  "wire.voice.invalid_request": "No words came with that request, so nothing was sent.",
+  "wire.voice.empty_transcript": "Nothing was heard, so nothing was sent.",
+  "wire.voice.store_busy": "Something else on this device is changing voice mode. Try again in a moment.",
+  "wire.voice.invalid_request_id": "The request id must be a dashed UUID, so nothing was sent.",
+  "wire.voice.invalid_message": "That message was not sent: {reason}",
+  "wire.voice.approval_pending": "Answer the question or approval on screen first.",
+  "wire.voice.invalid_text_origin": "text_origin names where the words came from: qwen_s2s, or leave it out."
+}

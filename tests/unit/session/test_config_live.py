@@ -915,6 +915,12 @@ HOST_OWNED_LIVE_SECTIONS = {
     # (``scripts/console-host.test.mjs``: the registry's admission against
     # ``policy.maxLive``/``userReserved``), the same split ``desktop`` uses.
     "console",
+    # ``voice`` is host-owned in the ``static`` shape: ``voice.max_spoken_chars`` is
+    # read PER REQUEST off config.yml by ``POST /v1/desktop/voice/text``
+    # (``desktop_voice._max_spoken_chars``), and no ``Session`` holds it, so a probe
+    # here could watch nothing move. Proven in ``tests/unit/server/
+    # test_desktop_voice.py::test_text_honours_the_configured_cap_read_from_disk``.
+    "voice",
 }
 
 

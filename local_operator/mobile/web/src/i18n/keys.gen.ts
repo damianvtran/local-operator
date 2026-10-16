@@ -1138,6 +1138,20 @@ export type MessageParams = {
   "wire.tunnel_setup.deadline": undefined;
   "wire.tunnel_setup.in_progress": undefined;
   "wire.tunnel_setup.unavailable": undefined;
+  "wire.voice.approval_pending": undefined;
+  "wire.voice.description": undefined;
+  "wire.voice.empty_transcript": undefined;
+  "wire.voice.invalid_message": { "reason": string };
+  "wire.voice.invalid_request": undefined;
+  "wire.voice.invalid_request_id": undefined;
+  "wire.voice.invalid_text_origin": undefined;
+  "wire.voice.max_spoken_chars.help": undefined;
+  "wire.voice.max_spoken_chars.label": undefined;
+  "wire.voice.not_enabled": undefined;
+  "wire.voice.store_busy": undefined;
+  "wire.voice.title": undefined;
+  "wire.voice.unknown_session": { "session_id": string };
+  "wire.voice.unknown_source": undefined;
 };
 export type MessageKey = keyof MessageParams;
 export type WithParams = {

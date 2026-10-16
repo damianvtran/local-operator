@@ -46,8 +46,9 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the THREE 1 s invalidation probes are NOT in that five-stat
-figure: the catalogue's, the authoring one (O(profiles)), and the code-request one
+COST, CONTINUED — the FOUR 1 s probes are NOT in that five-stat figure: the
+catalogue's, the authoring one (O(profiles)), the voice slot's (one ``os.stat`` of
+``voice/active.json``, a read only when it moved), and the code-request one
 (one ``readdir`` of the derived code-request index plus one ``os.stat`` per session
 WITH rows — usually zero, since most sessions never touch a pull request, and one
 small file read per CHANGED index). The catalogue probe is a readdir
@@ -154,6 +155,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import DesktopPresence, desktop_presence
 from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
 from local_operator.tui.sidebar_pins import PINS_FILE
+from local_operator.voice import slot as voice_slot
 from local_operator.wakes.store import read_index
 
 logger = logging.getLogger(__name__)
@@ -660,6 +662,14 @@ class DesktopFeed:
         #: Sessions whose token moved and whose frame has not been published yet.
         self._code_requests_invalidated: set[str] = set()
 
+        # -- the voice channel (machine-wide, docs/design/qwen-voice.md) --------
+        #: The voice slot file's stat token. One ``os.stat`` per probe, on the
+        #: list-invalidation cadence: the slot is written by whichever server
+        #: process handled the toggle, so a frame from THIS feed is the only way
+        #: another window learns that voice moved.
+        self._voice_token: tuple[int, int, int] | None = None
+        self._voice_probed_at = 0.0
+
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
         #: plain path, and since #1666's review round 1 (R1-1)
@@ -1139,6 +1149,9 @@ class DesktopFeed:
         # list the client is already loading, while a change landing inside that first
         # second is still caught.
         self._code_requests_tokens = self._code_requests_probe()
+        # The VOICE baseline, same no-replay rule: the slot as it stood at
+        # connect is what the client's own `GET /v1/desktop/voice` returns.
+        self._voice_token = voice_slot.slot_token(self.root)
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1331,6 +1344,29 @@ class DesktopFeed:
         # written by a scan that may be running in a different process entirely (the
         # desktop backend and a session runtime share the config root).
         await self._maybe_emit_code_requests()
+        # 8. THE VOICE SLOT. Outside the doorbell branch for the authoring
+        # channel's reason: the slot lives under the config root, which the
+        # five-stat doorbell never looks at.
+        await self._maybe_emit_voice()
+
+    async def _maybe_emit_voice(self) -> None:
+        """Publish ``type: "voice"`` with ``{active}`` when the slot moved.
+
+        A LEVEL, not an edge: the payload is the slot as it now is, so a burst of
+        switches that lands inside one probe is one frame carrying the latest
+        holder. That is all a renderer needs, since it shows only who holds the
+        slot now. ``CATALOGUE_PROBE_INTERVAL_S``, the module's one list cadence.
+        """
+        now = time.monotonic()
+        if now - self._voice_probed_at < CATALOGUE_PROBE_INTERVAL_S:
+            return
+        self._voice_probed_at = now
+        token = await asyncio.to_thread(voice_slot.slot_token, self.root)
+        if token == self._voice_token:
+            return
+        self._voice_token = token
+        slot = await asyncio.to_thread(voice_slot.read_slot, self.root)
+        self._publish("voice", {"active": slot.public() if slot is not None else None})
 
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
