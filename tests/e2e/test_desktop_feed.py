@@ -40,7 +40,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -739,6 +739,9 @@ class _BannerProcessingWitness:
 
 # These controls exercise the real witness with a SYNTHETIC emitter boundary.
 # They do not construct a feed/server or prove the production hosting path.
+# The synthetic carrier is cast at the call boundary: it presents exactly the
+# attributes `_emit_notifications` and the witness touch. Casting keeps the real
+# signature honest rather than widening it or adding a blanket ignore.
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["return", "raise"])
 async def test_banner_witness_records_owned_emitter_outcome(
@@ -768,7 +771,7 @@ async def test_banner_witness_records_owned_emitter_outcome(
     witness = _BannerProcessingWitness(root, monkeypatch)
     if outcome == "raise":
         with pytest.raises(ValueError) as raised:
-            await DesktopFeed._emit_notifications(feed, rows, states)
+            await DesktopFeed._emit_notifications(cast("DesktopFeed", feed), rows, states)
         assert raised.value is failure
         error_identity = raised.value is failure
         assert witness.through == {}
@@ -776,7 +779,7 @@ async def test_banner_witness_records_owned_emitter_outcome(
         assert witness.observations[rows[0]["token"]][0]["stage"] == "raised"
         assert witness.observations[rows[0]["token"]][0]["error_type"] == "ValueError"
     else:
-        await DesktopFeed._emit_notifications(feed, rows, states)
+        await DesktopFeed._emit_notifications(cast("DesktopFeed", feed), rows, states)
         assert witness.through == {rows[0]["token"]: (feed.epoch, feed.sequence)}
         assert witness.decisions[rows[0]["token"]].is_set()
         assert witness.observations[rows[0]["token"]][0] == {
@@ -839,7 +842,7 @@ async def test_banner_witness_delegates_foreign_rows_without_inspection(
 
     monkeypatch.setattr(DesktopFeed, "_emit_notifications", emitter)
     witness = _BannerProcessingWitness(tmp_path / "owned", monkeypatch)
-    await DesktopFeed._emit_notifications(feed, rows, states)
+    await DesktopFeed._emit_notifications(cast("DesktopFeed", feed), rows, states)
     assert len(calls) == 1
     assert calls[0][0] is feed and calls[0][1] is rows and calls[0][2] is states
     assert witness.observations == {} and witness.tasks == {}
@@ -898,7 +901,9 @@ async def test_banner_witness_timeout_note_precedes_successful_return(
     monkeypatch.setattr(DesktopFeed, "_emit_notifications", emitter)
     witness = _BannerProcessingWitness(root, monkeypatch)
     witness.phase = "synthetic-held-emitter"
-    invocation = asyncio.create_task(DesktopFeed._emit_notifications(feed, rows, states))
+    invocation = asyncio.create_task(
+        DesktopFeed._emit_notifications(cast("DesktopFeed", feed), rows, states)
+    )
     feed._task = invocation
     try:
         async with asyncio.timeout(5):
