@@ -3161,8 +3161,10 @@ class AskPickerScreen(Container):
         the faintest step in the ramp and the highlight vanished exactly when the
         user reached for the mouse.
         """
-        hovered = index == self._hovered
-        if index == self.state.selected and not self.passive:
+        # A READ-ONLY card marks no row either (D10): a lit row says "a click or
+        # Enter takes this one", and on a lapsed card nothing does.
+        hovered = index == self._hovered and not self._read_only
+        if index == self.state.selected and not self.passive and not self._read_only:
             token = "tint-select-hi" if hovered else "tint-select"
         elif hovered:
             token = "tint-select"
@@ -3250,7 +3252,7 @@ class AskPickerScreen(Container):
         ``recommended`` badge is untouched: it is a statement about the options,
         not about the keys, and it never depended on ``selected``.
         """
-        selected = index == self.state.selected and not self.passive
+        selected = index == self.state.selected and not self.passive and not self._read_only
         accent = ground + Style(color=theme_mod.semantic_color("accent"))
         row = Text(no_wrap=True, overflow="ellipsis")
         row.append(
