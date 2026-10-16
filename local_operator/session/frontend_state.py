@@ -5987,7 +5987,6 @@ class FrontendStateStore:
         #: row embedded a raw transcript row id as ``history_cursor`` — the
         #: durable-journal invariant the desktop ask-images e2e pins.
         self._internal_subscribers: set[Callable[[FrontendUpdate], None]] = set()
-        self._viewer_count = 0
         #: Guards the ONE O(1) critical section that makes registration and
         #: publication a single step across threads: a publish assigns ``_state``
         #: and takes its subscriber list (``_install``); a subscribe appends
@@ -6325,7 +6324,13 @@ class FrontendStateStore:
         but are not viewers, so they must not make an unobserved runtime look
         attended: that would turn on work reserved for an attached frontend.
         """
-        return self._viewer_count > 0
+        # Read from the CALLBACK set, never a parallel counter: a counter can
+        # drift from the set (the same callable registered as viewer and then
+        # as an internal observer left it reading as an attached frontend), and
+        # then this property lies about whether work reserved for a viewer is
+        # owed. O(number of registered callbacks), the same order the publish
+        # fan-out already pays on every update.
+        return any(callback not in self._internal_subscribers for callback in self._subscribers)
 
     def _freeze_for_install(self, state: FrontendSessionState) -> FrontendSessionState:
         """The frozen object an install publishes. Call OUTSIDE ``_publish_lock``.
@@ -7022,8 +7027,6 @@ class FrontendStateStore:
             self._subscribers.append(callback)
             if internal:
                 self._internal_subscribers.add(callback)
-            else:
-                self._viewer_count += 1
             state_ref = self._state
         state = self._public_state(state_ref)
         sync = FrontendSync(
@@ -7042,8 +7045,6 @@ class FrontendStateStore:
                 else:
                     if internal:
                         self._internal_subscribers.discard(callback)
-                    else:
-                        self._viewer_count = max(0, self._viewer_count - 1)
 
         return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
 
