@@ -19,6 +19,8 @@ from textual.binding import Binding
 from textual.message import Message
 
 from local_operator.harness.types import ImageContent
+from local_operator.i18n.keys import tui_small as copy
+from local_operator.i18n.text import tr
 from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
@@ -29,6 +31,12 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
 )
+
+#: The slice's catalogued copy, resolved at the render point. This module is
+#: constructed per presentation and resolves per frame, so it holds no
+#: module-level constant and registers no locale refresher (text.py: only
+#: CONSTANTS need re-materialising on a locale move).
+_t = tr("tui.small")
 
 #: Resident bytes of retained text one parked presentation may hold, measured
 #: with ``sys.getsizeof`` rather than estimated from a character count. It must
@@ -425,7 +433,14 @@ class DraftRecoveryNotice(HeldPayloadNotice):
             1 for attachment in draft.attachments.values() if getattr(attachment, "image", None)
         )
         if images:
-            parts.append(f"({images} image{'s' if images != 1 else ''})")
+            # A catalogue plural, not a hand-rolled s-suffix: en renders
+            # '(1 image)' / '(3 images)' byte for byte, and a translation wave
+            # changes the CATEGORIES where the language's rules say so. `shown`
+            # carries the bare digit the pre-extraction f-string printed (the
+            # `images` slot exists only to select the branch and would group
+            # '1,200' if it were interpolated), so byte fidelity holds at every
+            # magnitude. The parentheses live in the message branches.
+            parts.append(_t(copy.draft_attachment_count(images=images, shown=str(images))))
         return " ".join(parts) + " — enter"
 
     def action_restore(self) -> None:
