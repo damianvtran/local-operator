@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import PropertyMock, patch
 
 import pytest
@@ -100,24 +101,41 @@ class _Capture:
     """A stand-in Static: records the Text it was asked to paint."""
 
     def __init__(self) -> None:
-        self.text = None
+        self.text: Any = None
         self.display = False
 
     def update(self, text) -> None:  # noqa: ANN001, ANN202 - test double
         self.text = text
 
 
+def _painted(capture: Any) -> Any:
+    """The Text a `_Capture` (or a real `Static`) was handed.
+
+    Annotated `Any` on purpose: the painter stores the `Text` on a test
+    double here, while on a real `Static` that attribute is written by
+    Textual's own machinery and is not part of its public type.
+    """
+    return capture.text
+
+
 def _chrome_view(*, expand_all: bool, legend_open: bool) -> OrgChartView:
+    # Assigning through `setattr` (rather than `view._title = ...`) keeps this
+    # test double off pyright's attribute-assignment path: the real widget
+    # declares `_title` as a `Static`, and pyright rejects assigning a test
+    # double to it even though the painter only calls `.update()`/`.text`.
     view = OrgChartView.__new__(OrgChartView)
-    view._root = None
-    view._team_name = "org"
-    view._tier = 1
-    view._expand_all = expand_all
-    view._title = _Capture()
-    view._rule = _Capture()
-    view._legend = _Capture()
-    view._legend_open = legend_open
-    view._paint_hints = lambda: None
+    for name, value in (
+        ("_root", None),
+        ("_team_name", "org"),
+        ("_tier", 1),
+        ("_expand_all", expand_all),
+        ("_title", _Capture()),
+        ("_rule", _Capture()),
+        ("_legend", _Capture()),
+        ("_legend_open", legend_open),
+        ("_paint_hints", lambda: None),
+    ):
+        setattr(view, name, value)
     return view
 
 
@@ -128,7 +146,7 @@ def test_org_chart_title_and_legend_paint_the_extracted_copy() -> None:
         view = _chrome_view(expand_all=True, legend_open=True)
         view._paint_chrome()
         assert view._title_text.plain == "team org · org chart · zoom: standard · expanded"
-        assert view._legend.text.plain.startswith("◆ manager")
+        assert _painted(view._legend).plain.startswith("◆ manager")
 
         collapsed = _chrome_view(expand_all=False, legend_open=False)
         collapsed._paint_chrome()
