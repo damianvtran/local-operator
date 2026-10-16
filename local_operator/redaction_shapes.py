@@ -4073,11 +4073,37 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # 8080:80``, ``ssh -p 2222``) and masking a port would be both unhelpful and
     # wrong. The binary name is the only thing that distinguishes the two, which
     # is why this rule exists at all rather than a bare ``-p`` pattern.
+    #
+    # **The anchor must be an INVOCATION, not a filename stem** (operator-reported
+    # 2026-10-16). ``\b`` treats the dot in a Rust module path as a boundary, so the
+    # old anchor fired on a SOURCE-FILE NAME — the prose of a coder session's own
+    # reasoning — and then masked whatever package-style flag sat within 200
+    # characters of it. Measured (session ``19b15d6e369d``): one such line masked
+    # the crate NAME and REGISTERED it, after which crate paths, ``cargo test -p
+    # <crate>``, ``git add`` pathspecs and a later ``project`` tool ``name:``
+    # argument all came back as the marker. The reported symptom was a cargo
+    # command whose package argument had become the marker and which failed with
+    # "package pattern(s) … not found in workspace".
+    #
+    # The invocation reading is what the rule always MEANT (see "the client
+    # binary" above): the word must begin a command — the string start, or just
+    # after whitespace or a shell separator — and must be followed by whitespace,
+    # so a filename stem or a hyphenated slug cannot anchor it. A path-qualified
+    # invocation is admitted on purpose (see the leading class), because a client
+    # reached by an absolute path IS being invoked; what the class refuses is a
+    # name that is not being invoked at all.
+    #
+    # Every true positive keeps its mask: the inline-password spellings pinned in
+    # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
+    # redis-cli, clickhouse-client, influx) match the anchored form, and the
+    # published-port negatives (``docker run -p``, ``ssh -p``) were never in this
+    # alternation.
     Shape(
         "client-inline-password",
         re.compile(
-            r"(?i)(\b(?:mysql|mysqldump|psql|pg_dump|pg_restore|mongo|mongosh|"
-            r"clickhouse-client|redis-cli|influx)\b[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
+            r"(?i)((?:^|[ \t(;|&/])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
+            r"mongo|mongosh|clickhouse-client|redis-cli|influx)(?=[ \t])"
+            r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
         ),
         r"\1" + REDACTION_MARKER,
         2,
