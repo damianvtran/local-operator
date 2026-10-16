@@ -154,7 +154,9 @@ class ConsentDocument:
     def locked(self) -> Iterator[None]:
         placement.credentials_dir_for(self.network_id, self.root)
         with store._write_lock(self.path):
-            with placement._cross_process_lock(self.path.with_name(".consent.lock"), root=self.root):
+            with placement._cross_process_lock(
+                self.path.with_name(".consent.lock"), root=self.root
+            ):
                 yield
 
     def load(self) -> dict[str, Any]:

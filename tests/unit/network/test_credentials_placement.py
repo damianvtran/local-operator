@@ -18,8 +18,6 @@ from typing import Any
 
 import pytest
 
-from tests.unit.network.test_credentials_private_paths import write_envelope  # noqa: F401 — fixture
-
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials import store as mesh_store
 from local_operator.network.credentials.state import (
@@ -34,11 +32,17 @@ from local_operator.network.credentials.types import (
     synthetic_credential_id,
 )
 from local_operator.network.types import MeshRefusal
+from tests.unit.network import test_credentials_private_paths as private_path_fixtures
 
 OWNER = "d_00000000000000000000000000000001"
 OTHER = "d_00000000000000000000000000000002"
 THIRD = "d_00000000000000000000000000000003"
 NETWORK = "n_placement_test"
+
+# The shared fixture declares its public pytest name explicitly. Import its
+# module and keep a distinct binding so test parameters do not redefine an
+# unused imported symbol, while still using the exact same guarded fixture.
+_private_write_envelope = private_path_fixtures.write_envelope
 
 
 def _document(root: Path) -> placement_mod.PlacementDocument:
