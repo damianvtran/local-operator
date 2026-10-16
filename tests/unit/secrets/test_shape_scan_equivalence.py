@@ -354,7 +354,9 @@ def test_each_unguarded_rule_scans_the_text_exactly_once() -> None:
     what keeps "one scan" from being satisfied by a rule that never ran.
     """
     hits: list[ShapeHit] = []
-    text = "MONGO_DSN=mongodb://svc:hunter2pw@db.invalid/x\n"
+    # DSNs now use the guarded path. Exercise a genuinely UNGUARDED bearer
+    # rule so the non-vacuity assertion still proves the one-scan claim.
+    text = "Authorization" + ": Bearer " + "SyntheticScan" + "Token7X2v9" + "\n"
     unguarded = [shape for shape in CREDENTIAL_SHAPES if shape.guard is None]
     assert unguarded, "the table would be empty"
 

@@ -4,7 +4,8 @@ import { getSurfaces, withSessionMutation } from "./state";
 
 /** A private proof is intentionally separate from ownerKey (tab-group copy).
  * Records live with surfaces in storage.session: worker churn preserves them;
- * a full browser restart clears both, so a reused numeric tab id is never proof.
+ * extension reload/update/disable or a full browser restart clears both, so a
+ * reused numeric tab id is never proof. Do not reload to inspect lost authority.
  */
 export interface Scope {
   session: string;
@@ -113,6 +114,78 @@ export async function recordAllocation(params: Params, tab: string, state: strin
   });
 }
 
+/** A small, identifier-free receipt for a refused `owner_recover`, or `undefined`.
+ *
+ * WHY it exists: both refusals used to arrive as the same bare "generation is
+ * stale", so a field failure could not be classified without reading this peer's
+ * private state. From the caller's side the two cases need opposite next steps:
+ * the stored scope belongs to ANOTHER session (nothing to repair, and nothing the
+ * caller may learn about it), or it is this session's own scope at a generation
+ * the caller never listed (its ancestry is behind, which only the operator can
+ * judge). This answers that and nothing more.
+ *
+ * WHAT it carries: booleans and counts only. The caller already knows what IT
+ * sent, so `request_*` echoes lengths of its own input; `allocations_*` and
+ * `unknown_reservations` count the scope it is entitled to (same proof AND same
+ * session). It never contains a proof, session, generation, allocation id, tab
+ * handle or URL, because a refusal is rendered to the model and logged.
+ *
+ * WHAT it must not do: a caller whose session differs gets no scope counts at all
+ * (`session_match: false` and nothing else), so a holder of the proof but not of
+ * the session cannot use a refusal to size or probe a scope it does not own. A
+ * proof that names no scope never reaches here (that path answers `unresolved`).
+ * It reads only; the refusal that follows mutates nothing, so diagnosing is not a
+ * repair, a rotation or a rebind. Additive on the wire: an older consumer drops
+ * unknown `data` keys, and an older PEER simply omits it, which the consumer must
+ * keep reading as an ambiguous refusal, never as a licence to upgrade or retry.
+ */
+async function recoverRefusalDiagnostic(scope: Scope, sessionMatches: boolean, params: Params): Promise<Record<string, unknown>> {
+  if (!sessionMatches) return { version: 1, session_match: false };
+  const surfaces = await getSurfaces();
+  const allocations = Object.values(scope.allocations);
+  return {
+    version: 1,
+    session_match: true,
+    request_ancestry_count: Array.isArray(params.previous_generations) ? params.previous_generations.length : 0,
+    request_previous_supplied: typeof params.previous_generation === "string" && params.previous_generation !== "",
+    allocations_total: allocations.length,
+    allocations_live: allocations.filter(a => a.tab && surfaces[a.tab]).length,
+    allocations_pending: allocations.filter(a => ["allocating", "allocated", "cleanup_pending"].includes(a.state)).length,
+    unknown_reservations: scope.unknownReservations ?? 0,
+  };
+}
+
+/** Inspection is a snapshot, NEVER reconciliation. In particular it must not
+ * enter the owner queue (a stuck navigation may own it), materialize a scope,
+ * touch surfaces/approvals, or accept legacy capability-only dispatch. Storage
+ * returns a detached snapshot, so concurrent writers cannot change this read.
+ * Only this proof's row is selected; no foreign scope enumeration is permitted.
+ */
+export async function inspectOwnership(params: Params): Promise<Record<string, unknown>> {
+  const bounded = (v: unknown, max: number, empty = false): v is string =>
+    typeof v === "string" && v.length <= max && (empty || v.length > 0);
+  const ancestry = params.previous_generations ?? [];
+  if (!bounded(params.owner_proof, 128) || !/^[a-zA-Z0-9_-]{32,}$/.test(params.owner_proof)
+      || !bounded(params.requester, 256) || !params.requester.startsWith("session:")
+      || !bounded(params.owner_generation, 128)
+      || !bounded(params.previous_generation ?? "", 128, true)
+      || !Array.isArray(ancestry) || ancestry.length > 16
+      || !ancestry.every(value => bounded(value, 128))) {
+    throw new BridgeCommandError("owner_refused", "invalid ownership inspection identity", { refusal: "foreign" });
+  }
+  const all = await scopes();
+  const scope = Object.hasOwn(all, params.owner_proof) ? all[params.owner_proof] : undefined;
+  if (!scope) return { version: 1, scope_missing: true, session_match: false };
+  if (scope.session !== params.requester) return { version: 1, session_match: false };
+  return {
+    version: 1, scope_missing: false, session_match: true,
+    generation_current: scope.generation === params.owner_generation,
+    generation_previous: scope.generation === params.previous_generation,
+    generation_ancestry: ancestry.includes(scope.generation),
+    request_ancestry_count: ancestry.length,
+  };
+}
+
 /** Serialize owner commands per owner through the entire side effect, not just
  * the map write. A finish cannot overtake an in-flight allocation and then let
  * its late navigation resurrect the tab. The daemon's deadlines remain bounded;
@@ -129,6 +202,7 @@ export function withOwnership(
   method: string, params: Params, handler: () => Promise<Record<string, unknown>>,
   close: (params: Params) => Promise<Record<string, unknown>>,
 ): Promise<Record<string, unknown>> {
+  if (method === "owner_inspect") return inspectOwnership(params);
   const key = String(params.owner_proof ?? "legacy");
   const previous = queues.get(key) ?? Promise.resolve();
   const operate = async (): Promise<Record<string, unknown>> => {
@@ -148,10 +222,14 @@ export function withOwnership(
         if (!scope) return { ownership_version: 1, state: "unresolved" };
         const predecessors = Array.isArray(params.previous_generations) ? params.previous_generations : [];
         if (scope.session !== session) {
-          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", { refusal: "foreign" });
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", {
+            refusal: "foreign", diagnostic: await recoverRefusalDiagnostic(scope, false, params),
+          });
         }
         if (scope.generation !== generation && scope.generation !== params.previous_generation && !predecessors.includes(scope.generation)) {
-          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", { refusal: "stale" });
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", {
+            refusal: "stale", diagnostic: await recoverRefusalDiagnostic(scope, true, params),
+          });
         }
         // A resume retires the ended scope. Keying this on the generation
         // CHANGING was unreachable for an in-process child: that path

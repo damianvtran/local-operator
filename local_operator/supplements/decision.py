@@ -16,13 +16,14 @@ session's one shared ``ClassificationService`` (``decide`` takes its guards from
   the deliverable?" (memo round-1 S-R8). All of it is harness-derived text; the one
   model-controlled string, the file's name, is sanitised and clipped.
 * **Graphics** -- one ``noul`` question ``supplement_graphics`` at :data:`GRAPHICS_THRESHOLD`.
-  Precision over recall: a "yes" below 0.7 is a "no", and a "yes" the pre-filter's structured-
+  Charts require 0.7; exact summary tables require 0.6. A "yes" the pre-filter's structured-
   data signal does not back is OVERRULED (the model has no rows, only shapes, so it cannot see
   whether the data exists; the harness can).
 
 FAIL-OPEN, AND WHAT OPEN MEANS HERE. A ``None`` answer (disabled, circuit open, timeout, no
-leg, schema rejection) degrades to the no-vendor heuristic, not to an error: tier-1 files (a
-``write`` call the turn made) of a deliverable kind, by recency, capped. Graphics NEVER run
+leg, schema rejection) degrades to the no-vendor heuristic, not to an error: tier-1/2 files
+(a ``write`` call or a command's output the turn made) of a deliverable kind, direct writes
+first, then by recency, capped. Graphics NEVER run
 without a vendor -- a session-model fallback for that question is ~100x the decision cost and
 exactly the "default-on spends money" surprise the welcome copy warns about (memo §2.3 Step 3).
 
@@ -66,6 +67,13 @@ FILE_PROB_FLOOR: Final = 0.25
 NONE_WINS_P: Final = 0.5
 #: Graphics go ahead iff the answer is at least this AND the structured signal is true.
 GRAPHICS_THRESHOLD: Final = 0.7
+#: Explicit operational tables have a different precision/recall tradeoff from charts:
+#: they collect four exact noun-labelled counts, without inferred trends, common axes
+#: or totals. Live sanitized replay decisions were .60/.65 despite useful table evidence.
+#: User-requested table recall therefore uses .60 ONLY for validated, exclusively
+#: labelled-summary/table-only evidence; every chart/series keeps the .70 threshold.
+#: This still requires a vendor answer and all real-turn/evidence/cost guards.
+SUMMARY_TABLE_THRESHOLD: Final = 0.6
 
 #: State bounds (memo §2.3 State), cut with the monitors' marker so the model knows a preview
 #: is incomplete. Duplicated, not imported: ``monitors.classify`` is import-cheap but its
@@ -89,12 +97,17 @@ GRAPHICS_INSTRUCTIONS: Final = (
     "The assistant just finished answering a user. Would a chart or figure help the user "
     "understand the numbers? Answer with a HIGH probability only when the answer or its tool "
     "output actually shows a table or series of three or more comparable measurements whose "
-    "shape, ranking or trend is faster to see than to read. Answer LOW for a single value, a "
-    "version or count, a short list, a prose-only answer, or data that was only talked about "
+    "shape, ranking or trend is faster to see than to read, OR an extracted labelled-summary "
+    "dataset of four or more operational counts with distinct entity units that a compact "
+    "labelled table makes easier to check than counts scattered through paragraphs. For "
+    "distinct units prefer a table, never comparable bars or a total. Answer LOW for a single "
+    "value, version, unlabelled numbers, ordinary prose, or data only talked about "
     "and never shown."
 )
 GRAPHICS_CRITERIA: Final[dict[str, str]] = {
-    "true": "a chart would let the user see a ranking, trend or comparison at a glance",
+    "true": (
+        "a chart reveals a ranking/trend, or a labelled table clarifies shown operational counts"
+    ),
     "false": "no figure helps: one or two values, prose, or no data actually shown",
 }
 
@@ -368,8 +381,19 @@ def graphics_state(
     The dataset titles ride in the shapes and are turn data too, so the whole composed
     string passes the same egress scrub.
     """
-    shapes = "\n".join(f"- {d.title}: {d.shape()}" for d in evidence.datasets) or (
-        "- numbers inside the answer text"
+    shapes = (
+        "\n".join(
+            f"- {d.title}: {d.shape()}"
+            + (
+                "; explicit noun-labelled operational counts extracted from this answer's list. "
+                "Presentation: compact labelled summary table only (mixed entity units, "
+                "not comparable bars). Judge whether collecting these scattered counts helps."
+                if d.presentation == "table-only"
+                else ""
+            )
+            for d in evidence.datasets
+        )
+        or "- numbers inside the answer text"
     )
     return _egress(
         _state_text(user_text, answer_text) + "\n\nDATA SHOWN THIS TURN:\n" + shapes, literals
@@ -441,8 +465,32 @@ def drawable(evidence: Evidence) -> bool:
     return evidence.structured and bool(evidence.datasets)
 
 
+def _summary_table_only(evidence: Evidence) -> bool:
+    """Narrow table-recall gate, never a lower threshold for mixed/chart datasets.
+
+    Check the extractor's form AND its concrete shape, not a presentation hint alone.
+    Exact/uncertain context validation belongs to evidence._labelled_summary; these
+    structural checks keep a future other table producer from silently buying this rate.
+    """
+    units = {"comments", "profiles", "links", "matches"}
+    return (
+        evidence.structured
+        and "labelled-summary" in evidence.forms
+        and len(evidence.datasets) == 1
+        and all(
+            d.presentation == "table-only"
+            and d.source == "answer"
+            and d.columns == ("entity (distinct units)", "count")
+            and len(d.rows) == d.n_rows == 4
+            and all(len(row) == 2 and re.fullmatch(r"[0-9]+", row[1]) for row in d.rows)
+            and {row[0] for row in d.rows} == units
+            for d in evidence.datasets
+        )
+    )
+
+
 def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
-    """The graphics half's ONE rule: threshold AND evidence (memo §2.3).
+    """The graphics rule: evidence plus its declared table/chart probability threshold.
 
     A pure function so the evidence overrule can be tested against an answer that ARRIVES
     anyway (a service whose answer was cached before the signal moved): the caller never asks
@@ -451,13 +499,22 @@ def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
     if answer is None or not isinstance(getattr(answer, "value", None), (int, float)):
         return 0.0, False
     probability = round(float(answer.value), 4)
-    return probability, probability >= GRAPHICS_THRESHOLD and drawable(evidence)
+    threshold = SUMMARY_TABLE_THRESHOLD if _summary_table_only(evidence) else GRAPHICS_THRESHOLD
+    return probability, probability >= threshold and drawable(evidence)
 
 
 def heuristic_files(candidates: Sequence[Candidate]) -> list[Candidate]:
-    """The no-vendor fallback: tier-1 (written this turn) deliverable files, newest first."""
-    chosen = [c for c in candidates if c.tier == 1 and c.deliverable]
-    chosen.sort(key=lambda c: (-c.order, c.path))
+    """The no-vendor fallback: deliverable files the turn wrote, direct writes first.
+
+    Tier 1 (a ``write`` call) outranks tier 2 (a command's output: redirect, ``cp``, a python
+    ``open(..., 'w')``, the touched-directory sweep), each newest first. Tier 2 is admitted
+    because the operator's real deliverables are often made by a shell/python step, not the
+    ``write`` tool, and the vendor being down is exactly when nothing else would surface them;
+    the cost is bounded by ``max_featured`` and by the pre-filter's own exclusions. Tier 3
+    (merely NAMED in the answer) and source-code kinds stay out: no write evidence.
+    """
+    chosen = [c for c in candidates if c.tier <= 2 and c.deliverable]
+    chosen.sort(key=lambda c: (c.tier, -c.order, c.path))
     return chosen
 
 

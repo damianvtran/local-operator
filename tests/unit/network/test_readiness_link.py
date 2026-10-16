@@ -153,6 +153,113 @@ def _settle_the_peer_link(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_tool_ready_checks_selected_model_without_targeting_requester_session(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The actual tool/child CLI asks two real relays, with ownership still enforced.
+
+    An inferred caller is model-selection context, not a session the remote owns.
+    Cold synthetic directories make both sides' ownership observable without
+    starting a runtime or needing provider credentials.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.network import tool
+
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+    requester, target = "synthetic-local-requester", "synthetic-remote-target"
+    (server_a.root / "sessions" / requester).mkdir(parents=True)
+    (server_b.root / "sessions" / target).mkdir(parents=True)
+    assert requester in server_a.store_view.local_session_ids()
+    assert requester not in server_b.store_view.local_session_ids()
+    assert target in server_b.store_view.local_session_ids()
+    selector = "openai/gpt-6.1-sol"
+
+    for peer in (server_b.identity.name, ""):
+        result = await tool.execute_network(
+            "synthetic-ready-call",
+            {"action": "ready", "peer": peer},
+            None,
+            None,
+            ToolContext(cwd=".", session_id=requester, session_model_label=selector),
+        )
+        assert result.details is not None, result
+        payload = result.details["network"]
+        selected = _capability(payload, "selected_model_credential")
+        assert selected["selector"] == selector
+        assert selected["session_id"] == ""
+        assert selected["source"] == readiness.SOURCE_PEER
+        # No login/request proof exists in this isolated rig. Returning facts
+        # must not turn absence into authentication convergence or overall PASS.
+        assert selected["ok"] is False
+        assert selected["code"] == "absent"
+        assert result.is_error
+        assert "does not live on this device" not in json.dumps(payload)
+        assert _capability(payload, readiness.CAPABILITY_GIT)["source"] == readiness.SOURCE_PEER
+
+    # Explicit CLI targeting still means REMOTE ownership. Exercise the real
+    # parser, local control socket, peer wire and authorizer in both directions.
+    _, owned = _ready_json(
+        capsys, "--peer", server_b.identity.name, "--model", selector, "--session", target
+    )
+    assert _capability(owned, "selected_model_credential")["session_id"] == target
+    assert _capability(owned, readiness.CAPABILITY_GIT)["source"] == readiness.SOURCE_PEER
+    _, foreign = _ready_json(
+        capsys, "--peer", server_b.identity.name, "--model", selector, "--session", requester
+    )
+    refused = _capability(foreign, readiness.CAPABILITY_GIT)
+    assert refused["code"] == readiness.CODE_NOT_ASKED
+    assert f"session {requester} does not live on this device" in refused["detail"]
+
+    # A readiness-capable older peer can omit selected-access facts. Do not
+    # mistake the successfully answered node request for proof of model access.
+    original = server_b._handlers["net_readiness"]  # noqa: SLF001
+
+    def legacy_facts(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        facts = original(link, frame)
+        assert isinstance(facts, dict), "the real readiness handler must return facts"
+        facts.pop("selected_model_access", None)
+        return facts
+
+    monkeypatch.setitem(server_b._handlers, "net_readiness", legacy_facts)  # noqa: SLF001
+    legacy = await tool.execute_network(
+        "synthetic-legacy-call",
+        {"action": "ready", "peer": server_b.identity.name},
+        None,
+        None,
+        ToolContext(cwd=".", session_id=requester, session_model_label=selector),
+    )
+    assert legacy.details is not None
+    legacy_row = _capability(legacy.details["network"], "selected_model_credential")
+    assert legacy_row["code"] == "pending" and legacy_row["ok"] is False
+    assert "has not converged or been verified" in legacy_row["detail"]
+
+    # With only local records available the same model requirement survives,
+    # but no peer facts or successful authentication may be invented.
+    server_a.stop()
+    local = await tool.execute_network(
+        "synthetic-local-call",
+        {"action": "ready"},
+        None,
+        None,
+        ToolContext(cwd=".", session_id=requester, session_model_label=selector),
+    )
+    assert local.details is not None
+    local_row = _capability(local.details["network"], "selected_model_credential")
+    assert local_row["selector"] == selector and local_row["session_id"] == ""
+    assert local_row["source"] == readiness.SOURCE_UNKNOWN
+    assert local_row["code"] == "pending" and local_row["ok"] is False
+
+
 def test_both_ends_serve_the_readiness_op(request: pytest.FixtureRequest) -> None:
     pair_devices: Devices = request.getfixturevalue("devices")
     server_a, server_b, _host, _port = pair_devices

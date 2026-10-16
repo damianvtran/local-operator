@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.memory_capture import policy
 from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
     SessionStreamFn,
@@ -44,6 +45,7 @@ from local_operator.model.configure import (
     _openai_api_mode,
     _openai_use_max_context_window,
     _openrouter_provider_preferences,
+    _openrouter_retire_below_tps,
 )
 from local_operator.projects import stale_after_s
 from local_operator.providers.failover import RetrySettings
@@ -546,6 +548,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
             "preferred_max_latency"
         ),
     ),
+    # The harness-side decode-rate floor: probed through the resolver that
+    # `SessionStreamFn._score_host_decode_rate` reads it with, over the session's
+    # LIVE routing mapping. 40.0 differs from the 0.0 default, so the probe
+    # observes a CHANGE reaching the running session.
+    "providers.openrouter.retire_below_tps": (
+        40.0,
+        lambda s, w: _openrouter_retire_below_tps(s.routing_settings),
+    ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on
     # the auth STORE, not the mapping, because the store holds its own copy.
@@ -722,6 +732,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # is that very resolver against the watched directory, in the setting's own
     # units (hours).
     "projects.stale_after_hours": (2, lambda s, w: stale_after_s() / 3600.0),
+    # -- memory: ``memory_capture.policy`` re-reads config.yml on EVERY tool call, capture
+    # pass and suggestion, so a write from another process lands on the next use. The
+    # shipped default is ON, hence the probe value is False. Observed through that very
+    # reader against the watched directory.
+    "memory.enabled": (False, lambda s, w: policy(w.config_dir)["enabled"]),
+    "memory.capture": (False, lambda s, w: policy(w.config_dir)["capture"]),
+    "memory.suggest": (False, lambda s, w: policy(w.config_dir)["suggest"]),
     # -- team_bridge: the local machine prefs, observed through the public
     # bridge settings plumbing the status route's ``local`` block calls -------
     # The section is LIVE because the surfaces consult these keys on every

@@ -225,6 +225,50 @@ class BrowserCleanupResult:
     detail: str = ""
 
 
+#: The only keys of a peer's `owner_recover` refusal receipt that are ever rendered,
+#: each with the type it must have. A whitelist, not a pass-through: the receipt is
+#: produced by another process (an extension, possibly an old or hostile one) and ends
+#: up in an error the model reads and a log keeps, so free text, identifiers or a URL
+#: must never ride along. Booleans and small counts carry everything the diagnosis
+#: needs (does the stored owner session match, and is the stored generation absent
+#: from the ancestry the caller sent).
+_REFUSAL_RECEIPT_KEYS: dict[str, type] = {
+    "session_match": bool,
+    "request_ancestry_count": int,
+    "request_previous_supplied": bool,
+    "allocations_total": int,
+    "allocations_live": int,
+    "allocations_pending": int,
+    "unknown_reservations": int,
+}
+_REFUSAL_RECEIPT_MAX_COUNT = 1_000_000
+
+
+def _refusal_receipt(value: Any) -> str:
+    """The peer's refusal receipt as a short suffix, or "" when there is none.
+
+    "" for a missing or malformed receipt is deliberate: an older peer omits it, and
+    that must read exactly as before -- an explicit ambiguous refusal -- never as a
+    reason to retry, rotate the proof or upgrade the extension. The receipt only
+    explains a refusal; it never changes which recovery branch runs.
+    """
+    if not isinstance(value, dict):
+        return ""
+    parts: list[str] = []
+    for key, kind in _REFUSAL_RECEIPT_KEYS.items():
+        item = value.get(key)
+        if kind is bool and isinstance(item, bool):
+            parts.append(f"{key}={'true' if item else 'false'}")
+        elif (
+            kind is int
+            and isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= _REFUSAL_RECEIPT_MAX_COUNT
+        ):
+            parts.append(f"{key}={item}")
+    return f" (peer receipt: {', '.join(parts)})" if parts else ""
+
+
 class BrowserResource:
     def __init__(self, directory: Path, session_id: str, *, host: str = "") -> None:
         self.directory = directory
@@ -765,6 +809,120 @@ class BrowserResource:
         if all(per_lane.get(lane) == [self.generation] for lane in _REPLAY_LANES):
             self.record["bridge_generations"] = [self.generation]
 
+    async def inspect_ownership(self) -> dict[str, Any]:
+        """Read only the existing extension identity, without initializing a lane.
+
+        ``params()`` initializes and saves, and ``client()`` resolves a mutable
+        lane: neither is safe for inspection. Use a detached disk snapshot and
+        the extension transport directly; never recover, retry, or update caches.
+        The response is allowlisted because peers are not a logging boundary.
+        """
+        # Bound the sidecar before decoding: an inspection cannot spend unbounded
+        # CPU/memory on a corrupt journal, nor create a missing directory.
+        try:
+            with self.path.open() as stream:
+                raw = stream.read(65537)
+            if len(raw) > 65536:
+                return {"version": 1, "error_code": "ownership_inspection_invalid"}
+            snapshot = json.loads(raw)
+            if not isinstance(snapshot, dict) or snapshot.get("session_id") != self.session_id:
+                return {"version": 1, "error_code": "ownership_inspection_invalid"}
+        except FileNotFoundError:
+            snapshot = {}
+        except (OSError, ValueError, RecursionError):
+            return {"version": 1, "error_code": "ownership_inspection_invalid"}
+        if not snapshot:
+            return {"version": 1, "local_scope_missing": True}
+        if (
+            self.host not in ("", HOST_BRIDGE)
+            or snapshot.get("host", "") not in ("", HOST_BRIDGE)
+            or surface_host(str(snapshot.get("surface_id", ""))) == HOST_UI
+        ):
+            return {"version": 1, "error_code": "ownership_inspection_unsupported"}
+        lanes = snapshot.get("lane_generations", {})
+        chain = (
+            lanes.get(HOST_BRIDGE, snapshot.get("bridge_generations", []))
+            if isinstance(lanes, dict)
+            else None
+        )
+
+        # Match initialize's identity precedence without initializing or rereading
+        # the lease/journal: on a resumed owner's FIRST browser action, the
+        # captured execution lease is current and the detached journal is previous.
+        # Using the journal for both sides would label an old scope as current.
+        generation = self.generation or self._lease_at_creation or snapshot.get("generation")
+        previous_generation = (
+            self.previous_generation if self.generation else snapshot.get("generation", "")
+        )
+
+        def valid_string(value: Any, maximum: int) -> bool:
+            return isinstance(value, str) and 0 < len(value) <= maximum
+
+        if (
+            not valid_string(snapshot.get("proof"), 128)
+            or not valid_string(generation, 128)
+            or not isinstance(chain, list)
+            or len(chain) > MAX_REPLAY_GENERATIONS
+            or not all(valid_string(value, 128) for value in chain)
+            or len(self.session_id) > 248
+            or not isinstance(previous_generation, str)
+            or len(previous_generation) > 128
+        ):
+            return {"version": 1, "error_code": "ownership_inspection_invalid"}
+        params = {
+            "requester": f"session:{self.session_id}",
+            "owner_proof": snapshot.get("proof"),
+            "owner_generation": generation,
+            "previous_generation": previous_generation,
+            "previous_generations": chain,
+        }
+        try:
+            async with asyncio.timeout(10):
+                result = await BridgeClient().call("owner_inspect", params)
+        except BridgeError as exc:
+            unsupported = exc.code in (
+                ErrorCode.UNSUPPORTED_METHOD,
+                ErrorCode.CAPABILITY_UNSUPPORTED,
+                ErrorCode.INTERNAL,
+            )
+            return {
+                "version": 1,
+                "error_code": (
+                    "ownership_inspection_unsupported"
+                    if unsupported
+                    else "ownership_inspection_unavailable"
+                ),
+            }
+        except Exception:  # noqa: BLE001 - never echo a peer's secret-bearing error
+            return {"version": 1, "error_code": "ownership_inspection_unavailable"}
+        if (
+            not isinstance(result, dict)
+            or type(result.get("version")) is not int
+            or result.get("version") != 1
+            or type(result.get("session_match")) is not bool
+        ):
+            return {"version": 1, "error_code": "ownership_inspection_unsupported"}
+        clean: dict[str, Any] = {"version": 1, "session_match": result["session_match"]}
+        # No scope-derived fields cross a foreign-session boundary, even if a
+        # buggy peer sends them. Counts are only of bounded caller input.
+        keys = (
+            ("scope_missing",)
+            if not result["session_match"]
+            else (
+                "scope_missing",
+                "generation_current",
+                "generation_previous",
+                "generation_ancestry",
+            )
+        )
+        for key in keys:
+            if type(result.get(key)) is bool:
+                clean[key] = result[key]
+        count = result.get("request_ancestry_count")
+        if result["session_match"] and type(count) is int and 0 <= count <= MAX_REPLAY_GENERATIONS:
+            clean["request_ancestry_count"] = count
+        return clean
+
     def params(self) -> dict[str, Any]:
         self.initialize()
         return {
@@ -1029,14 +1187,15 @@ class BrowserResource:
                 # predates the key omits it, which reads as unknown and keeps the
                 # prior bare-refusal behaviour (the failure still stands).
                 refusal = str(exc.data.get("refusal") or "")
+                receipt = _refusal_receipt(exc.data.get("diagnostic"))
                 if refusal == "stale":
                     raise BrowserOwnershipError(
                         "browser owner generation is stale; resume this session's scope "
-                        "before browsing"
+                        "before browsing" + receipt
                     ) from exc
                 if refusal == "foreign":
                     raise BrowserOwnershipError(
-                        "this browser scope belongs to a different owner; no action taken"
+                        "this browser scope belongs to a different owner; no action taken" + receipt
                     ) from exc
                 raise
             if exc.code is ErrorCode.INTERNAL and (

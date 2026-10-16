@@ -3151,6 +3151,50 @@ def _code_requests_recommendation(
     )
 
 
+_MEMORY_SAVE_INTENT = re.compile(
+    r"(?:\b(?:remember|retain)\b.{0,100}|"
+    r"\b(?:save|store)\b(?:\s+(?:these|the|key|important|useful|work|project|our)){0,4}\s+)"
+    r"\b(?:facts?|details?|goals?|decisions?|files?|runbooks?|channels?|threads?|contacts?|"
+    r"preferences?|future sessions?|after (?:context )?compaction)\b",
+    re.I | re.S,
+)
+# Personal first saves contain no work nouns and have no bank to match yet.
+# Pair an explicit retention verb with first-person facts, not an arbitrary name
+# or fixture value; technical RAM/profile/code questions must remain quiet.
+_MEMORY_PERSONAL_SAVE_INTENT = re.compile(
+    r"\b(?:remember|retain|save|store)\b.{0,160}"
+    r"\b(?:my (?:name|e-?mail|phone|address|location)\b"
+    r"(?!\s+(?:parser|field|schema|validator|validation|implementation|code)\b)|where I live\b|"
+    r"I live\b|(?:things? )?about me\b)",
+    re.I | re.S,
+)
+_MEMORY_RECALL_INTENT = re.compile(
+    r"\b(?:retained (?:knowledge|facts?)|remembered|previously (?:saved|stored)|"
+    r"what (?:did|do) (?:we|you) (?:decide|remember)|saved (?:facts?|goals?|contacts?))\b",
+    re.I,
+)
+
+
+def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
+    """Route deliberate retain/recall intent even with an empty bank or no classifier.
+
+    The real fresh-agent pilot invented CLI verbs when the guide was merely listed:
+    a bank hit cannot teach the FIRST save. Reuse the existing advisory resource-tail
+    seam, not another model call or frozen-prefix instructions. Compound intent keeps
+    technical memory (RAM/SQLite/store implementations) and ordinary tasks quiet.
+    """
+    text = query[:2048]
+    if not (
+        _MEMORY_SAVE_INTENT.search(text)
+        or _MEMORY_PERSONAL_SAVE_INTENT.search(text)
+        or _MEMORY_RECALL_INTENT.search(text)
+    ):
+        return None
+    return _ClassificationCandidate(
+        "guide", "memory", "Deliberate scoped retain/recall protocol.", "guide://memory"
+    )
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -3238,7 +3282,11 @@ def _log_classification_cost(recommendation: Any) -> None:
     decision call through it would suppress that rebuild, quietly dropping the
     restored history's dollars from a resumed session's total. The cost is
     therefore logged here in the vendor's own units, and the accounting path is
-    left to the slice that owns it. ``Recommendation`` carries the vendor's token
+    left to the channel ledger (``classification.accounting``, bound by
+    :func:`attach_classification_spend`), which records one row per vendor request at
+    the service's single cascade point — not here, because this line sees only the
+    ANSWER of a call and misses every failed, timed-out and re-walked request.
+    ``Recommendation`` carries the vendor's token
     counts as of the 2026-09-18 cost change, so the line reports the real per-call
     figures; a field this seam does not publish still prints ``-``.
     """
@@ -3444,6 +3492,12 @@ async def _select_knowledge_block(
     # not starve the line the trigger exists to deliver. Vendor answers keep
     # their own late-first order after it.
     answers: list[Any] = []
+    # Deliberate memory intent has a zero-provider fallback: the first save has no
+    # bank to match, and classification may be disabled or unavailable. It rides
+    # the same cap/dedupe and append-only state tail as every resource suggestion.
+    deterministic_memory = _memory_recommendation(query)
+    if deterministic_memory is not None:
+        answers.append(_DeterministicRecommendation(resources=(deterministic_memory,)))
     if deterministic_code_requests is not None:
         answers.append(_DeterministicRecommendation(resources=(deterministic_code_requests,)))
     answers.extend(pending)
@@ -4603,6 +4657,10 @@ async def _prepare(
     # changes.
     hooks.project_registry = project_registry
     tool_context = ToolContext(
+        # Team attachment happens after this warm inventory. The live Session
+        # derives its registry ID on every turn, never a configured role name.
+        team_id="",
+        memory_config_dir=str(config_manager.config_dir),
         cwd=effective_cwd,
         session_id=transcript_dir.name,
         # The session's own directory. This context is the WARM snapshot
@@ -4790,6 +4848,23 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
+    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
+    # account-bound designated session. The decision is the HOST's, taken at
+    # the ONE construction seam, and a gate miss adds NO key at all (the
+    # ordinary kwargs dict cannot drift from what existing callers built).
+    # The helper is import-light and NETWORK-FREE: it reads local
+    # enrollment/settings/availability state and constructs the runtime — no
+    # fetch, no spawn; the client stays cheap until its first request.
+    # Subagent children are built elsewhere and never receive it (see the
+    # parameter's comment on ``Session``).
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    if bridge_runtime is not None:
+        session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,
@@ -5440,6 +5515,43 @@ def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | No
     return _hook
 
 
+def attach_classification_spend(session: Session, hooks: "_KnowledgeHooks | None") -> None:
+    """Route the classification seam's vendor requests into the session's channel ledger.
+
+    WHY HERE AND WHY LATE: the service is built in ``_attach_classification`` during
+    knowledge setup, before any ``Session`` exists, and only the session can ingest a
+    channel record (fold, journal, analytics mirror, publish to every surface). So the
+    composition root binds ``Session.record_channel_spend`` once the session is built —
+    the same callback the tools receive on ``ToolContext.record_channel_spend`` — and
+    every front end (TUI, phone, server, SDK, exec) that builds a session through this
+    factory gets the rows without a host-specific line.
+
+    Resolved off the seam with ``getattr`` and re-resolved by the caller, never
+    assumed: ``hooks.classifier`` is an injectable attribute (tests and hosts swap in
+    their own seam, whose contract is ``recommend_resources`` alone) and a seam that
+    does not publish ``bind_spend_sink`` simply has nothing of ours to account. A
+    session built with ``values.classification.auto`` false has ``classifier is None``
+    and this is a no-op: no socket is ever opened and nothing is recorded.
+
+    A SUBAGENT CHILD NEEDS NO BINDING OF ITS OWN. Children share the parent's knowledge
+    hooks only to REUSE its already-rendered block (``harness.subagent`` reads
+    ``frozen_block``); the child ``Session`` is built without ``monitor_classify``,
+    ``title_fit_check`` or ``supplement_seam`` and its prompt provider never runs the
+    selection leg, so no child path reaches this service. Were one added, its rows
+    would land in the PARENT's ledger (the one service, the one sink), which is also
+    where a child's spend rolls up.
+    """
+    if hooks is None:
+        return
+    bind = getattr(hooks.classifier, "bind_spend_sink", None)
+    # ``None`` is the documented "this host tracks no channels" value (the same one
+    # ``ToolContext.record_channel_spend`` takes): a facade or double without the
+    # ingest leaves the service unbound, which records nothing — never a raise at boot.
+    ingest = getattr(session, "record_channel_spend", None)
+    if callable(bind) and callable(ingest):
+        bind(ingest)
+
+
 def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | None") -> None:
     """Fold the classification seam's ``aclose()`` into the session's dispose path.
 
@@ -5931,6 +6043,7 @@ async def create_session(
     # dispose (one leaked pool per turn on the server facade otherwise).
     # The classification seam's client and memos are per SESSION, so the
     # keep-alive client has to be released with everything else the root owns.
+    attach_classification_spend(session, plan.knowledge_hooks)
     attach_classification_dispose(session, plan.knowledge_hooks)
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])
     # Config seam: follow ``config.yml`` while the session lives, so an edit in

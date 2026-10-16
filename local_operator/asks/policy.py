@@ -157,6 +157,14 @@ URGENT_MAX_S = 900
 #: the human pays, not the model.
 OPEN_ASK_CAP = 8
 
+#: TB-13 (PR #2378): the SEPARATE budget for open bridge requests. The 8-slot
+#: OPEN_ASK_CAP above is the MODEL's asking capacity — "free for the model and
+#: costly for the human" — and a remote sender's burst must not consume it.
+#: Bridge asks are charged here instead (and conversely the model's asks never
+#: squeeze a waiting request out). The number mirrors the model's cap; moving
+#: it is a product call for the owner, flagged in the disposition.
+BRIDGE_ASK_CAP = 8
+
 #: The session's earliest-deadline timer ticks at most this often
 #: (``harness/wake.py MAX_ARM_MS``): a deadline hours out re-checks the wall
 #: clock every minute rather than arming one long asyncio timeout, so a
@@ -242,6 +250,7 @@ __all__ = [
     "MIN_TIMEOUT_S",
     "NONBLOCKING_ASK",
     "OPEN_ASK_CAP",
+    "BRIDGE_ASK_CAP",
     "PROJECTION_CAP",
     "URGENT_MAX_S",
     "enabled",

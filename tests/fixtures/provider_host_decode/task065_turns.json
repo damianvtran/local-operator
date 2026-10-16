@@ -1,0 +1,747 @@
+{
+ "_provenance": "Per-request shape of an OpenRouter-routed DeepSeek v4.1 Flash run (OSWorld task 065), taken from the architect audit q2-task065-walltime.md (journal fields only: host, output tokens, request window; no content). request_window_s is next-message-end minus tool-end, i.e. it INCLUDES queue/prefill and the idle gap. decode_s is request_window_s minus that host's fitted non-decode intercept (DigitalOcean 2.6 s, OpenInference 17.9 s, Morph 3.7 s), floored at 0.2 s: an APPROXIMATION of the first-to-last-output-delta window the harness measures, not a recorded one. Fitted decode rates from the same audit: OpenInference 20.3 tok/s (R2 0.99), Morph ~130, DigitalOcean ~172 (small outputs).",
+ "turns": [
+  {
+   "turn": 1,
+   "host": "DigitalOcean",
+   "output_tokens": 103,
+   "request_window_s": 1.2,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 2,
+   "host": "DigitalOcean",
+   "output_tokens": 152,
+   "request_window_s": 1.6,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 3,
+   "host": "DigitalOcean",
+   "output_tokens": 205,
+   "request_window_s": 1.6,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 4,
+   "host": "DigitalOcean",
+   "output_tokens": 385,
+   "request_window_s": 3.2,
+   "decode_s": 0.6
+  },
+  {
+   "turn": 5,
+   "host": "DigitalOcean",
+   "output_tokens": 120,
+   "request_window_s": 1.2,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 6,
+   "host": "DigitalOcean",
+   "output_tokens": 697,
+   "request_window_s": 4.3,
+   "decode_s": 1.7
+  },
+  {
+   "turn": 7,
+   "host": "DigitalOcean",
+   "output_tokens": 912,
+   "request_window_s": 5.3,
+   "decode_s": 2.7
+  },
+  {
+   "turn": 8,
+   "host": "DigitalOcean",
+   "output_tokens": 238,
+   "request_window_s": 2.6,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 9,
+   "host": "DigitalOcean",
+   "output_tokens": 109,
+   "request_window_s": 1.5,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 10,
+   "host": "DigitalOcean",
+   "output_tokens": 97,
+   "request_window_s": 1.4,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 11,
+   "host": "DigitalOcean",
+   "output_tokens": 173,
+   "request_window_s": 1.7,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 12,
+   "host": "DigitalOcean",
+   "output_tokens": 115,
+   "request_window_s": 1.8,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 13,
+   "host": "DigitalOcean",
+   "output_tokens": 266,
+   "request_window_s": 2.5,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 14,
+   "host": "DigitalOcean",
+   "output_tokens": 384,
+   "request_window_s": 3.7,
+   "decode_s": 1.1
+  },
+  {
+   "turn": 15,
+   "host": "DigitalOcean",
+   "output_tokens": 224,
+   "request_window_s": 3.9,
+   "decode_s": 1.3
+  },
+  {
+   "turn": 16,
+   "host": "DigitalOcean",
+   "output_tokens": 1001,
+   "request_window_s": 8.4,
+   "decode_s": 5.8
+  },
+  {
+   "turn": 17,
+   "host": "DigitalOcean",
+   "output_tokens": 391,
+   "request_window_s": 4.3,
+   "decode_s": 1.7
+  },
+  {
+   "turn": 18,
+   "host": "DigitalOcean",
+   "output_tokens": 326,
+   "request_window_s": 5.0,
+   "decode_s": 2.4
+  },
+  {
+   "turn": 19,
+   "host": "DigitalOcean",
+   "output_tokens": 511,
+   "request_window_s": 6.1,
+   "decode_s": 3.5
+  },
+  {
+   "turn": 20,
+   "host": "DigitalOcean",
+   "output_tokens": 254,
+   "request_window_s": 5.5,
+   "decode_s": 2.9
+  },
+  {
+   "turn": 21,
+   "host": "DigitalOcean",
+   "output_tokens": 376,
+   "request_window_s": 7.0,
+   "decode_s": 4.4
+  },
+  {
+   "turn": 22,
+   "host": "DigitalOcean",
+   "output_tokens": 351,
+   "request_window_s": 5.0,
+   "decode_s": 2.4
+  },
+  {
+   "turn": 23,
+   "host": "DigitalOcean",
+   "output_tokens": 187,
+   "request_window_s": 6.3,
+   "decode_s": 3.7
+  },
+  {
+   "turn": 24,
+   "host": "DigitalOcean",
+   "output_tokens": 158,
+   "request_window_s": 7.3,
+   "decode_s": 4.7
+  },
+  {
+   "turn": 25,
+   "host": "DigitalOcean",
+   "output_tokens": 215,
+   "request_window_s": 7.5,
+   "decode_s": 4.9
+  },
+  {
+   "turn": 26,
+   "host": "DigitalOcean",
+   "output_tokens": 479,
+   "request_window_s": 11.0,
+   "decode_s": 8.4
+  },
+  {
+   "turn": 27,
+   "host": "DigitalOcean",
+   "output_tokens": 306,
+   "request_window_s": 9.5,
+   "decode_s": 6.9
+  },
+  {
+   "turn": 28,
+   "host": "OpenInference",
+   "output_tokens": 686,
+   "request_window_s": 49.8,
+   "decode_s": 31.9
+  },
+  {
+   "turn": 29,
+   "host": "OpenInference",
+   "output_tokens": 100,
+   "request_window_s": 24.4,
+   "decode_s": 6.5
+  },
+  {
+   "turn": 30,
+   "host": "OpenInference",
+   "output_tokens": 1887,
+   "request_window_s": 109.0,
+   "decode_s": 91.1
+  },
+  {
+   "turn": 31,
+   "host": "OpenInference",
+   "output_tokens": 523,
+   "request_window_s": 42.0,
+   "decode_s": 24.1
+  },
+  {
+   "turn": 32,
+   "host": "OpenInference",
+   "output_tokens": 686,
+   "request_window_s": 42.6,
+   "decode_s": 24.7
+  },
+  {
+   "turn": 33,
+   "host": "OpenInference",
+   "output_tokens": 1831,
+   "request_window_s": 99.9,
+   "decode_s": 82.0
+  },
+  {
+   "turn": 34,
+   "host": "OpenInference",
+   "output_tokens": 794,
+   "request_window_s": 55.7,
+   "decode_s": 37.8
+  },
+  {
+   "turn": 35,
+   "host": "OpenInference",
+   "output_tokens": 111,
+   "request_window_s": 22.1,
+   "decode_s": 4.2
+  },
+  {
+   "turn": 36,
+   "host": "OpenInference",
+   "output_tokens": 605,
+   "request_window_s": 43.0,
+   "decode_s": 25.1
+  },
+  {
+   "turn": 37,
+   "host": "OpenInference",
+   "output_tokens": 1813,
+   "request_window_s": 102.3,
+   "decode_s": 84.4
+  },
+  {
+   "turn": 38,
+   "host": "OpenInference",
+   "output_tokens": 3139,
+   "request_window_s": 168.8,
+   "decode_s": 150.9
+  },
+  {
+   "turn": 39,
+   "host": "OpenInference",
+   "output_tokens": 1010,
+   "request_window_s": 64.9,
+   "decode_s": 47.0
+  },
+  {
+   "turn": 40,
+   "host": "OpenInference",
+   "output_tokens": 834,
+   "request_window_s": 55.4,
+   "decode_s": 37.5
+  },
+  {
+   "turn": 41,
+   "host": "OpenInference",
+   "output_tokens": 2672,
+   "request_window_s": 137.9,
+   "decode_s": 120.0
+  },
+  {
+   "turn": 42,
+   "host": "OpenInference",
+   "output_tokens": 542,
+   "request_window_s": 41.6,
+   "decode_s": 23.7
+  },
+  {
+   "turn": 43,
+   "host": "OpenInference",
+   "output_tokens": 638,
+   "request_window_s": 44.6,
+   "decode_s": 26.7
+  },
+  {
+   "turn": 44,
+   "host": "OpenInference",
+   "output_tokens": 1393,
+   "request_window_s": 79.9,
+   "decode_s": 62.0
+  },
+  {
+   "turn": 45,
+   "host": "OpenInference",
+   "output_tokens": 3788,
+   "request_window_s": 211.5,
+   "decode_s": 193.6
+  },
+  {
+   "turn": 46,
+   "host": "OpenInference",
+   "output_tokens": 789,
+   "request_window_s": 52.1,
+   "decode_s": 34.2
+  },
+  {
+   "turn": 47,
+   "host": "OpenInference",
+   "output_tokens": 604,
+   "request_window_s": 49.7,
+   "decode_s": 31.8
+  },
+  {
+   "turn": 48,
+   "host": "OpenInference",
+   "output_tokens": 2267,
+   "request_window_s": 128.9,
+   "decode_s": 111.0
+  },
+  {
+   "turn": 49,
+   "host": "OpenInference",
+   "output_tokens": 2594,
+   "request_window_s": 160.6,
+   "decode_s": 142.7
+  },
+  {
+   "turn": 50,
+   "host": "OpenInference",
+   "output_tokens": 1422,
+   "request_window_s": 87.1,
+   "decode_s": 69.2
+  },
+  {
+   "turn": 51,
+   "host": "OpenInference",
+   "output_tokens": 107,
+   "request_window_s": 23.5,
+   "decode_s": 5.6
+  },
+  {
+   "turn": 52,
+   "host": "OpenInference",
+   "output_tokens": 1283,
+   "request_window_s": 91.3,
+   "decode_s": 73.4
+  },
+  {
+   "turn": 53,
+   "host": "OpenInference",
+   "output_tokens": 2235,
+   "request_window_s": 146.8,
+   "decode_s": 128.9
+  },
+  {
+   "turn": 54,
+   "host": "OpenInference",
+   "output_tokens": 1395,
+   "request_window_s": 92.1,
+   "decode_s": 74.2
+  },
+  {
+   "turn": 55,
+   "host": "OpenInference",
+   "output_tokens": 1602,
+   "request_window_s": 107.4,
+   "decode_s": 89.5
+  },
+  {
+   "turn": 56,
+   "host": "OpenInference",
+   "output_tokens": 485,
+   "request_window_s": 37.8,
+   "decode_s": 19.9
+  },
+  {
+   "turn": 57,
+   "host": "OpenInference",
+   "output_tokens": 720,
+   "request_window_s": 49.9,
+   "decode_s": 32.0
+  },
+  {
+   "turn": 58,
+   "host": "OpenInference",
+   "output_tokens": 819,
+   "request_window_s": 55.5,
+   "decode_s": 37.6
+  },
+  {
+   "turn": 59,
+   "host": "OpenInference",
+   "output_tokens": 1216,
+   "request_window_s": 81.6,
+   "decode_s": 63.7
+  },
+  {
+   "turn": 60,
+   "host": "OpenInference",
+   "output_tokens": 1688,
+   "request_window_s": 97.9,
+   "decode_s": 80.0
+  },
+  {
+   "turn": 61,
+   "host": "OpenInference",
+   "output_tokens": 2205,
+   "request_window_s": 126.7,
+   "decode_s": 108.8
+  },
+  {
+   "turn": 62,
+   "host": "OpenInference",
+   "output_tokens": 2396,
+   "request_window_s": 132.3,
+   "decode_s": 114.4
+  },
+  {
+   "turn": 63,
+   "host": "OpenInference",
+   "output_tokens": 565,
+   "request_window_s": 38.1,
+   "decode_s": 20.2
+  },
+  {
+   "turn": 64,
+   "host": "OpenInference",
+   "output_tokens": 1062,
+   "request_window_s": 64.3,
+   "decode_s": 46.4
+  },
+  {
+   "turn": 65,
+   "host": "OpenInference",
+   "output_tokens": 3848,
+   "request_window_s": 203.3,
+   "decode_s": 185.4
+  },
+  {
+   "turn": 66,
+   "host": "OpenInference",
+   "output_tokens": 525,
+   "request_window_s": 52.0,
+   "decode_s": 34.1
+  },
+  {
+   "turn": 67,
+   "host": "OpenInference",
+   "output_tokens": 2107,
+   "request_window_s": 115.4,
+   "decode_s": 97.5
+  },
+  {
+   "turn": 68,
+   "host": "OpenInference",
+   "output_tokens": 7566,
+   "request_window_s": 381.1,
+   "decode_s": 363.2
+  },
+  {
+   "turn": 69,
+   "host": "OpenInference",
+   "output_tokens": 402,
+   "request_window_s": 42.6,
+   "decode_s": 24.7
+  },
+  {
+   "turn": 70,
+   "host": "OpenInference",
+   "output_tokens": 377,
+   "request_window_s": 29.5,
+   "decode_s": 11.6
+  },
+  {
+   "turn": 71,
+   "host": "OpenInference",
+   "output_tokens": 948,
+   "request_window_s": 60.7,
+   "decode_s": 42.8
+  },
+  {
+   "turn": 72,
+   "host": "OpenInference",
+   "output_tokens": 456,
+   "request_window_s": 42.9,
+   "decode_s": 25.0
+  },
+  {
+   "turn": 73,
+   "host": "OpenInference",
+   "output_tokens": 2743,
+   "request_window_s": 140.3,
+   "decode_s": 122.4
+  },
+  {
+   "turn": 74,
+   "host": "OpenInference",
+   "output_tokens": 3859,
+   "request_window_s": 201.7,
+   "decode_s": 183.8
+  },
+  {
+   "turn": 75,
+   "host": "OpenInference",
+   "output_tokens": 3958,
+   "request_window_s": 205.4,
+   "decode_s": 187.5
+  },
+  {
+   "turn": 76,
+   "host": "OpenInference",
+   "output_tokens": 5568,
+   "request_window_s": 286.1,
+   "decode_s": 268.2
+  },
+  {
+   "turn": 77,
+   "host": "OpenInference",
+   "output_tokens": 492,
+   "request_window_s": 40.2,
+   "decode_s": 22.3
+  },
+  {
+   "turn": 78,
+   "host": "OpenInference",
+   "output_tokens": 1481,
+   "request_window_s": 85.0,
+   "decode_s": 67.1
+  },
+  {
+   "turn": 79,
+   "host": "OpenInference",
+   "output_tokens": 4714,
+   "request_window_s": 257.8,
+   "decode_s": 239.9
+  },
+  {
+   "turn": 80,
+   "host": "OpenInference",
+   "output_tokens": 1939,
+   "request_window_s": 126.4,
+   "decode_s": 108.5
+  },
+  {
+   "turn": 81,
+   "host": "OpenInference",
+   "output_tokens": 1055,
+   "request_window_s": 78.0,
+   "decode_s": 60.1
+  },
+  {
+   "turn": 82,
+   "host": "OpenInference",
+   "output_tokens": 1220,
+   "request_window_s": 83.6,
+   "decode_s": 65.7
+  },
+  {
+   "turn": 83,
+   "host": "OpenInference",
+   "output_tokens": 236,
+   "request_window_s": 28.6,
+   "decode_s": 10.7
+  },
+  {
+   "turn": 84,
+   "host": "OpenInference",
+   "output_tokens": 2126,
+   "request_window_s": 142.9,
+   "decode_s": 125.0
+  },
+  {
+   "turn": 85,
+   "host": "OpenInference",
+   "output_tokens": 1577,
+   "request_window_s": 98.0,
+   "decode_s": 80.1
+  },
+  {
+   "turn": 86,
+   "host": "OpenInference",
+   "output_tokens": 1993,
+   "request_window_s": 131.5,
+   "decode_s": 113.6
+  },
+  {
+   "turn": 87,
+   "host": "OpenInference",
+   "output_tokens": 2006,
+   "request_window_s": 127.2,
+   "decode_s": 109.3
+  },
+  {
+   "turn": 88,
+   "host": "OpenInference",
+   "output_tokens": 103,
+   "request_window_s": 18.2,
+   "decode_s": 0.3
+  },
+  {
+   "turn": 89,
+   "host": "OpenInference",
+   "output_tokens": 9641,
+   "request_window_s": 496.2,
+   "decode_s": 478.3
+  },
+  {
+   "turn": 90,
+   "host": "OpenInference",
+   "output_tokens": 2088,
+   "request_window_s": 131.1,
+   "decode_s": 113.2
+  },
+  {
+   "turn": 91,
+   "host": "Morph",
+   "output_tokens": 2913,
+   "request_window_s": 30.1,
+   "decode_s": 26.4
+  },
+  {
+   "turn": 92,
+   "host": "Morph",
+   "output_tokens": 3405,
+   "request_window_s": 33.9,
+   "decode_s": 30.2
+  },
+  {
+   "turn": 93,
+   "host": "Morph",
+   "output_tokens": 5660,
+   "request_window_s": 44.2,
+   "decode_s": 40.5
+  },
+  {
+   "turn": 94,
+   "host": "Morph",
+   "output_tokens": 6115,
+   "request_window_s": 39.8,
+   "decode_s": 36.1
+  },
+  {
+   "turn": 95,
+   "host": "Morph",
+   "output_tokens": 1705,
+   "request_window_s": 17.7,
+   "decode_s": 14.0
+  },
+  {
+   "turn": 96,
+   "host": "Morph",
+   "output_tokens": 1065,
+   "request_window_s": 10.1,
+   "decode_s": 6.4
+  },
+  {
+   "turn": 97,
+   "host": "Morph",
+   "output_tokens": 96,
+   "request_window_s": 3.7,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 98,
+   "host": "Morph",
+   "output_tokens": 2687,
+   "request_window_s": 22.2,
+   "decode_s": 18.5
+  },
+  {
+   "turn": 99,
+   "host": "Morph",
+   "output_tokens": 440,
+   "request_window_s": 4.2,
+   "decode_s": 0.5
+  },
+  {
+   "turn": 100,
+   "host": "Morph",
+   "output_tokens": 1393,
+   "request_window_s": 15.5,
+   "decode_s": 11.8
+  },
+  {
+   "turn": 101,
+   "host": "Morph",
+   "output_tokens": 205,
+   "request_window_s": 3.2,
+   "decode_s": 0.2
+  },
+  {
+   "turn": 102,
+   "host": "Morph",
+   "output_tokens": 615,
+   "request_window_s": 6.0,
+   "decode_s": 2.3
+  },
+  {
+   "turn": 103,
+   "host": "Morph",
+   "output_tokens": 846,
+   "request_window_s": 8.3,
+   "decode_s": 4.6
+  },
+  {
+   "turn": 104,
+   "host": "Morph",
+   "output_tokens": 2194,
+   "request_window_s": 25.3,
+   "decode_s": 21.6
+  },
+  {
+   "turn": 105,
+   "host": "Morph",
+   "output_tokens": 10114,
+   "request_window_s": 87.1,
+   "decode_s": 83.4
+  },
+  {
+   "turn": 106,
+   "host": "Morph",
+   "output_tokens": 649,
+   "request_window_s": 16.9,
+   "decode_s": 13.2
+  }
+ ]
+}

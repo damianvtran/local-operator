@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +17,7 @@ from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync.merge import ConflictProposal, ResolverError
+from local_operator.hub_sync.resolver import LlmResolver, MergeModel
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
 BASE = "## Rules\nBe brief.\n\n## Legacy\nOld advice.\n\n## Tools\nUse tools carefully."
@@ -244,6 +247,67 @@ def test_a_model_outage_leaves_a_conflicting_item_available_but_still_applies_cl
     )
     item = ctx.store().load()["items"][f"agent:{row.id}"]
     assert item["state"] == "available" and item["error_class"] == "model-unavailable"
+
+
+def test_an_unusable_provider_records_the_failure_and_a_future_retry_the_sidebar_sees(
+    env,
+) -> None:
+    """The unattended-update failure path: an unusable provider/model at the
+    resolver call must leave a durable, retryable failure the desktop indicator
+    can read, not a silent no-op.
+
+    This is the leg the two-install unattended-update proof never reached: the
+    orchestrated run always had a working resolver, so no provider-error was ever
+    recorded. The genuine class is provoked by driving the REAL :class:`LlmResolver`
+    over a completion whose provider the wire layer refuses (``clients.py`` raises
+    ``ValueError("Unknown provider: ...")`` before any HTTP), which lands as
+    ``provider-error/request`` through ``classify_failure``/``call_with_retry`` --
+    exactly the wrap's ``ResolverError: provider-error: Unknown provider``. No
+    production seam is added: ``complete`` is already the injected call.
+    """
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE.replace("Be brief.", "Be brief and cite sources."))
+    hub.agents["h1"] = (BASE.replace("Be brief.", "Be brief and use plain words."), "d")
+
+    async def unusable_provider(system: str, prompt: str) -> str:
+        raise ValueError("Unknown provider: 'bogus'")
+
+    ctx.resolver = LlmResolver(
+        ctx.config_manager,
+        complete=unusable_provider,
+        model=MergeModel(
+            spec=SimpleNamespace(context_window=128_000, max_output_tokens=4096),
+            label="bogus/bogus",
+        ),
+    )
+
+    report = svc.apply_items(ctx, kind="agent", auto=True)
+
+    # (1) The item did not settle: a conflict held for review, classed as a
+    # provider failure rather than the merge-refused a two-sided conflict gives.
+    assert report.reports[0].outcome == "needs-review"
+    assert report.reports[0].error_class == "provider-error/request"
+
+    # ...and the failure is RECORDED on the row with a future retry schedule, so
+    # the timer re-attempts instead of the item being abandoned.
+    item = ctx.store().load()["items"][f"agent:{row.id}"]
+    assert (item["error_class"], item["error_subclass"]) == ("provider-error", "request")
+    assert item["last_error"] and item["attempts"] == 1 and item["auto_retry"] is True
+    due = datetime.strptime(item["next_retry_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+    # Counted backoff for attempt 1 is 15 min * U(0.9, 1.1); a future, bounded due.
+    assert timedelta(minutes=12) < due - datetime.now(timezone.utc) < timedelta(minutes=18)
+
+    # (2) The desktop sidebar's failure indicator is a pure store read: the
+    # recorded class and schedule are what it consumes, so both must be exposed.
+    (exposed,) = svc.status_snapshot(ctx)["items"]
+    assert exposed["error_class"] == "provider-error"
+    assert exposed["error_subclass"] == "request"
+    assert exposed["state"] == "available"  # indicator stays; the user resolves it
+    assert exposed["next_retry_at"] == item["next_retry_at"]
 
 
 def test_a_concurrent_edit_between_check_and_write_aborts_and_keeps_the_users_file(env) -> None:
@@ -654,6 +718,150 @@ def test_resolve_source_materializes_identity_and_preserves_scope(env) -> None:
             tenant_id="org-tab",
         )
     assert (root / "hub" / "baselines" / f"agent-{stamped.id}.json").read_bytes() == before
+
+
+def test_resolve_source_keeps_a_genuine_pulls_provenance(env) -> None:
+    """F2: pull then resolve must ADD identity, never downgrade a trusted baseline.
+
+    Observed on the real acceptance pass: the team's pull recorded a trusted
+    baseline (``recorded_by=pull``); the CLI's resolve then overwrote it with the
+    unknown marker, and the next tick refused the merge with "the baseline is
+    unknown". The check trusts the recorded base exactly when ``recorded_by`` is
+    not the unknown marker (``known = record.recorded_by != UNKNOWN_BASELINE``),
+    so the downgrade silently discarded a perfectly good merge base.
+    """
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    before = prov.read_baseline(root, "team", team.id)
+    assert before is not None and before.recorded_by == "pull"
+
+    svc.resolve_source(
+        ctx,
+        kind="team",
+        name=team.name,
+        hub_source="https://hub.test/v1",
+        visibility="org",
+        tenant_id="org-1",
+    )
+
+    after = prov.read_baseline(root, "team", team.id)
+    assert after is not None and after.identity is not None
+    assert after.recorded_by == "pull"  # was adopt-unknown: the F2 downgrade
+    assert after.recorded_by != prov.UNKNOWN_BASELINE
+    assert after.remote_revision == before.remote_revision
+    assert after.scope_known is True  # the resolve still confirms source+scope
+
+    # The real consequence: a remote-only edit now merges unattended from the
+    # pull-time base instead of refusing "baseline is unknown".
+    hub.teams["ht1"] = {**hub.teams["ht1"], "instructions": "## Brief\nShip it safely."}
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+    assert report.reports and report.reports[0].applied, report
+
+
+def test_resolve_source_never_vouches_an_unknown_legacy_baseline(env) -> None:
+    """The anti-laundering half: a legacy record stays unknown after resolve.
+
+    Resolving confirms SOURCE+SCOPE; it is not an integration. A record no real
+    pull/merge wrote keeps the unknown marker, so the check keeps refusing to
+    diff against it -- resolve must not convert absence of evidence into a
+    trusted baseline.
+    """
+
+    ctx, hub, agents, _t, root = env
+    stamped = _pull_agent(agents, hub, root)
+    record = prov.read_baseline(root, "agent", stamped.id)
+    assert record is not None
+    prov.write_baseline(
+        root,
+        dataclasses.replace(
+            record, identity=None, recorded_by=prov.UNKNOWN_BASELINE, scope_known=True
+        ),
+    )
+
+    resolved = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=stamped.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    assert resolved.identity is not None
+
+    after = prov.read_baseline(root, "agent", stamped.id)
+    assert after is not None
+    assert after.recorded_by == prov.UNKNOWN_BASELINE  # still conservative
+    assert after.lineage != "clean"
+    assert after.remote_revision is None
+
+
+def test_resolve_places_identity_on_the_original_record_without_rebuilding_the_base(
+    env,
+) -> None:
+    """R2: resolve adds identity/scope to the ORIGINAL record; it never rebuilds.
+
+    Reconstructing the payload from current local content makes a user's
+    unintegrated edit the merge base: the next unchanged-remote apply then
+    classifies as ``remote-only`` and erases the edit. Review repro with the
+    identical-code no-resolve control: with resolve the edit was overwritten;
+    without it the edit survived. This pins the record itself.
+    """
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE.replace("Old advice.", "USER EDIT TO KEEP"))
+    before = prov.read_baseline(root, "agent", row.id)
+    assert before is not None and before.recorded_by != prov.UNKNOWN_BASELINE
+
+    svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+
+    after = prov.read_baseline(root, "agent", row.id)
+    assert after is not None and after.identity is not None
+    assert after.fields == before.fields, "the pulled base must not absorb local edits"
+    assert after.fingerprint == before.fingerprint
+    bytes_now = (root / "hub" / "baselines" / f"agent-{row.id}.json").read_bytes()
+    assert b"USER EDIT TO KEEP" not in bytes_now, "the baseline file must not carry the edit"
+
+    # The remote never changed: the apply is a no-op and the edit survives.
+    report = svc.apply_items(ctx, kind="agent", allow_llm=False)
+    assert report.reports[0].outcome == "up-to-date", report
+    assert "USER EDIT TO KEEP" in _text(agents, row.id)
+
+
+def test_resolve_keeps_the_team_pull_base_and_a_surviving_local_edit(env) -> None:
+    """R2 for teams: same contract, exercised on the team registry path."""
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    teams.update_team(team.id, TeamEditFields(description="USER TEAM EDIT TO KEEP"))
+    before = prov.read_baseline(root, "team", team.id)
+    assert before is not None and before.recorded_by != prov.UNKNOWN_BASELINE
+
+    svc.resolve_source(
+        ctx,
+        kind="team",
+        name=team.name,
+        hub_source="https://hub.test/v1",
+        visibility="org",
+        tenant_id="org-1",
+    )
+
+    after = prov.read_baseline(root, "team", team.id)
+    assert after is not None and after.identity is not None
+    assert after.fields == before.fields
+    assert after.fingerprint == before.fingerprint
+
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+    assert report.reports[0].outcome == "up-to-date", report
+    assert teams.get_team(team.id).description == "USER TEAM EDIT TO KEEP"
 
 
 def test_resolve_source_refuses_unlinked_item(env) -> None:
@@ -1269,7 +1477,11 @@ def test_a_local_only_check_never_marks_or_seeds_integration(env) -> None:
     assert stored.lineage == "unknown", "a local edit is not an integration"
     assert stored.remote_revision is None, "no revision may be borrowed"
     assert stored.outbound is None, "no receipt may be seeded"
-    assert stored.recorded_by == "adopt-unknown"
+    # F2: resolve keeps the pull's provenance, so the record here is still the
+    # PULL record -- what this test pins is that the local-only check did not
+    # upgrade it into an integration (the lineage/revision/receipt trio above is
+    # the integration evidence; the unknown marker is only for unpulled rows).
+    assert stored.recorded_by == "pull"
 
 
 def test_an_equal_read_without_a_revision_never_marks(env, monkeypatch) -> None:

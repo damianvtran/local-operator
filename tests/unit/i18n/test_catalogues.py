@@ -57,11 +57,16 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings.hub_defaults",
         "wire.slash",
         "wire.aida_cadence",
+        # The OpenRouter host-speed settings row (English-only, own namespace so
+        # the audited wire.settings hash is untouched).
+        "wire.host_speed",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
         # The desktop phone-setup refusals (this PR's own namespace).
         "wire.tunnel_setup",
+        # Memory settings copy (LOH-25): the registry rows resolve through it.
+        "wire.memory",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

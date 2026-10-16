@@ -428,8 +428,17 @@ async def test_a_multi_question_ask_is_answered_atomically(
             )
             record = session.ask_queue().find(ask_id)
             assert record["answers"] == {"q0": ["a"], "q1": ["c"]}
-            # The model read both, from ONE row.
-            last = stream.requests[-1]
+            # Row commitment precedes its provider call. This exact three-call
+            # tape fixes the response oracle at index 2: a later good request
+            # must not hide an earlier partial one, nor may extra calls pass.
+            await _wait_until(
+                lambda: len(stream.requests) >= 3,
+                what="the third scripted provider call",
+            )
+            assert len(stream.requests) == 3, len(stream.requests)
+            assert stream.exhausted_at is None, stream.exhausted_at
+            # The model request includes both, from ONE row.
+            last = stream.requests[2]
             text = "\n".join((message.text or "") for message in last.messages)
             assert "first?" in text and "second?" in text
     finally:

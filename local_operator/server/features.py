@@ -277,6 +277,18 @@ def feature_flags() -> dict[str, Any]:
         # state, not an error -- the capability advertises that the routes
         # EXIST, never that the deployment carries traffic.
         "team_bridge": 1,
+        # The READ slice of agent messages (RFC §6.1 reads):
+        # `GET /v1/desktop/team-bridge/inbox` -- what this machine may SHOW the
+        # person it already received. Its own key rather than a bump of
+        # `team_bridge`, by the same rule as its sibling above, and for one
+        # more reason: this is the half that does not need the decision gate.
+        # A renderer on >= 1 may mount the inbox read and its (metadata-only)
+        # states; a renderer that does not see it keeps the surfaces it has and
+        # says "update the backend" -- it must NOT probe decision operations to
+        # find out, because the fact that reads exist says nothing about them.
+        # The number is the READ SHAPE's version, not a gate: 1 is ids, states
+        # and coarse codes with no message body.
+        "team_bridge_read": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

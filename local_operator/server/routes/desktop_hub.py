@@ -26,7 +26,7 @@ import asyncio
 from typing import Any, Callable, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from local_operator.config import ConfigManager
 from local_operator.hub_sync.identity import Visibility
@@ -87,6 +87,32 @@ class HubRetry(Input):
     request_id: RequestID
     kind: Kind
     name: str = Field(min_length=1, max_length=128)
+
+
+class SkillPull(Input):
+    """``POST /v1/desktop/hub/skills/pull`` -- the UI's ``hub.skillPull`` arm.
+
+    The body is the desktop contract's exact snake_case spelling (composed by
+    ``desktop-contract.ts``'s ``hub.skillPull`` case and pinned by its zod
+    schema): a request id, the published skill's ``hub_id``, the full
+    credential-free API source, the paired scope (public carries no tenant, org
+    requires one), the local alias, and the OPTIONAL initial policy the install
+    dialog drafts. ``StrictBool`` on those three follows the policies module's
+    own rule -- a policy value must refuse a truthy string by name, never
+    coerce -- and the pairing guard in the handler is the server-side twin of
+    the UI's ``assertPairedPublicationTarget``: the one field where failing
+    open would be a disclosure.
+    """
+
+    request_id: RequestID
+    hub_id: str = Field(min_length=1, max_length=128)
+    hub_source: str = Field(min_length=1, max_length=2048)
+    visibility: Literal["public", "org"]
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    local_alias: str = Field(min_length=1, max_length=128)
+    subscribe: StrictBool | None = None
+    auto_push: StrictBool | None = None
+    confirm_public_egress: StrictBool | None = None
 
 
 async def _run(
@@ -551,5 +577,79 @@ async def patch_link(
                 {"link_id": link_id, **body.model_dump()},
                 mutate,
                 retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/hub/skills/pull", response_model=CRUDResponse)
+async def skill_pull(
+    body: SkillPull,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Install one remote skill as a NEW local link (the UI's ``hub.skillPull``).
+
+    The scoped pair is enforced HERE as well as in the renderer: a public pull
+    that names a tenant, or an org pull that omits one, is refused before any
+    credential could be routed. Everything else is the service's: source
+    approval against the ONE configured base (never an arbitrary URL gaining
+    credential egress), the fetch through the same seam the linked checks use,
+    the deterministic identity mint, the managed skill transaction (journaled,
+    alias-ownership checked, fingerprint/policy CAS), and the inventory row the
+    response carries. Replays are receipted like every other mutation, so a
+    lost response is replayed, not re-installed.
+    """
+
+    if body.visibility == "public" and body.tenant_id:
+        raise _refusal(422, "a public skill pull must not name an organization")
+    if body.visibility == "org" and not body.tenant_id:
+        raise _refusal(422, "an org skill pull needs tenant_id")
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    def work(ctx: Any) -> dict[str, Any]:
+        try:
+            return svc.install_skill(
+                ctx,
+                hub_source=body.hub_source,
+                hub_id=body.hub_id,
+                visibility=body.visibility,
+                tenant_id=body.tenant_id,
+                alias=body.local_alias,
+                subscribe=body.subscribe,
+                auto_push=body.auto_push,
+                confirm_public_egress=bool(body.confirm_public_egress),
+            )
+        except LinkError as error:
+            code = getattr(error, "code", "") or ""
+            # The refusal vocabulary the renderer branches on: a missing or
+            # foreign row is ONE plain 404 (never a distinguishable 403), a
+            # missing credential is the 401 whose remedy is signing in, a
+            # policy CAS loss is the 409 the link controls reload on, an
+            # unreachable hub is the 502 their retry class covers, and every
+            # other named refusal is a 422 that carries its code.
+            if code == "no-credential":
+                from local_operator.providers.radient_credentials import (
+                    ORG_LOGIN_REMEDY,
+                )
+
+                raise _refusal(401, ORG_LOGIN_REMEDY) from None
+            if code == "skill-not-found":
+                raise _refusal(404, str(error), code=code) from None
+            if code == "policy-revision-changed":
+                raise _refusal(409, str(error), code=code) from None
+            if code == "hub-upstream":
+                raise _refusal(502, str(error), code=code) from None
+            raise _refusal(422, str(error), code=code or None) from None
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-skill-pull:" + body.request_id, body.model_dump(), mutate, retry_safe=True
             )
         )

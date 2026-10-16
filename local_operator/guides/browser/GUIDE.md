@@ -728,3 +728,36 @@ supports the `chrome.debugger` API: **Chrome, Edge, Brave, Arc**. Firefox and
 Safari are out of scope (different extension/debugger models). If the user is
 on Firefox/Safari and inside cmux, the cmux panel is the fallback; otherwise
 static-page reading via `bash`/curl is the honest limit.
+
+## Read-only ownership inspection
+
+`browser(action="inspect_ownership")` asks the existing extension scope whether
+its private proof and session match, and whether its stored generation matches
+the caller's current, previous, or bounded ancestry. It returns only booleans and
+an input-ancestry count. A missing local record is reported without creating one;
+a missing remote scope is distinct from a same-proof session mismatch. Unknown
+proofs reveal no other scope, and foreign sessions receive no scope counts.
+A missing local record or remote scope is not proof that no tab, approval,
+retained scope or other ownership obligation remains; inspection is not an
+all-host inventory or authorization to activate an extension update.
+
+Inspection does not recover, repair, retry, allocate, close, select a host, grant
+access, or change local/extension ownership records. It targets only the existing
+extension lane; other hosts/old peers return a typed unsupported result. An
+unavailable peer is not an instruction to restart or retry. Stale-generation
+fences remain in force. The result cannot reconstruct historical lost evidence
+or establish why a generation changed.
+
+**Source support is not loaded support.** Merging this code or updating the
+Python runtime does not add the handler to an already-loaded extension. Do not
+reload/update/disable an extension to obtain diagnostics during an unresolved
+incident: Chrome clears `storage.session` on extension reload, update, disable,
+and browser restart (ordinary service-worker churn preserves it). A new
+`onInstalled` handler cannot save the old session state after Chrome erases it.
+Activation requires an explicitly authorized quiescent/settled boundary across
+all hosts' tab debt, unknown reservations, retained scopes and pending approvals,
+or a separately reviewed pre-activation checkpoint/restore strategy executed by
+the still-loaded old build. This inspection adds no persistence migration.
+
+Chrome's documented storage lifecycle:
+https://developer.chrome.com/docs/extensions/reference/api/storage#storage_areas

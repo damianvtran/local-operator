@@ -100,3 +100,120 @@ def test_units_only_signal_is_not_drawable_without_datasets() -> None:
     assert apply_graphics(Yes(), found) == (0.95, False)
     table = ev.extract([], "| r | ms |\n|---|---|\n| a | 12 |\n| b | 40 |\n| c | 7 |\n")
     assert drawable(table) and apply_graphics(Yes(), table) == (0.95, True)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "No changes were needed.",
+        "- Added 296 comments.",
+        "There are 296 comments, 225 profiles, 325 links and 3194 matches.",
+        "- Count 1.2.3; 2026-10-14; version 325; ticket 3194.",
+    ],
+)
+def test_labelled_summary_does_not_admit_unstructured_or_single_counts(answer):
+    from local_operator.supplements.evidence import extract
+
+    assert not extract([], answer).structured
+
+
+def test_labelled_summary_generator_payload_requires_table_not_comparable_axes():
+    from local_operator.supplements.evidence import extract
+    from local_operator.supplements.generator import evidence_block
+
+    answer = "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    evidence = extract([], answer)
+    assert evidence.structured and evidence.datasets[0].presentation == "table-only"
+    payload = evidence_block(evidence.datasets, user_text="summarise", answer_text=answer)
+    assert "table-only" in payload and "distinct entity units" in payload
+    assert all(value in payload for value in ("296", "225", "325", "3194"))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "- Delta: -10 comments, -20 profiles, -30 links, -40 matches.",
+        "- Delta: +10 comments, +20 profiles, +30 links, +40 matches.",
+        "- Delta: −10 comments, −20 profiles, −30 links, −40 matches.",
+        "- Forecast: 10-20 comments, 30-40 profiles, 50-60 links and 70-80 matches.",
+        "- Forecast: 10 - 20 comments, 30 – 40 profiles, 50 — 60 links, 70 to 80 matches.",
+        "- Dates: 2026-10-14 comments, 2026-10-15 profiles, 2026-10-16 links, 2026-10-17 matches.",
+        "- IDs: case-296 comments, case-225 profiles, case-325 links and case-3194 matches.",
+        (
+            "- Ticket 101 covers comments; ticket 202 covers profiles; ticket "
+            "303 covers links; ticket 404 covers matches."
+        ),
+        (
+            "- Ticket 101 Covers comments; ticket 202 Covers profiles; ticket "
+            "303 Covers links; ticket 404 Covers matches."
+        ),
+        "- Delta: - 10 comments, - 20 profiles, - 30 links and - 40 matches.",
+        "Historical 296 comments, 225 profiles, 325 links, 3194 matches.\n- No counts here.",
+        "- Earlier 100 comments, 225 profiles, 325 links, 3194 matches.\n- Now 296 comments.",
+    ],
+)
+def test_labelled_summary_rejects_ambiguous_numeric_semantics(answer):
+    from local_operator.supplements.decision import drawable
+
+    found = ev.extract([], answer)
+    assert ev._labelled_summary(answer) is None
+    assert found.datasets == ()
+    # A pre-existing unit signal can fire on repeated 'covers'; no dataset means
+    # no paid graphics call. Do not conflate the signal with authoritative rows.
+    assert not drawable(found)
+
+
+@pytest.mark.parametrize("qualifier", ["supplementary", "SUPPLEMENTARY", "ACME Production"])
+def test_labelled_summary_keeps_explicit_vocabulary_and_real_uppercase_acronyms(qualifier):
+    answer = (
+        f"- Added 296 {qualifier} comments to 225 profiles, covering 325 links and 3,194 matches."
+    )
+    found = ev._labelled_summary(answer)
+    assert found is not None
+    assert {r[0]: r[1] for r in found.rows} == {
+        "comments": "296",
+        "profiles": "225",
+        "links": "325",
+        "matches": "3194",
+    }
+
+
+@pytest.mark.parametrize(
+    "qualifier",
+    [
+        "between 10 and",
+        "up to",
+        "at least",
+        "at most",
+        "about",
+        "roughly",
+        "approximately",
+        "around",
+        "more than",
+        "less than",
+        "fewer than",
+        "greater than",
+        "nearly",
+        "almost",
+        "estimated",
+        "from 10 to",
+    ],
+)
+def test_summary_refuses_entire_qualified_count_bullet(qualifier):
+    # Even with four OTHER exact counts, a qualified count bullet must not be
+    # silently collapsed into the authoritative point-count table.
+    answer = (
+        "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches.\n"
+        f"- Expected {qualifier} 20 comments."
+    )
+    assert ev._labelled_summary(answer) is None
+    assert not ev.extract([], answer).datasets
+
+
+def test_between_ranges_do_not_become_upper_endpoint_counts():
+    answer = (
+        "- Forecast: between 10 and 20 comments, between 30 and 40 profiles, "
+        "between 50 and 60 links, between 70 and 80 matches."
+    )
+    assert ev._labelled_summary(answer) is None
+    assert not ev.extract([], answer).datasets

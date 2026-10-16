@@ -105,7 +105,10 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
-from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    PEER_MESSAGE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
+)
 from local_operator.harness.rows import (
     is_harness_chrome,
     is_harness_notice_row,
@@ -210,6 +213,7 @@ from local_operator.slash_commands import (
     unknown_flag_refusal,
 )
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui import images as images_mod
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
@@ -509,6 +513,11 @@ from local_operator.tui.widgets.tool_card import (
     clean_intent,
     parse_duration,
 )
+
+# Mounted by ``on_peer_message_delivered`` below AND re-exported for the
+# replay fold: ``session_presentation`` imports its block vocabulary from this
+# module (the sibling convention), and a bridge wake must paint the same card
+# live and on replay (§13.4).
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
@@ -518,6 +527,7 @@ from local_operator.tui.widgets.transcript import (
     NoticeKind,
     PeerMessageBlock,
     RichBlock,
+    TeamBridgeBlock,
     TranscriptView,
     UserBlock,
     WakeBlock,
@@ -1005,10 +1015,11 @@ _DRAIN_NOTICES: dict[str, str] = {
 #: already (see the round-1 MINOR-3 note above), so the sentence and its key are gone
 #: rather than kept for a wire addition that has not happened.
 #:
-#: WHAT THE ABANDONED STATE IS TOLD, TODAY. The record and the incident row carry it,
-#: where every other fleet surface already reads it: `lop sessions` prints the phrase
-#: (true — the commitment survives) beside `update failed` in its own column, and the
-#: incident row names the bound the runtime actually spent. The viewer's row is the
+#: WHAT THE ABANDONED STATE IS TOLD, TODAY. `lop sessions` prints the phrase — true,
+#: because the commitment survives — and that phrase plus the build still running is
+#: now the WHOLE of the account (operator ask, 2026-10-15: the drain abandon publishes
+#: no failure, so there is no `update failed` column beside it and no incident row
+#: naming a bound for a runtime nothing failed on). The viewer's row is the
 #: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
 #: drain sentence after the abandon, and **nothing takes that row down** — it is painted
 #: once, through `_notice_for`, which appends a block to the transcript, and the only
@@ -4405,6 +4416,65 @@ class TranscriptScreen(Screen[None]):
 #: command comes from ``providers.login_catalog`` so the splash, the hints,
 #: the CLI and the README cannot recommend different providers again.
 AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
+
+
+def bridge_decision_target(
+    row: AskRow, answers: Mapping[str, Sequence[str]]
+) -> tuple[str, str, str] | None:
+    """The ``(ask_id, question_id, word)`` a BRIDGE card answer decides.
+
+    ``None`` for every ordinary ask: a decision exists only for a request whose
+    question carries the producer's ``question_id`` AND whose picked value
+    resolves to one of that question's own option ids. The word sent on the
+    wire is the OPTION ID (``approve``/``deny``), never the drawn label — the
+    door validates the word against the request's closed set, and a label is
+    display copy that can be re-worded without touching the decision.
+
+    Ambiguity is ``None`` rather than a guess: two picked request questions, or
+    a value that maps to no option id, must fall back to the ordinary door and
+    its refusal rather than decide something the human did not choose.
+    """
+
+    picked: list[tuple[str, str]] = []
+    for question in row.questions:
+        if not isinstance(question, Mapping):
+            continue
+        question_id = str(question.get("question_id") or "")
+        if not question_id:
+            continue
+        selected = answers.get(str(question.get("id") or "")) or ()
+        if len(selected) != 1:
+            continue
+        options = {
+            str(option.get("label") or "").strip().lower(): str(option.get("id") or "")
+            for option in (question.get("options") or ())
+            if isinstance(option, Mapping)
+        }
+        value = str(selected[0]).strip()
+        picked.append((question_id, options.get(value.lower()) or value.lower()))
+    if len(picked) != 1:
+        return None
+    return (row.ask_id, picked[0][0], picked[0][1])
+
+
+def _is_bridge_ask_row(row: Any) -> bool:
+    """Whether an ask row is a Team Bridge carriage (D2).
+
+    The predicate is STRUCTURAL, not a status or a label: a bridge question
+    carries the locator seat (``bridge``) and/or the ``question_id`` that only
+    the bridge carriage stamps (the same reading ``_is_bridge_ask_record`` uses
+    on the fold). Anything else is an ordinary ask and keeps the ordinary copy —
+    a name-based test would relabel the user's own asks the moment a string
+    drifted.
+    """
+    for question in getattr(row, "questions", ()) or ():
+        if not isinstance(question, Mapping):
+            continue
+        if question.get("bridge"):
+            return True
+        if str(question.get("question_id") or "").strip():
+            return True
+    return False
 
 
 class OperatorApp(App[None]):
@@ -20101,6 +20171,54 @@ class OperatorApp(App[None]):
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
+    def _cmd_memory(self, arg: str, notice: NoticeFn) -> None:
+        """Human local inspection uses the CLI's optimistic/confirmation runner.
+
+        Like /project list this renders a durable reading receipt. It does not
+        enqueue a model turn or wake an idle owner; correction uses a displayed
+        revision and forgetting requires the explicit --yes token.
+        """
+        from pathlib import Path
+
+        from local_operator.memory import MemoryIdentity
+        from local_operator.memory_cli import run
+        from local_operator.paths import config_dir
+
+        session = self._session
+        builder = getattr(session, "_build_tool_context", None)
+        context: Any = builder() if callable(builder) else None
+        identity = MemoryIdentity(
+            context.session_id if context else str(getattr(session, "session_id", "") or ""),
+            context.team_id if context else "",
+            context.agent_id if context else "",
+        )
+        root = (
+            Path(context.memory_config_dir)
+            if context and context.memory_config_dir
+            else config_dir()
+        )
+        directory = Path(context.session_dir) if context and context.session_dir else None
+
+        loading = NoticeBlock("Memory\nReading…", "info")
+        self._append_block(loading)
+
+        async def inspect_memory() -> None:
+            text, failed = await asyncio.to_thread(
+                run,
+                arg,
+                config=root,
+                identity=identity,
+                session_dir=directory,
+                prefix="/memory",
+            )
+            from local_operator.memory_cli import render_human
+
+            loading.restate(
+                "Memory\n" + render_human(text, failed, "/memory"), "warning" if failed else "info"
+            )
+
+        self.run_worker(inspect_memory(), exclusive=False, exit_on_error=False)
+
     def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
         """``/project`` — the operator's own verbs over THIS machine's store.
 
@@ -27257,17 +27375,29 @@ class OperatorApp(App[None]):
         """The row's questions as the CARD would draw them, or ``None`` when it cannot.
 
         ONE reader for the two seams that must agree about a row (Q-1, round 1):
-        the card mounts only for questions ``AskQuestion`` accepts, and the chat
+        the card mounts only for questions the ROW model accepts, and the chat
         refusal (``_head_ask_wants_a_secret``) may only point at a card that can
         exist. A row carrying something the validator refuses (a secret question
         with options, a truncated question) cannot be drawn anywhere, so a
         refusal would name a door that cannot open while protecting nothing —
         the row is still declinable from the list.
+
+        ``AskRowQuestion`` and NOT ``AskQuestion`` (round 13). The queue's own
+        projection (``asks/queue._question_shape``) stores the FULL question,
+        and a bridge carriage's row carries the seat — ``question_id``,
+        ``bridge``, ``human_required`` and each option's ``id``. Validating the
+        row against the TOOL's model therefore refused every real cross-member
+        ask (``extra="forbid"`` on the seat keys), ``_mount_ask_card`` gave up
+        with "carries questions this surface cannot draw", and no human decision
+        card ever mounted for the one ask kind that cannot be answered anywhere
+        else. The row model declares exactly those fields as optional, so the
+        seat is drawn-from rather than stripped, and the strict tool model stays
+        strict where it guards the model's own asks.
         """
-        from local_operator.harness.types import AskQuestion
+        from local_operator.harness.types import AskRowQuestion
 
         try:
-            return [AskQuestion.model_validate(dict(question)) for question in row.questions]
+            return [AskRowQuestion.model_validate(dict(question)) for question in row.questions]
         except Exception:  # noqa: BLE001 - a malformed row must not break the dock
             return None
 
@@ -27632,7 +27762,17 @@ class OperatorApp(App[None]):
             )
             try:
                 if op == "respond":
-                    await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                    target = bridge_decision_target(row, answers or {})
+                    if target is not None:
+                        # An agent-messages request: the card's answer IS a
+                        # decision and rides the verified door (`bridge_decide`
+                        # — authority-admitted, grant-bearing). The plain ask
+                        # door refuses these asks by construction, so sending it
+                        # here would leave the human with a card that cannot
+                        # answer (TB-02 wiring, PR #2378).
+                        await client.bridge_decide(*target)
+                    else:
+                        await client.ask_respond(row.ask_id, answers or {}, by="terminal")
                 elif op == "decline":
                     await client.ask_decline(row.ask_id, by="terminal")
                 else:
@@ -27835,11 +27975,25 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
+        bridge = _is_bridge_ask_row(row)
         if row.status == STATUS_TIMED_OUT:
+            if bridge:
+                # D2: a carriage's ask is not this user's own agent. The
+                # timeout line says the same true thing; only the SUBJECT
+                # changes, so a reader is not told their own agent asked when
+                # the request came from another member's.
+                return (
+                    f"{ASK_MARKER} this request timed out — the sender moved on; "
+                    "your answer still reaches them"
+                )
             return (
                 f"{ASK_MARKER} this ask timed out — the agent moved on; "
                 "your answer still reaches it"
             )
+        if bridge:
+            # A cross-member request: the answer travels back to the requester,
+            # so "the agent asked" (this user's own) is the wrong subject.
+            return f"{ASK_MARKER} another member's agent asked — " "your answer goes back to them"
         return f"{ASK_MARKER} the agent asked and moved on — your answer still reaches it"
 
     def _on_queue_ask_settle(self, ask_id: str, answers: dict[str, list[str]] | None) -> None:
@@ -27859,13 +28013,14 @@ class OperatorApp(App[None]):
         submitted = bool(answers) and bool(expected) and expected <= set(answers or {})
         if submitted:
             session = self._queued_ask_session()
-            reader: Any = getattr(session, "respond_ask", None)
-            if callable(reader):
-                try:
-                    outcome: Any = reader(ask_id, answers or {}, by="terminal")
-                except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
-                    logger.warning("could not deliver a queued answer", exc_info=True)
-                    outcome = {"ok": False, "error": "the answer could not be delivered"}
+            outcome: Any = self._deliver_owner_answer(session, row, ask_id, answers)
+            # THE VIEWER'S DOOR IS A COROUTINE, and this is where that is
+            # handled: `_handle_ask_outcome` raises a worker for an awaitable
+            # and renders the verdict when it lands, so a bridge decision from a
+            # paired device is reported in the owner's words too. `is not None`
+            # is the right test (a coroutine is not None) and an inline `await`
+            # here would block the keypress on the wire.
+            if outcome is not None:
                 self._handle_ask_outcome(outcome, toast=False)
             self._ask_drafts.pop(ask_id, None)
             # ONE QUEUE COSTS ONE COLLAPSE, not one per answer. The card was
@@ -27907,6 +28062,52 @@ class OperatorApp(App[None]):
         # respect (contract clause 4). A submit is not — answering is the opposite of
         # waving a question off — so it records nothing.
         self._collapse_asks(by_user=not submitted)
+
+    def _deliver_owner_answer(
+        self, session: Any, row: AskRow | None, ask_id: str, answers: dict[str, list[str]] | None
+    ) -> Any:
+        """Hand a settled card to the door its ROW belongs to, on the owner contract.
+
+        TWO DOORS, ONE ROW EACH, and the row is what picks (UX review U1). An
+        ordinary ask rides ``respond_ask`` — verbatim, as it always has. A
+        BRIDGE request rides ``Session.bridge_decide``: the verified decision
+        door the runtime's op serves and the fleet worker's engage route calls
+        (``_fleet_ask_worker``), which consumes the one-shot grant the authority
+        seam minted. ``respond_ask`` refuses every bridge record by construction
+        (``BRIDGE_DECISION_DOOR_REQUIRED``), so leaving these rows on the
+        ordinary door made the ORDINARY CARRIAGE — a request arriving in THIS
+        session — undecidable from the card that asked for the decision, while
+        the refusal named that very card (the owner half of security round 3's
+        TB-02/R3-2; the fleet half was wired and no test covered this one).
+
+        The target is built by the SAME helper the fleet route uses, so the word
+        on the wire is the option ID (``approve``/``deny``), never the drawn
+        label, and an ambiguous pick (``None``) falls back to the ordinary door
+        and its refusal rather than deciding something the human did not choose.
+
+        ``None`` means the session offers neither door — the reduced harnesses
+        the surface tests build — and nothing is delivered, exactly as the old
+        ``callable(reader)`` guard behaved. An owner's op answers with the verdict
+        dict; a viewer's is a COROUTINE (it crosses the wire), and the caller
+        hands either to ``_handle_ask_outcome``, which reports an awaitable from
+        the worker it raises rather than blocking the key.
+        """
+        target = bridge_decision_target(row, answers or {}) if row is not None else None
+        decider: Any = getattr(session, "bridge_decide", None)
+        if target is not None and callable(decider):
+            try:
+                return decider(*target)
+            except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+                logger.warning("could not deliver a queued decision", exc_info=True)
+                return {"ok": False, "error": "the decision could not be delivered"}
+        reader: Any = getattr(session, "respond_ask", None)
+        if not callable(reader):
+            return None
+        try:
+            return reader(ask_id, answers or {}, by="terminal")
+        except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+            logger.warning("could not deliver a queued answer", exc_info=True)
+            return {"ok": False, "error": "the answer could not be delivered"}
 
     def _next_outstanding_ask(self, ask_id: str) -> AskRow | None:
         """The ask to hand the user after ``ask_id`` settles, or None.
@@ -39524,6 +39725,8 @@ class OperatorApp(App[None]):
             self._cmd_aida(arg, notice, attachments)
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
+        elif command == "/memory":
+            self._cmd_memory(arg, notice)
         elif command == "/project":
             # Every reserved verb runs (slice 3); `_cmd_project` owns the
             # branch so a registered command always has a TUI path.
@@ -56233,7 +56436,19 @@ class OperatorApp(App[None]):
             return
         if message.message_id:
             self._live_peer_receipts.add(message.message_id)
-        self._append_block(PeerMessageBlock(message.body, message.sender))
+        if message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
+            # §13.4 on the LIVE surface: a bridge wake is its own card here
+            # too — the peer-typed card this used to paint would ALSO dedup
+            # the correct bridge card away on a later replay of this attach
+            # (the replay skips ids in ``_live_peer_receipts``).
+            self._append_block(
+                TeamBridgeBlock(
+                    bridge_card_text(message.details),
+                    bridge_card_sender(message.details),
+                )
+            )
+        else:
+            self._append_block(PeerMessageBlock(message.body, message.sender))
 
     def _announce_on_splash(
         self, text: str, kind: NoticeKind, *, headline: str | None = None
@@ -57840,7 +58055,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 146
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 147
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

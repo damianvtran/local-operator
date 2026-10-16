@@ -393,3 +393,24 @@ def test_record_cap_is_counted_not_silent(monkeypatch: pytest.MonkeyPatch) -> No
     ]
     scan = _scan(rows)
     assert len(scan.records) == 3 and scan.truncated and scan.dropped == 2
+
+
+@pytest.mark.parametrize("name,key", [("bash", "command"), ("eval", "code")])
+def test_oversized_code_is_refused_before_shared_parser_work(name, key, monkeypatch):
+    """Inventory reads FULL journal arguments, unlike the supplement's 8KiB snapshot.
+
+    Structural guard: a 100k repeated-open command must not reach the lexer/regex
+    or hold the inventory's between-row deadline hostage. A normal row still scans.
+    """
+    from local_operator.supplements import candidates
+
+    def forbidden(*args):
+        raise AssertionError("oversized journal argument reached parser")
+
+    monkeypatch.setattr(candidates, "_lift_heredocs", forbidden)
+    monkeypatch.setattr(candidates, "_variable_write", forbidden)
+    scan = _scan(
+        [assistant("a", 1, [call("large", name, **{key: 'python3 -c "' + "open(" * 20000 + '"'})])]
+    )
+    assert len(scan.pending) == 1
+    assert not next(iter(scan.pending.values())).outputs
