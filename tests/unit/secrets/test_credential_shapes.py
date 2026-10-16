@@ -1029,6 +1029,7 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "credential-url-value",
         "dsn-password",
         "dsn-password-plain",
+        "dsn-password-truncated",
         "cli-credential-flag",
         "vendor-prefixed-token",
         "gcp-service-account-value",
