@@ -13,7 +13,7 @@ description: "Save or recall goals, files, channels, threads, contacts and decis
   **session** scope. Store shared workstream facts in **team** scope only when
   intentionally shared; **agent** scope is a persistent registry profile, not a
   role tag. Subagents inherit that profile. Anonymous `main` has no agent bank:
-  use session or global instead.
+  use session for work, not global.
 - Save durable user preferences, names, colleagues, locations, contacts and
   environment facts in **global** scope only when intentionally cross-session.
   Do not automatically promote captured facts out of session scope.
@@ -39,11 +39,15 @@ there is **no scope argument**. Old scope-bearing calls are refused, never strip
 or reinterpreted. This is a declared personal-only convenience, not a content
 classifier or a guarantee that a model will always choose the right tool.
 
-Temporary work, checkpoints and team/profile knowledge use the explicit URLs below:
-`memory://session`, `memory://team`, `memory://agent`, or `memory://global` when
-intentionally durable. Existing session rows are not promoted or rewritten. Guards,
-quotas, provenance and host approvals are shared. Explicit role allowlists are never
-widened; when the helper is absent, use read/write/edit URLs.
+Work state and checkpoints use `memory://session`; intentionally shared work uses
+`memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
+Long-lived work stays in those scopes, not global. `memory://global` is only for
+durable personal/user facts, preferences, contacts and environment. This boundary
+is about the kind of knowledge, not how long it should survive: an unavailable
+agent bank or a future-session request does not turn work state into personal facts.
+Existing session rows are not promoted or rewritten. Guards, quotas, provenance and
+host approvals are shared. Explicit role allowlists are never widened; when the
+helper is absent, use read/write/edit URLs with the same scope boundaries.
 
 The human CLI verbs are `list`, `show`, `search`, `edit`, `forget`, `status` — there
 are no `lop memory remember` or `recall` CLI commands.
