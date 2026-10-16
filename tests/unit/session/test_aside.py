@@ -752,6 +752,15 @@ async def test_a_failed_receipt_write_is_reported_at_dispose(tmp_path, caplog) -
     assert any("shell-7" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
     notices = [e for e in events if isinstance(e, NoticeEvent) and e.kind == "error"]
     assert len(notices) == 1 and "1 shell command record(s)" in notices[0].text
+    # The durable half (review R2-3): the incident row names the receipt too.
+    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+
+    rows = [
+        str(e.payload.get("details", {}).get("text", ""))
+        for e in Transcript(tmp_path / "sess").entries()
+        if e.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(rows) == 1 and "shell-7" in rows[0], rows
 
 
 @pytest.mark.asyncio
@@ -964,3 +973,71 @@ def test_wrap_aside_turns_wraps_a_leading_whitespace_variant_of_the_wrapper() ->
     wrapped = wrap_aside_turns([already])
 
     assert wrapped[0].text.count("<aside>") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_adopt_never_lands_the_first_pair_twice(tmp_path) -> None:
+    """Review R2-2: dedupe is PER MESSAGE across the queue and the transcript.
+
+    An aside continuation re-sends the whole exchange with a new tail. Both
+    orders are pinned: pair 1 still QUEUED when the continuation arrives, and
+    pair 1 already LANDED. Either way exactly one Q1/A1 is written, with Q2/A2
+    after them.
+    """
+    for landed_first in (False, True):
+        session = make_session(tmp_path / f"landed-{landed_first}", RecordingStream())
+        q1, a1 = Message.user("Q1"), Message.assistant("A1")
+        q2, a2 = Message.user("Q2"), Message.assistant("A2")
+        await session._turn_lock.acquire()
+        try:
+            assert await session.adopt_aside([q1, a1]) == "queued"
+            if landed_first:
+                await session._flush_shell_records()
+                assert session._transcript.has_entry(a1.id)
+            assert await session.adopt_aside([q1, a1, q2, a2]) == "queued"
+            await session._flush_shell_records()
+        finally:
+            session._turn_lock.release()
+
+        ids = [e.id for e in session._transcript.entries()]
+        assert ids == [q1.id, a1.id, q2.id, a2.id], (landed_first, ids)
+        assert [m.id for m in session._context.messages] == [q1.id, a1.id, q2.id, a2.id]
+        # And a third re-send of the same exchange is a no-op answered "applied".
+        assert await session.adopt_aside([q1, a1, q2, a2]) == "applied"
+        assert [e.id for e in session._transcript.entries()] == ids
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_continuation_writes_only_the_new_pair(tmp_path) -> None:
+    """The immediate-write path filters per message too (R2-2)."""
+    session = make_session(tmp_path, RecordingStream())
+    q1, a1 = Message.user("Q1"), Message.assistant("A1")
+    q2, a2 = Message.user("Q2"), Message.assistant("A2")
+    assert await session.adopt_aside([q1, a1]) == "applied"
+    assert await session.adopt_aside([q1, a1, q2, a2]) == "applied"
+    assert [e.id for e in session._transcript.entries()] == [q1.id, a1.id, q2.id, a2.id]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_half_known_pair_is_refused_rather_than_landed(tmp_path) -> None:
+    """Pair-safe: never land an answer whose question was dropped as known."""
+    from local_operator.session.errors import AsideAdoptRefused
+
+    session = make_session(tmp_path, RecordingStream())
+    q1, a1 = Message.user("Q1"), Message.assistant("A1")
+    assert await session.adopt_aside([q1, a1]) == "applied"
+    before = [e.id for e in session._transcript.entries()]
+
+    # Q1 known, its answer new: a half pair.
+    with pytest.raises(AsideAdoptRefused):
+        await session.adopt_aside([q1, Message.assistant("a different answer")])
+    # An odd tail and an exchange that starts with an answer are refused too.
+    with pytest.raises(AsideAdoptRefused):
+        await session.adopt_aside([q1, a1, Message.user("dangling")])
+    with pytest.raises(AsideAdoptRefused):
+        await session.adopt_aside([Message.assistant("A"), Message.user("Q")])
+
+    assert [e.id for e in session._transcript.entries()] == before
+    await session.dispose()

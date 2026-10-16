@@ -8671,8 +8671,11 @@ class Session:
         finally:
             # D8: anything queued after the pipeline's own flush (or on an
             # early exit before it) lands before the lock goes free.
-            await self._flush_queued_before_release()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def seed_history(self, messages: list[Message]) -> None:
         """Prime the conversation from a host-supplied history.
@@ -15931,8 +15934,11 @@ class Session:
                 drain_steering_on_open=drain_steering_on_open,
             )
         finally:
-            await self._flush_queued_before_release()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _run_turn_pipeline(
         self,
@@ -20764,8 +20770,11 @@ class Session:
             # `record_shell` queues while manual compaction owns the message
             # list. Fold those receipts into the newly compacted context before
             # another prompt can acquire the lock and build its request.
-            await self._flush_queued_before_release()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     @staticmethod
     async def _offloaded(compaction_api: Any, name: str, *args: Any) -> Any:
@@ -23490,12 +23499,14 @@ class Session:
 
         if self._disposed:
             raise AsideAdoptRefused(reason="session_closed")
-        if self._adoption_known(messages):
+        fresh = self._unadopted_messages(messages)
+        if not fresh:
             # A retried adopt (a client that lost the ack) must not land twice:
-            # the pair is already queued or already durable.
-            return "applied" if self._transcript.has_entry(messages[-1].id) else "queued"
+            # every message is already queued or already durable.
+            durable = all(self._transcript.has_entry(m.id) for m in messages)
+            return "applied" if durable else "queued"
         if self._is_streaming or self._turn_lock.locked():
-            self._pending_shell_records.append(_PendingAdoption(tuple(messages)))
+            self._pending_shell_records.append(_PendingAdoption(tuple(fresh)))
             return "queued"
         # Serialized like the idle ``record_shell`` write, for its reason: a
         # prompt acquiring the lock while the transcript write below awaits
@@ -23503,33 +23514,60 @@ class Session:
         # that turn's live list — the splice this method exists to prevent.
         await self._turn_lock.acquire()
         try:
-            if unanswered_tail_call_ids(self._context.messages):
+            # Re-filtered under the lock: the holder we waited for may have
+            # landed some of these messages from the queue on its way out.
+            fresh = self._unadopted_messages(messages)
+            if fresh and unanswered_tail_call_ids(self._context.messages):
                 raise AsideAdoptRefused(reason="open_tool_batch")
-            await self._apply_adoption(messages)
+            if fresh:
+                await self._apply_adoption(fresh)
         finally:
             # D8: a record queued while this write awaited lands before release.
-            await self._flush_queued_before_release()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
         return "applied"
 
-    def _adoption_known(self, messages: Sequence[Message]) -> bool:
-        """Whether this exact exchange is already queued or already durable (D2).
+    def _unadopted_messages(self, messages: Sequence[Message]) -> list[Message]:
+        """The messages of ``messages`` not yet queued or durable, in order.
 
-        Keyed by the LAST message's id, the same identity ``_persist_shell_record``
-        dedupes on: the pair is written as one batch, so its tail being on disk
-        means the whole exchange is.
+        Dedupe is PER MESSAGE ID, across the queue and the transcript (review
+        R2-2, superseding D2's tail-id rule). An aside continuation re-sends the
+        whole exchange with a new tail — ``[Q1, A1, Q2, A2]`` after ``[Q1, A1]``
+        was adopted — so a tail-only check let ``Q1``/``A1`` land twice.
+
+        PAIR-SAFE, or refused: the exchange is user/assistant pairs, and a
+        filter that keeps half of one would land an answer with no question
+        (or the reverse). Each pair must be entirely known or entirely new, and
+        the result must be an even run starting with a user row; anything else
+        raises :class:`AsideAdoptRefused` (bare reason, the generic sentence)
+        instead of landing a half pair.
         """
-        if not messages:
-            return False
-        tail_id = messages[-1].id
-        if self._transcript.has_entry(tail_id):
-            return True
-        return any(
-            isinstance(queued, _PendingAdoption)
-            and bool(queued.messages)
-            and queued.messages[-1].id == tail_id
+        from local_operator.session.errors import AsideAdoptRefused
+
+        known = {
+            message.id
             for queued in self._pending_shell_records
-        )
+            if isinstance(queued, _PendingAdoption)
+            for message in queued.messages
+        }
+        fresh: list[Message] = []
+        for index in range(0, len(messages), 2):
+            pair = list(messages[index : index + 2])
+            seen = [m.id in known or self._transcript.has_entry(m.id) for m in pair]
+            if all(seen):
+                continue
+            if any(seen) or len(pair) != 2:
+                raise AsideAdoptRefused()
+            fresh.extend(pair)
+        if any(
+            message.role != ("user" if offset % 2 == 0 else "assistant")
+            for offset, message in enumerate(fresh)
+        ):
+            raise AsideAdoptRefused()
+        return fresh
 
     async def _apply_adoption(self, messages: Sequence[Message]) -> None:
         """Write one adopted exchange to the transcript, then the live context."""
@@ -23582,8 +23620,11 @@ class Session:
         finally:
             # D8's rule for every release; a no-op unless something queued
             # during the write above (or the write failed, when it logs).
-            await self._flush_queued_before_release()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
         """Append one synthetic bash exchange to transcript and live context."""
@@ -23620,10 +23661,18 @@ class Session:
         # durable. Adoption-vs-later-receipt order is therefore guaranteed only
         # while the tail is closed, which is every boundary but a cancelled turn.
         index = 0
+        # Adoptions keep their order AMONG THEMSELVES even though receipts may
+        # pass them: a continuation's pair (Q2/A2) is queued already filtered of
+        # the first pair (R2-2), so landing it while Q1/A1 is still held — say
+        # a receipt closed the tail mid-pass — would put the follow-up before
+        # the question it follows. Once one adoption is held this pass, every
+        # later adoption waits with it.
+        adoption_held = False
         while index < len(self._pending_shell_records):
             queued = self._pending_shell_records[index]
             if isinstance(queued, _PendingAdoption):
-                if not await self._land_deferred_adoption(queued):
+                if adoption_held or not await self._land_deferred_adoption(queued):
+                    adoption_held = True
                     index += 1
                     continue
             else:
@@ -23634,14 +23683,29 @@ class Session:
             self._pending_shell_records.remove(queued)
 
     async def _flush_queued_before_release(self) -> None:
-        """The last flush before ``_turn_lock`` is released — call it, then release.
+        """The last flush before ``_turn_lock`` is released.
 
         THE RULE (D8): every ``_turn_lock.release()`` is immediately preceded by
-        this, with no await in between. A record queued while the lock is held
-        is otherwise stranded until some later turn: the pipeline's own flush
-        is followed by further awaits (shape incidents, the after-turn duty,
-        the patience flush), and an adopt arriving in that window saw the lock
-        held, queued, and then nothing flushed when the lock went free.
+        this, with no await in between, in the shape::
+
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+
+        The inner ``finally`` is not optional (review R2-1): a cancel delivered
+        while this awaits a write is a ``BaseException`` the ``except`` below
+        does not catch, and a release skipped then holds the lock for good —
+        every later prompt is refused as "already streaming". ``release()`` is
+        synchronous, so the no-await rule still holds. The one exemption is
+        ``serving.py``'s ``_await_turn_lock_free`` (``async with lock: pass``):
+        nothing awaits inside that hold, so nothing can be queued during it.
+
+        Without this, a record queued while the lock is held is stranded until
+        some later turn: the pipeline's own flush is followed by further awaits
+        (shape incidents, the after-turn duty, the patience flush), and an adopt
+        arriving in that window saw the lock held, queued, and then nothing
+        flushed when the lock went free.
 
         It LOGS rather than raises. It runs in ``finally`` blocks, where an
         exception would replace the one already propagating (the turn's own
@@ -23743,8 +23807,8 @@ class Session:
         never streamed, so a frontend must project them through the settled
         renderer — the contract :class:`HistoryDeltaEvent` already states.
         """
-        messages = list(queued.messages)
-        if not messages or self._transcript.has_entry(messages[-1].id):
+        messages = [m for m in queued.messages if not self._transcript.has_entry(m.id)]
+        if not messages:
             return True
         if unanswered_tail_call_ids(self._context.messages):
             # Named by the exchange's tail id, the identity the dedupe keys on.
