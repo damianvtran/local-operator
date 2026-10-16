@@ -16,6 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, NoReturn
 
 import pytest
 
@@ -153,7 +154,7 @@ def test_checkout_revision_rejects_bad_metadata(tmp_path: Path, fault: str) -> N
         checkout_revision(tmp_path)
 
 
-def refuse_external(violations: list[str], *_args, **_kwargs):
+def refuse_external(violations: list[str], *_args, **_kwargs) -> NoReturn:
     violations.append("external-effect-or-provider")
     raise AssertionError("UI proof attempted an external effect or provider")
 
@@ -187,8 +188,8 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     violations: list[str] = []
 
-    def refuse(*_args, **_kwargs):
-        return refuse_external(violations, *_args, **_kwargs)
+    def refuse(*_args, **_kwargs) -> NoReturn:
+        refuse_external(violations, *_args, **_kwargs)
 
     for name in ("Popen", "run", "call", "check_call", "check_output"):
         monkeypatch.setattr(subprocess, name, refuse)
@@ -253,7 +254,7 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         async def prompt(self, *_args, **_kwargs):
             refuse()
 
-        async def complete_once(self, *_args, **_kwargs):
+        async def complete_once(self, system: str, prompt: str) -> str:
             refuse()
 
     session = BoundSession()
@@ -288,51 +289,67 @@ async def capture_pair(proof, pilot, case: str, phase: str) -> set[str]:
 
     proof.output.mkdir(exist_ok=True)
     generated: set[str] = set()
-    previous = None
     for frame in ("post-pause-1", "post-pause-2"):
         await pilot.pause()
         stem = f"{case}-{phase}-{frame}"
         target = proof.output / f"{stem}.svg"
         save_capture(proof.app, target)
-        geometry_path = target.with_suffix(".geometry.json")
-        geometry = json.loads(geometry_path.read_text())
-        assert geometry["grid"] == list(proof.app.size)
-        assert geometry["widgets"] and geometry["css_path"]
-        measured = {key: geometry[key] for key in ("grid", "screen", "widgets")}
-        if previous is not None:
-            assert previous == measured, "consecutive frames changed geometry"
-        previous = measured
-        for path in (target, geometry_path):
-            data = path.read_bytes()
-            # Fail closed rather than rewrite visible pixels or conceal a leak.
-            for private_prefix in (proof.root, SOURCE_ROOT):
-                assert str(private_prefix).encode() not in data
-            generated.add(path.name)
+        generated.update((target.name, target.with_suffix(".geometry.json").name))
     publish_proof(proof, case, phase, generated)
     return generated
 
 
-def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
-    """Extend only the existing unit artifact; never collect arbitrary files."""
+def publish_proof(
+    proof, case: str, phase: str, names: set[str], *, _target: Path | None = None
+) -> None:
+    """Publish a fully validated pair BEFORE its unchanged strict verdict.
+
+    Failed geometry is evidence, not a reason to discard the original frames.
+    Privacy, provenance and the combined job quota still precede EVERY copy.
+    The private target argument isolates pure publisher controls from the real
+    CI artifact directory; it is not an App/exporter/renderer substitution.
+    """
+    assert re.fullmatch(r"(?:host-speed|ownership)-(?:100|60)x30", case)
+    assert phase in proof.expected_phases and re.fullmatch(r"[a-z-]+", phase)
+    frames = ("post-pause-1", "post-pause-2")
+    expected = {
+        f"{case}-{phase}-{frame}{suffix}"
+        for frame in frames
+        for suffix in (".svg", ".geometry.json")
+    }
+    assert names == expected, "unexpected or incomplete proof pair"
+    paths = {name: proof.output / name for name in names}
+    assert all(path.resolve().parent == proof.output.resolve() for path in paths.values())
+    assert (
+        sum(path.stat().st_size for path in paths.values()) <= 12 * 1024 * 1024
+    ), "proof pair byte quota exceeded before publication"
+    incoming = {name: path.read_bytes() for name, path in paths.items()}
+    measured = []
+    for data in incoming.values():
+        # Refuse the whole pair, rather than rewrite pixels or publish its safe
+        # first member before discovering a leak in the second.
+        for private_prefix in (proof.root, SOURCE_ROOT):
+            assert str(private_prefix).encode() not in data, "private prefix in proof pair"
+    for frame in frames:
+        geometry = json.loads(incoming[f"{case}-{phase}-{frame}.geometry.json"])
+        assert geometry["grid"] == list(proof.app.size)
+        assert geometry["widgets"] and geometry["css_path"] == ["local_operator.tcss"]
+        measured.append({key: geometry[key] for key in ("grid", "screen", "widgets")})
+    stable = measured[0] == measured[1]
     if os.environ.get("GITHUB_ACTIONS") != "true":
+        assert stable, "consecutive frames changed geometry"
         return
     # Unit CI is POSIX. A lock covers all xdist workers in THIS job; neither a
     # partial overwrite nor a per-worker quota may hide a per-job overflow.
     import fcntl
 
-    target = SOURCE_ROOT / "test-artifacts" / "tui-proof"
+    target = _target if _target is not None else SOURCE_ROOT / "test-artifacts" / "tui-proof"
     target.mkdir(parents=True, exist_ok=True)
     with (target / ".manifest.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         manifest_path = target / "manifest.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
         head = checkout_revision(SOURCE_ROOT)
-        assert phase in proof.expected_phases
-        incoming = {}
-        for name in names:
-            assert name.startswith(case + "-")
-            assert name.endswith((".svg", ".geometry.json"))
-            incoming[name] = (proof.output / name).read_bytes()
         existing = {
             p.name: p.stat().st_size for p in target.iterdir() if p.suffix in (".svg", ".json")
         }
@@ -372,6 +389,9 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
         manifest.setdefault("expected_phases", {})[case] = sorted(proof.expected_phases)
         manifest.setdefault("cases", {}).setdefault(case, {})[phase] = {
             "grid": list(proof.app.size),
+            "pair_frames": list(frames),
+            "geometry_equal_at_capture": stable,
+            "pair_verdict_note": "Diagnostic capture only; strict assertion follows publication.",
             "files": {name: hashlib.sha256(incoming[name]).hexdigest() for name in sorted(names)},
             "external_attempts_at_capture": len(proof.violations),
             "coverage_note": proof.case_note,
@@ -390,6 +410,67 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
         for name, data in incoming.items():
             (target / name).write_bytes(data)
         manifest_path.write_bytes(manifest_bytes)
+    # This is the SAME complete grid/screen/widgets equality. Publishing safe
+    # failing evidence must never turn the call or final teardown into PASS.
+    assert measured[0] == measured[1], "consecutive frames changed geometry"
+
+
+@pytest.mark.parametrize("fault", ["second-private", "combined-quota", "safe-unstable"])
+def test_pair_publication_preserves_privacy_quota_and_strict_failure(tmp_path, monkeypatch, fault):
+    """Pure publisher controls only: no App, UI-hook or pixel sensitivity proof."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    root = tmp_path / "synthetic-private"
+    output = tmp_path / "pair"
+    output.mkdir()
+    target = tmp_path / "published"
+    case, phase = "ownership-100x30", "happy"
+    proof = SimpleNamespace(
+        root=root,
+        output=output,
+        app=SimpleNamespace(size=(100, 30)),
+        expected_phases={phase},
+        violations=[],
+        case_note="Synthetic pure publisher control; not rendered evidence.",
+    )
+    names = set()
+    for index, frame in enumerate(("post-pause-1", "post-pause-2")):
+        stem = f"{case}-{phase}-{frame}"
+        svg = output / f"{stem}.svg"
+        svg.write_text(
+            "<svg/>" if fault != "combined-quota" else "<svg>" + " " * (6 * 1024 * 1024) + "</svg>"
+        )
+        geometry: dict[str, Any] = {
+            "grid": [100, 30],
+            "css_path": ["local_operator.tcss"],
+            "screen": {"class": "SyntheticPublisherControl"},
+            "widgets": [{"region": [0, index, 100, 30]}],
+        }
+        if fault == "second-private" and index == 1:
+            geometry["screen"]["private"] = str(root)
+        metadata = svg.with_suffix(".geometry.json")
+        metadata.write_text(json.dumps(geometry))
+        names.update((svg.name, metadata.name))
+    if fault == "safe-unstable":
+        with pytest.raises(AssertionError, match="consecutive frames changed geometry"):
+            publish_proof(proof, case, phase, names, _target=target)
+        manifest = json.loads((target / "manifest.json").read_text())
+        record = manifest["cases"][case][phase]
+        assert record["geometry_equal_at_capture"] is False
+        assert record["pair_frames"] == ["post-pause-1", "post-pause-2"]
+        assert set(record["files"]) == names
+        for name in names:
+            data = (target / name).read_bytes()
+            assert data == (output / name).read_bytes()
+            assert hashlib.sha256(data).hexdigest() == record["files"][name]
+    else:
+        expected_refusal = (
+            "private prefix in proof pair"
+            if fault == "second-private"
+            else "proof pair byte quota exceeded before publication"
+        )
+        with pytest.raises(AssertionError, match=expected_refusal):
+            publish_proof(proof, case, phase, names, _target=target)
+        assert not target.exists(), "unsafe or over-quota pair was partially published"
 
 
 async def replace_inline(pilot, view, value: str) -> None:
