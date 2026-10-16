@@ -1493,17 +1493,16 @@ def test_every_question_reaches_the_projection(tmp_path: Path, count: int):
 
 
 # ---------------------------------------------------------------------------
-# the outstanding view of a timed-out ask (the flip precondition)
+# a timed-out ask: still shown, already settled (#2388)
 # ---------------------------------------------------------------------------
 
 
-def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path: Path):
-    """A queue whose ONLY ask timed out must not read as empty.
+def test_the_projection_keeps_a_timed_out_ask_but_counts_it_settled(tmp_path: Path):
+    """A queue whose ONLY ask timed out keeps the row and owes nothing.
 
-    The row stays (it is still answerable) and the outstanding tally is 1, not
-    0 — the defect was a surface tallying ``open`` alone, which dropped exactly
-    this row while the bar still offered it and a late answer still reached the
-    agent. Answering it late settles it and the outstanding set empties.
+    The row stays (a settled receipt the user can dismiss), but it is not
+    outstanding: the agent was told at the deadline and moved on (#2388). The
+    queue still takes a late answer, which folds to ``late``.
     """
     session = FakeSession()
     queue = _queue(tmp_path, session)
@@ -1512,7 +1511,7 @@ def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path
     rows = queue.projection()
     assert [row["ask_id"] for row in rows] == [ask_id]
     assert rows[0]["status"] == store.STATUS_TIMED_OUT
-    assert len(store.outstanding_asks(rows)) == 1
+    assert store.outstanding_asks(rows) == []
 
     assert queue.respond(ask_id, {"q0": ["late answer"]}, by="phone")["ok"] is True
     late = queue.projection()
@@ -1523,9 +1522,9 @@ def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path
 def test_the_index_keeps_a_timed_out_only_queue_rather_than_going_absent(tmp_path: Path):
     """The derived index must not drop to absence for a timed-out-only queue.
 
-    That file is the COLD reader's view (the aggregate route, the phone's list)
-    of what the user can still answer, so a queue that folded to no outstanding
-    rows would hide the asks everywhere but the live bar.
+    That file is the COLD reader's view (the aggregate route, the phone's list),
+    and a stopped session's timed-out row must stay in it although it is no
+    longer outstanding (#2388): the row is where Dismiss lives.
     """
     session = FakeSession()
     queue = _queue(tmp_path, session)
@@ -1535,7 +1534,8 @@ def test_the_index_keeps_a_timed_out_only_queue_rather_than_going_absent(tmp_pat
     entry = store.read_entry(tmp_path, "s1")
     assert entry is not None
     assert [row["ask_id"] for row in entry["asks"]] == [ask_id]
-    assert store.outstanding_asks(entry["asks"])[0]["status"] == store.STATUS_TIMED_OUT
+    assert entry["asks"][0]["status"] == store.STATUS_TIMED_OUT
+    assert store.outstanding_asks(entry["asks"]) == []
     # ``now`` is injected so the reader's staleness sweep is judged at the SAME
     # instant the fold was (the fixture clock is years behind the wall clock).
     rows = store.index_asks(tmp_path, now=BASE + 120_001)

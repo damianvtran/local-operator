@@ -618,16 +618,24 @@ def test_append_creates_the_session_directory(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_is_outstanding_covers_open_and_timed_out_and_no_settled_status():
-    """The rule the wire's tally, the index and every surface share.
+def test_a_timed_out_ask_is_settled_but_still_injects_its_notice():
+    """The rule the wire's tally, the index and every surface share (#2388).
 
-    It is the flip precondition for ``LOP_ASK_NONBLOCKING``: a timed-out but
-    UNANSWERED ask is still outstanding — a late answer reaches the agent
-    (design §2.2, the spec's item 3) — while a settled one is not.
+    An ask settles when the AGENT is told — by its deadline or by an answer —
+    not only when the user acts: a timed-out ask is no longer outstanding, so no
+    surface counts it as owed. Settling it must not cost the agent its notice:
+    ``timed_out`` still injects, and the fold still requires exactly the
+    deadline row.
     """
+    assert store.OUTSTANDING_STATUSES == frozenset({store.STATUS_OPEN})
     assert store.is_outstanding(store.STATUS_OPEN)
-    assert store.is_outstanding(store.STATUS_TIMED_OUT)
+    assert not store.is_outstanding(store.STATUS_TIMED_OUT)
+    assert store.STATUS_TIMED_OUT in store.INJECTING_STATUSES
+    (record,) = store.fold([_queued(at=BASE, timeout_s=3600)], BASE + 3_600_001)
+    assert record["status"] == store.STATUS_TIMED_OUT
+    assert store.expected_row_ids(record) == [store.timeout_row_id("a-1")]
     for settled in (
+        store.STATUS_TIMED_OUT,
         store.STATUS_ANSWERED,
         store.STATUS_LATE,
         store.STATUS_DECLINED,
@@ -642,31 +650,18 @@ def test_is_outstanding_covers_open_and_timed_out_and_no_settled_status():
     assert not store.is_outstanding("")
 
 
-def test_outstanding_asks_and_pending_asks_are_one_set_by_construction():
-    """``pending_asks`` (notice owed) delegates to the outstanding set.
+def test_open_asks_is_the_cap_set_and_a_timed_out_ask_holds_no_slot():
+    """The cap counts OPEN asks only, and so does the outstanding set (#2388).
 
-    They coincide because an ask owes its timeout notice exactly while it is
-    outstanding; a second spelling of either rule is what produced the wrong
-    wire tally, so there is only one.
-    """
-    events = [_queued(at=BASE, timeout_s=3600)]
-    (record,) = store.fold(events, BASE + 3_600_001)
-    assert record["status"] == store.STATUS_TIMED_OUT
-    assert [row["ask_id"] for row in store.outstanding_asks([record])] == ["a-1"]
-    assert store.pending_asks([record]) == store.outstanding_asks([record])
-
-
-def test_open_asks_is_the_narrower_cap_set():
-    """The cap counts OPEN asks only; the display set counts outstanding ones.
-
-    A timed-out ask must not hold a slot a fresh question needs, and it must not
-    vanish from a surface either — two questions, two sets, one definition each.
+    A timed-out ask must not hold a slot a fresh question needs, and it is no
+    longer owed either: the agent was told and moved on. It stays SHOWN (the
+    row is a settled receipt), which is the readers' business, not this set's.
     """
     events = [_queued(at=BASE, timeout_s=3600)]
     (record,) = store.fold(events, BASE + 3_600_001)
     assert record["status"] == store.STATUS_TIMED_OUT
     assert store.open_asks([record]) == []
-    assert len(store.outstanding_asks([record])) == 1
+    assert store.outstanding_asks([record]) == []
 
 
 # ---------------------------------------------------------------------------

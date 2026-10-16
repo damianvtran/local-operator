@@ -650,10 +650,9 @@ class SessionSidebar(Widget, can_focus=True):
         self.show_subagents: bool = False
         #: ``(session_id, outstanding_ask_count)`` for the session whose asks this
         #: sidebar can actually count — the one the app is attached to. Empty
-        #: string means "no mark". COUNTED OVER THE OUTSTANDING SET (open +
-        #: timed-out-and-answerable), matching the wire's ``asks_open`` and the
-        #: bar's ``present``: a queue of nothing but timed-out asks is still one
-        #: the user can answer, so its row must keep its mark. See
+        #: string means "no mark". COUNTED OVER THE OUTSTANDING SET (open asks;
+        #: a timed-out one is settled, #2388), matching the wire's ``asks_open``
+        #: and the bar's ``present``, so the row and the wire cannot disagree. See
         #: :meth:`set_asking` for why the count is
         #: live-only rather than read out of the catalogue.
         self._asking: dict[str, int] = {}
@@ -1173,10 +1172,9 @@ class SessionSidebar(Widget, can_focus=True):
         marks, which is why this does not simply feed ``pending``.
 
         ``marks`` maps ``session_id -> count``, and each count is the OUTSTANDING
-        tally (open + timed-out-and-answerable, the same set the wire's
-        ``asks_open`` publishes): a timed-out ask is still one the user can
-        answer, so a queue of nothing but those must keep the mark rather than
-        dropping it to absence.
+        tally (open asks, the same set the wire's ``asks_open`` publishes): a
+        timed-out ask is settled (#2388), so a queue of nothing but those puts
+        no mark here.
 
         A MAPPING rather than one pair, because the mark is no longer only the
         current session's (amendment A3): the index tally covers every session

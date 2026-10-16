@@ -3468,11 +3468,11 @@ class FrontendSessionState(BaseModel):
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     #: The session's queued asks, newest first with the OPEN ones in front, and
-    #: how many of them are still OUTSTANDING — ``open`` or ``timed_out`` and
-    #: still answerable late (design §2.2; the rule lives in
-    #: ``asks.store.OUTSTANDING_STATUSES``). It is NOT "open asks": a timed-out
-    #: ask the user can still answer still counts, which is exactly the state a
-    #: queue of nothing but timed-out asks is in.
+    #: how many of them are still OUTSTANDING — ``open`` asks, the ones still
+    #: waiting on the user (the rule lives in ``asks.store.OUTSTANDING_STATUSES``).
+    #: A ``timed_out`` ask is settled (#2388): its row rides ``asks`` as a
+    #: dismissible receipt, but the tally does not count it, so a queue of
+    #: nothing but timed-out asks publishes rows beside ``asks_open: 0``.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (design §4/N2, and the UI contract's own
     #: rule, amended by the WIRE FIX): a client may take "``asks`` OR
@@ -4477,7 +4477,7 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
     snapshot["asks"] = kept
     if dropped:
         # ``asks_open`` keeps its meaning (how many of the session's asks are
-        # still OUTSTANDING — open or timed out and answerable); this says the
+        # still OUTSTANDING — the open ones, #2388); this says the
         # frame could not carry every row. Present only when true, so absence
         # reads as "nothing was dropped" — the additive-defaulted shape the rest
         # of this payload uses. The catalogue's ``model_catalogue_truncated`` is
@@ -9179,15 +9179,14 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     frontend state, the projection and the list rows cannot disagree about which
     asks are OUTSTANDING.
 
-    THE TALLY IS OUTSTANDING, NOT ``open`` — this is the fix for a queue whose
-    asks have all timed out: it used to fold to ``0`` (and, with no rows left in
-    the tally's own eye, could read as absence) while the ask bar still offered
-    the asks and a late answer still reached the agent. An ask is outstanding
-    while the user can still act on it — ``open`` OR ``timed_out``-and-unanswered
-    — and SETTLED once answered, declined or dismissed (design §2.2, the spec's
-    item 3). The statuses live in ONE place (``asks.store.OUTSTANDING_STATUSES``)
-    precisely because four surfaces read this rule; see that constant for why a
-    second spelling is what produced the wrong count here.
+    THE TALLY IS THE OUTSTANDING SET, which is ``open`` alone: an ask settles
+    once the agent is told — by its deadline (``timed_out``, #2388) or by an
+    answer — and a settled row still rides the rows (a timed-out one as a
+    dismissible receipt) without being counted. The queue still attributes a
+    late answer, but no surface offers one (D10). The statuses live in ONE
+    place (``asks.store.OUTSTANDING_STATUSES``) precisely because four surfaces
+    read this rule; see that constant for why a second spelling is what
+    produced a wrong count here.
 
     Returns ABSENCE — ``None`` — for the ROWS whenever they are not there, and
     the TALLY is the capability signal: a live queue with nothing to fold returns

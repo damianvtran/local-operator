@@ -107,32 +107,32 @@ STATUS_EXPIRED = "expired"
 #: delivery (else ``reconcile`` loops forever on a row it can never write).
 INJECTING_STATUSES = frozenset({STATUS_ANSWERED, STATUS_DECLINED, STATUS_TIMED_OUT, STATUS_LATE})
 
-#: THE OUTSTANDING SET — the asks the user can still act on, and so the asks
-#: every surface must agree are still live. ``open`` (nothing has happened to
-#: it yet) and ``timed_out`` (its deadline fired, but a LATE answer is still
-#: accepted and attributed — design §2.2, the spec's item 3: "a late answer is
-#: still attributable and the agent still receives it"). It stops being
-#: outstanding the moment it is SETTLED: ``answered``/``declined`` (the user
-#: responded), ``dismissed`` (the user put a timed-out ask away), ``withdrawn``
-#: (the asker retracted the question — design §12) and ``expired`` (an answer or
-#: deadline past the 7-day window that injects nothing).
+#: THE OUTSTANDING SET — the asks still waiting on the user, and so the asks
+#: every surface must agree are live: ``open`` alone (nothing has happened to it
+#: yet). An ask SETTLES the moment the AGENT is told something, not only when
+#: the user acts (#2388): ``timed_out`` (its deadline fired and the agent got the
+#: notice and moved on), ``answered``/``declined``/``late`` (the user responded),
+#: ``dismissed`` (the user put a timed-out ask away), ``withdrawn`` (the asker
+#: retracted the question — design §12) and ``expired`` (past the 7-day window,
+#: injects nothing). A timed-out ask stays SHOWN as a settled receipt and the
+#: queue still attributes a late answer (``respond`` → ``late``), but no surface
+#: offers one (D10) and none counts it as owed.
 #:
-#: ONE AUTHORITY, deliberately. Before this constant the same two-status rule
-#: was spelled in four places — ``ask_wire``'s tally (open-only, which dropped a
-#: timed-out-but-answerable ask from the count while it stayed on the bar),
-#: ``AskQueue.projection``'s ordering, the TUI's ``_ANSWERABLE`` and the TUI
-#: app's ``_open_ask_rows`` — and the one that was wrong was the count the
-#: surfaces published. Anything that needs "is this ask still outstanding" reads
-#: THIS set (or :func:`is_outstanding`); nothing re-lists the statuses.
-OUTSTANDING_STATUSES = frozenset({STATUS_OPEN, STATUS_TIMED_OUT})
+#: ONE AUTHORITY, deliberately. Before this constant the same rule was spelled
+#: in four places — ``ask_wire``'s tally, ``AskQueue.projection``'s ordering,
+#: the TUI's ``_ANSWERABLE`` and the TUI app's ``_open_ask_rows`` — and they
+#: drifted apart, which is how the surfaces published a count the bar did not
+#: show. Anything that needs "is this ask still outstanding" reads THIS set (or
+#: :func:`is_outstanding`); nothing re-lists the statuses.
+OUTSTANDING_STATUSES = frozenset({STATUS_OPEN})
 
-#: THE LAPSED SET — outstanding asks whose deadline has passed. The queue still
-#: accepts a late answer (through chat), but no surface offers one any more
-#: (decision D10), and ``asks.lapsed_visible_for`` decides how long such a row
-#: stays shown (D6). A SUBSET of :data:`OUTSTANDING_STATUSES`, so the wire tally
-#: ``asks_open`` is unchanged; a surface's "answerable now" is outstanding AND
-#: NOT lapsed. An index row still written ``open`` past ``expires_at`` is
-#: re-derived to ``timed_out`` by the readers before this is asked.
+#: THE LAPSED SET — asks SETTLED BY THEIR DEADLINE. Still shown and still
+#: dismissible, and the queue still takes a late answer (through chat), but no
+#: surface offers one (decision D10), and ``asks.lapsed_visible_for`` decides how
+#: long such a row stays shown (D6). DISJOINT from :data:`OUTSTANDING_STATUSES`
+#: (#2388): a lapsed ask is never in the wire tally ``asks_open``. An index row
+#: still written ``open`` past ``expires_at`` is re-derived to ``timed_out`` by
+#: the readers before this is asked.
 LAPSED_STATUSES = frozenset({STATUS_TIMED_OUT})
 
 #: Row-id prefixes. The transcript row id IS the delivery marker (per
@@ -643,9 +643,9 @@ def is_outstanding(status: Any) -> bool:
 
 
 def is_lapsed(status: Any) -> bool:
-    """Whether a folded ask status is past its deadline and still unsettled
-    (see :data:`LAPSED_STATUSES`). Takes the status VALUE, for the reason
-    :func:`is_outstanding` gives."""
+    """Whether a folded ask status is past its deadline with no answer, so
+    settled by the deadline alone (see :data:`LAPSED_STATUSES`). Takes the
+    status VALUE, for the reason :func:`is_outstanding` gives."""
     return str(status or "") in LAPSED_STATUSES
 
 
@@ -668,7 +668,8 @@ def lapsed_hidden(
 
 
 def outstanding_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Records the user can still act on: ``open`` or ``timed_out``.
+    """Records still waiting on the user: ``open`` only (a ``timed_out`` ask
+    is settled, #2388).
 
     The row-list half of :func:`is_outstanding`; a surface that draws "asks
     waiting on you" (the TUI's bar/answerable set, a sidebar mark) uses this
@@ -681,29 +682,14 @@ def open_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Records still expecting an answer (``open`` only — a timed-out ask is
     past its deadline and no longer counts against the open cap).
 
-    NARROWER THAN :func:`outstanding_asks` ON PURPOSE, and the difference is the
-    CAP's, not a surface's: ``OPEN_ASK_CAP`` bounds how many questions the agent
-    may have in flight, and a timed-out ask is one the agent has already walked
-    past — it must not keep a slot that a fresh question needs. A display that
-    counted this instead of the outstanding set would drop a timed-out ask the
-    user can still answer, which is the defect this module's constant exists to
-    prevent.
+    The CAP's own name: ``OPEN_ASK_CAP`` bounds how many questions the agent may
+    have in flight, and a timed-out ask is one the agent has already walked past
+    — it must not keep a slot that a fresh question needs. Since #2388 it selects
+    the same rows as :func:`outstanding_asks`; it is kept separate because the
+    cap's rule is "in flight", not "shown as owed", and the two need not move
+    together.
     """
     return [dict(r) for r in records if r.get("status") == STATUS_OPEN]
-
-
-def pending_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Records whose timeout notice is still OWED.
-
-    Delegates to :func:`outstanding_asks`, and the two coincide BY
-    CONSTRUCTION rather than by accident: an ask owes its timeout notice exactly
-    while it is outstanding — ``open`` (the notice is still ahead of it) or
-    ``timed_out`` (the notice is owed now); a ``late`` ask's notice is
-    suppressed (its response replaces it) and a settled one has none. If a
-    future status ever makes the two diverge, SPLIT them here and say why rather
-    than letting a second spelling of either rule appear.
-    """
-    return outstanding_asks(records)
 
 
 def ask_ids(events: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -1094,7 +1080,6 @@ __all__ = [
     "now_ms",
     "open_asks",
     "outstanding_asks",
-    "pending_asks",
     "pending_row",
     "read_entry",
     "read_events",

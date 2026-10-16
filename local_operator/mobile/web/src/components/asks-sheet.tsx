@@ -29,7 +29,9 @@
  * LIVE WITHOUT A MANUAL REFRESH, and bounded. The sheet re-reads the aggregate
  * when it opens, whenever the daemon's own list frames change the outstanding
  * ask population (the store's `asksRevision` — a new ask or a settlement moves
- * it), and on a 20 s backstop while it is open. The backstop is there for the
+ * it) or this conversation's own ask rows change (how a lapsed ask's dismissal
+ * or late answer arrives: the list frame's count is 0 either side, #2388), and
+ * on a 20 s backstop while it is open. The backstop is there for the
  * one event the list cannot announce: a DEADLINE passing in a conversation
  * whose runtime is gone, where nothing publishes a frame at all. It is a read
  * from an open sheet rather than a poll feeding a push, which is the bound
@@ -41,12 +43,13 @@ import { AskCard } from "./ask-card";
 import { Sheet } from "./ui/sheet";
 import {
 	isAnswerable,
+	askRowsSignature,
 	isDeadConversation,
 	isLapsed,
 	orderedForDisplay,
 	questionTally,
 } from "../lib/asks";
-import { useAsksRevision, useSessions } from "../store";
+import { useAsksRevision, useProjection, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
 /** How often the open sheet re-reads the aggregate as a deadline backstop. */
@@ -92,6 +95,11 @@ export function AsksSheet({
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	const revision = useAsksRevision();
 	const { sessions } = useSessions();
+	/* THIS CONVERSATION'S OWN ROWS MOVE WHEN A LAPSED ASK LEAVES. The list
+	   frame's `asks_open` does not (a timed-out ask is not counted, #2388), so
+	   a dismissal or a late answer on another surface would otherwise wait for
+	   the backstop. */
+	const rowsSignature = askRowsSignature(useProjection(currentSessionId).projection?.asks);
 
 	const load = useCallback(async () => {
 		/* THE READ IS BOUNDED (U6). `AbortSignal.timeout` is the platform's own
@@ -122,13 +130,13 @@ export function AsksSheet({
 	}, []);
 
 	/* A NEW OPENING RE-READS, and so does a changed population (a new ask, or
-	   one settled on another surface). ONE effect for both triggers: two
-	   effects keyed on `open` would each fire on the opening transition and
-	   fetch the aggregate twice for one tap. */
+	   one settled on another surface, lapsed ones included). ONE effect for all
+	   triggers: two effects keyed on `open` would each fire on the opening
+	   transition and fetch the aggregate twice for one tap. */
 	useEffect(() => {
 		if (!open) return;
 		void load();
-	}, [open, revision, load]);
+	}, [open, revision, rowsSignature, load]);
 
 	/* The deadline backstop, while the sheet is open only. */
 	useEffect(() => {

@@ -26922,8 +26922,9 @@ class OperatorApp(App[None]):
             return
         answerable = self._open_ask_rows()
         # LAPSED rows are named to the reading but never counted as pending (D12):
-        # the wire's tally includes them, so leaving them out would read a
-        # lapsed-only queue as a dropped row and wait instead of settling.
+        # a runtime from before #2388 still counts them in the wire's tally (a
+        # current one does not), so leaving them out would read a lapsed-only
+        # queue from such a runtime as a dropped row and wait instead of settling.
         lapsed = sum(1 for row in self._ask_rows if row.lapsed)
         reading = read_queue(
             published=len(self._ask_rows),
@@ -27024,8 +27025,9 @@ class OperatorApp(App[None]):
 
         The rule is ``AskRow.answerable``, which reads the fold's own
         ``OUTSTANDING_STATUSES`` — the same set the wire's tally and the index
-        use, so a timed-out-but-answerable ask can never be counted by one
-        surface and dropped by another.
+        use, so an ask can never be counted by one surface and dropped by
+        another. Since #2388 that set is ``open`` alone: a timed-out ask is
+        settled, shown but neither offered nor counted.
         """
         return [row for row in self._ask_rows if row.answerable]
 
@@ -27061,9 +27063,9 @@ class OperatorApp(App[None]):
     def _paint_sidebar_asks(self) -> None:
         """Paint the outstanding-asks marks, unioned across the fleet and the wire.
 
-        THE MARK PREDICATE (amendment A3) is the OUTSTANDING set — ``open`` and
-        ``timed_out``, exactly what ``session_sidebar.set_asking``'s docstring
-        argues — over EVERY session, not only the current one. The source is the
+        THE MARK PREDICATE (amendment A3) is the OUTSTANDING set — ``open`` only
+        since #2388, a timed-out ask being settled; ``session_sidebar.set_asking``'s
+        docstring argues it — over EVERY session, not only the current one. The source is the
         index tally (``asks.store.read_index``), refreshed by the sidebar's own
         poll; the CURRENT session's live wire count is unioned in so an ask
         queued a moment ago marks immediately, before any index write.

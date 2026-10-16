@@ -272,16 +272,15 @@ def test_the_real_publish_path_carries_a_live_empty_tally(
     assert payload["asks_open"] == 0
 
 
-def test_a_timed_out_but_unanswered_ask_still_counts_as_outstanding(
+def test_a_timed_out_ask_leaves_the_tally_and_still_takes_a_late_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The flip precondition: ``asks_open`` counts OUTSTANDING asks.
+    """#2388: a timed-out ask is SETTLED — the agent was told and moved on.
 
-    An ask that timed out and was never answered used to drop out of the tally
-    (0, and with no other row present the queue read as absent everywhere but
-    the live bar) while the bar still offered it and a late answer still reached
-    the agent (design §2.2, the spec's item 3). It is outstanding while the user
-    can still act on it; answering it late settles it and the tally falls.
+    The row stays on the wire (a settled receipt the user can dismiss) with its
+    timeout notice delivered, but ``asks_open`` no longer counts it, so no
+    surface says a question is waiting. The queue still takes a late answer and
+    attributes it (``late``); no surface offers one (D10, #2481).
     """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
     clock = {"now": BASE}
@@ -291,10 +290,17 @@ def test_a_timed_out_but_unanswered_ask_still_counts_as_outstanding(
     ask_id = queue.enqueue(_questions(), 600)["details"]["ask_id"]
 
     clock["now"] += 600_001  # past the deadline, inside the 7-day late window
+    # Settling it must not cost the agent its notice: reconcile still writes the
+    # deadline row, and that row is the only one the status requires.
+    assert asyncio.run(queue.reconcile(clock["now"])) == [store.timeout_row_id(ask_id)]
+    record = queue.find(ask_id)
+    assert record is not None
+    assert store.expected_row_ids(record) == [store.timeout_row_id(ask_id)]
     rows, outstanding = ask_wire(session)
     assert rows is not None
     assert [row["status"] for row in rows] == ["timed_out"]
-    assert outstanding == 1, "a timed-out ask the user can still answer is outstanding"
+    assert rows[0]["delivered"] is True
+    assert outstanding == 0, "a timed-out ask is settled, not waiting on the user"
 
     assert queue.respond(ask_id, {"q0": ["late answer"]}, by="phone")["ok"] is True
     rows, outstanding = ask_wire(session)
@@ -1316,7 +1322,8 @@ def test_ask_wire_drops_a_hidden_lapsed_row_from_rows_and_tally(
 
     rows, outstanding = ask_wire(session)
     assert rows is not None and [r["status"] for r in rows] == ["timed_out"]
-    assert outstanding == 1, "the 7 d default keeps today's result"
+    # #2388: shown under the 7 d default, but settled — the tally never counted it.
+    assert outstanding == 0
 
     _write_config(config_dir, "1h")
     process_watcher(config_dir).poll_now()
@@ -1362,6 +1369,6 @@ def test_a_running_session_republishes_when_the_window_changes(
 
     before, after = asyncio.run(_drive())
     assert [row["status"] for row in before["asks"]] == ["timed_out"]
-    assert before["asks_open"] == 1
+    assert before["asks_open"] == 0  # #2388: shown, but settled
     assert "asks" not in after
     assert after["asks_open"] == 0

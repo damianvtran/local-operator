@@ -1092,10 +1092,10 @@ class SessionProjection:
     #: something.
     pending_count: int = 0
     #: The session's queued asks (design §4), newest first with the OPEN ones in
-    #: front, and how many are still OUTSTANDING — open, or timed out and still
-    #: answerable late (``asks.store.OUTSTANDING_STATUSES``). Not "open asks":
-    #: a timed-out ask the user can still answer still counts, which is the
-    #: state the defect this field's rule fixed was about.
+    #: front, and how many are still OUTSTANDING — the open asks, still waiting
+    #: on the user (``asks.store.OUTSTANDING_STATUSES``). A timed-out ask is
+    #: settled (#2388): its row stays in ``asks`` as a dismissible receipt, but
+    #: the tally does not count it.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (N2): both are ABSENT — ``None``, not
     #: empty — unless queued asks are live in the runtime that published this

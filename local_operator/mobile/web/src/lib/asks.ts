@@ -55,10 +55,11 @@ export type AskTone = "waiting" | "settled" | "gone" | "attention";
  *
  *  `timed_out` is answerable on the wire: the queue still takes a late answer
  *  and delivers it as a `late` response. The phone's card no longer offers one
- *  there — a lapsed ask (`isLapsed`) is shown read-only — but this predicate
- *  states the store's contract, which the outstanding count and the dock still
- *  follow. Everything already settled (answered/late/declined/dismissed/
- *  withdrawn) and everything too old to carry (expired) is not answerable.
+ *  there — a lapsed ask (`isLapsed`) is shown read-only — and the runtime's
+ *  `asks_open` no longer counts one (#2388); the dock still follows this
+ *  predicate, which is what keeps a lapsed-only queue's Dismiss door.
+ *  Everything already settled (answered/late/declined/dismissed/withdrawn)
+ *  and everything too old to carry (expired) is not answerable.
  */
 export function isAnswerable(status: string): boolean {
 	return status === "open" || status === "timed_out";
@@ -251,6 +252,23 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 			   one, and it must not crash the card either. */
 			return { text: status.replace(/_/g, " "), tone: "waiting" };
 	}
+}
+
+/** A fold of one conversation's published ask rows (id and status), for "did
+ *  this conversation's ask population change?".
+ *
+ *  WHY IT EXISTS (#2388). The list frame's `asks_open` cannot say it for a
+ *  lapsed ask: a timed-out ask is no longer counted, so dismissing it, or
+ *  answering it late, leaves the count at 0 before and after. The row list on
+ *  the conversation's own projection does move, so the open asks sheet re-reads
+ *  on this signature as well as on the list frame's. Order-insensitive, like
+ *  `asksPopulationSignature`, so a re-rank is not a change. */
+export function askRowsSignature(rows: PendingAsk[] | undefined | null): string {
+	if (!Array.isArray(rows)) return "";
+	return rows
+		.map((row) => `${row?.ask_id}:${row?.status}`)
+		.sort()
+		.join(",");
 }
 
 /** The asks worth showing on the outstanding surfaces, newest first (the wire's

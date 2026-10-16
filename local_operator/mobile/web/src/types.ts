@@ -491,8 +491,9 @@ export interface SessionProjection {
 	pending_count: number;
 	/** One queued ask as the runtime publishes it (design §4). */
 	asks?: PendingAsk[];
-	/** How many of `asks` are outstanding — open, or timed-out and still
-	    answerable (the runtime's `OUTSTANDING_STATUSES`). ABSENT (not 0) while
+	/** How many of `asks` are outstanding — the open ones (the runtime's
+	    `OUTSTANDING_STATUSES`; a timed-out ask is settled, #2388, and rides
+	    `asks` without being counted). ABSENT (not 0) while
 	    the runtime does not publish asks at all — the field's presence is the
 	    client-side capability proxy (N2), exactly as it is for `asks` itself. */
 	asks_open?: number;
