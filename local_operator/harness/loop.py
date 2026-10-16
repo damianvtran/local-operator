@@ -286,6 +286,212 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 #: (``added``/``removed``/``path``/``spill`` handles) whose readers compare
 #: exact values.
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
+
+# The producer caps diffs at 200 rows; this independent publication budget leaves
+# framing room, not permission to accept unbounded executor metadata. Refusal
+# still walks N slots to preserve container/nonstring identity (not O(cap)).
+_DIFF_DETAIL_ROWS = 256
+_DIFF_DETAIL_BYTES = 128 * 1024
+_DIFF_DETAIL_WITHHELD = "[output withheld: credential redaction requires a complete bounded diff]"
+_DIFF_HUNK = re.compile(
+    r"@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@[^\r\n]*"
+)
+_DIFF_ROW_BREAKS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
+    """Publish a bounded diff COPY without losing multiline credential proof.
+
+    A line-at-a-time callback releases unknown PEM body rows. Joining the raw
+    diff is also wrong: a removed header and an added footer can manufacture a
+    cross-side credential and erase unrelated documentation. Parse complete
+    hunks, judge original old/new views separately, and project only consumed
+    equality evidence. No executor bytes, metadata, types or registrations are
+    rewritten; ambiguous/capped/invalid fields are explicitly withheld.
+    """
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    scalar = isinstance(value, str)
+    if not scalar and not isinstance(value, (list, tuple)):
+        return value
+    if not scalar and not any(isinstance(item, str) for item in value):
+        return value
+
+    def withheld() -> Any:
+        if scalar:
+            return _DIFF_DETAIL_WITHHELD
+        first = True
+        out: list[Any] = []
+        # Deliberately O(N): no refused string body is inspected or copied, but
+        # dropping arbitrary nonstring items/positions would change the contract.
+        for item in value:
+            if isinstance(item, str):
+                out.append(_DIFF_DETAIL_WITHHELD if first else "")
+                first = False
+            else:
+                out.append(item)
+        return tuple(out) if isinstance(value, tuple) else out
+
+    calls = input_bytes = input_rows = output_bytes = output_rows = 0
+
+    def byte_size(text: str, limit: int) -> int:
+        if len(text) > limit:
+            raise ValueError
+        size = len(text.encode("utf-8", errors="surrogatepass"))
+        if size > limit:
+            raise ValueError
+        return size
+
+    def invoke(text: str) -> str:
+        nonlocal calls, input_bytes, input_rows, output_bytes, output_rows
+        calls += 1
+        input_bytes += byte_size(text, _DIFF_DETAIL_BYTES)
+        input_rows += text.count("\n") + 1
+        if (
+            calls > 2 * _DIFF_DETAIL_ROWS
+            or input_bytes > 3 * _DIFF_DETAIL_BYTES
+            or input_rows > 3 * _DIFF_DETAIL_ROWS
+        ):
+            raise ValueError
+        result = redact(text)
+        if not isinstance(result, str):
+            raise ValueError
+        output_bytes += byte_size(result, 3 * _DIFF_DETAIL_BYTES - output_bytes)
+        # Check population before splitting/materializing output rows. All other
+        # splitlines separators are forbidden in projected nominal rows too.
+        output_rows += result.count("\n") + 1
+        if output_rows > 3 * _DIFF_DETAIL_ROWS:
+            raise ValueError
+        return result
+
+    def changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
+        if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
+            raise ValueError
+        original = [text for _, text in rows]
+        returned = result.split("\n")
+        if original == returned:
+            return set()
+        # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
+        # never anchor. Across all calls there are <=2R original context rows
+        # and <=3R output rows (combined <=5R); byte populations are <=5B.
+        occurrences = sorted(
+            [(text, 0, index) for index, text in enumerate(original)]
+            + [(text, 1, index) for index, text in enumerate(returned)]
+        )
+        anchors: list[tuple[int, int]] = []
+        at = 0
+        while at < len(occurrences):
+            end = at + 1
+            while end < len(occurrences) and occurrences[end][0] == occurrences[at][0]:
+                end += 1
+            group = occurrences[at:end]
+            if len(group) == 2 and group[0][1] == 0 and group[1][1] == 1:
+                anchors.append((group[0][2], group[1][2]))
+            at = end
+        anchors.sort()
+        if any(a[1] >= b[1] for a, b in zip(anchors, anchors[1:])):
+            raise ValueError
+        affected: set[int] = set()
+        left_old = left_new = 0
+        for old, new in anchors + [(len(original), len(returned))]:
+            old_gap = original[left_old:old]
+            new_gap = returned[left_new:new]
+            if old_gap != new_gap:
+                if not old_gap:
+                    raise ValueError  # insertion-only output has no safe source projection
+                affected.update(index for index, _ in rows[left_old:old])
+            # Equal gaps consume each row once; no arbitrary duplicate elsewhere
+            # can justify retaining an original masked body row.
+            left_old, left_new = old + 1, new + 1
+        return affected
+
+    try:
+        if scalar:
+            byte_size(value, _DIFF_DETAIL_BYTES)
+            if len(value.splitlines()) > _DIFF_DETAIL_ROWS:
+                raise ValueError
+            return invoke(value)
+        if len(value) > _DIFF_DETAIL_ROWS:
+            raise ValueError
+        total = 0
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError  # a barrier cannot silently join two partial hunks
+            total += byte_size(item, _DIFF_DETAIL_BYTES - total)
+            if any(char in _DIFF_ROW_BREAKS for char in item):
+                raise ValueError
+        if len(value) < 3 or not value[0].startswith("--- ") or not value[1].startswith("+++ "):
+            raise ValueError
+        hunks: list[tuple[list[tuple[int, str]], list[tuple[int, str]]]] = []
+        at = 2
+        previous_old_end = previous_new_end = -1
+        while at < len(value):
+            frame = _DIFF_HUNK.fullmatch(value[at])
+            if frame is None:
+                raise ValueError
+            old_start, new_start = int(frame[1]), int(frame[3])
+            old_count = int(frame[2]) if frame[2] is not None else 1
+            new_count = int(frame[4]) if frame[4] is not None else 1
+            if (
+                not old_count + new_count
+                or (old_count and not old_start)
+                or (new_count and not new_start)
+            ):
+                raise ValueError
+            if old_start < previous_old_end or new_start < previous_new_end:
+                raise ValueError
+            previous_old_end, previous_new_end = old_start + old_count, new_start + new_count
+            old: list[tuple[int, str]] = []
+            new: list[tuple[int, str]] = []
+            at += 1
+            # Iterate OBSERVED rows only, never declared numeric ranges. A cap
+            # ellipsis, premature frame, unconsumed tail or count mismatch fails
+            # the entire field before any supposedly processed content escapes.
+            saw_change = False
+            while old_count or new_count:
+                if at >= len(value) or not value[at] or value[at][0] not in " +-":
+                    raise ValueError
+                tag, text = value[at][0], value[at][1:]
+                if tag in " -":
+                    old.append((at, text))
+                    old_count -= 1
+                if tag in " +":
+                    new.append((at, text))
+                    new_count -= 1
+                if tag in "+-":
+                    saw_change = True
+                if old_count < 0 or new_count < 0:
+                    raise ValueError
+                at += 1
+            # A hunk that claims to be a change must actually CHANGE something.
+            # Context-only hunks carry no edit to explain and are exactly the
+            # shape that lets a removed header and an added body row read as a
+            # credential, so they are refused rather than projected (review R1).
+            if not saw_change:
+                raise ValueError
+            hunks.append((old, new))
+            if len(hunks) > _DIFF_DETAIL_ROWS // 2:
+                raise ValueError
+        affected: set[int] = set()
+        # All contextual judgements see ORIGINAL views, before a header/row mask
+        # could destroy proof. Learning keeps the same known-value authority.
+        for old, new in hunks:
+            for rows in (old, new):
+                if rows:
+                    affected.update(changed_rows(rows, invoke("\n".join(text for _, text in rows))))
+        out = []
+        for index, item in enumerate(value):
+            masked = invoke(item)
+            if any(char in _DIFF_ROW_BREAKS for char in masked):
+                raise ValueError
+            out.append(item[0] + REDACTION_MARKER if index in affected else masked)
+        return tuple(out) if isinstance(value, tuple) else out
+    except Exception:
+        # No exception args/content/lengths go to diagnostics. This is a fixed
+        # withholding receipt, not a claim that an incomplete field is contained.
+        return withheld()
+
+
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
 
@@ -5558,52 +5764,28 @@ class AgentLoop:
         """
         if not details:
             return details
-        # The ORDER here is the rebuild's order below: every string of each
-        # key's value, list/tuple items only (a non-``str`` item cannot carry
-        # text and rides back through untouched).
-        texts: list[str] = []
-        for key in _CONTENT_BEARING_DETAIL_KEYS:
-            value = details.get(key)
-            if isinstance(value, str):
-                texts.append(value)
-            elif isinstance(value, (list, tuple)):
-                texts.extend(item for item in value if isinstance(item, str))
-        if not texts:
-            return details  # decided ON the loop: the common result pays no hop
+        if not any(
+            isinstance(details.get(key), str)
+            or (
+                isinstance(details.get(key), (list, tuple))
+                and any(isinstance(item, str) for item in details[key])
+            )
+            for key in _CONTENT_BEARING_DETAIL_KEYS
+        ):
+            return details
 
-        def _run() -> list[str]:
+        def _run() -> dict[str, Any]:
             with (
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
-                return [redact(text) for text in texts]
+                out = dict(details)
+                for key in _CONTENT_BEARING_DETAIL_KEYS:
+                    if key in details:
+                        out[key] = _redact_diff_detail(details[key], redact)
+                return out
 
-        masked = await asyncio.to_thread(_run)
-        out = dict(details)
-        index = 0
-        for key in _CONTENT_BEARING_DETAIL_KEYS:
-            value = details.get(key)
-            if isinstance(value, str):
-                out[key] = masked[index]
-                index += 1
-            elif isinstance(value, (list, tuple)):
-                rebuilt: list[Any] = []
-                for item in value:
-                    if isinstance(item, str):
-                        rebuilt.append(masked[index])
-                        index += 1
-                    else:
-                        # Not text, so it neither takes a mask nor shifts one:
-                        # the index advances only over the strings the
-                        # collection phase banked (review round 1, R-2 — an
-                        # enumerated position put the mask one ahead for every
-                        # non-``str`` item and read past the list).
-                        rebuilt.append(item)
-                # Same concrete sequence back, so a consumer that checks the
-                # container type (the card accepts any Sequence, but a future
-                # one may not) sees exactly the shape it stored.
-                out[key] = list(rebuilt) if isinstance(value, list) else tuple(rebuilt)
-        return out
+        return await asyncio.to_thread(_run)
 
     @staticmethod
     def _drain_pending(pending: list[AgentMessage], context: LoopContext) -> int:
