@@ -771,8 +771,9 @@ class ClassificationService:
 
         WHAT RECORDS, AND WHAT DOES NOT (each case has a test):
 
-        * answered -> ``ok`` with the vendor's ``usage.cost`` (unknown, not zero, when it
-          sent none);
+        * answered -> ``ok`` with the amount the leg stated — its inline ``usage.cost``,
+          else the server-reported top-level ``cost`` object Radient's decision route
+          sends instead, else unknown (never zero);
         * refused / unusable -> ``failed``, ``ok``-unknown or ``cancelled``-unknown per
           :func:`~local_operator.classification.accounting.failed_record`;
         * cancelled mid-request (the call's ``timeoutMs`` deadline, a dispose, a caller
