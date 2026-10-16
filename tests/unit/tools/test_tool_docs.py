@@ -230,8 +230,11 @@ _WALK_DEPTH_CAP = 2
 # Re-measured 2026-10-15 through both isolated render arms: the shared intent
 # shape stays "2-6 words, present participle"; only its repeated pointer shrank.
 # Native personal-memory docs are newly accounted for; URL docs remain opt-in.
+# 782 -> 804 (#2509): the tools/effort/delegate descriptions now say WHICH
+# kind may carry them, so the agent doc's rendered schema grew by those
+# qualifiers (the tier arm below moves with it).
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 782,
+    "agent": 804,
     "ask": 1001,
     "ask_withdraw": 314,
     "bash": 295,
@@ -361,7 +364,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: intent-description cut as the canonical table above.
 #: 639 -> 635 (and `task` 488 -> 484 above): the sentence the depth gate added to
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 811, "task": 764}
+#: 811 -> 833 (#2509): the same +22 the canonical table above takes, because
+#: the qualified tools/effort/delegate descriptions render on both arms.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 833, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
