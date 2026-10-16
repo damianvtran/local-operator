@@ -8774,8 +8774,13 @@ _INCIDENT_CRATE = "minerva" + "-" + "core" + "-" + "platform"
         + _INCIDENT_CRATE
         + " --all-targets` PASSED after e",
         # a crate path and a package flag on one line
-        "g crates/" + _INCIDENT_CRATE + "/src/" + _MONGO + ".rs; cargo test -p "
-        + _INCIDENT_CRATE + " --lib x",
+        "g crates/"
+        + _INCIDENT_CRATE
+        + "/src/"
+        + _MONGO
+        + ".rs; cargo test -p "
+        + _INCIDENT_CRATE
+        + " --lib x",
         _MONGO + ".rs; cargo clippy -p " + _INCIDENT_CRATE + " --all-targets",
         # a hyphenated slug and a path segment are not invocations either
         "see " + _MONGO + "-driver notes",
@@ -8829,7 +8834,10 @@ def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> 
     assert [h.label for h in hits] == ["client-inline-password"], f"{line!r}: {hits}"
 
 
-@pytest.mark.parametrize("line", ["docker run -p 8080:80 nginx", "ssh -p 2222 host", "go test -p pkg"])
+@pytest.mark.parametrize(
+    "line",
+    ["docker run -p 8080:80 nginx", "ssh -p 2222 host", "go test -p pkg"],
+)
 def test_the_published_port_negatives_are_untouched_by_the_anchor(line: str) -> None:
     """``-p`` as a PORT (or a Go package flag) is not this rule's, and never was."""
     assert scrub_shapes(line) == line, f"{line!r} was rewritten"
