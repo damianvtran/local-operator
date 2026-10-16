@@ -845,7 +845,6 @@ def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[s
     showing: one horizon, three readers.
     """
     stamp = now if now is not None else now_ms()
-    horizon_ms = LATE_WINDOW_S * _MILLIS
     #: NO CROSS-SESSION CAP, deliberately (review round 1, NIT 9). The population
     #: is (sessions with ask activity) × (rows the fold already caps at
     #: ``PROJECTION_CAP``), and the reader is an on-demand HTTP route rather than
@@ -856,17 +855,70 @@ def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[s
     #: each caller.
     rows: list[dict[str, Any]] = []
     for session_id, entry in (read_index(config_dir, now=stamp) or {}).items():
-        for ask in _entry_asks(entry):
-            status = str(ask.get("status") or "")
-            if status in (STATUS_EXPIRED, STATUS_DISMISSED):
-                continue
-            expires_at = int(ask.get("expires_at") or 0)
-            if expires_at and stamp - expires_at > horizon_ms:
-                continue
-            row = dict(ask)
-            row["session_id"] = session_id
-            row["cwd"] = str(entry.get("cwd") or "")
-            rows.append(row)
+        rows.extend(_shown_rows(session_id, entry, stamp))
+    rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
+    return rows
+
+
+def _shown_rows(session_id: str, entry: Mapping[str, Any], stamp: int) -> list[dict[str, Any]]:
+    """One entry's asks worth showing, stamped with the session they belong to.
+
+    The ONE per-entry rule, shared by the aggregate (:func:`index_asks`) and the
+    per-session read (:func:`session_asks`), so the phone's sheet and a stopped
+    conversation's own screen cannot disagree about which of its asks exist.
+    """
+    horizon_ms = LATE_WINDOW_S * _MILLIS
+    rows: list[dict[str, Any]] = []
+    for ask in _entry_asks(entry):
+        status = str(ask.get("status") or "")
+        if status in (STATUS_EXPIRED, STATUS_DISMISSED):
+            continue
+        expires_at = int(ask.get("expires_at") or 0)
+        if expires_at and stamp - expires_at > horizon_ms:
+            continue
+        row = dict(ask)
+        # THE DEADLINE IS JUDGED HERE, NOT TAKEN FROM THE FILE. The index holds
+        # each ask's status as the runtime last WROTE it, and a runtime stopped
+        # before the deadline never writes again, so its row keeps saying
+        # ``open`` long after ``expires_at``. The queue itself would fold that
+        # log to ``timed_out`` (rule 6 of :func:`fold`) and accept a dismiss, so
+        # a reader that repeated the stale word showed a lapsed ask as live: the
+        # legacy mirror painted it as waiting, every count called it waiting,
+        # and the phone withheld the dismiss the queue would take. Re-deriving on
+        # the COPY, against the reader's ``now``, makes this agree with the
+        # fold; no clock skew is involved, because every reader of this index
+        # (the relay, the desktop plane, the TUI) runs on the runtime's own host.
+        # ``delivered`` is left as written: it is a fact about the response
+        # rows, which a deadline does not change.
+        if status == STATUS_OPEN and expires_at and expires_at <= stamp:
+            row["status"] = STATUS_TIMED_OUT
+        row["session_id"] = session_id
+        row["cwd"] = str(entry.get("cwd") or "")
+        rows.append(row)
+    return rows
+
+
+def session_asks(
+    config_dir: Path | str, session_id: str, *, now: int | None = None
+) -> list[dict[str, Any]]:
+    """One session's asks worth showing, from its index entry, open first.
+
+    The per-session twin of :func:`index_asks`, for a reader that needs ONE
+    conversation's asks with no runtime to ask: the relay's durable projection
+    of a stopped conversation, which is the only screen that conversation's
+    asks can appear on once the phone's sheet lists its own conversation only.
+
+    Empty when the session has no entry (never queued, or swept) or nothing on
+    it is still worth showing. Reads the entry directly rather than the whole
+    index, so it neither scans other sessions nor runs their TTL sweep; the
+    staleness rule is not re-applied either, because a caller with a durable
+    session in hand has the very directory that rule checks for.
+    """
+    entry = read_entry(config_dir, session_id)
+    if entry is None:
+        return []
+    stamp = now if now is not None else now_ms()
+    rows = _shown_rows(session_id, entry, stamp)
     rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
     return rows
 

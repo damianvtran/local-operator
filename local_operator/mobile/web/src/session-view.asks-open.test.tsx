@@ -421,22 +421,6 @@ describe("state 4 — the user closed it while asks were pending: it stays close
 		mount(frame([ask({ ask_id: "other-1" })], { session_id: "s2" }), "s2");
 		await waitFor(() => expect(sheetOpen()).toBe(true));
 	});
-
-	it("is not recorded when the user LEAVES for another conversation from the sheet", async () => {
-		// Navigating to a foreign row's conversation is not waving this one's asks off, and
-		// the router dispatches a synthetic popstate while the sheet's listener is still up.
-		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ ask_id: "other-1", session_id: "other" })],
-		});
-		const view = mount(frame([ask(), ask({ ask_id: "ask-2" })]));
-		await waitFor(() => expect(sheetOpen()).toBe(true));
-		fireEvent.click(await screen.findByRole("button", { name: "open" }));
-		await waitFor(() => expect(window.location.hash).toBe("#/s/other"));
-		view.unmount();
-		window.location.hash = "#/s/s1";
-		mount(frame([ask(), ask({ ask_id: "ask-2" })]));
-		await waitFor(() => expect(sheetOpen()).toBe(true));
-	});
 });
 
 describe("clause 5 — never steal the keyboard, never trap", () => {
