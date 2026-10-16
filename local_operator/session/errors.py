@@ -841,6 +841,57 @@ class ForkRefused(ValueError):
         super().__init__(_FORK_REFUSAL_SENTENCES.get(self.reason, self.fallback))
 
 
+#: Every reason :class:`AsideAdoptRefused` may carry, each with its sentence.
+#:
+#: A CLOSED set for the reason :data:`_FORK_REFUSAL_SENTENCES` is one: the token
+#: crosses the attach wire, and the far side rebuilds the sentence from it rather
+#: than rendering the owner's prose.
+#:
+#: ``open_tool_batch`` is the fail-loud backstop for the one invariant the
+#: queued adopt exists to keep — nothing splices into a live tool batch. The
+#: busy path QUEUES the pair to the turn's next safe boundary, so this fires
+#: only when the idle write path finds the live list still ending in
+#: unanswered calls (a future flush site placed inside a loop, an aborted turn
+#: that left its tail open). Refusing there is the whole point: a user/assistant
+#: pair spliced after an unanswered ``tool_use`` is a request no provider will
+#: accept, and nothing repairs it afterwards.
+ASIDE_ADOPT_REFUSAL_SENTENCES: dict[str, str] = {
+    "session_closed": "this conversation has closed; the aside was not added",
+    "open_tool_batch": (
+        "the conversation is in the middle of a tool call; "
+        "add the aside once the current turn finishes"
+    ),
+}
+
+
+class AsideAdoptRefused(ValueError):
+    """An aside's "add to conversation" the session could not take, said loudly.
+
+    Modelled on :class:`ForkRefused`: ONE code for the family and the cause as a
+    :attr:`reason` token from :data:`ASIDE_ADOPT_REFUSAL_SENTENCES`. A busy
+    session is NOT a refusal any more — :meth:`Session.adopt_aside` queues the
+    pair and lands it at the turn's safe boundary — so the reasons left are the
+    two states where deferring would be a lie: the session has closed (nothing
+    will ever flush the queue), or the live list ends in an open tool batch on
+    the immediate-write path (writing would build an unsendable request).
+
+    Typed so it never reaches a desktop client as the owner's plain
+    ``RuntimeError``, which the control plane reads as a 503 "runtime
+    unreachable" for a request that was answered promptly and deliberately.
+    A ``ValueError`` so it decodes through :func:`admission_error` and lands in
+    the desktop ladder's named-refusal block, exactly as :class:`ForkRefused`.
+    """
+
+    code = "aside_adopt_refused"
+
+    #: The sentence used when the frame named no reason this build understands.
+    fallback = "the aside could not be added to the conversation"
+
+    def __init__(self, *, reason: str = "") -> None:
+        self.reason = reason if reason in ASIDE_ADOPT_REFUSAL_SENTENCES else ""
+        super().__init__(ASIDE_ADOPT_REFUSAL_SENTENCES.get(self.reason, self.fallback))
+
+
 def _wire_text(value: object, *, limit: int) -> str:
     """A bounded, control-character-free string off the attach wire, or "".
 
@@ -966,4 +1017,8 @@ def admission_error(
         # absent or unknown reason degrades to the generic sentence rather than
         # raising, which is what a newer owner's token reads as here.
         return ForkRefused(reason=reason if isinstance(reason, str) else "")
+    if code == AsideAdoptRefused.code:
+        # The same closed-set carriage as ``ForkRefused`` directly above: the
+        # sentence is rebuilt here from the token, never read off the frame.
+        return AsideAdoptRefused(reason=reason if isinstance(reason, str) else "")
     return None

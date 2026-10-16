@@ -406,14 +406,18 @@ class SessionProtocol(Protocol):
         """
         ...
 
-    async def adopt_aside(self, messages: list[Message]) -> None:
+    async def adopt_aside(self, messages: list[Message]) -> Literal["queued", "applied"] | None:
         """Promote an off-the-record aside exchange into the conversation.
 
         The user's explicit opt-out of :meth:`complete_aside`'s no-trace
         contract: appends the messages as ordinary turns to both the live
-        context and the transcript. Raises while a turn is running — the loop
-        owns the message list for the duration, and splicing into a tool batch
-        makes it unsendable.
+        context and the transcript. Nothing is ever spliced into a live tool
+        batch: while a turn runs the exchange is QUEUED and lands at the turn's
+        next safe boundary (``"queued"``, announced by a ``HistoryDeltaEvent``
+        carrying the pair); an idle session writes it now (``"applied"``). A
+        ``None`` answer (an older implementation or a test double) means
+        applied. A state that cannot defer — a closed session, or an idle list
+        still ending in unanswered calls — raises ``AsideAdoptRefused``.
         """
         ...
 

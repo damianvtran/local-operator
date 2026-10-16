@@ -1250,17 +1250,25 @@ class TuiSessionHandle(SessionHandle):
         result = await done
         return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
 
-    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
-        """Fork a follower's aside exchange into the authoritative conversation."""
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> AckDetail:
+        """Fork a follower's aside exchange into the authoritative conversation.
+
+        Carries the session's ``adopt_state`` on the ack exactly as the
+        headless owner's handle does (decision D4).
+        """
         from local_operator.harness.types import Message
 
         parsed = [Message.model_validate(message) for message in messages]
         session = self._session()
         owner_loop = await self._on_app(asyncio.get_running_loop)
         future = asyncio.run_coroutine_threadsafe(session.adopt_aside(parsed), owner_loop)
-        await asyncio.wrap_future(future)
+        state = await asyncio.wrap_future(future) or "applied"
         self._refresh_state()
-        return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+        if state == "queued":
+            detail = f"queued {len(parsed) // 2} aside exchange(s) for the end of this turn"
+        else:
+            detail = f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+        return AckDetail(detail, {}, {"adopt_state": state})
 
     def cancel_subagents_count(self) -> int:
         """Cancel every running subagent on the runtime; return the REAL count."""

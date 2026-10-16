@@ -47289,17 +47289,15 @@ class OperatorApp(App[None]):
     def _aside_can_fork(self) -> bool:
         """Whether ``^f`` would work right now — the card cannot know alone.
 
-        Two inputs, one on each side: the card must hold a settled exchange,
-        and the session must not be mid-turn. The second is not caution — the
-        loop owns the message list while it runs and pairs each tool call with
-        its result, so splicing a user message into a live batch produces a
-        request no provider will accept (``Session.adopt_aside`` refuses it).
+        The card must hold a settled exchange and a session must exist. A
+        running turn no longer disables it (decision D5): ``Session.adopt_aside``
+        QUEUES a mid-turn adopt and lands it at the turn's safe boundary, so the
+        key works whenever there is something to keep.
         """
         panel = self._aside_panel()
         if panel is None or not panel.is_open or not panel.fork_messages():
             return False
-        session = self._session
-        return session is not None and not session.is_streaming
+        return self._session is not None
 
     def _sync_aside_fork_hint(self) -> None:
         """Keep the card's footer honest about whether ``^f`` is live."""
@@ -47345,9 +47343,6 @@ class OperatorApp(App[None]):
         if session is None or not hasattr(session, "adopt_aside"):
             panel.set_notice("the session is still starting…")
             return
-        if session.is_streaming:
-            panel.set_notice("the agent is mid-turn — stop it first, then ^f")
-            return
         panel.set_notice("")
         self.run_worker(self._fork_aside_worker(session, pairs), thread=False, group="aside-fork")
 
@@ -47364,6 +47359,12 @@ class OperatorApp(App[None]):
         The card is closed BEFORE the rows are mounted so the conversation the
         user asked to keep is what they are left looking at, rather than a
         popup over it.
+
+        A QUEUED adopt (the session was mid-turn) mounts nothing here: the pair
+        lands at the turn's safe boundary and the session's ``history_delta``
+        paints it then, in its real place after the turn. Mounting it now would
+        draw the exchange above the turn's still-arriving output and then a
+        second time when the delta lands.
         """
         if session is not self._session or not self._source_commands_ready():
             return
@@ -47372,7 +47373,7 @@ class OperatorApp(App[None]):
             messages.append(Message.user(question))
             messages.append(Message.assistant(answer))
         try:
-            await session.adopt_aside(messages)
+            state = await session.adopt_aside(messages)
         except Exception as error:  # noqa: BLE001 — surfaced, never swallowed
             if session is self._session:
                 self._system_notice(f"could not fork the aside: {error}", "warning")
@@ -47380,6 +47381,9 @@ class OperatorApp(App[None]):
         if session is not self._session:
             return
         self._close_aside()
+        if state == "queued":
+            self._notice("aside queued — joins the chat when this turn ends")
+            return
         for question, answer in pairs:
             self._append_block(UserBlock(question))
             block = AssistantBlock()

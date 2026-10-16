@@ -164,6 +164,7 @@ from local_operator.harness.types import (
     Content,
     CustomMessage,
     EventHandler,
+    HistoryDeltaEvent,
     ImageContent,
     LoopConfig,
     Message,
@@ -989,6 +990,21 @@ class _PendingCompaction:
     reason: str
     #: Ids of ``plan.llm_history[: plan.cut]`` — the span the summary replaces.
     summarized_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingAdoption:
+    """An aside exchange the user added while a turn owned the message list.
+
+    The second variant of ``Session._pending_shell_records`` beside the bare
+    ``(command, result)`` shell receipt (decision D1): ONE FIFO, so a bang
+    receipt and an adopted aside land in the order the user produced them, at
+    the same safe boundaries, through the same pop-after-write discipline.
+    Kept in memory only (D2) — journalling it at queue time would put
+    user/assistant rows inside a durable tool batch — and dispose flushes it.
+    """
+
+    messages: tuple[Message, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -4131,7 +4147,9 @@ class Session:
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
         #: resume. The runtime flushes this FIFO before releasing `_turn_lock`.
-        self._pending_shell_records: list[tuple[str, ToolResult]] = []
+        #: An aside the user adopted mid-turn rides the same FIFO as a
+        #: :class:`_PendingAdoption`, for the same reason and in arrival order.
+        self._pending_shell_records: list[tuple[str, ToolResult] | _PendingAdoption] = []
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
         # automatic pass runs inside a turn and is covered by ``_is_streaming``;
@@ -23422,7 +23440,7 @@ class Session:
             )
         return snapshot
 
-    async def adopt_aside(self, messages: Sequence[Message]) -> None:
+    async def adopt_aside(self, messages: Sequence[Message]) -> Literal["queued", "applied"]:
         """Promote an off-the-record aside exchange into the conversation.
 
         The one door out of :meth:`complete_aside`'s no-trace contract, and it
@@ -23430,20 +23448,72 @@ class Session:
         appended as ordinary user/assistant turns, to the live context and the
         transcript both, so the next real turn sees it and a resume replays it.
 
-        Refused while a turn is running, and not as caution. The loop owns
-        ``_context.messages`` for the duration and pairs every tool call with
-        its result; splicing a user message between an assistant tool-call
-        message and the results it is waiting for produces a message list no
-        provider will accept.
+        NOTHING IS EVER SPLICED INTO A LIVE TOOL BATCH. The loop owns
+        ``_context.messages`` while a turn runs and pairs every tool call with
+        its result; a user message between an assistant tool-call message and
+        the results it is waiting for is a list no provider will accept. So an
+        adopt that arrives mid-turn is QUEUED (returns ``"queued"``) on the
+        shell-receipt FIFO and lands at the turn's next safe boundary — the
+        ``_flush_shell_records`` sites, every one of which holds ``_turn_lock``
+        with no open batch (decision D1) — announced by a ``HistoryDeltaEvent``
+        carrying the pair. It never goes through the steering queue: anything
+        drained there continues the turn it lands in.
 
         The turn LOCK is consulted as well as the streaming flag, for the
         reason :meth:`prompt` spells out: ``_is_streaming`` covers only
         ``_run_turn`` itself, while the lock is held across the whole pipeline
-        including a post-compaction auto-continuation. A fork landing in that
-        gap would be swept into a continuation the user never saw.
+        including a post-compaction auto-continuation. The pipeline's own
+        ``finally`` flush runs after that continuation, so the pair lands once
+        the whole pipeline is done rather than being swept into it.
+
+        Two states refuse LOUDLY with :class:`AsideAdoptRefused` instead,
+        because deferring there would be a lie: a closed session (no boundary
+        will ever flush the queue), and an idle write that finds the live list
+        still ending in unanswered calls — the backstop for the invariant
+        above, should any path reach here with a batch open (decision D3).
         """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        if self._disposed:
+            raise AsideAdoptRefused(reason="session_closed")
+        if self._adoption_known(messages):
+            # A retried adopt (a client that lost the ack) must not land twice:
+            # the pair is already queued or already durable.
+            return "applied" if self._transcript.has_entry(messages[-1].id) else "queued"
         if self._is_streaming or self._turn_lock.locked():
-            raise RuntimeError("cannot adopt an aside while a turn is running")
+            self._pending_shell_records.append(_PendingAdoption(tuple(messages)))
+            return "queued"
+        # Serialized like the idle ``record_shell`` write, for its reason: a
+        # prompt acquiring the lock while the transcript write below awaits
+        # would start a turn, and the extend after it would then land inside
+        # that turn's live list — the splice this method exists to prevent.
+        async with self._turn_lock:
+            if unanswered_tail_call_ids(self._context.messages):
+                raise AsideAdoptRefused(reason="open_tool_batch")
+            await self._apply_adoption(messages)
+        return "applied"
+
+    def _adoption_known(self, messages: Sequence[Message]) -> bool:
+        """Whether this exact exchange is already queued or already durable (D2).
+
+        Keyed by the LAST message's id, the same identity ``_persist_shell_record``
+        dedupes on: the pair is written as one batch, so its tail being on disk
+        means the whole exchange is.
+        """
+        if not messages:
+            return False
+        tail_id = messages[-1].id
+        if self._transcript.has_entry(tail_id):
+            return True
+        return any(
+            isinstance(queued, _PendingAdoption)
+            and bool(queued.messages)
+            and queued.messages[-1].id == tail_id
+            for queued in self._pending_shell_records
+        )
+
+    async def _apply_adoption(self, messages: Sequence[Message]) -> None:
+        """Write one adopted exchange to the transcript, then the live context."""
         # Persist first, then adopt — the order ``seed_history`` uses, and for
         # the same reason: a failed transcript write must not leave the live
         # context carrying messages a resume will not replay.
@@ -23471,7 +23541,9 @@ class Session:
         its safe boundary before another prompt can start.
         """
         if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
-            queued.tool_call_id == result.tool_call_id for _, queued in self._pending_shell_records
+            not isinstance(queued, _PendingAdoption)
+            and queued[1].tool_call_id == result.tool_call_id
+            for queued in self._pending_shell_records
         ):
             return
         if self._is_streaming or self._turn_lock.locked():
@@ -23514,9 +23586,84 @@ class Session:
         available to the next boundary or dispose.
         """
         while self._pending_shell_records:
-            command, result = self._pending_shell_records[0]
-            await self._persist_shell_record(command, result)
+            queued = self._pending_shell_records[0]
+            if isinstance(queued, _PendingAdoption):
+                if not await self._land_deferred_adoption(queued):
+                    # Still deferrable: leave it (and everything behind it, so
+                    # FIFO order holds) for the next boundary.
+                    return
+            else:
+                command, result = queued
+                await self._persist_shell_record(command, result)
             self._pending_shell_records.pop(0)
+
+    async def _report_stranded_adoptions(self) -> None:
+        """Say LOUDLY that an adopt held at a boundary will never land.
+
+        Dispose is the last boundary: an adoption still in the FIFO after its
+        flush was held back by an open tool batch (``_land_deferred_adoption``)
+        and no later boundary will come. That is the one case the queued adopt
+        cannot defer, so it is an error in the log and a user-visible notice on
+        the event stream — the same ``NoticeEvent`` path the session's other
+        runtime warnings use — rather than a pair that silently vanishes.
+        """
+        stranded = [
+            queued
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption) and queued.messages
+        ]
+        if not stranded:
+            return
+        ids = ", ".join(queued.messages[-1].id for queued in stranded)
+        logger.error(
+            "aside adopt(s) %s never landed: the conversation closed with an open tool "
+            "batch, so the exchange was not added",
+            ids,
+        )
+        await self._emit(
+            NoticeEvent(
+                text=(
+                    "an aside you added to the conversation could not be saved: the "
+                    "conversation closed in the middle of a tool call"
+                ),
+                kind="error",
+            )
+        )
+
+    async def _land_deferred_adoption(self, queued: _PendingAdoption) -> bool:
+        """Apply an adopt that waited for this boundary, and tell every frontend.
+
+        Returns False, writing nothing, when the live list still ends in
+        unanswered calls. Every current flush site holds the lock with the
+        batch closed (decision D1), so that never happens today — it is the
+        backstop against a future boundary placed inside a loop, which would
+        otherwise splice the pair into a live batch. It does not RAISE here:
+        the adopt can still be deferred, and an exception out of the pipeline's
+        ``finally`` would mask the turn's own outcome and skip the journal and
+        patience flushes after it. The warning is the loud half.
+
+        The event is a HISTORY delta, not live message events: these rows were
+        never streamed, so a frontend must project them through the settled
+        renderer — the contract :class:`HistoryDeltaEvent` already states.
+        """
+        messages = list(queued.messages)
+        if not messages or self._transcript.has_entry(messages[-1].id):
+            return True
+        if unanswered_tail_call_ids(self._context.messages):
+            # Named by the exchange's tail id, the identity the dedupe keys on,
+            # so a held adopt (and every receipt waiting behind it in FIFO
+            # order) can be traced to the request that produced it.
+            logger.warning(
+                "aside adopt %s held back: the conversation still ends in an open tool "
+                "batch at a flush boundary; it and %d record(s) queued behind it land "
+                "at the next safe one",
+                messages[-1].id,
+                len(self._pending_shell_records) - 1,
+            )
+            return False
+        await self._apply_adoption(messages)
+        await self._emit(HistoryDeltaEvent(messages=list(messages)))
+        return True
 
     # -- wakes -------------------------------------------------------------------
 
@@ -27756,6 +27903,7 @@ class Session:
             # through a host path without a turn task.
             if self._pending_shell_records:
                 await self._flush_shell_records()
+                await self._report_stranded_adoptions()
             # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
             # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
             # this is what keeps the next cold open bounded rather than O(file).

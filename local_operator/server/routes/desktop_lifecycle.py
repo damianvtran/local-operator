@@ -699,11 +699,24 @@ async def adopt(session_id: str, aside_id: str, body: Adopt, request: Request):
         # Latch before the first await, including bridge acquisition: separate
         # request IDs can otherwise both pass the check and duplicate history.
         entry.adopted = True
-        async with errors(request), host(request).session(session_id) as bridge:
-            assert bridge.remote is not None
-            await bridge.remote.bind_runtime()
-            await bridge.remote.adopt_aside(entry.turns)
-        return {"data": {"aside_id": aside_id, "status": "adopted"}}
+        try:
+            async with errors(request), host(request).session(session_id) as bridge:
+                assert bridge.remote is not None
+                await bridge.remote.bind_runtime()
+                state = await bridge.remote.adopt_aside(entry.turns)
+        except HTTPException as refused:
+            # A TYPED refusal (409 ``aside_adopt_refused``) means the owner wrote
+            # nothing, so the latch must come off or the panel can never retry
+            # once the turn ends (decision D2). Any other failure keeps it: the
+            # outcome is indeterminate and a second adopt could duplicate rows.
+            detail = refused.detail
+            if isinstance(detail, dict) and detail.get("code") == "aside_adopt_refused":
+                entry.adopted = False
+            raise
+        # ``queued``: the owner holds the pair until the running turn's safe
+        # boundary and announces it with a history delta (decision D4).
+        status = "queued" if state == "queued" else "adopted"
+        return {"data": {"aside_id": aside_id, "status": status}}
 
     async with errors(request):
         # The ordering ask, for the reason spelled out on ``stop`` above: this

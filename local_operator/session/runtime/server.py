@@ -6515,6 +6515,7 @@ class RuntimeServer:
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
+                AsideAdoptRefused,
                 AsideUnanswered,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
@@ -6528,6 +6529,7 @@ class RuntimeServer:
             if isinstance(
                 exc,
                 (
+                    AsideAdoptRefused,
                     AsideUnanswered,
                     AttachmentUnavailable,
                     AudioInputUnsupported,
@@ -6571,6 +6573,9 @@ class RuntimeServer:
                 # so the only thing that may ride along is a value the class
                 # enumerates. Absent, the far side composes the generic sentence,
                 # which is what an older peer's frame reads as anyway.
+                frame["error_reason"] = exc.reason
+            if isinstance(exc, AsideAdoptRefused) and exc.reason:
+                # The same closed-set token carriage as ``ForkRefused`` above.
                 frame["error_reason"] = exc.reason
             if isinstance(exc, AudioInputUnsupported):
                 # THE REFUSAL'S FACTS, AS THEIR OWN FIELDS rather than prose
