@@ -1082,6 +1082,9 @@ def test_a_sixteen_question_ask_is_answerable_from_the_wire(
     rows, _outstanding = ask_wire(session)
     assert rows, "a live session publishes its queued ask"
     kept, dropped = bound_ask_rows(rows)
+    # Checked before ``respond`` so a reintroduced cap fails here, at the bound,
+    # rather than as the queue's refusal string further down.
+    assert dropped is False
     shown = kept[0]["questions"]
     # The card answers every question it was shown, with the LAST option it was
     # shown — so a clipped option list would surface as a wrong answer too.
@@ -1096,7 +1099,6 @@ def test_a_sixteen_question_ask_is_answerable_from_the_wire(
     assert len(answered) == 1
     assert answered[0]["answers"]["q0"] == ["option 13"]
     assert sorted(answered[0]["answers"]) == sorted(f"q{index}" for index in range(16))
-    assert dropped is False
 
 
 def test_the_first_row_rides_whole_when_it_exceeds_the_budget() -> None:

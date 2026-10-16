@@ -4310,8 +4310,13 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #: once: … has no entry"). A row-level drop is recoverable (``dropped`` /
 #: ``asks_truncated``, and the aggregate routes carry the rest); a partial row
 #: is not. What bounds the BYTES of one huge head row is the frame, not this
-#: function: ``_yield_asks_when_the_frame_has_no_room`` drops the whole field
-#: and says so when the attach frame cannot carry it.
+#: function, and each route has its own backstop. On the attach snapshot,
+#: ``_yield_asks_when_the_frame_has_no_room`` drops the asks field (with
+#: ``asks_open``) and says so. On the delta route nothing yields the field
+#: alone: ``fit_frame_for_wire`` → ``relay_frame_or_degraded`` sheds the WHOLE
+#: ``frontend_update`` body — every other change in that delta with it — as a
+#: sequenced ``degraded`` placeholder, and the viewer re-syncs. Either way the
+#: ask stays answerable through the aggregate ``GET /v1/desktop/asks``.
 #:
 #: The ask field's text budget, and the allowance for the TAIL only. Spent in the
 #: fold's own order (open first) so the rows that survive are the ones a user
@@ -4336,7 +4341,7 @@ def bound_ask_rows(
     for jobs ("a bound placed only at the snapshot boundary holds for the first
     frame and leaks on every one after it").
 
-    NOTHING INSIDE A ROW IS CUT (see the constants above for the measured
+    NOTHING INSIDE A ROW IS CUT (see the comment block above for the measured
     corruption that clipping text, and capping question counts, caused): the
     bound drops whole ROWS past the budget and nothing else, so every question,
     every option and every string a surface shows — and the label an answer
@@ -4344,13 +4349,12 @@ def bound_ask_rows(
     can submit.
 
     The FIRST row always survives whole, and it does NOT spend the tail's
-    allowance: it is the ask the user
-    must answer, so charging its bytes into the budget would leave the field
-    already over and drop every later row — an over-budget head ask silently
-    taking the tail asks off the wire is the opposite of what the exemption is
-    for (review round 1, MAJOR-1). ``dropped`` says whether anything was left
-    out, so a client can be told the list is a prefix instead of inferring it
-    from a count.
+    allowance: it is the ask the user must answer, so charging its bytes into
+    the budget would leave the field already over and drop every later row — an
+    over-budget head ask silently taking the tail asks off the wire is the
+    opposite of what the exemption is for (review round 1, MAJOR-1).
+    ``dropped`` says whether anything was left out, so a client can be told the
+    list is a prefix instead of inferring it from a count.
     """
     if not isinstance(rows, list):
         return [], False
