@@ -378,10 +378,18 @@ def fts5_available() -> bool:
         probe.close()
 
 
-def safe_segment(value: Any) -> str:
+def safe_segment(value: Any, *, structural: bool = False) -> str:
     if not isinstance(value, str) or not _SAFE.fullmatch(value) or value in (".", ".."):
         raise MemoryError("Memory identity must be one safe segment (1–128 characters).")
-    guard(value)
+    # Structural identifiers are minted, not user prose: device ids are
+    # ``d_`` + hex and op/entity ids are UUID/hex, so a free-text sensitive
+    # shape (an IBAN/mod-97 or card/Luhn match on the hex run) can occur by
+    # chance in a legitimate id. Running guard() over them therefore refused
+    # whole installs permanently — the id persists in store meta — while
+    # adding no protection: the _SAFE shape above is the actual constraint
+    # on an identifier. Callers validating fact *content* keep guard().
+    if not structural:
+        guard(value)
     return value
 
 
@@ -581,7 +589,6 @@ def validate_fact(raw: Any) -> dict[str, Any]:
 def validate_op(op: Any, *, allow_redacted: bool = False) -> dict[str, Any]:
     if not isinstance(op, dict) or len(_dump(op).encode()) > 16384:
         raise MemoryError("Invalid or oversized memory operation.")
-    guard(op)
     required = {
         "v",
         "op_id",
@@ -598,8 +605,16 @@ def validate_op(op: Any, *, allow_redacted: bool = False) -> dict[str, Any]:
     }
     if set(op) != required or type(op["v"]) is not int or op["v"] != 1:
         raise MemoryError("Unsupported memory operation version/fields; update both peers.")
+    # Do NOT guard() the whole op: its structural identifiers (op/entity ids,
+    # origin_device, owner_key, parents, body_sha) are minted hex/UUID shapes
+    # that legitimately collide with the free-text IBAN/card patterns — a
+    # ``d_`` + hex device id whose tail passes mod-97 made every put on that
+    # install fail as "sensitive". Those fields get the structural _SAFE /
+    # hex checks here and below instead. The fact payload is still free text
+    # and is guarded as such by validate_fact() on the put path below, so a
+    # real IBAN or card number in a title/body remains refused.
     for key in ("op_id", "entity_id", "origin_device", "owner_key"):
-        safe_segment(op[key])
+        safe_segment(op[key], structural=True)
     if type(op["seq"]) is not int or not 1 <= op["seq"] <= 2**63 - 1:
         raise MemoryError("Invalid origin sequence.")
     if (
@@ -612,7 +627,7 @@ def validate_op(op: Any, *, allow_redacted: bool = False) -> dict[str, Any]:
     if not isinstance(op["parents"], list) or len(op["parents"]) > 16:
         raise MemoryError("Memory parents must be a bounded list.")
     for parent in op["parents"]:
-        safe_segment(parent)
+        safe_segment(parent, structural=True)
     if (
         op["scope"] not in SCOPES
         or (op["scope"] == "global" and op["owner_key"] != "global")
@@ -670,7 +685,9 @@ class MemoryStore:
         self.path = self.root / "memory.db"
         self.identity = identity
         self.session_dir = session_dir
-        self.origin = safe_segment(origin) if origin else None
+        # Origin is a minted device id (``d_`` + hex; see _origin), i.e.
+        # structural — never free-text guard it (see safe_segment).
+        self.origin = safe_segment(origin, structural=True) if origin else None
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

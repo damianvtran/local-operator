@@ -107,3 +107,44 @@ def test_guard_is_structurally_linear_on_pathological_input():
 def test_validate_fact_refuses_with_a_name_reference_example():
     with pytest.raises(MemoryError, match=r"GITHUB_TOKEN"):
         validate_fact({"title": "t", "body": "SSN 123-45-6789"})
+
+
+@pytest.mark.parametrize(
+    "device_id",
+    [
+        # Minted as ``d_`` + sha256 hex[:32] (network/identity); the hex after
+        # ``d_`` can satisfy the IBAN shape + mod-97 check, so a default-origin
+        # store must not be refused as if the id were user-supplied fact text.
+        "d_cd474787b1adaa67f8cb5934196c4834",
+        "d_ba65518d4cd0f218ddd960d22f3dc6c6",
+    ],
+)
+def test_iban_shaped_device_id_is_structural_not_fact_text(tmp_path, device_id):
+    store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin=device_id)
+    item = store.put("global", {"title": "Host", "body": "staging host is stage-2"})
+    corrected = store.put(
+        "global",
+        {"title": "Host", "body": "staging host is stage-3"},
+        entity=item["id"],
+        expected_version=item["version"],
+    )
+    assert corrected["version"] != item["version"]
+    assert store.show("global", item["id"])["fact"]["body"] == "staging host is stage-3"
+
+
+@pytest.mark.parametrize(
+    "fact",
+    [
+        {"title": "Payout", "body": "IBAN GB82WEST12345698765432"},
+        {"title": "IBAN GB82WEST12345698765432", "body": "payout details"},
+        {"title": "Card", "body": "card 4111 1111 1111 1111"},
+        {"title": "card 4111-1111-1111-1111", "body": "payment details"},
+    ],
+)
+def test_real_iban_and_card_in_fact_payload_still_refused(tmp_path, fact):
+    # The structural exemption must not weaken the free-text guard: a real
+    # IBAN/card supplied as fact content is still refused, even on a store
+    # whose device id happens to be IBAN-shaped.
+    store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin="d_cd474787b1adaa67f8cb5934196c4834")
+    with pytest.raises(MemoryError, match="Sensitive value refused"):
+        store.put("global", fact)
