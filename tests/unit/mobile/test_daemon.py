@@ -3174,3 +3174,59 @@ def test_the_daemon_repaints_an_open_stopped_screen_when_the_window_changes(
     frames = asyncio.run(scenario())
     last = frames[-1]
     assert last.get("asks") == [] and last.get("asks_open") == 0
+
+
+def test_a_stopped_screen_the_daemon_watched_end_drops_hidden_asks_on_a_window_change(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 2, R2-1: the COMMON stopped shape is a conversation this
+    daemon watched die. The scan's ``terminal=True`` capture fences every later
+    non-terminal capture of the route (``state.terminal and not terminal``), so
+    without dropping the retained payload a window change re-served the frame
+    with the hidden rows — on the open stream AND on reopen. Both must carry
+    rows ``[]``, tally 0 and keep the ended receipt."""
+    from local_operator.config_watch import process_watcher
+
+    cfg = _seed_lapsed_stopped_screen(tmp_path, monkeypatch, "ended-stopped")
+    record = SessionRecord(
+        pid=9_999_901,
+        kind="tui",
+        session_id="ended-stopped",
+        conversation_name="ended",
+        cwd="/tmp/w",
+        model_label="m",
+        control_port=4999,
+        control_key="synthetic-ended-key",
+        started_at=10.0,
+    )
+
+    async def scenario() -> tuple[list[dict[str, Any]], Any]:
+        daemon = MobileDaemon(port=0, password="pw")
+        entry = SessionEntry(record)
+        entry.ended = True
+        daemon.table.entries[record.pid] = entry
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
+        daemon.table.session_subscribers["ended-stopped"] = {queue}
+        # The scan proving the pid dead: the terminal capture that sets the fence.
+        dead = await daemon._capture_durable_projection(
+            "ended-stopped", record=record, terminal=True, ended=True
+        )
+        assert dead is not None and [row.ask_id for row in dead.asks or []] == ["stale-2h"]
+        assert daemon._projection_generations["ended-stopped"].terminal is True
+
+        daemon.watch_ask_visibility()
+        _set_window(cfg, "at_expiry")
+        process_watcher(cfg).poll_now()
+        frames = [await asyncio.wait_for(queue.get(), timeout=5)]
+        while not queue.empty():
+            frames.append(queue.get_nowait())
+        # A reopen after the change: the SSE route's own capture for this route.
+        reopened = await daemon._capture_durable_projection("ended-stopped", ended=True)
+        return frames, reopened
+
+    frames, reopened = asyncio.run(scenario())
+    pushed = frames[-1]
+    assert pushed.get("asks") == [] and pushed.get("asks_open") == 0
+    assert pushed.get("ended") is True
+    assert reopened is not None
+    assert reopened.asks == [] and reopened.asks_open == 0 and reopened.ended is True
