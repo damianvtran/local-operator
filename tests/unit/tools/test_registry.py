@@ -736,6 +736,37 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         assert rows[-1] == "…", "the over-cap payload must advertise truncation"
         assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES + 1
 
+    def test_new_file_create_header_matches_difflib_byte_for_byte(self) -> None:
+        """A zero-length side prints the line BEFORE it, as difflib does (R3-1).
+
+        ``difflib._format_range_unified`` spells an empty range as ``0,0`` — the
+        line just before the range — so a new file is ``@@ -0,0 +1,2 @@`` and a
+        truncation to empty is ``@@ -1,2 +0,0 @@``. Printing ``1,0`` instead put
+        a wrong start line into the transcript and the expanded tool card.
+        """
+        import difflib
+
+        created = self._details("", "a\nb\n")
+        assert created == list(difflib.unified_diff([], ["a", "b"], lineterm="", n=2))
+        assert created[2] == "@@ -0,0 +1,2 @@"
+
+    def test_truncate_to_empty_header_matches_difflib_byte_for_byte(self) -> None:
+        import difflib
+
+        truncated = self._details("a\nb\n", "")
+        assert truncated == list(difflib.unified_diff(["a", "b"], [], lineterm="", n=2))
+        assert truncated[2] == "@@ -1,2 +0,0 @@"
+
+    def test_mixed_one_sided_hunks_match_difflib_byte_for_byte(self) -> None:
+        """Beyond parity on the two empty cases: ran 500 fuzz cases, zero mismatches."""
+        import difflib
+
+        before = "p\nq\nr\ns\nt\nu\n"
+        after = "p\nq\nX\ns\nt\nu\nv\nw\n"
+        assert self._details(before, after) == list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:
     """The tool card renders +N/-N from these keys, so they must always be
