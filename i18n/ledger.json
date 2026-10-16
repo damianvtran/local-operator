@@ -1140,6 +1140,101 @@
       },
       "status": "passed",
       "note": "Structural-deletion-only; NO linguistic re-audit. Carry translator/audit provenance entries[39]; no retranslation. Auditor i18n-auditor/openai/gpt-6.1-sol. Retained bytes identical; context absent both. Target 37b2fddb15d5530787ecf22c1657e5ad53bf38ca49598879c474f6d7f864004f"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "847a96559d9feaefcc4951ac3a945c6ac44fddc06b8821f9a1fb2e42f2db3f8d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). A-es-1 MINOR fixed (asks.description 'a la vez' -> 'de inmediato'); A-es-2 MINOR fixed (help 'Cuánto' ambiguity -> 'Tiempo visible de una pregunta sin respuesta tras vencer.', 57/58). Prior acceptance carried."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "847a96559d9feaefcc4951ac3a945c6ac44fddc06b8821f9a1fb2e42f2db3f8d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). A-fr-1 MINOR fixed (help reordered to 'question expirée sans réponse', 54/58); A-fr-2 NIT accepted (dans … et sur mirrors en). Prior acceptance carried."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "847a96559d9feaefcc4951ac3a945c6ac44fddc06b8821f9a1fb2e42f2db3f8d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). A-ru-1 MINOR fixed (help 'остаётся виден' -> 'Сколько вопрос без ответа виден после дедлайна.', 47/58); A-ru-2 NIT accepted (label 'просроченных' vs 'тайм-аут', width). Prior acceptance carried."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "847a96559d9feaefcc4951ac3a945c6ac44fddc06b8821f9a1fb2e42f2db3f8d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). A-vi-1 MINOR fixed (label dangling 'trong' -> 'Hiện câu hỏi hết giờ bao lâu', 28/29). Prior acceptance carried."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "847a96559d9feaefcc4951ac3a945c6ac44fddc06b8821f9a1fb2e42f2db3f8d",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). no findings; candidate shipped byte-identical. Prior acceptance carried."
     }
   ]
 }
