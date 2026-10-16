@@ -261,7 +261,7 @@ def guarded_rig(write_envelope: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
             directory.mkdir(mode=0o700, exist_ok=True)
         # Unchanged input writer, NOT the defective preparation or tested engine.
         store._write_private_json(target, payload)
-            # The serializer deliberately stamps a fresh written_at on every call.
+        # The serializer deliberately stamps a fresh written_at on every call.
         # Check the exact disk snapshot and all authoritative loader fields;
         # a second serialization is not an equality oracle for that clock.
         assert json.loads(target.read_text()) == payload
@@ -278,80 +278,90 @@ def guarded_rig(write_envelope: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def test_write_guard_accepts_only_validated_ipc_not_regular_unknown_fds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    write_envelope: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep spawn's pipe writer distinct from disk ownership, without a guard gap."""
-    envelope = tmp_path / "owned"
+    envelope = write_envelope / "owned"
     envelope.mkdir()
-    inside, outside = envelope / "inside", tmp_path / "outside"
+    inside, outside = envelope / "inside", write_envelope / "outside"
     inside.write_bytes(b"inside-sentinel")
     outside.write_bytes(b"outside-sentinel")
+    outer_guards = (os.open, os.unlink, os.rmdir, os.write, io.open, builtins.open)
     raw_open = os.open
     unknown = raw_open(inside, os.O_RDWR)
     foreign = raw_open(outside, os.O_RDWR)
     read_fd, write_fd = os.pipe()
     try:
-        _guard_fixture_writes(monkeypatch, envelope)
-        with io.open(write_fd, "wb", closefd=False) as pipe:
-            pipe.write(b"a")
-            pipe.flush()
-        assert os.read(read_fd, 1) == b"a"
-        assert os.write(write_fd, b"b") == 1
-        assert os.read(read_fd, 1) == b"b"
-        for fd in (unknown, foreign):
+        # The fixture's whole-envelope guard must outlive this deliberately
+        # narrower negative cell, including inherited fixture cleanup.
+        with monkeypatch.context() as inner:
+            _guard_fixture_writes(inner, envelope)
+            with io.open(write_fd, "wb", closefd=False) as pipe:
+                pipe.write(b"a")
+                pipe.flush()
+            assert os.read(read_fd, 1) == b"a"
+            assert os.write(write_fd, b"b") == 1
+            assert os.read(read_fd, 1) == b"b"
+            for fd in (unknown, foreign):
+                with pytest.raises(AssertionError, match="untracked"):
+                    io.open(fd, "wb", closefd=False)
+                with pytest.raises(AssertionError, match="untracked"):
+                    os.write(fd, b"not-written")
             with pytest.raises(AssertionError, match="untracked"):
-                io.open(fd, "wb", closefd=False)
-            with pytest.raises(AssertionError, match="untracked"):
-                os.write(fd, b"not-written")
-        with pytest.raises(AssertionError, match="untracked"):
-            os.ftruncate(write_fd, 0)
-        # Even an observed read-only disk open outside the envelope is NOT a
-        # later write capability; no broad integer-FD or non-regular fallback.
-        tracked_foreign = os.open(outside, os.O_RDONLY)
-        try:
-            with pytest.raises(AssertionError, match="outside disposable"):
-                os.write(tracked_foreign, b"not-written")
-        finally:
-            os.close(tracked_foreign)
-        assert inside.read_bytes() == b"inside-sentinel"
-        assert outside.read_bytes() == b"outside-sentinel"
+                os.ftruncate(write_fd, 0)
+            # Even an observed read-only disk open outside the envelope is NOT a
+            # later write capability; no broad integer-FD or non-regular fallback.
+            tracked_foreign = os.open(outside, os.O_RDONLY)
+            try:
+                with pytest.raises(AssertionError, match="outside disposable"):
+                    os.write(tracked_foreign, b"not-written")
+            finally:
+                os.close(tracked_foreign)
+            assert inside.read_bytes() == b"inside-sentinel"
+            assert outside.read_bytes() == b"outside-sentinel"
     finally:
         for fd in (unknown, foreign, read_fd, write_fd):
             os.close(fd)
+        assert (os.open, os.unlink, os.rmdir, os.write, io.open, builtins.open) == outer_guards
 
 
 def test_write_guard_qualifies_owned_relative_cleanup_without_outside_writes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    write_envelope: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Exercise real rmtree plus retained path/dir_fd refusal, not guard removal."""
     import shutil
 
-    envelope = tmp_path / "owned"
+    envelope = write_envelope / "owned"
     envelope.mkdir()
     nested = envelope / "nested"
     nested.mkdir()
     (nested / "sentinel").write_bytes(b"owned")
-    outside = tmp_path / "outside"
+    outside = write_envelope / "outside"
     outside.mkdir()
     (outside / "sentinel").write_bytes(b"foreign")
-    supports_relative = os.rmdir in os.supports_dir_fd and os.open in os.supports_dir_fd
-    _guard_fixture_writes(monkeypatch, envelope)
-    shutil.rmtree(nested)
-    assert not nested.exists()
-    with pytest.raises(AssertionError, match="outside disposable"):
-        os.unlink(outside / "sentinel")
-    if supports_relative:
-        directory = os.open(outside, os.O_RDONLY)
-        owned_directory = os.open(envelope, os.O_RDONLY)
-        try:
-            with pytest.raises(AssertionError, match="outside disposable"):
-                os.unlink("sentinel", dir_fd=directory)
-            with pytest.raises(AssertionError, match="outside disposable"):
-                os.rmdir("../outside", dir_fd=owned_directory)
-        finally:
-            os.close(directory)
-            os.close(owned_directory)
-    assert (outside / "sentinel").read_bytes() == b"foreign"
+    outer_guards = (os.open, os.unlink, os.rmdir, os.write, io.open, builtins.open)
+    # Both guard layers wrap os functions; native capability registry entries
+    # retain their original names, so wrapper identity must not skip dir_fd cases.
+    supports_relative = {"rmdir", "open"} <= {fn.__name__ for fn in os.supports_dir_fd}
+    with monkeypatch.context() as inner:
+        _guard_fixture_writes(inner, envelope)
+        shutil.rmtree(nested)
+        assert not nested.exists()
+        with pytest.raises(AssertionError, match="outside disposable"):
+            os.unlink(outside / "sentinel")
+        if supports_relative:
+            directory = os.open(outside, os.O_RDONLY)
+            owned_directory = os.open(envelope, os.O_RDONLY)
+            try:
+                with pytest.raises(AssertionError, match="outside disposable"):
+                    os.unlink("sentinel", dir_fd=directory)
+                with pytest.raises(AssertionError, match="outside disposable"):
+                    os.rmdir("../outside", dir_fd=owned_directory)
+            finally:
+                os.close(directory)
+                os.close(owned_directory)
+        assert (outside / "sentinel").read_bytes() == b"foreign"
+    assert (os.open, os.unlink, os.rmdir, os.write, io.open, builtins.open) == outer_guards
 
 
 def _mode(path: Path) -> int:
