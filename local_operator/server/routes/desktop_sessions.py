@@ -2325,9 +2325,7 @@ def _requested_sort(sort: str) -> str:
     if value and value not in CATALOGUE_SORTS:
         raise HTTPException(
             422,
-            _wd.sort_unknown(sorts=", ".join(CATALOGUE_SORTS)).envelope(
-                code="sort_unknown"
-            ),
+            _wd.sort_unknown(sorts=", ".join(CATALOGUE_SORTS)).envelope(code="sort_unknown"),
         )
     return value
 

@@ -265,9 +265,7 @@ class TestActivityCursors:
         cursor: str | None = None
         pages = 0
         while True:
-            page = catalogue_page(
-                tmp_path, cursor=cursor, limit=5, sort=CATALOGUE_SORT_ACTIVITY
-            )
+            page = catalogue_page(tmp_path, cursor=cursor, limit=5, sort=CATALOGUE_SORT_ACTIVITY)
             pages += 1
             seen += [entry.id for entry in page.entries]
             assert (page.next_cursor is not None) == (len(page.entries) == 5)
@@ -297,22 +295,24 @@ class TestActivityCursors:
         fresh = catalogue_page(tmp_path, limit=2, sort=replay_order)
 
         assert replayed.cursor_missing is True
-        assert [entry.id for entry in replayed.entries] == [
-            entry.id for entry in fresh.entries
-        ]
+        assert [entry.id for entry in replayed.entries] == [entry.id for entry in fresh.entries]
 
     def test_a_v2_token_without_its_order_declaration_is_unusable(self, tmp_path: Path) -> None:
         """The declaration is part of the position's meaning, so the key is
         read only under it -- a token missing ``o`` is answered as a first
         page, never resumed under an assumed order."""
         _session(tmp_path, "plain0000001", created=1_000.0)
-        forged = base64.urlsafe_b64encode(
-            json.dumps(
-                {"v": 2, "s": None, "k": [0, 1_000.0, "plain0000001"]},
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        ).decode("ascii").rstrip("=")
+        forged = (
+            base64.urlsafe_b64encode(
+                json.dumps(
+                    {"v": 2, "s": None, "k": [0, 1_000.0, "plain0000001"]},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
 
         assert decode_cursor(forged) is None
 
