@@ -22,9 +22,7 @@ def _memory_guide() -> str:
 def test_anonymous_profile_uses_session_for_work_not_global() -> None:
     body = _memory_guide()
 
-    assert (
-        "Anonymous `main` has no agent bank: use session for work, not global." in body
-    )
+    assert "Anonymous `main` has no agent bank: use session for work, not global." in body
     assert "use session or global instead" not in body
 
 
@@ -43,9 +41,7 @@ def test_long_lived_work_is_not_a_global_fallback() -> None:
 def test_personal_helper_and_existing_privacy_limits_remain_explicit() -> None:
     body = _memory_guide()
 
-    assert (
-        "Both operations are bound to global; there is **no scope argument**." in body
-    )
+    assert "Both operations are bound to global; there is **no scope argument**." in body
     assert "not a content classifier or a guarantee" in body
     assert "Existing session rows are not promoted or rewritten." in body
     assert "Explicit role allowlists are never widened" in body
