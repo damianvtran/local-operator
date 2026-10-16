@@ -66,7 +66,8 @@
     "local_operator/tui/widgets/goal_panel.py",
     "local_operator/tui/widgets/network_panel.py",
     "local_operator/tui/widgets/settings_view.py",
-    "local_operator/tui/widgets/usage_panel.py"
+    "local_operator/tui/widgets/usage_panel.py",
+    "local_operator/tui/projects_render.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -225,7 +226,6 @@
     "local_operator/tools/video_tool.py": 7,
     "local_operator/tui/app.py": 43,
     "local_operator/tui/images.py": 2,
-    "local_operator/tui/projects_render.py": 25,
     "local_operator/tui/session_move.py": 3,
     "local_operator/tui/widgets/analytics_panel.py": 0,
     "local_operator/tui/widgets/command_picker.py": 2,

@@ -170,6 +170,102 @@ def new_project() -> Msg:
     return Msg("tui.projects.new_project", {})
 
 
+def render_filed_by(*, ids: str, more: str) -> Msg:
+    return Msg("tui.projects.render.filed_by", {"ids": ids, "more": more})
+
+
+def render_live_count(*, count: str) -> Msg:
+    return Msg("tui.projects.render.live_count", {"count": count})
+
+
+def render_more_lines_hint(*, count: str, noun: str, verb: str) -> Msg:
+    return Msg("tui.projects.render.more_lines_hint", {"count": count, "noun": noun, "verb": verb})
+
+
+def render_more_not_shown(*, count: str) -> Msg:
+    return Msg("tui.projects.render.more_not_shown", {"count": count})
+
+
+def render_more_not_shown_indent(*, count: str) -> Msg:
+    return Msg("tui.projects.render.more_not_shown_indent", {"count": count})
+
+
+def render_more_working(*, count: str) -> Msg:
+    return Msg("tui.projects.render.more_working", {"count": count})
+
+
+def render_next_clause(*, joined: str) -> Msg:
+    return Msg("tui.projects.render.next_clause", {"joined": joined})
+
+
+def render_no_dates_count(*, count: str) -> Msg:
+    return Msg("tui.projects.render.no_dates_count", {"count": count})
+
+
+def render_no_dates_label(*, label: str, count: str) -> Msg:
+    return Msg("tui.projects.render.no_dates_label", {"label": label, "count": count})
+
+
+def render_no_estimate_or_dates() -> Msg:
+    return Msg("tui.projects.render.no_estimate_or_dates", {})
+
+
+def render_no_linked_sessions() -> Msg:
+    return Msg("tui.projects.render.no_linked_sessions", {})
+
+
+def render_no_progress() -> Msg:
+    return Msg("tui.projects.render.no_progress", {})
+
+
+def render_no_progress_recorded() -> Msg:
+    return Msg("tui.projects.render.no_progress_recorded", {})
+
+
+def render_older_updates(*, count: str) -> Msg:
+    return Msg("tui.projects.render.older_updates", {"count": count})
+
+
+def render_open_over_total(*, open: str, total: str) -> Msg:
+    return Msg("tui.projects.render.open_over_total", {"open": open, "total": total})
+
+
+def render_own_session() -> Msg:
+    return Msg("tui.projects.render.own_session", {})
+
+
+def render_progress_none() -> Msg:
+    return Msg("tui.projects.render.progress_none", {})
+
+
+def render_progress_reported(*, age: str, suffix: str) -> Msg:
+    return Msg("tui.projects.render.progress_reported", {"age": age, "suffix": suffix})
+
+
+def render_reported_ago(*, age: str, suffix: str) -> Msg:
+    return Msg("tui.projects.render.reported_ago", {"age": age, "suffix": suffix})
+
+
+def render_running_settled(*, running: str, settled: str) -> Msg:
+    return Msg("tui.projects.render.running_settled", {"running": running, "settled": settled})
+
+
+def render_session_missing(*, session: str) -> Msg:
+    return Msg("tui.projects.render.session_missing", {"session": session})
+
+
+def render_todo_snapshots_none() -> Msg:
+    return Msg("tui.projects.render.todo_snapshots_none", {})
+
+
+def render_todos_counts(*, open: str, total: str) -> Msg:
+    return Msg("tui.projects.render.todos_counts", {"open": open, "total": total})
+
+
+def render_working_prefix() -> Msg:
+    return Msg("tui.projects.render.working_prefix", {})
+
+
 def send_binding_choose() -> Msg:
     return Msg("tui.projects.send.binding_choose", {})
 
