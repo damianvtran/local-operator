@@ -128,8 +128,17 @@ def test_iban_shaped_device_id_is_structural_not_fact_text(tmp_path, device_id):
         entity=item["id"],
         expected_version=item["version"],
     )
+    # A correction genuinely produced a NEW head while preserving the replaced
+    # revision in history (the store contract). Comparing corrected["version"] to
+    # item["version"] directly would be trivially true — both are independently
+    # minted UUIDv7 revisions — so the meaningful check is that each revision
+    # still resolves to its own body.
     assert corrected["version"] != item["version"]
     assert store.show("global", item["id"])["fact"]["body"] == "staging host is stage-3"
+    assert (
+        store.show("global", item["id"], version=item["version"])["fact"]["body"]
+        == "staging host is stage-2"
+    )
 
 
 @pytest.mark.parametrize(
