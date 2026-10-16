@@ -445,6 +445,74 @@ _DSN_SCHEMES = (
     r"clickhouse|jdbc:[a-z][a-z0-9]*|https?|ftp|sftp|ssh|ldaps?"
 )
 
+#: The schemes the TRUNCATED-connection-string rule accepts, which is the list
+#: above MINUS ``http(s)``.
+#:
+#: **The exclusion is the whole false-positive boundary of that rule.** A
+#: truncated value carries no host, so the rule has to decide from the userinfo
+#: alone whether it is looking at a credential or at ``host:port`` — and the only
+#: in-band signal is that a PORT IS ALWAYS DIGITS (see
+#: :data:`_DSN_TRUNCATED_PATTERN`). ``http://localhost:8080`` is exactly the
+#: spelling where a non-numeric reading would be wrong, and it is the scheme those
+#: URLs use, so leaning on the scheme list as well as the digit test keeps the two
+#: signals independent rather than making one carry both.
+_DSN_TRUNCATED_SCHEMES = (
+    r"mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|rediss?|amqps?|mssql|"
+    r"clickhouse|jdbc:[a-z][a-z0-9]*|ftp|sftp|ssh|ldaps?"
+)
+
+#: Triple-grouped so the password can be masked with the user and host kept:
+#: ``(scheme://user:)(password)(@)``. ``[^\s:/@"']*`` allows an EMPTY user,
+#: which is how ``redis://:password@host`` is spelled.
+#: ``scheme://user:password@host``.
+#:
+#: The password class admits ``@`` and ``/`` and is GREEDY, so it takes the run
+#: that ends at the LAST ``@`` of the authority rather than the first: a password
+#: containing either character (``p@ssw0rd``, ``p/ssw0rd`` — both ordinary in
+#: base64 and generated secrets) was masked up to the first one and the REST WAS
+#: PUBLISHED, with an incident row then telling the model the credential had been
+#: masked. Measured before the fix: a ``mongodb+srv://`` DSN whose userinfo
+#: password contains ``@`` was masked up to that first ``@`` while the rest was
+#: published, and a ``postgres://`` DSN whose name is not credential-shaped — so
+#: the assignment rule cannot rescue it — was not masked at all, with ZERO incidents.
+#: The class still refuses whitespace, quotes and ``:``, so an unterminated line cannot
+#: run away, and the authority part (``user``) still cannot contain ``:``/``@``.
+_DSN_PATTERN = re.compile(
+    rf"(?i)\b((?:{_DSN_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
+    r"([^\s]*?)@(?=[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+(?:[/:?#]|$))"
+)
+
+#: A connection string CUT BEFORE ITS HOST — the userinfo is complete and the
+#: ``@host`` tail is missing (the shape a line-wrapped log, a truncated read or a
+#: ``head -c`` produces).
+#:
+#: **Why the rules above cannot see it.** :data:`_DSN_PATTERN` and
+#: :data:`_DSN_PATTERN_PLAIN` both REQUIRE the literal ``@`` plus a host
+#: lookahead, and the named-URL fallback decides through
+#: :func:`_url_contains_credential`, whose two userinfo patterns also start at
+#: ``://`` and END at ``@``. The at-sign is the match condition at both layers, so
+#: a cut value is proposed to no rule at all and is published in full.
+#:
+#: **Why this fires only on the PROVABLE subset.** The value must already carry
+#: (1) a KNOWN credential scheme, (2) an explicit userinfo with the ``user:``
+#: separator, and (3) a password run that is NOT all digits. Signal (3) is the
+#: line between a credential and a port: in a URL authority a port is always
+#: digits, so ``postgres://dbhost:5432/prod`` is a host:port and stays readable
+#: while ``postgres://appuser:S3cret`` is a userinfo and is masked. That is the
+#: same distinction the existing rules make structurally (they only accept a host
+#: after the ``@``), extended to the case where the host is gone.
+#:
+#: **What it deliberately does NOT decide.** A bare ``x:y`` with no scheme —
+#: ``dbhost:5432`` and ``appuser:S3cret`` are the same spelling and there is no
+#: in-band signal between them — is left alone, as is an all-digit password
+#: (indistinguishable from a port). Both are recorded residuals, not oversights.
+#: The password class reuses the DSN's own exclusions (no whitespace, quote,
+#: colon, slash or at-sign), so a truncated tail cannot run into the next token.
+_DSN_TRUNCATED_PATTERN = re.compile(
+    rf"(?i)\b((?:{_DSN_TRUNCATED_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
+    r"((?![0-9]+(?:[/:?#]|\s|$))[^\s:/@\"']{4,})(?![\w:])"
+)
+
 #: Triple-grouped so the password can be masked with the user and host kept:
 #: ``(scheme://user:)(password)(@)``. ``[^\s:/@"']*`` allows an EMPTY user,
 #: which is how ``redis://:password@host`` is spelled.
@@ -3645,6 +3713,19 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         "dsn-password-plain",
         _DSN_PATTERN_PLAIN,
         None,  # guarded path preserves the user/host and masks only group 2
+        2,
+        guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
+    ),
+    # A connection string CUT BEFORE ITS HOST: the userinfo is complete and the
+    # ``@host`` tail the rules above require is simply gone. Same guarded path as
+    # its neighbours — the scheme and userinfo stay, only the password goes.
+    # The pattern's own docstring carries the false-positive boundary (a port is
+    # digits, so a numeric tail is a host:port and not a credential) and the
+    # ambiguous ``x:y`` class this rule deliberately leaves undecided.
+    Shape(
+        "dsn-password-truncated",
+        _DSN_TRUNCATED_PATTERN,
+        None,  # guarded path preserves the scheme/user and masks only group 2
         2,
         guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
     ),
