@@ -388,6 +388,33 @@ def test_message_user_orders_text_then_images_then_audio() -> None:
     ]
 
 
+def test_message_user_omits_the_text_block_when_there_is_no_text() -> None:
+    """#2460: empty text must yield NO text block, the rule ``assistant``
+    already follows.
+
+    It used to emit ``TextContent(text="")`` unconditionally. An image-only
+    send then persisted ``content: [{}, {attachment...}]``, and because that
+    row is in history it was resent on every later turn, where Anthropic
+    rejected the whole request with "text content blocks must be non-empty" —
+    a permanently broken session from one screenshot. The ``{}`` on the row is
+    the empty block: the encoder dumps with ``exclude_defaults``, so a
+    defaulted ``text`` is dropped and nothing is left but the braces.
+    """
+    image = ImageContent(data="aGk=", mime_type="image/png")
+    assert Message.user("", images=[image]).content == [image]
+    assert Message.user("").content == []
+
+
+def test_message_user_keeps_text_that_is_present() -> None:
+    """The drop is surgical: real text, and whitespace a user typed, are
+    theirs. Only absent text is omitted — this is a shape rule at the
+    constructor, not the whitespace normalization the WIRE does separately
+    (``AnthropicClient._message_blocks``, which drops blank blocks because a
+    provider refuses them)."""
+    assert Message.user("hi").content == [TextContent(text="hi")]
+    assert Message.user(" ").content == [TextContent(text=" ")]
+
+
 def test_a_spec_does_not_take_audio_unless_it_is_stated() -> None:
     """The wrong-True asymmetry (see the field's comment): silence reads False.
 

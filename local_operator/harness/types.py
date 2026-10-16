@@ -677,15 +677,33 @@ class Message(BaseModel):
 
         Images follow the text rather than leading it: the prompt says what to
         do with them, and a model reading the instruction first knows what it
-        is looking for. Empty text still yields a text block, so a message that
-        is nothing but a pasted screenshot keeps the shape every provider
-        serializer expects. Audio follows the images for the same reason with
+        is looking for. Audio follows the images for the same reason with
         one addition: a wire that can carry a recording as its own part shape
         (``input_audio``, ``inline_data``) renders the text and stills it was
         asked about first, so the part order matches the reading order a
         model gets anywhere else.
+
+        EMPTY TEXT YIELDS NO TEXT BLOCK, the same rule ``assistant`` follows
+        one method down. It used to emit ``TextContent(text="")`` to "keep the
+        shape every provider serializer expects", which was wrong: the block is
+        not harmless. The row persists as ``{}`` and Anthropic 400s the WHOLE
+        request with "text content blocks must be non-empty" on every later
+        turn, because the poisoned row is in history and therefore resent
+        forever (#2460). Dropping it is what makes an image-only send store
+        ``[{attachment, mime_type}]`` instead of ``[{}, {attachment, ...}]``.
+
+        A message with no text and no attachments is therefore empty, and every
+        wire has to HANDLE that rather than receive a block it cannot use —
+        which is not the same as any wire being indifferent to it. Two of them
+        needed work for this shape rather than tolerating it by accident: the
+        Responses wire gained a backfill for a zero-block user item (an empty
+        ``content`` array is a shape it had never sent), and Anthropic drops
+        blank text blocks because rows already poisoned on disk cannot be
+        repaired by the write side at all. See ``providers.clients``:
+        ``_is_empty_assistant``, ``EMPTY_TOOL_RESULT_TEXT`` and
+        ``EMPTY_USER_TEXT``.
         """
-        content: list[Content] = [TextContent(text=text)]
+        content: list[Content] = [TextContent(text=text)] if text else []
         content.extend(images or ())
         content.extend(audio or ())
         return Message(role="user", content=content, **extra)
