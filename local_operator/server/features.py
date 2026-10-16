@@ -887,5 +887,12 @@ def feature_flags() -> dict[str, Any]:
         # definitive (show nothing, do not retry), because a backend that
         # answers this key yet 404s the route is broken, not slow.
         "quota_notice": 1,
+        # PER-SESSION VOICE MODE (docs/design/session-voice.md): the four
+        # `/v1/desktop/voice*` routes and the `type: "voice"` frame on
+        # `/v1/desktop/events`. Its own key for the rule `code_requests` states:
+        # the routes are additive, and this is how a renderer learns they exist
+        # before it mounts the voice toggle. Absent, the renderer shows no
+        # voice affordance and makes no voice request.
+        "voice": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

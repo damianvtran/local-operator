@@ -62,6 +62,7 @@ from local_operator.server.routes import (
     desktop_team_bridge,
     desktop_tunnel,
     desktop_tunnel_setup,
+    desktop_voice,
     desktop_wakes,
     health,
     i18n,
@@ -922,6 +923,10 @@ app.include_router(desktop_code_requests.router)
 # `/files/{file_id}/materialise`) match no sessions-router route (no `/files` child of a
 # session is declared there) and the POST's literal suffix cannot be swallowed by a parent.
 app.include_router(desktop_session_files.router)
+# Per-session VOICE MODE (`features.voice`): `/v1/desktop/voice` and its
+# `/utterance` and `/speech` children. Literal paths that no template above
+# declares, so declaration order cannot make one swallow them.
+app.include_router(desktop_voice.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;
