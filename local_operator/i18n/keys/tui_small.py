@@ -14,12 +14,28 @@ def approval_allow_verb() -> Msg:
     return Msg("tui.small.approval.allow_verb", {})
 
 
+def copy_code_count(*, shown: str) -> Msg:
+    return Msg("tui.small.copy.code_count", {"shown": shown})
+
+
+def copy_quote_count(*, shown: str) -> Msg:
+    return Msg("tui.small.copy.quote_count", {"shown": shown})
+
+
 def draft_attachment_count(*, images: int | float, shown: str) -> Msg:
     return Msg("tui.small.draft.attachment_count", {"images": images, "shown": shown})
 
 
 def model_picker_window_position(*, shown: str, total: str) -> Msg:
     return Msg("tui.small.model_picker.window_position", {"shown": shown, "total": total})
+
+
+def picker_of_separator() -> Msg:
+    return Msg("tui.small.picker.of_separator", {})
+
+
+def picker_showing_prefix() -> Msg:
+    return Msg("tui.small.picker.showing_prefix", {})
 
 
 def session_resume_hint(*, hint: str) -> Msg:

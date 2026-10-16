@@ -58,10 +58,17 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import AskQuestion
+
+# i18n: the window counter's grammar words are user-facing picker copy;
+# they stay separate fragments because the numerals carry a brighter style.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.notify import remote_park_hints
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import wrap_cells
+
+_t = tr("tui.small")
 
 #: Cells of the card's own padding on EACH side, mirroring the horizontal half
 #: of ``padding: 1 1`` in the stylesheet. One cell rather than the modal's two:
@@ -3032,10 +3039,13 @@ class AskPickerScreen(Container):
         span = f"{window[0] + 1}–{window[-1] + 1}"
         total = str(self.row_count)
         row = Text(no_wrap=True, overflow="ellipsis")
-        if cell_len(f"showing {span} of {total}") <= width:
-            row.append("showing ", style=dim)
+        prefix = _t(_x.picker_showing_prefix())
+        separator = _t(_x.picker_of_separator())
+        counter = f"{prefix}{span}{separator}{total}"
+        if cell_len(counter) <= width:
+            row.append(_t(_x.picker_showing_prefix()), style=dim)
         row.append(span, style=muted)
-        row.append(" of ", style=dim)
+        row.append(_t(_x.picker_of_separator()), style=dim)
         row.append(total, style=muted)
         return _cut_row(row, width)
 
