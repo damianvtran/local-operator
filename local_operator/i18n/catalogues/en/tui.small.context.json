@@ -118,5 +118,55 @@
     "role": "link picker card title",
     "tone": "plain, instructional",
     "note": "The /links picker card's title row, drawn first in foreground ink: one short phrase naming the surface and the key action, not a sentence, with zero ICU arguments. The card's own width measurement reads the same literal via this key, so the title and the timing that reserves its row cannot disagree. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.last_heartbeat_ago": {
+    "role": "info panel session row heartbeat age clause",
+    "tone": "plain, factual",
+    "note": "The 'last heartbeat <age> ago' clause on a wedged session row in /info, stating how long since that runtime last reported. {age} is the already-formatted duration string from format_duration (e.g. '4m'), passed verbatim; this key adds only the surrounding words, so the digit formatting the pre-extraction f-string printed is unchanged. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.needs_pending": {
+    "role": "info panel session row pending clause",
+    "tone": "plain, factual",
+    "note": "The 'needs <pending>' clause on a session row with work waiting. {pending} is the record's own pending description string, passed verbatim (it already carries its noun and count), so this key is only the leading verb and the single space before it; do not add a noun or a number here. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.busy_word": {
+    "role": "info panel session row busy state word",
+    "tone": "plain, factual",
+    "note": "The single word 'busy' closing a live session row's meta in /info. It is suppressed on wedged and leaving rows by the caller (their words already cover the state), so this key must stay the bare unqualified word with no punctuation or trailing space; the row joins clauses with ' · ' itself. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.info_panel.deeper_below_depth": {
+    "role": "info panel subagent tree depth overflow marker",
+    "tone": "plain count",
+    "note": "The '  +N deeper (below depth D)' summary row under the /info subagent tree, counting nodes hidden below the drawn depth cap anywhere in the tree. The TWO LEADING SPACES are load-bearing — they are the row's base indent, written because the row is a section summary attached to no parent row — do not trim. {deeper} and {depth} are RAW digit strings, never grouped, so 1200 stays '1200' exactly as the pre-extraction f-string printed it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagent_view.row_name": {
+    "role": "subagent page title row surface name",
+    "tone": "plain, factual",
+    "note": "The word 'Subagent' opening the subagent page's title row, naming the surface; the child's label follows after a ' · ' seam the caller appends separately, so this key is the bare singular noun with no trailing space or punctuation. The same key paints both the swept-job row and the normal title row, so the two cannot drift onto two spellings. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagent_view.no_longer_on_ledger": {
+    "role": "subagent page swept-job status phrase",
+    "tone": "plain, factual",
+    "note": "The status phrase on the title row of a subagent page whose job the ledger has swept: the run's outcome is no longer knowable, so the row carries no glyph, clock or count, only this phrase after the label. Bare fragment, no punctuation; the caller supplies the two-space gap before it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.wakes_title": {
+    "role": "wake panel wakes section header",
+    "tone": "plain, factual",
+    "note": "The header word of the wake half of the wake panel band, naming the scheduled wakes listed below it. One plural noun, no trailing space; the caller appends the ' · ' seam and the scheduled count as separate fragments in their own ink. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.monitors_title": {
+    "role": "wake panel monitors section header",
+    "tone": "plain, factual",
+    "note": "The header word of the monitor half of the wake panel band, naming the armed monitors listed below it. One plural noun, no trailing space; the caller appends the ' · ' seam and the armed/attention count as separate fragments in their own ink. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.monitors_need_attention": {
+    "role": "wake panel monitors broken-count header clause",
+    "tone": "plain count",
+    "note": "The '<broken> of <total> need(s) attention' clause in the monitor section header when some armed monitors are broken. ICU plural on 'count' selects needs/need exactly as the pre-extraction hand-written verb choice did ('1 of 5 needs', '3 of 5 need'); {shown} and {total} are RAW digit strings, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.wake_panel.monitors_armed": {
+    "role": "wake panel monitors armed-count header clause",
+    "tone": "plain count",
+    "note": "The '<N> monitor(s) armed' clause in the monitor section header when no armed monitor is broken. ICU plural on 'count' gives the singular '1 monitor armed' the pre-extraction code wrote by hand; {shown} is the RAW digit string, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   }
 }
