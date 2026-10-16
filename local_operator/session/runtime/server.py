@@ -1894,7 +1894,8 @@ class SessionHandle(Protocol):
     # ask_decline(ask_id, by="") -> str: the explicit "no answer, decide
     #   yourself" (today's Esc). Optional, same shape.
     # ask_dismiss(ask_id, by="") -> str: view-only removal of a TIMED-OUT ask;
-    #   injects nothing. Optional, same shape.
+    #   asks the model nothing (it can still deliver the deadline notice that ask
+    #   never got — design §14). Optional, same shape.
     # receive_peer_message(text, *, mode="mailbox", wake=False, sender=None)
     #   -> str: deliver a message from another local lop session (`lop send`).
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
