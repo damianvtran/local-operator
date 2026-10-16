@@ -1739,3 +1739,47 @@ def test_a_lapsed_only_wait_does_not_refold_the_log_every_tick(tmp_path: Path, m
     # 30 lapsed-only ticks cost ONE plan fold, not 30; the enqueue's re-plan and
     # the open ask's every-tick loop account for the rest.
     assert folds["n"] < 20, folds
+
+
+def test_rearm_never_cancels_a_reconcile_mid_hand_off(tmp_path: Path, monkeypatch):
+    """Review round 2, R2-2: ``rearm`` must not cancel the timer while its
+    ``reconcile`` is between adding a row id to ``_handed`` and handing the row
+    to delivery. A cancel there stranded the id in ``_handed`` (only
+    ``finish_row_commit`` removes it), so every later reconcile treated the
+    timeout notice as already planned and it was never delivered. Here the
+    delivery suspends, ``rearm`` lands mid-hand-off, and the row must still
+    reach delivery exactly once."""
+    from local_operator.asks import queue as queue_module
+
+    monkeypatch.setattr(queue_module, "_lapsed_visible_ms", lambda _dir: HOUR_MS)
+    clock = {"now": BASE}
+    session = FakeSession()
+    queue = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: clock["now"])
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    timeout_row = store.timeout_row_id(ask_id)
+    clock["now"] = BASE + 120_000 + 1  # the deadline has passed: a notice is owed
+
+    async def scenario() -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_deliver = session.deliver_ask_messages
+
+        async def suspending_deliver(messages) -> None:
+            entered.set()
+            await release.wait()  # the hand-off is in flight here
+            await real_deliver(messages)
+
+        session.deliver_ask_messages = suspending_deliver  # type: ignore[method-assign]
+        task: asyncio.Task[Any] = asyncio.ensure_future(queue.reconcile())
+        queue._timer = cast("asyncio.Task[None]", task)  # the timer runs this reconcile
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert timeout_row in queue._handed
+        queue.rearm()  # a window change lands mid-hand-off
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        queue.dispose()
+
+    _run(scenario())
+    delivered = [m.id for batch in session.batches for m in batch]
+    assert delivered == [timeout_row], delivered
