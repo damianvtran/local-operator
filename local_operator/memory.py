@@ -194,9 +194,7 @@ _WORK_REF = re.compile(
 # A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
 # all-letter abbreviation (`cafebabe`) is not.
 _WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
-_WORK_SHA = re.compile(
-    r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I
-)
+_WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I)
 _WORK_STATUS = re.compile(
     r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
     r"\b"
@@ -249,9 +247,7 @@ def scope_fit(scope: str, fact: dict[str, Any]) -> None:
     """
     if scope != "global" or not isinstance(fact, dict):
         return
-    haystack = "\n".join(
-        str(fact.get(key) or "") for key in ("title", "body", "subject")
-    )
+    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
     for key in ("tags", "aliases"):
         value = fact.get(key) or []
         if isinstance(value, list):
