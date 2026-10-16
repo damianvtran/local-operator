@@ -5,8 +5,15 @@ from typing import Any
 
 import pytest
 
+from local_operator.memory import MemoryError
 from local_operator.memory import MemoryError as SensitiveMemoryError
-from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, guard, parse_url, safe_segment
+from local_operator.memory import (
+    MemoryIdentity,
+    MemoryStore,
+    guard,
+    parse_url,
+    safe_segment,
+)
 from local_operator.network import audit, identity, memory, wire
 from tests.unit.network.test_mcpdefs_link import _bind_and_start, _set_peer_endpoints
 from tests.unit.network.test_relay_e2e import _pair, serve_shaped_relay
