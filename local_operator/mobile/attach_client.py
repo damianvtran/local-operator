@@ -2371,8 +2371,16 @@ class AttachClient:
         )
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
-        """Fork an aside exchange into the conversation on the authoritative owner."""
-        return await self._request("adopt_aside", messages=messages)
+        """Fork an aside exchange into the conversation on the authoritative owner.
+
+        Returns the owner's ``adopt_state`` (``"queued"`` or ``"applied"``),
+        read off the ack's extra field (decision D4). An owner from before
+        the field sends none, and that owner refused mid-turn adopts rather
+        than queueing them, so an absent field means applied.
+        """
+        reply = await self._request_frame("adopt_aside", messages=messages)
+        self._raise_for_reply_error(reply)
+        return "queued" if reply.get("adopt_state") == "queued" else "applied"
 
     # -- turn supplements (memo §2.7) ---------------------------------------
     #

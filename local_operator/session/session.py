@@ -164,6 +164,7 @@ from local_operator.harness.types import (
     Content,
     CustomMessage,
     EventHandler,
+    HistoryDeltaEvent,
     ImageContent,
     LoopConfig,
     Message,
@@ -989,6 +990,21 @@ class _PendingCompaction:
     reason: str
     #: Ids of ``plan.llm_history[: plan.cut]`` — the span the summary replaces.
     summarized_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingAdoption:
+    """An aside exchange the user added while a turn owned the message list.
+
+    The second variant of ``Session._pending_shell_records`` beside the bare
+    ``(command, result)`` shell receipt (decision D1): ONE FIFO, so a bang
+    receipt and an adopted aside land in the order the user produced them, at
+    the same safe boundaries, through the same pop-after-write discipline.
+    Kept in memory only (D2) — journalling it at queue time would put
+    user/assistant rows inside a durable tool batch — and dispose flushes it.
+    """
+
+    messages: tuple[Message, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -4168,7 +4184,13 @@ class Session:
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
         #: resume. The runtime flushes this FIFO before releasing `_turn_lock`.
-        self._pending_shell_records: list[tuple[str, ToolResult]] = []
+        #: An aside the user adopted mid-turn rides the same queue as a
+        #: :class:`_PendingAdoption`, for the same reason; a held one is skipped
+        #: rather than blocking receipts behind it (D7).
+        self._pending_shell_records: list[tuple[str, ToolResult] | _PendingAdoption] = []
+        #: Tail ids of held adoptions already warned about, so a hold is logged
+        #: once rather than at every boundary that re-tries it.
+        self._held_adoption_warned: set[str] = set()
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
         # automatic pass runs inside a turn and is covered by ``_is_streaming``;
@@ -8684,7 +8706,13 @@ class Session:
                 carried_prompt=True,
             )
         finally:
-            self._turn_lock.release()
+            # D8: anything queued after the pipeline's own flush (or on an
+            # early exit before it) lands before the lock goes free.
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def seed_history(self, messages: list[Message]) -> None:
         """Prime the conversation from a host-supplied history.
@@ -15840,7 +15868,11 @@ class Session:
         # during the wait therefore bumps the epoch past this sample, which is
         # exactly how the honoured-vs-stale test below can tell the two apart.
         arrived_at_epoch = self._abort_epoch
-        async with self._turn_lock:
+        # acquire/try/finally rather than ``async with``, so every exit — the
+        # pipeline and both early returns below — passes D8's flush-before-
+        # release rule.
+        await self._turn_lock.acquire()
+        try:
             if self._leaving_deliveries:
                 # THE LATCH, RE-CHECKED AT ADMISSION (session 664a234ec561,
                 # 2026-09-28). The spawn-time check (``_deliver_job_results``)
@@ -15942,6 +15974,12 @@ class Session:
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
             )
+        finally:
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _run_turn_pipeline(
         self,
@@ -20891,8 +20929,11 @@ class Session:
             # `record_shell` queues while manual compaction owns the message
             # list. Fold those receipts into the newly compacted context before
             # another prompt can acquire the lock and build its request.
-            await self._flush_shell_records()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     @staticmethod
     async def _offloaded(compaction_api: Any, name: str, *args: Any) -> Any:
@@ -23617,7 +23658,7 @@ class Session:
             )
         return snapshot
 
-    async def adopt_aside(self, messages: Sequence[Message]) -> None:
+    async def adopt_aside(self, messages: Sequence[Message]) -> Literal["queued", "applied"]:
         """Promote an off-the-record aside exchange into the conversation.
 
         The one door out of :meth:`complete_aside`'s no-trace contract, and it
@@ -23625,20 +23666,106 @@ class Session:
         appended as ordinary user/assistant turns, to the live context and the
         transcript both, so the next real turn sees it and a resume replays it.
 
-        Refused while a turn is running, and not as caution. The loop owns
-        ``_context.messages`` for the duration and pairs every tool call with
-        its result; splicing a user message between an assistant tool-call
-        message and the results it is waiting for produces a message list no
-        provider will accept.
+        NOTHING IS EVER SPLICED INTO A LIVE TOOL BATCH. The loop owns
+        ``_context.messages`` while a turn runs and pairs every tool call with
+        its result; a user message between an assistant tool-call message and
+        the results it is waiting for is a list no provider will accept. So an
+        adopt that arrives mid-turn is QUEUED (returns ``"queued"``) on the
+        shell-receipt FIFO and lands at the turn's next safe boundary — the
+        ``_flush_shell_records`` sites, every one of which holds ``_turn_lock``
+        with no open batch (decision D1) — announced by a ``HistoryDeltaEvent``
+        carrying the pair. It never goes through the steering queue: anything
+        drained there continues the turn it lands in.
 
         The turn LOCK is consulted as well as the streaming flag, for the
         reason :meth:`prompt` spells out: ``_is_streaming`` covers only
         ``_run_turn`` itself, while the lock is held across the whole pipeline
-        including a post-compaction auto-continuation. A fork landing in that
-        gap would be swept into a continuation the user never saw.
+        including a post-compaction auto-continuation. The pipeline's own
+        ``finally`` flush runs after that continuation, so the pair lands once
+        the whole pipeline is done rather than being swept into it.
+
+        Two states refuse LOUDLY with :class:`AsideAdoptRefused` instead,
+        because deferring there would be a lie: a closed session (no boundary
+        will ever flush the queue), and an idle write that finds the live list
+        still ending in unanswered calls — the backstop for the invariant
+        above, should any path reach here with a batch open (decision D3).
         """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        if self._disposed:
+            raise AsideAdoptRefused(reason="session_closed")
+        fresh = self._unadopted_messages(messages)
+        if not fresh:
+            # A retried adopt (a client that lost the ack) must not land twice:
+            # every message is already queued or already durable.
+            durable = all(self._transcript.has_entry(m.id) for m in messages)
+            return "applied" if durable else "queued"
         if self._is_streaming or self._turn_lock.locked():
-            raise RuntimeError("cannot adopt an aside while a turn is running")
+            self._pending_shell_records.append(_PendingAdoption(tuple(fresh)))
+            return "queued"
+        # Serialized like the idle ``record_shell`` write, for its reason: a
+        # prompt acquiring the lock while the transcript write below awaits
+        # would start a turn, and the extend after it would then land inside
+        # that turn's live list — the splice this method exists to prevent.
+        await self._turn_lock.acquire()
+        try:
+            # Re-filtered under the lock: the holder we waited for may have
+            # landed some of these messages from the queue on its way out.
+            fresh = self._unadopted_messages(messages)
+            if fresh and unanswered_tail_call_ids(self._context.messages):
+                raise AsideAdoptRefused(reason="open_tool_batch")
+            if fresh:
+                await self._apply_adoption(fresh)
+        finally:
+            # D8: a record queued while this write awaited lands before release.
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+        return "applied"
+
+    def _unadopted_messages(self, messages: Sequence[Message]) -> list[Message]:
+        """The messages of ``messages`` not yet queued or durable, in order.
+
+        Dedupe is PER MESSAGE ID, across the queue and the transcript (review
+        R2-2, superseding D2's tail-id rule). An aside continuation re-sends the
+        whole exchange with a new tail — ``[Q1, A1, Q2, A2]`` after ``[Q1, A1]``
+        was adopted — so a tail-only check let ``Q1``/``A1`` land twice.
+
+        PAIR-SAFE, or refused: the exchange is user/assistant pairs, and a
+        filter that keeps half of one would land an answer with no question
+        (or the reverse). Each pair must be entirely known or entirely new, and
+        the result must be an even run starting with a user row; anything else
+        raises :class:`AsideAdoptRefused` (bare reason, the generic sentence)
+        instead of landing a half pair.
+        """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        known = {
+            message.id
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption)
+            for message in queued.messages
+        }
+        fresh: list[Message] = []
+        for index in range(0, len(messages), 2):
+            pair = list(messages[index : index + 2])
+            seen = [m.id in known or self._transcript.has_entry(m.id) for m in pair]
+            if all(seen):
+                continue
+            if any(seen) or len(pair) != 2:
+                raise AsideAdoptRefused()
+            fresh.extend(pair)
+        if any(
+            message.role != ("user" if offset % 2 == 0 else "assistant")
+            for offset, message in enumerate(fresh)
+        ):
+            raise AsideAdoptRefused()
+        return fresh
+
+    async def _apply_adoption(self, messages: Sequence[Message]) -> None:
+        """Write one adopted exchange to the transcript, then the live context."""
         # Persist first, then adopt — the order ``seed_history`` uses, and for
         # the same reason: a failed transcript write must not leave the live
         # context carrying messages a resume will not replay.
@@ -23666,7 +23793,9 @@ class Session:
         its safe boundary before another prompt can start.
         """
         if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
-            queued.tool_call_id == result.tool_call_id for _, queued in self._pending_shell_records
+            not isinstance(queued, _PendingAdoption)
+            and queued[1].tool_call_id == result.tool_call_id
+            for queued in self._pending_shell_records
         ):
             return
         if self._is_streaming or self._turn_lock.locked():
@@ -23676,12 +23805,21 @@ class Session:
         # while transcript.append_message is awaiting and build its request from
         # a half-written synthetic exchange. Re-check the FIFO after acquisition
         # to flush anything that raced us while we waited.
-        async with self._turn_lock:
+        await self._turn_lock.acquire()
+        try:
             # Queue-then-flush rather than a direct write: the FIFO pops only
             # after a successful transcript write, so a failure here leaves the
             # receipt for the next boundary instead of losing it.
             self._pending_shell_records.append((command, result))
             await self._flush_shell_records()
+        finally:
+            # D8's rule for every release; a no-op unless something queued
+            # during the write above (or the write failed, when it logs).
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
         """Append one synthetic bash exchange to transcript and live context."""
@@ -23708,10 +23846,187 @@ class Session:
         successful write so a transcript failure leaves the unpersisted tail
         available to the next boundary or dispose.
         """
-        while self._pending_shell_records:
-            command, result = self._pending_shell_records[0]
-            await self._persist_shell_record(command, result)
-            self._pending_shell_records.pop(0)
+        # Walk by INDEX and re-read the list each pass: a record queued during
+        # one of this loop's awaits is picked up by the same flush (D8).
+        #
+        # A held adoption is SKIPPED, not a barrier (D7): bang receipts behind it
+        # persist exactly as they did before adoptions shared this queue —
+        # unconditionally, even onto an open tail — because blocking them
+        # behind a pair that may never land lost receipts that used to be
+        # durable. Adoption-vs-later-receipt order is therefore guaranteed only
+        # while the tail is closed, which is every boundary but a cancelled turn.
+        index = 0
+        # Adoptions keep their order AMONG THEMSELVES even though receipts may
+        # pass them: a continuation's pair (Q2/A2) is queued already filtered of
+        # the first pair (R2-2), so landing it while Q1/A1 is still held — say
+        # a receipt closed the tail mid-pass — would put the follow-up before
+        # the question it follows. Once one adoption is held this pass, every
+        # later adoption waits with it.
+        adoption_held = False
+        while index < len(self._pending_shell_records):
+            queued = self._pending_shell_records[index]
+            if isinstance(queued, _PendingAdoption):
+                if adoption_held or not await self._land_deferred_adoption(queued):
+                    adoption_held = True
+                    index += 1
+                    continue
+            else:
+                command, result = queued
+                await self._persist_shell_record(command, result)
+            # Pop by IDENTITY, not by the index read before the await: the list
+            # may have grown during it, though nothing else removes from it.
+            # (``list.remove`` would match by equality instead, and it is the
+            # filesystem-deletion guard's ``.remove`` shape.)
+            position = next(
+                i for i, item in enumerate(self._pending_shell_records) if item is queued
+            )
+            del self._pending_shell_records[position]
+
+    async def _flush_queued_before_release(self) -> None:
+        """The last flush before ``_turn_lock`` is released.
+
+        THE RULE (D8): every ``_turn_lock.release()`` is immediately preceded by
+        this, with no await in between, in the shape::
+
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+
+        The inner ``finally`` is not optional (review R2-1): a cancel delivered
+        while this awaits a write is a ``BaseException`` the ``except`` below
+        does not catch, and a release skipped then holds the lock for good —
+        every later prompt is refused as "already streaming". ``release()`` is
+        synchronous, so the no-await rule still holds. The one exemption is
+        ``serving.py``'s ``_await_turn_lock_free`` (``async with lock: pass``):
+        nothing awaits inside that hold, so nothing can be queued during it.
+
+        Without this, a record queued while the lock is held is stranded until
+        some later turn: the pipeline's own flush is followed by further awaits
+        (shape incidents, the after-turn duty, the patience flush), and an adopt
+        arriving in that window saw the lock held, queued, and then nothing
+        flushed when the lock went free.
+
+        It LOGS rather than raises. It runs in ``finally`` blocks, where an
+        exception would replace the one already propagating (the turn's own
+        outcome); a failed write leaves its record queued for the next boundary
+        or for the dispose report, so nothing is lost by not raising here.
+        """
+        try:
+            await self._flush_shell_records()
+        except Exception:  # noqa: BLE001 — must not mask the in-flight exception
+            logger.error(
+                "could not persist %d queued record(s) before releasing the turn lock; "
+                "they stay queued for the next boundary",
+                len(self._pending_shell_records),
+                exc_info=True,
+            )
+
+    async def _report_unlanded_records(self) -> None:
+        """Say LOUDLY that a queued record will never land (D7).
+
+        Dispose is the last boundary, so whatever is still queued after its
+        flush never will be: an adoption held back by an open tool batch, or a
+        bang receipt whose transcript write failed. Nothing leaves the queue
+        without a write or this report. Each record is an ERROR line naming it,
+        and the batch is ONE user-visible ``NoticeEvent(kind="error")`` — the
+        path the session's other runtime warnings use — counting both kinds.
+        """
+        adoptions = [
+            queued
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption) and queued.messages
+        ]
+        receipts = [
+            queued
+            for queued in self._pending_shell_records
+            if not isinstance(queued, _PendingAdoption)
+        ]
+        if not adoptions and not receipts:
+            return
+        for adoption in adoptions:
+            logger.error(
+                "aside adopt %s never landed: the conversation closed with an open tool "
+                "batch, so the exchange was not added",
+                adoption.messages[-1].id,
+            )
+        for _command, result in receipts:
+            logger.error(
+                "shell receipt %s never landed: its transcript write failed and the "
+                "conversation closed",
+                result.tool_call_id,
+            )
+        lost: list[str] = []
+        if adoptions:
+            lost.append(f"{len(adoptions)} aside(s) you added to the conversation")
+        if receipts:
+            lost.append(f"{len(receipts)} shell command record(s)")
+        await self._emit(
+            NoticeEvent(
+                text=f"{' and '.join(lost)} could not be saved before the conversation closed",
+                kind="error",
+            )
+        )
+        # DURABLE as well (review R6): the notice reaches only a frontend still
+        # connected during teardown. The row is written straight to the
+        # transcript, as ``_journal_held_delivery_failure`` does once disposed —
+        # ``journal_incident`` returns early then, and the transcript still
+        # accepts appends until the end of ``dispose``.
+        from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+        from local_operator.incidents import format_unlanded_records_message
+
+        rendered = format_unlanded_records_message(
+            [adoption.messages[-1].id for adoption in adoptions],
+            [result.tool_call_id for _command, result in receipts],
+        )
+        try:
+            await self._transcript.append_message(
+                CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": rendered, "raw": rendered[:1000]},
+                ),
+                preserve_mtime=True,
+            )
+        except Exception:  # noqa: BLE001 — the ERROR lines above still stand
+            logger.error("could not journal the unlanded-records incident", exc_info=True)
+
+    async def _land_deferred_adoption(self, queued: _PendingAdoption) -> bool:
+        """Apply an adopt that waited for this boundary, and tell every frontend.
+
+        Returns False, writing nothing, when the live list still ends in
+        unanswered calls. A turn CANCELLED without an abort (its prompt task
+        dropped with the control socket) leaves the tail open at every later
+        boundary, and a future boundary placed inside a loop would too; either
+        way the pair would otherwise splice into a batch. It does not RAISE:
+        the adopt can still land once a new turn closes the tail, and an
+        exception out of a ``finally`` would mask the turn's own outcome. The
+        flush skips it (D7) and dispose reports it if it never lands.
+
+        The event is a HISTORY delta, not live message events: these rows were
+        never streamed, so a frontend must project them through the settled
+        renderer — the contract :class:`HistoryDeltaEvent` already states.
+        """
+        messages = [m for m in queued.messages if not self._transcript.has_entry(m.id)]
+        if not messages:
+            return True
+        if unanswered_tail_call_ids(self._context.messages):
+            # Named by the exchange's tail id, the identity the dedupe keys on.
+            # ONCE per held adoption, not per boundary: every boundary after a
+            # cancelled turn re-tries it, and a line per retry is noise that
+            # buries the dispose report that actually matters.
+            if messages[-1].id not in self._held_adoption_warned:
+                self._held_adoption_warned.add(messages[-1].id)
+                logger.warning(
+                    "aside adopt %s held back: the conversation still ends in an open "
+                    "tool batch at a flush boundary; it lands at the next safe one",
+                    messages[-1].id,
+                )
+            return False
+        await self._apply_adoption(messages)
+        self._held_adoption_warned.discard(messages[-1].id)
+        await self._emit(HistoryDeltaEvent(messages=list(messages)))
+        return True
 
     # -- wakes -------------------------------------------------------------------
 
@@ -27950,7 +28265,10 @@ class Session:
             # last-resort pass keeps disposal durable if teardown reached here
             # through a host path without a turn task.
             if self._pending_shell_records:
-                await self._flush_shell_records()
+                # The logging flush, not the raising one: a failed write must
+                # stay queued for the report below rather than abort teardown.
+                await self._flush_queued_before_release()
+                await self._report_unlanded_records()
             # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
             # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
             # this is what keeps the next cold open bounded rather than O(file).

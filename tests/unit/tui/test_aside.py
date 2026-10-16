@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -40,8 +40,8 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     Editor,
 )
-from local_operator.tui.widgets.transcript import TranscriptView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from tests.unit.tui.test_app_pilot import FakeSession, _factory, _renderable_plain
 
 
 class AsideSession(FakeSession):
@@ -107,11 +107,14 @@ class AsideSession(FakeSession):
             on_usage(Usage(input_tokens=100, output_tokens=20))
         return self.answer
 
-    async def adopt_aside(self, messages) -> None:  # noqa: ANN001
-        if self.streaming:
-            raise RuntimeError("cannot adopt an aside while a turn is running")
+    async def adopt_aside(self, messages) -> Literal["queued", "applied"]:  # noqa: ANN001
+        # The real session's mid-turn answer (decision D1/D4): the pair is
+        # QUEUED for the turn's boundary, so nothing reaches the history yet.
         self.forked.extend(messages)
+        if self.streaming:
+            return "queued"
         self._history.extend(messages)
+        return "applied"
 
 
 async def _settle_boot(pilot, app: OperatorApp, session: FakeSession) -> None:
@@ -380,8 +383,9 @@ async def test_an_aside_over_a_live_turn_carries_the_sentence_on_screen() -> Non
             for m in sent
         )
         assert panel.turns[-1].state == "done"
-        # Forking is refused mid-turn, so the card must not advertise ^f.
-        assert "^f" not in panel.render_lines_for_test()[-1]
+        # A mid-turn fork is queued for the turn's boundary (decision D5), so
+        # the card advertises ^f even while the agent works.
+        assert "^f" in panel.render_lines_for_test()[-1]
 
 
 @pytest.mark.asyncio
@@ -513,7 +517,6 @@ async def test_a_reader_scrolled_back_is_not_yanked_to_the_tail_on_close() -> No
     SAME rows correctly, because the conversation's own content never moved;
     only the reserved ground under the card did.
     """
-    from local_operator.tui.widgets.transcript import UserBlock
 
     session = AsideSession(answer="\n\n".join(f"para {i} " * 20 for i in range(20)))
     app = OperatorApp(lambda: _factory(session))
@@ -768,20 +771,37 @@ async def test_forking_is_the_only_way_an_aside_reaches_the_conversation() -> No
 
 
 @pytest.mark.asyncio
-async def test_forking_is_refused_while_a_turn_is_running() -> None:
-    """The loop owns the message list mid-turn; a splice makes it unsendable."""
+async def test_forking_mid_turn_queues_the_aside_and_mounts_nothing_yet() -> None:
+    """D5: ^f works mid-turn; the pair is queued, the card closes, and the
+    rows are NOT mounted here — the session's history delta paints them when
+    they land at the turn's boundary, in their real place after the turn.
+    """
     session = AsideSession()
     session.streaming = True
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         await _open_with_question(pilot, app, "what are you doing?")
+        transcript = app.query_one(TranscriptView)
+        users_before = len([b for b in transcript.blocks() if isinstance(b, UserBlock)])
 
         await pilot.press("ctrl+f")
-        await pilot.pause()
+        for _ in range(5):
+            await pilot.pause()
 
-        assert session.forked == []
-        assert app.query_one(AsidePanel).is_open
+        assert [(m.role, m.text) for m in session.forked] == [
+            ("user", "what are you doing?"),
+            ("assistant", session.answer),
+        ]
+        assert not app.query_one(AsidePanel).is_open
+        users_after = len([b for b in transcript.blocks() if isinstance(b, UserBlock)])
+        assert users_after == users_before, "a queued pair must not be mounted twice"
+        notices = [
+            _renderable_plain(b.renderable)
+            for b in transcript.blocks()
+            if isinstance(b, NoticeBlock)
+        ]
+        assert any("aside queued" in text for text in notices), notices
 
 
 # -- the card itself -------------------------------------------------------
