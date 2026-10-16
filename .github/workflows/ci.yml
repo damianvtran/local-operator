@@ -527,7 +527,7 @@ jobs:
           $env:USERPROFILE = $env:HOME
           $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py -n0 -q
+          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout -n0 -q
 
   # The cross-platform probe battery (`scripts/xplat_probe.py`), one leg per OS.
   #

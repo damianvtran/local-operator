@@ -88,5 +88,195 @@
     "role": "picker copy",
     "tone": "plain",
     "note": "Textual binding description for existing Escape action; one short word."
+  },
+  "tui.projects.title": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Shared lowercase title word across canvas, form and detail. One clipped title row; keep short."
+  },
+  "tui.projects.new_project": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Form title suffix including leading space and middle-dot separator; one clipped row."
+  },
+  "tui.projects.active_view": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Canvas title suffix; view is the localized display name, never the routing token. Preserve separator and one-row budget."
+  },
+  "tui.projects.tracked": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Tracked-project count in title; count is preformatted ASCII integer text to preserve existing ungrouped bytes. No English singular/other branch exists. One clipped clause."
+  },
+  "tui.projects.zoom": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Timeline-only title clause; tier is the opaque renderer tier token, not translated here. Leading separator and one-row budget."
+  },
+  "tui.projects.updated": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Shared canvas/detail freshness suffix; stamp retains existing local strftime %H:%M exactly. Do not reinterpret as relative time; one clipped clause."
+  },
+  "tui.projects.this_session": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Optional calling-session association count; count is preformatted ASCII integer text. Keep parentheses and separator; sheds first when title is narrow."
+  },
+  "tui.projects.view_list": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Human display name for stable list token; lowercase inside title, not routing vocabulary. One short word."
+  },
+  "tui.projects.view_board": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Human display name for stable board token; lowercase inside title, not routing vocabulary. One short word."
+  },
+  "tui.projects.view_timeline": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Human display name for stable timeline token; lowercase inside title, not routing vocabulary. One short word."
+  },
+  "tui.projects.unnamed": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Detail title fallback when project has no display name; preserve parentheses and keep short within one clipped row."
+  },
+  "tui.projects.binding_show_list": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing show_list action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_show_board": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing show_board action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_show_timeline": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing show_timeline action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_cycle_view": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing cycle_view action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_open_detail": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing open_detail action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_create": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing create action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_message": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing message action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_start": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing start action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_copy_attachment": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing copy_attachment action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_preview_attachment": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing preview_attachment action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_refresh": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing refresh action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_zoom_in": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing zoom_in action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_zoom_out": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing zoom_out action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_up": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing up action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_down": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing down action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_left": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_left action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_right": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_right action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_up": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_up action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_down": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_down action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_left": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_left action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_right": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_right action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_home": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_home action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_end": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_end action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_jump": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing jump action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_next_section": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing next_section action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_prev_section": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing prev_section action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_leave": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing leave action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
   }
 }
