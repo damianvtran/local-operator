@@ -27,6 +27,7 @@ real runtime is an in-process ``RuntimeServer`` on a loopback socket.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import cast
 
@@ -824,6 +825,100 @@ def test_a_cold_dismiss_republishes_the_conversation_s_own_asks(monkeypatch) -> 
     assert cast("list[dict[str, object]]", frame.get("asks")) == []
     # Still the cold door: nothing was dialled and nothing was started.
     assert daemon.table.entries == {}
+
+
+def test_a_cold_dismiss_keeps_the_ended_receipt_the_stopped_screen_had(monkeypatch) -> None:
+    """Agent review round 2, M-3: the repaint must carry the ENDED receipt too.
+
+    ``_repaint_stopped_screen`` and the SSE route both fold with the daemon's own
+    ended rule ("a stopped screen is ended iff an ended entry for it exists"),
+    because the phone's composer reads ``projection.ended``: a conversation this
+    daemon has watched die must not come back to life on the phone because a
+    dismissal repainted it. The republish spelling omitted the flag, so the frame
+    the subscriber received NEXT said ``ended=False`` over a screen whose last
+    frame said ``True`` — until some later frame corrected it.
+
+    The state that exposes it is the ordinary one: the scan proved the pid dead
+    and pushed its terminal frame (``ended=True``), then the retained payload was
+    evicted under payload-cache pressure while the generation ledger survived —
+    which is exactly the ``durable_rematerialize`` branch this capture exists for,
+    and the branch that rebuilds the frame from the flags the CALLER passed.
+    """
+    from local_operator.mobile.daemon import _projection_frame
+
+    _cold_engage(monkeypatch)
+    _durable_lapsed_ask("ask-lapsed")
+    client, daemon = _client_and_daemon()
+    record = _record(SESSION_A, 9_999_911)
+    entry = SessionEntry(record)
+    entry.ended = True  # the scan's own verdict on a pid that is gone
+    daemon.table.entries[record.pid] = entry
+    subscriber: "asyncio.Queue[dict[str, object]]" = asyncio.Queue(maxsize=8)
+    daemon.table.session_subscribers[SESSION_A] = {subscriber}
+
+    async def seed() -> None:
+        # The frame the watching phone received when the death was proved — the
+        # scan's capture, pushed to this same subscriber set (daemon.py's dead-pid
+        # branch) — and then the eviction that keeps the ledger without the payload.
+        dead = await daemon._capture_durable_projection(
+            SESSION_A, record=record, terminal=True, ended=True
+        )
+        assert dead is not None
+        subscriber.put_nowait(_projection_frame(dead))
+        daemon.session_projections.pop(SESSION_A, None)
+        assert daemon._projection_generations[SESSION_A].terminal is True
+
+    asyncio.run(seed())
+    assert subscriber.get_nowait()["ended"] is True
+
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+    assert reply.status_code == 200, reply.text
+
+    frame = subscriber.get_nowait()
+    assert frame["asks"] == []
+    # The receipt the screen already had, on the frame that repaints it.
+    assert frame["ended"] is True
+
+
+def test_a_dismissal_that_landed_is_not_failed_by_a_broken_repaint(monkeypatch, caplog) -> None:
+    """Agent review round 2, M-4: the repaint is a courtesy, the dismissal is durable.
+
+    The capture at the end of this route reads the same disk the dismissal has
+    already written, and it only decides what is DRAWN: what it produces is what
+    the next fold would produce anyway. Catching ``_StaleProjection`` alone meant
+    any other raise (a session directory that vanished under the fold, a full
+    disk) reached the route's own except ladder and answered 422/502 for a
+    dismissal that had ALREADY landed — so the phone painted a failure over a
+    durable success and the user tapped again. Answer the dismissal; log the paint.
+    """
+    _cold_engage(monkeypatch)
+    _durable_lapsed_ask("ask-lapsed")
+    client, daemon = _client_and_daemon()
+    subscriber: "asyncio.Queue[dict[str, object]]" = asyncio.Queue()
+    daemon.table.session_subscribers[SESSION_A] = {subscriber}
+
+    async def broken_capture(session_id, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise OSError("the fold could not read the session directory")
+
+    monkeypatch.setattr(daemon, "_capture_durable_projection", broken_capture)
+    with caplog.at_level(logging.DEBUG, logger="local_operator.mobile.daemon"):
+        reply = client.post(
+            f"/api/sessions/{SESSION_A}/command",
+            json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+        )
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "dismissed"}
+    # Nothing was painted, and nothing was claimed: the subscriber waits for the
+    # next honest frame rather than being handed one built from a failed read.
+    assert subscriber.empty()
+    # The claim that survives the broken paint is the durable one.
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert events[-1]["kind"] == ask_store.EVENT_DISMISSED
+    assert any("repaint failed" in record.getMessage() for record in caplog.records)
 
 
 def test_a_cold_dismiss_from_the_phone_records_the_remote_surface(monkeypatch) -> None:
