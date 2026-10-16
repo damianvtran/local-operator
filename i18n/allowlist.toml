@@ -12,7 +12,9 @@
 # group only when an in-scope locale requires it, and then as the WHOLE set
 # (the display map and the alias map together, with the `dict.get` path made
 # scanner-visible first) — never one branch at a time. Sites carry this via
-# `# i18n: ignore` with the same reason, e.g. `local_operator/keymap.py`. `scripts/i18n/check.py` refuses the file —
+# `# i18n: ignore` with the same reason, e.g. `local_operator/keymap.py`.
+#
+# `scripts/i18n/check.py` refuses the file —
 # and its unit test fails — when a reason is missing or empty, because an
 # unreasoned exemption is how a scanner gets allowlisted into uselessness
 # (RFC §10 risk 3). The list is PRUNED at P5: an entry is removed when its
