@@ -74,6 +74,7 @@ from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
 from local_operator.model.effort import (
     EFFORT_ORDER,
     FALLBACK_EFFORTS,
+    TIER_EFFORTS,
     parse_tier_mapping,
 )
 from local_operator.providers.local import (
@@ -1419,17 +1420,56 @@ def validate_tier_value(value: Any) -> None:
     the launch resolves. A string stays the row's ordinary TEXT contract — this
     validator only exists because ``validate``'s generic TEXT arm refuses every
     non-string. A string that LOOKS like JSON is refused: stored verbatim it
-    would be read as a ``provider/model`` selector and fail at launch.
+    would be read as a ``provider/model`` selector and fail at launch (a
+    well-formed JSON string never gets here — :func:`write_setting` parses it
+    first — so what reaches this branch is JSON that did not parse).
+
+    This checks the value's SHAPE only. Whether the selector names a usable
+    ``provider/model`` (or the ``default`` sentinel) is judged at launch by the
+    tier reader, exactly as it is for a bare string, so the two forms are held
+    to one standard.
     """
     if isinstance(value, str):
         if value.strip().startswith("{"):
-            raise ValueError('enter the mapping as JSON, e.g. {"model": "a/b", "effort": "high"}')
+            raise ValueError(_TIER_JSON_HINT)
         return
     if parse_tier_mapping(value) is None:
         raise ValueError(
             "expected provider/model, or "
-            f'{{"model": "provider/model", "effort": "{"|".join(EFFORT_ORDER)}"}}'
+            f'{{"model": "provider/model", "effort": "{"|".join(TIER_EFFORTS)}"}}'
         )
+
+
+#: The one hint for a tier mapping typed as JSON that did not parse, shared by
+#: :func:`coerce` and :func:`validate_tier_value` so the page, ``lop config
+#: edit`` and ``PATCH /v1/settings`` say the same thing.
+_TIER_JSON_HINT = 'expected JSON, e.g. {"model": "provider/model", "effort": "high"}'
+
+
+def _normalise_tier_value(value: Any) -> Any:
+    """A tier value as it should be STORED, whichever writer delivered it.
+
+    ``read_setting`` serves a mapping tier as JSON text, and two writers —
+    ``PATCH /v1/settings/{key}`` and the agent ``setting`` tool — hand their
+    value to :func:`write_setting` without :func:`coerce`. Without this the
+    exact string a client was served came back as a string and was refused,
+    so the desktop could not save a row it had just displayed (#2428 R1-1).
+    JSON that does not parse is returned as-is so the validator refuses it
+    with the JSON hint. A mapping the parser accepts is stored in its
+    normalised form (stripped selector, lowercased effort, ``auto`` dropped),
+    so the file holds what the launch path will act on, not ``" MAX "``.
+    """
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, Mapping):
+        parsed = parse_tier_mapping(dict(value))
+        if parsed is not None:
+            selector, effort = parsed
+            return {"model": selector} if effort is None else {"model": selector, "effort": effort}
+    return value
 
 
 def _validate_delegated_max_age_hours(value: Any) -> None:
@@ -5545,7 +5585,7 @@ def coerce(setting: Setting, text: str) -> Any:
         try:
             return json.loads(text)
         except ValueError:
-            raise ValueError('expected JSON, e.g. {"model": "a/b", "effort": "high"}') from None
+            raise ValueError(_TIER_JSON_HINT) from None
     return text
 
 
@@ -5781,6 +5821,10 @@ def write_setting(
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
         else:
             value = _keymap.normalize_key(value)
+    if setting.validate_value is validate_tier_value:
+        # Same reason as the HOTKEY arm: not every writer passes through
+        # `coerce`, so a tier's JSON text and its spelling are settled here.
+        value = _normalise_tier_value(value)
     # The group check needs the CURRENT config, so it is supplied here rather
     # than left to each caller: this is the one function every writer funnels
     # through, including `lop config edit` and `PATCH /v1/settings`, neither of

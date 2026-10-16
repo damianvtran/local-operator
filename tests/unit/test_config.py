@@ -1270,5 +1270,52 @@ def test_a_tier_mapping_round_trips_through_the_settings_registry(
         settings_io.write_setting(
             ConfigManager(tmp_path), setting, {"model": "a/b", "effort": "extreme"}
         )
-    with pytest.raises(ValueError):
-        settings_io.write_setting(ConfigManager(tmp_path), setting, '{"model": "a/b"}')
+    with pytest.raises(ValueError, match="expected JSON"):
+        settings_io.write_setting(ConfigManager(tmp_path), setting, '{"model": "a/b",')
+
+
+def test_a_tier_mapping_survives_writers_that_skip_coerce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2428 R1-1: ``PATCH /v1/settings`` and the agent ``setting`` tool call
+    ``write_setting`` WITHOUT ``coerce``. ``read_setting`` serves a mapping as
+    JSON text, so that text must be stored as the mapping again (the desktop
+    round trip), stored normalised, and refused when it is not JSON."""
+    from local_operator import settings_io
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.resolve_key("subagents.models.hi")
+    assert setting is not None
+
+    def stored() -> object:
+        return ConfigManager(tmp_path).get_config_value("subagents", None)["models"]["hi"]
+
+    settings_io.write_setting(
+        ConfigManager(tmp_path), setting, '{"model": "anthropic/claude-opus-5-5", "effort": "high"}'
+    )
+    assert stored() == {"model": "anthropic/claude-opus-5-5", "effort": "high"}
+
+    served = settings_io.read_setting(ConfigManager(tmp_path), setting)
+    settings_io.write_setting(ConfigManager(tmp_path), setting, served)
+    assert stored() == {"model": "anthropic/claude-opus-5-5", "effort": "high"}
+    assert settings_io.read_setting(ConfigManager(tmp_path), setting) == served
+
+    # QA N1: stored as the launch path will act on it, not as typed.
+    settings_io.write_setting(
+        ConfigManager(tmp_path), setting, {"model": " a/b ", "effort": " MAX "}
+    )
+    assert stored() == {"model": "a/b", "effort": "max"}
+    # R1-3: ``auto`` is "no override", stored as the omission it means.
+    settings_io.write_setting(
+        ConfigManager(tmp_path), setting, '{"model": "a/b", "effort": "auto"}'
+    )
+    assert stored() == {"model": "a/b"}
+
+    config_file = ConfigManager(tmp_path).config_file
+    before = config_file.read_bytes()
+    with pytest.raises(ValueError, match="expected JSON"):
+        settings_io.write_setting(ConfigManager(tmp_path), setting, '{"model": "a/b",')
+    assert config_file.read_bytes() == before
+    # A bare selector is unchanged by the normalisation.
+    settings_io.write_setting(ConfigManager(tmp_path), setting, "openai/gpt-5-mini")
+    assert stored() == "openai/gpt-5-mini"

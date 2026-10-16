@@ -17765,7 +17765,13 @@ class Session:
                 self._prepared_writes[absolute] = content
 
     def _resolve_subagent_model(
-        self, agent: str, effort: str | None, *, strict: bool = False, model: str | None = None
+        self,
+        agent: str,
+        effort: str | None,
+        *,
+        strict: bool = False,
+        model: str | None = None,
+        apply_tier_effort: bool = True,
     ) -> ModelSpec | None:
         """Effort tier -> ModelSpec via config; None keeps the parent's model.
 
@@ -17806,6 +17812,13 @@ class Session:
         a sound fallback of their own — session naming on ``lo`` is one — and
         for whom failing would be worse than inheriting. See
         :meth:`_launch_subagent` for the incident that made the launch strict.
+
+        ``apply_tier_effort=False`` returns the tier's MODEL at that model's own
+        default effort, ignoring the reasoning effort a ``{model, effort}`` tier
+        carries (#2428). For a caller that borrows a tier's model without being
+        a delegated role: the supplement renderer reads ``hi`` only to pick a
+        model, and its per-turn token cap counts reasoning, so inheriting the
+        tier's ``max`` would spend the cap on thinking.
         """
         if model is not None:
             # Explicit run choices override the role, but never rewrite it.
@@ -17925,7 +17938,7 @@ class Session:
             # at the session's own model, and the disclosure code already
             # anticipates exactly that (a pin whose label equals the parent's
             # is why ``owns_model`` is a separate field).
-            return _with_tier_effort(self.model, tier_effort)
+            return _with_tier_effort(self.model, tier_effort if apply_tier_effort else None)
         provider, _, model_id = selector.partition("/")
         # BOTH halves, to the same standard ``configured_effort_tiers`` applies
         # (review R3-F11). Checking only the model let a leading-slash selector
@@ -17939,7 +17952,8 @@ class Session:
         try:
             from local_operator.model.configure import build_model_spec
 
-            return _with_tier_effort(build_model_spec(provider, model_id), tier_effort)
+            spec = build_model_spec(provider, model_id)
+            return _with_tier_effort(spec, tier_effort if apply_tier_effort else None)
         except Exception as exc:  # noqa: BLE001 — an unbuildable selector is a reason, not a crash
             return _unavailable(f"{selector!r} could not be resolved ({exc})")
 
