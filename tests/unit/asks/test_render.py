@@ -323,7 +323,9 @@ def test_a_dismissed_ask_has_its_own_word_on_both_doors():
     assert render.refusal_copy(dismissed) == "you already dismissed this."
     assert render.dismiss_refusal(dismissed) == "you already dismissed this."
     # The declined case keeps its own sentence, and the two must not swap.
-    assert render.refusal_copy(_record(status=store.STATUS_DECLINED)) == "you already declined this."
+    assert (
+        render.refusal_copy(_record(status=store.STATUS_DECLINED)) == "you already declined this."
+    )
 
 
 def test_a_withdrawn_ask_refuses_with_the_chat_route():

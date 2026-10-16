@@ -15,10 +15,12 @@
  *  * A queued ask has a DEADLINE, and the card says when it is (`expires_at`,
  *    rendered on the client clock per §5) rather than leaving the user to guess
  *    whether anybody is still waiting.
- *  * A queued ask can be DISMISSED. Dismissal injects nothing — it buys no
- *    turn — which is why it is offered as a quiet third action rather than a
+ *  * A queued ask can be DISMISSED. Dismissal asks the model nothing — it buys
+ *    no turn — which is why it is offered as a quiet third action rather than a
  *    second button beside Decline, and why its own state line says "no reply
- *    was sent".
+ *    was sent". What it can still OWE is the deadline notice that ask never got
+ *    (design `ask-nonblocking.md` §14), delivered on the conversation's next
+ *    run: the agent's fact, not this card's action.
  *
  * THE SEND BUTTON IS ENABLED ONLY BY A COMPLETE MAP. Every question id must
  * carry a value; a question the user deliberately skipped is sent as an EMPTY
@@ -218,9 +220,11 @@ export function AskCard({
 
 	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
 	   `runtime_live === false` means the relay will have to bring the conversation
-	   up before the op can land, which is a ~30 s envelope against a warm
-	   answer's 1–3 s. `undefined` (an older daemon, or a row from a projection)
-	   promises nothing and keeps the bare `…`.
+	   up before the op can land — FOR ANSWER AND DECLINE, which is a ~30 s envelope
+	   against a warm answer's 1–3 s. A dismissal is the exception that takes the
+	   no-boot door on every surface (design §14, fork A), so `cold` buys it nothing
+	   and nothing here mentions it. `undefined` (an older daemon, or a row from a
+	   projection) promises nothing and keeps the bare `…`.
 
 	   BOTH FACTS ARE READ OFF THE ROW, not passed as props: they are the
 	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
@@ -421,7 +425,7 @@ export function AskCard({
 					    re-derive a stale `open` past its deadline), so the Dismiss gate and
 					    the queue's own rule are the same statement. It stays apart from any
 					    Decline: declining ANSWERS the agent, dismissing answers nobody and
-					    buys no turn. */}
+					    buys no turn (the agent is told on its next run — §14). */}
 					{questions.map((question, index) => (
 						<span
 							key={String(question.id ?? index)}
@@ -440,10 +444,18 @@ export function AskCard({
 							<button
 								type="button"
 								disabled={busy !== ""}
+								aria-busy={busy === "dismiss" || undefined}
 								onClick={dismiss}
 								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
 							>
-								{busy === "dismiss" ? "…" : "dismiss — send no reply"}
+								{/* D1 (design round 1): the label IS the width, so it stays put while
+								    the dismissal is in flight. The in-flight mark used to be the bare
+								    glyph "…", which collapsed the control from 208 px to a 44 px square
+								    under the thumb — a glitch rather than feedback, and now the whole
+								    in-flight life of a dismissal is one append and a flash. The only
+								    change is that it dims (`disabled`) and says it is busy. Kept off the
+								    answer/decline pair, where D1 called the same glyph optional. */}
+								dismiss — send no reply
 							</button>
 							{/* NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16). A dismissal
 							    on a conversation with no runtime used to ENGAGE it to record the

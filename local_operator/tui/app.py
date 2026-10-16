@@ -27990,9 +27990,17 @@ class OperatorApp(App[None]):
             # `AttachClient` raises with `asks/render.refusal_copy`'s own
             # sentence, so the ask says why in its own words rather than in a
             # generic notice; anything else (a dial that timed out) is passed
-            # through as it came.
-            failed = str(exc) or "the answer could not be delivered"
-            logger.warning("could not deliver a fleet answer", exc_info=True)
+            # through as it came. THE FALLBACK IS THE OP'S OWN (design round 1,
+            # D2): every refusal carries a sentence, so this only fires on a
+            # failure that said nothing — and "the answer could not be delivered"
+            # names an answer nobody was ever asked for on a dismissal, whose
+            # whole promise is that nothing is sent.
+            if op == "dismiss":
+                failed = str(exc) or "the dismissal could not be recorded."
+                logger.warning("could not record a fleet dismissal", exc_info=True)
+            else:
+                failed = str(exc) or "the answer could not be delivered"
+                logger.warning("could not deliver a fleet answer", exc_info=True)
         finally:
             self._mark_ask_in_flight(row.ask_id, False)
             await self._reload_fleet_rows()
@@ -28446,7 +28454,13 @@ class OperatorApp(App[None]):
             self._system_notice(text, "warning")
 
     def _dismiss_ask(self, ask_id: str) -> None:
-        """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+        """Take a TIMED-OUT ask out of the view.
+
+        The dismissal's own act asks the model nothing and buys no turn; what it can
+        still OWE is the deadline notice the ask never got (fork A, §14), which the
+        next run's reconcile delivers in its dismissed wording. Its twin in
+        ``asks/queue.py`` and ``serving.py`` says the same thing for the same reason.
+        """
         fleet_row = self._fleet_row_for(ask_id)
         if fleet_row is not None and self._fleet_answer_starts_here(fleet_row):
             self._run_fleet_ask_op(fleet_row, "dismiss")

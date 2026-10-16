@@ -329,8 +329,13 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         return ""  # accepted again; still one response row
     if status == store.STATUS_EXPIRED:
         return "this ask expired 7 days ago — ask again if it is still needed."
-    if status in (store.STATUS_DECLINED, store.STATUS_DISMISSED):
+    if status == store.STATUS_DECLINED:
         return "you already declined this."
+    if status == store.STATUS_DISMISSED:
+        # THE VIEW ACTION HAS ITS OWN WORD (UX round 1, U3 = QA Q3 = agent review
+        # round 1, MINOR-4): a dismissal is a decision the user took, but "declined"
+        # names a different act — the one where the agent was told to decide.
+        return DISMISS_ALREADY_DISMISSED
     if status == store.STATUS_WITHDRAWN:
         # DESIGN §12's sentence, verbatim: a withdrawn ask is not answerable
         # from any surface (its box hides everywhere — ``withdrawn`` is not
@@ -358,11 +363,22 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
 #:
 #: WHY IT NAMES ONLY THE LAPSED CASE. :func:`refusal_copy` answers "why can I not
 #: ANSWER this", and it has a better sentence per state for that question. This
-#: op's question is "why can I not DISMISS this", and its one true answer is that
-#: the ask is still live — the same sentence for an open ask, a declined one and
-#: an answered one, because the surface offered the button on a row that had
-#: already moved on and the user's act is the same either way.
+#: op's question is "why can I not DISMISS this", and the answer for an OPEN,
+#: declined or answered ask is that the ask is still live — one sentence for all
+#: three, because the surface offered the button on a row that had already moved on
+#: and the user's act is the same either way. A DISMISSED ask is the one state that
+#: needs a different word, and it has its own below.
 DISMISS_NOT_LAPSED = "only a timed-out ask can be dismissed; it is still open."
+
+
+#: What a DISMISSED ask answers when something is asked of it AGAIN (UX round 1,
+#: U3 = QA round 1, Q3 = agent review round 1, MINOR-4). ``DISMISS_NOT_LAPSED``
+#: says the ask "is still open", which is the one thing a dismissed ask is not —
+#: a repeat tap on the row the user had struck out was told the opposite of what
+#: they had just done. ONE constant read by :func:`refusal_copy` (an ANSWER or a
+#: revision aimed at a dismissed ask) and :func:`dismiss_refusal` (the repeat tap)
+#: on both doors, so a stale sheet and a live queue cannot word it differently.
+DISMISS_ALREADY_DISMISSED = "you already dismissed this."
 
 
 def dismiss_refusal(record: Mapping[str, Any] | None) -> str:
@@ -377,7 +393,12 @@ def dismiss_refusal(record: Mapping[str, Any] | None) -> str:
 
     if record is None:
         return refusal_copy(None)
-    if str(record.get("status") or "") != store.STATUS_TIMED_OUT:
+    status = str(record.get("status") or "")
+    if status == store.STATUS_DISMISSED:
+        # THE REPEAT TAP, above the lapsed-only rule: a dismissed ask is not a
+        # live one, and this is the sentence that says what the user did.
+        return DISMISS_ALREADY_DISMISSED
+    if status != store.STATUS_TIMED_OUT:
         return DISMISS_NOT_LAPSED
     return ""
 

@@ -2569,6 +2569,37 @@ async def _engage_and_publish(
     return detail
 
 
+async def _republish_durable_projection(daemon: "MobileDaemon", session_id: str) -> None:
+    """Push the durable projection to a session's subscribers, with no engage.
+
+    THE NO-BOOT DISMISSAL IS THE ONE SETTLE THAT PUSHES NO FRAME OF ITS OWN (UX
+    round 1, U1). Every other ask op reaches a runtime, whose own fold publishes
+    the frame; a dismissal is decided by the fold on disk, so nothing repaints an
+    open screen — and the dock and the header chip read ``projection.asks``, so
+    they kept showing a question the user had just dismissed (measured at +45 s,
+    and the dock disagreed with the sheet the whole time). Main did not have this
+    because its engage pushed a frame.
+
+    ``_capture_durable_projection`` is the same fold site the phone's own open and
+    ``/api/asks`` use, so the frame says what a reload would say; the subscribe set
+    is the one the SSE route registers. Nothing here dials, and nothing is claimed
+    active: the session is still cold, and this only corrects what is drawn.
+    """
+    try:
+        projection = await daemon._capture_durable_projection(session_id)
+    except _StaleProjection:
+        # A fenced reconstruction: a live owner's frame has the screen, and the
+        # dismissal is already durable. Nothing here is worth failing it for.
+        return
+    if projection is None:
+        return
+    for target in daemon.table.session_subscribers.get(session_id, set()):
+        try:
+            target.put_nowait(_projection_frame(projection))
+        except asyncio.QueueFull:
+            pass
+
+
 def _journal_page(
     directory: Path,
     state: Any,
@@ -6289,11 +6320,18 @@ def build_app(daemon: MobileDaemon):
                         config_dir(),
                         session_id,
                         str(body.get("ask_id") or ""),
+                        # The phone's body carries no ``by``; the empty word is the
+                        # remote door, which is what ``dismiss_cold`` records for it
+                        # (the same word the live op's own door defaults to).
                         by=str(body.get("by") or ""),
                     )
                     if outcome.get("ok"):
-                        # The same detail the live op answers with, because it IS the
-                        # same op: only the door differs.
+                        # THE SCREEN IS REPAINTED HERE BECAUSE NOTHING ELSE WILL (UX
+                        # round 1, U1): no runtime means no fold publishing a frame,
+                        # and the dock/chip read ``projection.asks``. The same detail
+                        # the live op answers with, because it IS the same op: only
+                        # the door differs.
+                        await _republish_durable_projection(daemon, session_id)
                         return JSONResponse({"ok": True, "detail": "dismissed"})
                     # ONLY a live owner falls back to the dial, and only because that
                     # owner settles the ask itself. Every other refusal is the ANSWER
