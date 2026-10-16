@@ -32,6 +32,19 @@ user-facing release notes.
   Root recovery restores the minimal prerequisite; cross-repository hardening
   is a separate scope, not an incidental repair.
 
+## Delegate so the child can land
+
+Across 48h of children, the median first write/edit landed on call 29: a child
+made to rediscover a diagnosis you hold pays twice — in its budget and in the
+resume brief.
+
+- Briefs carry the change site (file:line), the failing behaviour and the
+  acceptance check; "investigate and fix X" redoes work the delegator did.
+- Coder-class children land early: first edit within ~10 calls; after ~30 with
+  nothing landed, return the precise blocker instead of exploring on.
+- A repeated "explored, nothing landed" gets a smaller, sharper brief, not a
+  repeat.
+
 ## Preflight before expensive dispatch
 
 Inventory the actual loaded briefs and source winners first; measure raw and
