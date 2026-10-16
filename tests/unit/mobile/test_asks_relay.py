@@ -738,6 +738,111 @@ def test_a_cold_dismiss_never_engages(monkeypatch) -> None:
     assert [event["kind"] for event in events][-1] == ask_store.EVENT_DISMISSED
 
 
+def _durable_lapsed_ask(ask_id: str) -> None:
+    """A durable, runtime-less session whose LAPSED ask is in the LOG and the INDEX.
+
+    Both halves are the point. ``dismiss_cold`` folds the LOG (an ask is only
+    dismissible when the log says it lapsed), and the phone's screen reads the
+    INDEX: ``_durable_projection`` builds a stopped conversation's ``asks`` from
+    the derived index (``asks.store.session_asks``), which is what the dock and
+    the header chip draw.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    _session_dir(SESSION_A)
+    directory = config_dir() / "sessions" / SESSION_A
+    asyncio.run(Transcript(directory).append_message(Message.user("existing", id="existing")))
+    now = int(time.time() * 1000)
+    ask_store.append_event(
+        directory,
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now - 3_600_000,
+            "created_at": now - 3_600_000,
+            # Past the deadline (the only state a dismissal is offered on) and
+            # well inside the 7 d window a lapsed row stays visible for.
+            "expires_at": now - 60_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [_question("q1")],
+        },
+    )
+    ask_store.write_entry(
+        config_dir(),
+        SESSION_A,
+        cwd=str(directory),
+        asks=[
+            _pending(
+                {
+                    "ask_id": ask_id,
+                    "status": "timed_out",
+                    "created_at": now - 3_600_000,
+                    "expires_at": now - 60_000,
+                }
+            )
+        ],
+    )
+
+
+def test_a_cold_dismiss_republishes_the_conversation_s_own_asks(monkeypatch) -> None:
+    """UX round 1, U1 (MAJOR): the no-boot path pushes a frame, minus the engage.
+
+    The dock and the header chip read ``projection.asks``, and nothing refreshed
+    them: the card's ``onSettled`` re-reads ``/api/asks`` for the SHEET, so the
+    sheet said "1 timed out" while the dock still read "2 questions timed out"
+    at +45 s, until the user left the screen. Main did not have this because its
+    engage pushed a frame. The dismissal now recaptures the durable projection
+    and publishes it to the session's subscribers — what
+    ``_engage_and_publish``'s repaint does, without starting anything.
+    """
+    from local_operator.mobile.daemon import _durable_projection
+
+    _cold_engage(monkeypatch)
+    _durable_lapsed_ask("ask-lapsed")
+    before = _durable_projection(SESSION_A)
+    assert before is not None, "the fixture must project asks for this cell to mean anything"
+    assert [row.ask_id for row in before.asks or ()] == ["ask-lapsed"]
+
+    client, daemon = _client_and_daemon()
+    subscriber: asyncio.Queue = asyncio.Queue()
+    daemon.table.session_subscribers[SESSION_A] = {subscriber}
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+    assert reply.status_code == 200, reply.text
+
+    frame = subscriber.get_nowait()
+    assert frame["session_id"] == SESSION_A
+    assert [row["ask_id"] for row in frame.get("asks") or ()] == []
+    # Still the cold door: nothing was dialled and nothing was started.
+    assert daemon.table.entries == {}
+
+
+def test_a_cold_dismiss_from_the_phone_records_the_remote_surface(monkeypatch) -> None:
+    """Agent review round 1, MINOR-3: the phone sends no ``by``, so name the door.
+
+    ``daemon.py`` passes ``by=str(body.get("by") or "")`` and the phone's
+    ``ask_dismiss`` body carries no ``by`` at all, which recorded ``by:
+    {"surface": ""}`` — an audit line that names nobody, where the LIVE door
+    records ``"remote"`` for the same tap (``serving.py``: ``by or "remote"``).
+    """
+    _cold_engage(monkeypatch)
+    _durable_ask_session("ask-lapsed", expired=True)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+    assert reply.status_code == 200, reply.text
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert events[-1]["kind"] == ask_store.EVENT_DISMISSED
+    assert events[-1]["by"] == {"surface": "remote"}
+
+
 def test_a_cold_dismiss_of_an_open_ask_refuses_in_the_queues_own_words(monkeypatch) -> None:
     """Only ``ask_owner_present`` falls back to the dial (fork A).
 

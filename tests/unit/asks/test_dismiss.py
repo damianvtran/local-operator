@@ -29,6 +29,7 @@ from typing import Any
 from local_operator.asks import render, store
 from local_operator.asks.dismiss import dismiss_cold
 from local_operator.harness.wake import WakeSchedule
+from local_operator.wakes import store as wakes_store
 from local_operator.wakes.store import read_entry as read_wake_entry
 
 SESSION = "colddismiss01"
@@ -223,3 +224,182 @@ def test_a_cold_dismiss_injects_nothing_of_its_own(tmp_path: Path):
     outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone"))
     assert outcome == {"ok": True}
     assert (directory / "transcript.jsonl").read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+# round 1 remediation — the park marker, the divergent index, the surface word
+# ---------------------------------------------------------------------------
+
+
+class _StoppedProbe:
+    """Exactly the fields the REAL ``AttachedSession.session_was_stopped`` reads.
+
+    Called on the class with this as ``self`` so the cell below exercises the
+    shipped implementation (the marker read plus its live-owner probe) rather
+    than a copy of the rule: a marker no reader consults is not the property the
+    review asked about.
+    """
+
+    _deliberate_stop = False
+
+    def __init__(self, config_dir: Path) -> None:
+        self._config_dir = config_dir
+        self._session_id = SESSION
+
+
+def _park(root: Path, directory: Path, *, stopped_at: int, rows: list[dict[str, Any]]) -> None:
+    """Park the session: an index entry carrying ``stopped_at`` AND ``rows``.
+
+    Both halves matter, and so does the shape they are in. ``stopped_at`` is
+    stamped by the stop path (``session/runtime/control.py:_mark_wakes_dormant``),
+    which counts the HIDDEN rows a session carries — so a stopped conversation
+    whose only wake IS its ask's own deadline row is the reachable state, not a
+    contrived one. The index entry is what every reader of the marker reads:
+    ``attached.session_was_stopped``, ``attention._stopped_marker`` and the
+    desktop warm guards.
+    """
+    wakes_store.write_entry(
+        root,
+        SESSION,
+        cwd=str(directory),
+        schedules=rows,
+        preserve={"stopped_at": stopped_at},
+    )
+
+
+def test_a_cold_dismiss_leaves_a_parked_sessions_stop_marker_alone(tmp_path: Path):
+    """A PARKED SESSION'S PARK MARKER OUTLIVES THE DISMISSAL (agent review round 1, MAJOR).
+
+    ``cancel_wake`` REMOVES the index entry when the remainder is empty
+    (``wakes/arm.py``), and that entry carried ``stopped_at`` — the durable
+    marker that says this conversation was stopped on purpose. With the entry
+    gone, ``session_was_stopped`` answers False, ``attention._stopped_marker``
+    reads "not proven stopped", and the desktop warm guards
+    (``server/utils/desktop_sessions.py``) may start the very runtime this PR
+    promises not to start.
+
+    The cancel buys nothing on a parked entry: every supervisor decision skips a
+    held one (``wakes/supervisor.py``'s ``_is_held_entry``), so the row engages
+    nothing while the session is parked — and it is stale by then, because only
+    a terminal (timed-out) ask can be dismissed. So the row stays, the marker
+    stays, and NO transcript write happens: the mtime that moves a conversation
+    to the top of /resume and the phone's list (QA round 1, Q1) does not move.
+    """
+    directory = _session(tmp_path)
+    hidden = _wake_row(store.timeout_row_id(ASK_ID), kind="ask_timeout", hidden=True)
+    _seed_wakes(directory, [hidden])
+    _park(tmp_path, directory, stopped_at=NOW - 60_000, rows=[hidden])
+    before = (directory / "transcript.jsonl").read_bytes()
+    mtime = (directory / "transcript.jsonl").stat().st_mtime_ns
+
+    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    assert outcome == {"ok": True}
+
+    entry = read_wake_entry(tmp_path, SESSION)
+    assert entry is not None, "the dismissal removed the entry that carried stopped_at"
+    assert entry["stopped_at"] == NOW - 60_000
+    assert wakes_store.is_held(entry) is True
+    assert [row["id"] for row in entry["schedules"]] == [store.timeout_row_id(ASK_ID)]
+    assert _wake_ids(directory) == [store.timeout_row_id(ASK_ID)]
+    # No transcript write at all, so the conversation keeps its place in /resume.
+    assert (directory / "transcript.jsonl").read_bytes() == before
+    assert (directory / "transcript.jsonl").stat().st_mtime_ns == mtime
+
+    # The two readers the review named still read "stopped".
+    from local_operator.session.attention import _stopped_marker
+
+    assert _stopped_marker(directory) is True
+    from local_operator.session.attached import AttachedSession
+
+    assert _run(AttachedSession.session_was_stopped(_StoppedProbe(tmp_path))) is True
+
+
+def test_a_cold_dismiss_still_drops_the_wake_row_when_nothing_parks_it(tmp_path: Path):
+    """THE OTHER SIDE OF THE PARKED RULE, and why the row must go there.
+
+    With no ``stopped_at``/``held_at`` the entry is not parked, so nothing
+    suppresses its fire: the supervisor engages a runtime for a due row, and a
+    crashed conversation's stale deadline row would boot exactly the session the
+    dismissal exists to avoid booting. So the row goes — and the transcript gains
+    the empty ``wake_schedules`` bookkeeping row whose mtime moves the
+    conversation in /resume. That reorder is accepted rather than overlooked: the
+    wake list genuinely changed, and this session never carried a park marker for
+    the entry removal to destroy.
+    """
+    directory = _session(tmp_path)
+    hidden = _wake_row(store.timeout_row_id(ASK_ID), kind="ask_timeout", hidden=True)
+    _seed_wakes(directory, [hidden, _wake_row("w-user")])
+    wakes_store.write_entry(
+        tmp_path, SESSION, cwd=str(directory), schedules=[hidden, _wake_row("w-user")]
+    )
+
+    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    assert outcome == {"ok": True}
+    assert _wake_ids(directory) == ["w-user"]
+    entry = read_wake_entry(tmp_path, SESSION)
+    assert entry is not None
+    assert wakes_store.is_held(entry) is False
+    assert [row["id"] for row in entry["schedules"]] == ["w-user"]
+
+
+def test_a_cold_dismiss_repairs_an_index_row_the_transcript_never_carried(tmp_path: Path):
+    """QA round 1, Q2: a divergent index keeps the row alive, so the dismissal heals it.
+
+    ``cancel_wake`` reads its base from the TRANSCRIPT (``wakes/arm.py``'s own
+    invariant) and refuses with ``wake_not_found`` when the id is not in it —
+    which this door used to swallow, leaving an index row the supervisor reads
+    and fires. The repair is the arm module's own: ``repair_index`` re-projects
+    the transcript onto the index, so the stale row goes and the rows the
+    transcript does carry (``w-user`` here) survive untouched. Best-effort, like
+    every other index writer: an unreadable transcript leaves the index alone.
+    """
+    directory = _session(tmp_path)
+    _seed_wakes(directory, [_wake_row("w-user")])
+    wakes_store.write_entry(
+        tmp_path,
+        SESSION,
+        cwd=str(directory),
+        schedules=[
+            _wake_row("w-user"),
+            _wake_row(store.timeout_row_id(ASK_ID), kind="ask_timeout", hidden=True),
+        ],
+    )
+
+    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    assert outcome == {"ok": True}
+    entry = read_wake_entry(tmp_path, SESSION)
+    assert entry is not None
+    assert [row["id"] for row in entry["schedules"]] == ["w-user"]
+    assert _wake_ids(directory) == ["w-user"]
+
+
+def test_a_cold_dismiss_records_the_surface_the_live_door_would(tmp_path: Path):
+    """AGENT REVIEW ROUND 1, MINOR-3: the phone's dismissal names no surface.
+
+    ``mobile/daemon.py`` passes ``by=str(body.get("by") or "")`` and the phone's
+    ``ask_dismiss`` body has no ``by``, so the cold door recorded
+    ``by: {"surface": ""}`` — an audit line that names nobody, where the live
+    door records ``"remote"`` for the same tap (``serving.py``: ``by or
+    "remote"``). The empty string is the one input that means "the remote door
+    did not name itself", so the cold door defaults it the same way.
+    """
+    directory = _session(tmp_path)
+    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="", now_ms=NOW))
+    assert outcome == {"ok": True}
+    assert store.read_events(directory)[-1]["by"] == {"surface": "remote"}
+
+
+def test_a_second_cold_dismiss_says_the_ask_is_already_dismissed(tmp_path: Path):
+    """UX round 1, U3 = QA Q3 = agent review MINOR-4: the repeat tap.
+
+    A second dismissal answered "only a timed-out ask can be dismissed; it is
+    still open." — which is the opposite of what the user did, on the one row
+    the surface had already struck out. The dismissed state gets its own
+    sentence, shared with the live door (``AskQueue.dismiss``) because both doors
+    answer this question with the same words.
+    """
+    directory = _session(tmp_path)
+    assert _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW)) == {"ok": True}
+    again = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW + 1))
+    assert again == {"ok": False, "error": "you already dismissed this."}
+    assert _kinds(directory) == [store.EVENT_QUEUED, store.EVENT_DISMISSED]

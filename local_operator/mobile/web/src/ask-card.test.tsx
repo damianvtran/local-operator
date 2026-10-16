@@ -408,6 +408,28 @@ describe("AskCard", () => {
 		).toBeTruthy();
 	});
 
+	it("keeps the dismiss control's width while the dismissal is in flight", async () => {
+		/* D1 (design round 1): the in-flight mark used to be the bare glyph `…`,
+		   which collapsed the control from 208 px to a 44 px square under the
+		   thumb. The label IS the width, so keeping it — dimmed and disabled by
+		   the `busy` state — is the whole fix, and the assertion is that the
+		   in-flight name is the resting one. The glyph stays on answer/decline,
+		   where D1 called it optional. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise<never>(() => {}),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expandLapsed();
+		const resting = screen.getByRole("button", { name: "dismiss — send no reply" });
+		fireEvent.click(resting);
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		const inFlight = screen.getByRole("button", { name: "dismiss — send no reply" });
+		// The same node, so the same box: nothing remounted and no label changed.
+		expect(inFlight).toBe(resting);
+		expect((inFlight as HTMLButtonElement).disabled).toBe(true);
+		expect(inFlight.getAttribute("aria-busy")).toBe("true");
+	});
+
 	it("promises no engage for a COLD dismissal, before or during the tap", async () => {
 		/* FORK A (2026-10-16): the relay used to ENGAGE the conversation to RECORD the
 		   dismissal, so the card said so in advance (U3) and named the ~30 s while it

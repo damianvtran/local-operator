@@ -395,6 +395,28 @@ def test_a_dismissal_before_the_deadline_owes_nothing():
     assert store.expected_row_ids(record) == []
 
 
+def test_a_dismissed_notice_already_in_the_transcript_is_not_owed():
+    """The field says a row is still OWED, so a durable one clears it.
+
+    ``notice_owed`` was read off the dates alone, so a dismissed ask whose
+    ``ask-timeout-<id>`` row had already landed still said ``notice_owed: True``
+    (agent review round 1, MINOR-2) — and ``expected_row_ids``, the queue's
+    reconcile and every future reader take that field at its word. The fold has
+    the facts (``present_ids``), so it answers the question it is asked rather
+    than the rule behind it. ``delivered`` is the any-row form (see
+    ``delivered_hint``): a settled row a dismissal arrived AFTER is the answer
+    the model already has, which the notice's own N8 rule lets stand.
+    """
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(
+        events, BASE + 200_001, present_ids=[store.timeout_row_id("a-1")]
+    )
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["delivered"] is True
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
+
+
 def test_a_withdrawn_row_folds_to_withdrawn_and_leaves_the_outstanding_set():
     """Rule §12: a withdrawn row with NO answered sibling is terminal-on-write.
 
