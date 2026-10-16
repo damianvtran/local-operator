@@ -107,6 +107,12 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   - Changing steer semantics for every surface. Typed steers behave the same way today (QA 13b); that is a harness decision outside this feature.
   **Overturned by:** the owner-side refusal landing, which closes the race; the pinned test's "current behaviour" half then flips to a 409.
   **Owner:** coder.
+- **V14 — Binding a spoken take to its turn.** *(Added slice 1, round 3.)*
+  **Taken:** a take is bound to the turn whose stream carries the user `message_start` with `message.id ==` the take's `request_id`; timing never binds. The id equality is pinned by `tests/e2e/test_voice_take_binding_e2e.py::test_a_take_binds_to_the_user_message_start_whose_id_is_its_request_id`.
+  - It holds for every admission path: a take admitted as a prompt, a take steered mid-turn (delivered at a tool boundary), and a take steered into a turn's tail and carried by `_flush_parked_deliveries` after the turn ends. It holds live and on an `after_seq` replay.
+  - `admission.command_id` in the utterance's 200 is the same UUID.
+  **Rejected:** binding by arrival order or by "the next turn after the POST". A steer can land at a tool boundary, at the turn's end, or in the next turn, and a replay re-delivers frames out of wall-clock time.
+  **Owner:** coder (backend pin), UI (the binding).
 - **V12 — Input mode.**
   **Taken:** push-to-talk only in v1, reusing `keymap.push_to_talk`. Hands-free (VAD, echo cancellation, barge-in) is deferred.
   **Rejected:** always-listening by default. Echo from the app's own TTS, accidental prompts to an agent that holds tools, and per-utterance STT spend.
@@ -124,6 +130,7 @@ Every route uses `require_desktop`.
   - 409: `voice_unavailable` (no TTS path; STT absence is allowed because of the text door) or `voice_store_busy`.
 - `POST /v1/desktop/voice/utterance` (multipart)
   - Body: `session_id`, `request_id`, and either `file` (wav/webm/ogg/mp4, ≤16 MiB) or `text`.
+  - `request_id` is the take's BINDING KEY (V14): the user `message_start` that admits it on the session stream carries `message.id == request_id`, and the 200's `admission.command_id` equals it.
   - `request_id` is a dashed lowercase UUID, the `RequestID` type of `/messages` (`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`). It is the receipt journal key, so a retry reuses it and a new utterance mints a new one. *(Stated in slice 1, round 1; the type was always `/messages`' own.)*
   - 200: `{text, path, admission: MessageAdmission}`.
   - 409: `voice_not_enabled`, `approval_pending` (V13: any pending card), or `stt_unavailable` with the cascade's reason.
@@ -172,6 +179,10 @@ local-operator-ui:
   - `use-speech-to-text-manager.ts`: a VOICE priority, so the PTT hold sends an utterance when the viewed session holds the slot.
   - `src/renderer/src/dev-driver/install.ts`: a `voiceUtterance(text)` verb. It never answers a gate.
   - i18n catalogues.
+
+## Not addressed
+
+- **The published user `message_start` carries `input_mode: null`** even though the journal row says `"dictated"` (found slice 1, round 3; also on origin/main `0301a5731`). The runtime emits the field: `Session._emit` and `ServingSessionHandle.subscribe_events` both carry `"dictated"`. The runtime then strips it per connection at `local_operator/session/runtime/server.py:8232` (`if not conn.input_metadata: frame = _strip_input_from_relay_frame(frame)`, the strip at `:479`), because `conn.input_metadata` (`:3894`) is set only when the viewer's auth frame says `input_mode: true`, and the desktop viewer's `AttachClient` auth (`local_operator/mobile/attach_client.py:1207-1255`) never sets it. The renderer cannot tell a dictated row from a typed one on the live stream. Voice does not depend on it (V14 binds by id). The fix is a one-line negotiation in the attach client plus a test, outside this feature.
 
 ## Order
 
