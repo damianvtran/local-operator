@@ -2605,7 +2605,11 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
-        elif setting.kind in (settings_io.Kind.CASCADE, settings_io.Kind.LIST):
+        elif setting.kind in (settings_io.Kind.CASCADE, settings_io.Kind.LIST) or (
+            # A ``{model, effort}`` subagent tier (#2428) is JSON too.
+            setting.validate_value is settings_io.validate_tier_value
+            and value.strip().startswith("{")
+        ):
             # The guessing ladder below knows int/float/bool/null and nothing
             # structured in EITHER sense:
             #

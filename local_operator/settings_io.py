@@ -71,7 +71,12 @@ from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
-from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
+from local_operator.model.effort import (
+    EFFORT_ORDER,
+    FALLBACK_EFFORTS,
+    TIER_EFFORTS,
+    parse_tier_mapping,
+)
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -1415,6 +1420,67 @@ def _validate_advertise_hosts(value: object) -> object:
 #: syncs its title into this key, so a title the session layer accepted must
 #: never be refused by the config layer mid-sync.
 _AIDA_NAME_MAX_CHARS = 80
+
+
+def validate_tier_value(value: Any) -> None:
+    """A ``subagents.models.<tier>`` value: a selector string or a ``{model, effort}`` map.
+
+    The mapping form (#2428) gives a tier a reasoning effort; it mirrors a
+    fallback-chain hop and is parsed by the same leaf function the launch path
+    uses (``model.effort.parse_tier_mapping``), so a value this accepts is one
+    the launch resolves. A string stays the row's ordinary TEXT contract — this
+    validator only exists because ``validate``'s generic TEXT arm refuses every
+    non-string. A string that LOOKS like JSON is refused: stored verbatim it
+    would be read as a ``provider/model`` selector and fail at launch (a
+    well-formed JSON string never gets here — :func:`write_setting` parses it
+    first — so what reaches this branch is JSON that did not parse).
+
+    This checks the value's SHAPE only. Whether the selector names a usable
+    ``provider/model`` (or the ``default`` sentinel) is judged at launch by the
+    tier reader, exactly as it is for a bare string, so the two forms are held
+    to one standard.
+    """
+    if isinstance(value, str):
+        if value.strip().startswith("{"):
+            raise ValueError(_TIER_JSON_HINT)
+        return
+    if parse_tier_mapping(value) is None:
+        raise ValueError(
+            "expected provider/model, or "
+            f'{{"model": "provider/model", "effort": "{"|".join(TIER_EFFORTS)}"}}'
+        )
+
+
+#: The one hint for a tier mapping typed as JSON that did not parse, shared by
+#: :func:`coerce` and :func:`validate_tier_value` so the page, ``lop config
+#: edit`` and ``PATCH /v1/settings`` say the same thing.
+_TIER_JSON_HINT = 'expected JSON, e.g. {"model": "provider/model", "effort": "high"}'
+
+
+def _normalise_tier_value(value: Any) -> Any:
+    """A tier value as it should be STORED, whichever writer delivered it.
+
+    ``read_setting`` serves a mapping tier as JSON text, and two writers —
+    ``PATCH /v1/settings/{key}`` and the agent ``setting`` tool — hand their
+    value to :func:`write_setting` without :func:`coerce`. Without this the
+    exact string a client was served came back as a string and was refused,
+    so the desktop could not save a row it had just displayed (#2428 R1-1).
+    JSON that does not parse is returned as-is so the validator refuses it
+    with the JSON hint. A mapping the parser accepts is stored in its
+    normalised form (stripped selector, lowercased effort, ``auto`` dropped),
+    so the file holds what the launch path will act on, not ``" MAX "``.
+    """
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    if isinstance(value, Mapping):
+        parsed = parse_tier_mapping(dict(value))
+        if parsed is not None:
+            selector, effort = parsed
+            return {"model": selector} if effort is None else {"model": selector, "effort": effort}
+    return value
 
 
 def _validate_delegated_max_age_hours(value: Any) -> None:
@@ -3131,6 +3197,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_lo_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     Setting(
         key="subagents.models.med",
@@ -3192,6 +3259,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_med_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     Setting(
         key="subagents.models.hi",
@@ -3253,6 +3321,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_hi_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     # -- resource classification --------------------------------------------
     #
@@ -5460,6 +5529,10 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
         # Hand-written YAML maps and the text editor share the same contract.
         # Python's dict repr uses single quotes and cannot round-trip as JSON.
         return json.dumps(raw, default=str)
+    if setting.validate_value is validate_tier_value and isinstance(raw, Mapping):
+        # Same contract as model_overrides above: a ``{model, effort}`` tier
+        # (#2428) is shown as JSON the TEXT editor can round-trip.
+        return json.dumps(raw, default=str)
     if setting.validate_value is _validate_openrouter_max_price and isinstance(raw, Mapping):
         # Same contract as model_overrides above: the TUI editor is text, so a
         # stored mapping (PATCH route, hand-written YAML) is shown as JSON the
@@ -5556,6 +5629,14 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.validate_value is validate_tier_value and text.startswith("{"):
+        # A ``{model, effort}`` tier typed on the page or via ``lop config
+        # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON
+        # text, which the tier reader would take for a selector.
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError(_TIER_JSON_HINT) from None
     return text
 
 
@@ -5791,6 +5872,10 @@ def write_setting(
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
         else:
             value = _keymap.normalize_key(value)
+    if setting.validate_value is validate_tier_value:
+        # Same reason as the HOTKEY arm: not every writer passes through
+        # `coerce`, so a tier's JSON text and its spelling are settled here.
+        value = _normalise_tier_value(value)
     # The group check needs the CURRENT config, so it is supplied here rather
     # than left to each caller: this is the one function every writer funnels
     # through, including `lop config edit` and `PATCH /v1/settings`, neither of

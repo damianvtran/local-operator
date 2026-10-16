@@ -41,7 +41,7 @@ A registered profile is not automatically a live peer in the current process. In
 
 Use the `task` tool when the current job contains an independent, well-bounded slice that can run concurrently or needs isolated context. A task subagent:
 
-- inherits the parent model and reasoning effort, working directory, approval gate, and compaction budget. `effort` buys a different MODEL for the child, not a deeper reasoning level, and who may choose it is the OPERATOR's decision, not yours. `subagents.model_choice` decides that, and its default is `operator`: no tier is advertised to you and asking for one is refused — omit the field. `model="inherit"` can still bypass a role pin; exact `model="provider/id"` needs the model-choice arm. The way back is theirs to take (set `subagents.model_choice=model` in `/settings`, or `lop config edit subagents.model_choice model`); only then may `effort` name a tier they configured under `subagents.models`, and the `task` schema then lists exactly those. (An operator who wants one role on a stronger model does not need to hand you the picker at all: a role's own profile carries its `effort` pin, and the desktop profile editor writes it.)
+- inherits the parent model and reasoning effort, working directory, approval gate, and compaction budget. `effort` picks an operator-configured model TIER, not a reasoning level you choose: the tier names the child's model, and the operator may also give it a reasoning effort (`subagents.models.hi: {model: provider/model, effort: xhigh}`) that the child then runs at. Who may choose a tier is the OPERATOR's decision, not yours. `subagents.model_choice` decides that, and its default is `operator`: no tier is advertised to you and asking for one is refused — omit the field. `model="inherit"` can still bypass a role pin; exact `model="provider/id"` needs the model-choice arm. The way back is theirs to take (set `subagents.model_choice=model` in `/settings`, or `lop config edit subagents.model_choice model`); only then may `effort` name a tier they configured under `subagents.models`, and the `task` schema then lists exactly those. (An operator who wants one role on a stronger model does not need to hand you the picker at all: a role's own profile carries its `effort` pin, and the desktop profile editor writes it.)
 - receives only the prompt passed to `task`; include every requirement and expected output
 - reports through the parent session's jobs/events — the launch RESULT names the
   model each child will run on (`on <provider/model>`, or `on this session's model
@@ -60,7 +60,7 @@ Use the `task` tool when the current job contains an independent, well-bounded s
 Use `task(label="design", prompt="…", agent="designer", model="inherit")` to
 keep the role but bypass its model pin. Batch items accept the same `model`.
 Omission keeps existing role/tier defaults; it is **not** explicit inheritance.
-Leave unused optional fields absent. `effort` changes the model tier, not reasoning.
+Leave unused optional fields absent. `effort` changes the model tier; reasoning changes only with the effort the operator configured on that tier.
 
 `model="provider/model-id"` chooses an exact per-run model when
 `subagents.model_choice=model`; catalogue and usable credentials are checked before
