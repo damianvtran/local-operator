@@ -49,6 +49,11 @@ def test_refusal_is_value_free(tmp_path):
         "PR #99 CHANGES",
         "next step: cut the release window",
         "remaining work on the branch",
+        "checks green",
+        "MRs #12 and #13 are waiting on review",
+        "mr #12 needs review",
+        "commit cafebabe merged",
+        "sha deadbeef landed",
     ],
 )
 def test_scope_fit_refuses_work_shapes(text):

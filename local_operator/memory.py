@@ -166,7 +166,7 @@ def _fold(text: str) -> str:
 # deliberately narrow: they require WORK CONTEXT next to the locator, and are only ever
 # matched against the FOLDED copy (never stored or echoed).
 #
-# QA round 1 (M-1): a bare `#N` is how people write chapters, order/invoice/room/seat #
+# QA round 1 (M-1): a bare `#N` is how people write chapters, order/invoice/room/seat
 # and extension numbers (`Office #4`, `order #1123`), and `next step`/`HOLD` occur in
 # ordinary prose (`next step is to fold in the flour`, `a HOLD on the cheque`). A locator
 # alone is therefore NOT a marker: it must sit next to a work word.
@@ -180,7 +180,7 @@ def _fold(text: str) -> str:
 # (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
 # deliberately rejects; the guide states this bound rather than overclaiming.
 _WORK_WORD = (
-    r"pr|pull request|merge request|(?-i:MRS?)|issue|ticket|ci|pipeline|build|commit|"
+    r"pr|pull request|merge request|(?-i:MRs?|mrs?)|issue|ticket|ci|pipeline|build|checks|commit|"
     r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
     r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
 )
@@ -192,12 +192,12 @@ _WORK_REF = re.compile(
 )
 # A named commit needs BOTH a letter and a digit in the hash: `commit 5000000` is
 # ordinary prose (code review round 1, minor), a real abbreviated SHA is not all digits.
-_WORK_NOUN = r"pr|(?-i:MR)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
+_WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
 _WORK_SHA = re.compile(
-    r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b", re.I
+    r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I
 )
 _WORK_STATUS = re.compile(
-    r"\b(?:ci|pipeline|build)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
+    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
     r"\b"
     r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
     r"\b(?:pr|(?-i:MR)|#\d|into main)\b"
