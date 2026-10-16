@@ -9033,8 +9033,21 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
         # (``asks/queue._refresh``) — a durable cross-session view must not show
         # an answer that a runtime death would erase. A queue that predates the
         # parameter answers the plain call, which is the log-only view.
+        #
+        # ``lapsed_visible_ms``: the ``asks.lapsed_visible_for`` window
+        # (decisions D8/D9), read per publish so a changed setting reaches the
+        # rows AND the tally below together — no surface may count an ask it no
+        # longer shows. Read off the queue, because the queue knows the config
+        # directory its log lives under.
+        window = getattr(queue, "lapsed_visible_ms", None)
         try:
-            rows = [dict(row) for row in cast("Any", folder(drafts=True))]
+            if callable(window):
+                rows = [
+                    dict(row)
+                    for row in cast("Any", folder(drafts=True, lapsed_visible_ms=window()))
+                ]
+            else:
+                rows = [dict(row) for row in cast("Any", folder(drafts=True))]
         except TypeError:
             rows = [dict(row) for row in cast("Any", folder())]
     except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero

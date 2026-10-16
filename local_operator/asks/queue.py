@@ -87,6 +87,18 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _lapsed_visible_ms(config_dir: Path) -> int:
+    """The ``asks.lapsed_visible_for`` window, for the deadline timer.
+
+    A module-level seam so a test can pin the window without a ``config.yml``;
+    the import is local because ``visibility`` reaches the config watcher, which
+    this module's other paths never need.
+    """
+    from local_operator.asks.visibility import lapsed_visible_ms
+
+    return lapsed_visible_ms(config_dir)
+
+
 class AskQueue:
     """The session's queued asks: enqueue, answer, withdraw, fold, deliver."""
 
@@ -1731,8 +1743,18 @@ class AskQueue:
 
     # -- the wire view and the derived index -------------------------------
 
+    def lapsed_visible_ms(self) -> int:
+        """This queue's ``asks.lapsed_visible_for`` window, read from ITS config
+        directory (the one the log and index live under), for a surface that
+        passes it to :meth:`projection`."""
+        return _lapsed_visible_ms(self._config_dir)
+
     def projection(
-        self, now_ms: int | None = None, *, drafts: bool = False
+        self,
+        now_ms: int | None = None,
+        *,
+        drafts: bool = False,
+        lapsed_visible_ms: int = store.DEFAULT_LAPSED_VISIBLE_MS,
     ) -> list[dict[str, Any]]:
         """The ``PendingAsk`` rows for a surface, open first, capped.
 
@@ -1745,6 +1767,12 @@ class AskQueue:
         every non-``expired`` row would have this writer re-create an entry the
         reader sweeps as stale — the two would disagree forever about whether a
         week-old answered ask is still worth showing. One horizon, both sides.
+
+        ``lapsed_visible_ms`` is the ``asks.lapsed_visible_for`` DISPLAY window
+        (decision D6): a surface passes it to drop a lapsed row sooner. The
+        index writer (:meth:`_refresh`) does NOT, so the derived index stays
+        data at the 7 d horizon the sweep shares, and its readers apply the
+        window themselves (``asks/store._shown_rows``).
         """
         stamp = now_ms if now_ms is not None else self._now()
         horizon_ms = store.LATE_WINDOW_S * 1000
@@ -1755,6 +1783,8 @@ class AskQueue:
                 continue
             expires_at = int(record.get("expires_at") or 0)
             if expires_at and stamp - expires_at > horizon_ms:
+                continue
+            if store.lapsed_hidden(status, expires_at, stamp, lapsed_visible_ms):
                 continue
             # A DRAFT IS PUBLISHED ONLY FOR AN OPEN ASK (review round 2's one new
             # minor). Two reasons, and the first is the one that shows on the
@@ -1878,21 +1908,46 @@ class AskQueue:
         One task, not one per ask: N asyncio timers for N asks is the shape the
         design rejects, and a re-check on a bounded tick absorbs clock changes
         rather than arming a multi-hour timeout.
+
+        TWO KINDS OF INSTANT wake it (decision D9 ii): an ``open`` ask's
+        deadline, and the first millisecond past a LAPSED ask's
+        ``asks.lapsed_visible_for`` window. The second has no event of its own
+        — nothing is written when a row stops being shown — so without it a
+        running session would keep painting a row the setting says is gone
+        until the next turn happened to republish. The reconcile at the wake
+        ends in ``_refresh`` → ``publish_ask_state``, which re-reads the window.
+        The window is read per loop, so a changed setting takes effect at the
+        next tick (the session also republishes at once on the change itself).
         """
         try:
             while not self._disposed:
-                opens = [
-                    int(r["expires_at"])
-                    for r in self.records()
-                    if r["status"] in (store.STATUS_OPEN,)
-                ]
-                if not opens:
+                now = self._now()
+                records = self.records(now)
+                due = [int(r["expires_at"]) for r in records if r["status"] == store.STATUS_OPEN]
+                window = self.lapsed_visible_ms()
+                due.extend(
+                    # ``+ 1``: the horizon is strict (``now - expires_at >
+                    # window``), so this is the first instant the row is hidden.
+                    int(r["expires_at"]) + window + 1
+                    for r in records
+                    if store.is_lapsed(r["status"])
+                    and r.get("expires_at")
+                    and not store.lapsed_hidden(r["status"], r["expires_at"], now, window)
+                )
+                if not due:
                     return
-                delay_s = min(policy.MAX_TICK_MS, max(0, min(opens) - self._now())) / 1000.0
+                delay_s = min(policy.MAX_TICK_MS, max(0, min(due) - now)) / 1000.0
                 await asyncio.sleep(max(0.05, delay_s))
                 if self._disposed:
                     return
-                await self.reconcile()
+                # An OPEN ask keeps today's every-tick reconcile. A queue with
+                # only lapsed rows reconciles when a window has actually passed:
+                # at the 7 d default it would otherwise rewrite the index and
+                # republish every minute for a week, for a row nothing changed.
+                if any(r["status"] == store.STATUS_OPEN for r in records) or self._now() >= min(
+                    due
+                ):
+                    await self.reconcile()
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001 — a timer must never kill the session

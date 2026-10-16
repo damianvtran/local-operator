@@ -334,6 +334,18 @@ export type MessageParams = {
   "wire.settings.appearance.title": undefined;
   "wire.settings.approvals.description": undefined;
   "wire.settings.approvals.title": undefined;
+  "wire.settings.asks.description": undefined;
+  "wire.settings.asks.title": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.1h.description": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.1h.label": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.24h.description": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.24h.label": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.7d.description": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.7d.label": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.at_expiry.description": undefined;
+  "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label": undefined;
+  "wire.settings.asks_lapsed_visible_for.help": undefined;
+  "wire.settings.asks_lapsed_visible_for.label": undefined;
   "wire.settings.auto_save_conversation.choice.false.description": undefined;
   "wire.settings.auto_save_conversation.choice.true.description": undefined;
   "wire.settings.auto_save_conversation.help": undefined;

@@ -885,6 +885,17 @@ SECTIONS: tuple[Section, ...] = (
     ),
     # Preserve the established Model landing row and short-terminal editor target.
     Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
+    # Queued asks (decisions D6–D9). LIVE because every reader applies the
+    # window at READ time — the index readers per request, the live
+    # projection per publish — and a running session republishes on the
+    # change (``Session._apply_config_change``), so an edit lands with no
+    # relaunch on the terminal, the desktop app and the phone alike.
+    Section(
+        "asks",
+        _t(_ws.asks_title()),
+        Scope.LIVE,
+        _t(_ws.asks_description()),
+    ),
 )
 
 
@@ -5310,6 +5321,46 @@ SETTINGS: tuple[Setting, ...] = (
         # designated" (badge only).
         empty_unsets=True,
         help=_t(_ws.team_bridge_session_help()),
+    ),
+    # -- asks ------------------------------------------------------------------
+    # How long a LAPSED (timed-out, unanswered) ask stays shown, measured from
+    # its deadline. Display only (D6): the late-answer window and the index
+    # sweep stay at 7 d, and settled rows keep the 7 d horizon. The default is
+    # a literal because this module stays off the readers' import path;
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins it to
+    # ``asks.store.DEFAULT_LAPSED_VISIBLE_FOR``, and the choice VALUES are the
+    # keys of ``asks.store.LAPSED_VISIBLE_FOR_S`` (pinned beside it). An ENUM,
+    # not an INT of hours (D7): a dropdown of four was asked for.
+    Setting(
+        key="asks.lapsed_visible_for",
+        path=("asks", "lapsed_visible_for"),
+        section="asks",
+        label=_t(_ws.asks_lapsed_visible_for_label()),
+        kind=Kind.ENUM,
+        default="7d",
+        help=_t(_ws.asks_lapsed_visible_for_help()),
+        choices=(
+            Choice(
+                "at_expiry",
+                _t(_ws.asks_lapsed_visible_for_choice_at_expiry_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_at_expiry_description()),
+            ),
+            Choice(
+                "1h",
+                _t(_ws.asks_lapsed_visible_for_choice_1h_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_1h_description()),
+            ),
+            Choice(
+                "24h",
+                _t(_ws.asks_lapsed_visible_for_choice_24h_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_24h_description()),
+            ),
+            Choice(
+                "7d",
+                _t(_ws.asks_lapsed_visible_for_choice_7d_label()),
+                _t(_ws.asks_lapsed_visible_for_choice_7d_description()),
+            ),
+        ),
     ),
 )
 
