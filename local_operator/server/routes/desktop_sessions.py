@@ -4187,8 +4187,15 @@ async def asks(request: Request):
     """
     async with errors(request):
         from local_operator.asks.store import index_asks
+        from local_operator.asks.visibility import lapsed_visible_ms
 
-        rows = await asyncio.to_thread(index_asks, store_root(request))
+        root = store_root(request)
+        # ``asks.lapsed_visible_for`` (decision D8). The desktop server starts
+        # no config watcher, so the window is polled fresh per request — ON the
+        # loop, where a poll's listener fan-out belongs (the team-bridge status
+        # route's pattern) — and only the int crosses into the worker thread.
+        window = lapsed_visible_ms(root, poll_now=True)
+        rows = await asyncio.to_thread(index_asks, root, lapsed_visible_ms=window)
         return reply({"asks": rows})
 
 

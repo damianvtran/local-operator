@@ -1,0 +1,64 @@
+{
+  "wire.settings.asks.description": {
+    "role": "settings section description",
+    "tone": "plain, precise",
+    "note": "Says the setting applies immediately everywhere (terminal UI, desktop app, phone). Do not imply a restart."
+  },
+  "wire.settings.asks.title": {
+    "role": "settings section title",
+    "tone": "plain",
+    "note": "Section heading for the queued-question settings. 'Ask' is the product noun for a question an agent queues for the user; keep it short and consistent with the ask bar/list vocabulary."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.1h.description": {
+    "role": "dropdown choice description",
+    "tone": "plain",
+    "note": "Measured from the ask's deadline, not from when it was asked."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.1h.label": {
+    "role": "dropdown choice label",
+    "tone": "plain",
+    "note": "A duration; use the locale's natural form for one hour."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.24h.description": {
+    "role": "dropdown choice description",
+    "tone": "plain",
+    "note": "Measured from the ask's deadline."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.24h.label": {
+    "role": "dropdown choice label",
+    "tone": "plain",
+    "note": "A duration of 24 hours (not 'one day'): the four choices read as a ladder."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.7d.description": {
+    "role": "dropdown choice description",
+    "tone": "plain",
+    "note": "Measured from the ask's deadline; '(default)' marks the shipped value, keep it."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.7d.label": {
+    "role": "dropdown choice label",
+    "tone": "plain",
+    "note": "A duration of 7 days."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.at_expiry.description": {
+    "role": "dropdown choice description",
+    "tone": "plain",
+    "note": "Short gloss beside the choice."
+  },
+  "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label": {
+    "role": "dropdown choice label",
+    "tone": "plain",
+    "note": "The ask disappears the moment its deadline passes."
+  },
+  "wire.settings.asks_lapsed_visible_for.help": {
+    "role": "help text",
+    "tone": "plain, precise",
+    "maxCells": 58,
+    "note": "Shown as '<help> · default: 7d' on the settings page's 74-cell detail line at 80 columns; keep the help within 58 cells so the default clause fits. Display only: hiding never answers or deletes the ask."
+  },
+  "wire.settings.asks_lapsed_visible_for.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer."
+  }
+}

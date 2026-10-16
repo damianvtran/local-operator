@@ -339,8 +339,11 @@ test the way `test_bash_shell_row_shares_the_consumer_path`
 
 **Per-call override.** Add `memory_mb: float | None = None` to `BashParams`
 (`tools/builtin.py:2009`). Semantics: `None` = use config; `0` = disable for this
-call; `> 0` = explicit ceiling. Its schema description must stay terse (the schema
-rides every request — the same note at `tools/builtin.py:2012`).
+call; `> 0` = explicit ceiling only while `bash.memory.enabled` is true. The
+machine-wide master off switch disables positive per-call caps too; an explicit
+number selects a ceiling, not permission to override that preference. Its schema
+description must stay terse (the schema rides every request — the same note at
+`tools/builtin.py:2012`).
 
 ## 8. Interface contract
 

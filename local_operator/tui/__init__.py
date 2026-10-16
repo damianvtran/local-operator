@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from local_operator.i18n.keys import tui_small as copy
+from local_operator.i18n.text import tr
 from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui.input_decode import install_nonfatal_stdin_decode
@@ -21,6 +23,11 @@ from local_operator.tui.terminal_modes import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The slice's catalogued copy. Resolved per call, not held in a constant, so
+#: this module registers no locale refresher (text.py: only module-level
+#: CONSTANTS re-materialise on a move).
+_t = tr("tui.small")
 
 
 def _register_secret_session(app: Any) -> Any:
@@ -383,5 +390,8 @@ async def run_tui(
             if app.return_code != REEXEC_CODE:
                 hint = app.resume_hint()
                 if hint:
-                    print(f"\nsession ended — resume with:\n  {hint}\n")
+                    # `_t` resolves the catalogue value, whose leading and
+                    # trailing newlines are part of the message; a plain
+                    # print() supplies the line's own final newline after it.
+                    print(_t(copy.session_resume_hint(hint=hint)))
         return int(app.return_code or 0)

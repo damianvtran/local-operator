@@ -32,6 +32,10 @@ from textual.containers import VerticalScroll
 from textual.geometry import Region
 from textual.widgets import Static
 
+# i18n: the empty-state placeholders below are user-facing detail-page
+# copy; they live in tui.projects with the rest of the projects surface.
+from local_operator.i18n.keys import tui_projects as _x
+from local_operator.i18n.text import tr
 from local_operator.logger import get_logger
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.projects_render import (
@@ -53,6 +57,8 @@ from local_operator.tui.projects_render import (
     update_stamp_text,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+
+_t = tr("tui.projects")
 
 logger = get_logger(__name__)
 
@@ -236,7 +242,7 @@ class DetailUpdateBodyRow(DetailRow):
         if self._shown:
             self.update(Markdown(autolink_bare_urls(self._shown)))
         else:
-            self.update(Text("(no text in this entry)", style=style_for("dim"), no_wrap=True))
+            self.update(Text(_t(_x.detail_no_text()), style=style_for("dim"), no_wrap=True))
 
     def readback(self) -> str | None:
         """The body's source, for ``painted_rows`` (the prose row's reason)."""
@@ -532,7 +538,7 @@ class DetailProseRow(DetailRow):
         if description.strip():
             self.update(Markdown(autolink_bare_urls(description)))
         else:
-            self.update(Text("no description yet", style=style_for("dim"), no_wrap=True))
+            self.update(Text(_t(_x.detail_no_description()), style=style_for("dim"), no_wrap=True))
 
     def readback(self) -> str | None:
         """The description's source text for ``painted_rows`` (UX round 1, U6).

@@ -386,6 +386,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers.update(_monitor_consumer_defaults())
     consumers.update(_supplements_consumer_defaults())
     consumers.update(_team_bridge_consumer_defaults())
+    # ``asks.lapsed_visible_for``'s reader table lives beside its consumer in
+    # the stdlib-only store; the registry row carries a literal (D7).
+    from local_operator.asks.store import DEFAULT_LAPSED_VISIBLE_FOR
+
+    consumers["asks.lapsed_visible_for"] = DEFAULT_LAPSED_VISIBLE_FOR
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -3128,3 +3133,38 @@ def test_delegated_rows_round_trip_through_the_policy_reader(manager: ConfigMana
     )
     policy = policy_from_config(ConfigManager(manager.config_dir))
     assert (policy.delegated_enabled, policy.delegated_max_age_hours) == (False, 96)
+
+
+class TestTheLapsedAskWindowRow:
+    """``asks.lapsed_visible_for`` (decisions D6/D7): a four-choice dropdown."""
+
+    def test_the_row_is_a_nested_enum_in_its_own_live_section(self) -> None:
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        assert setting.path == ("asks", "lapsed_visible_for")
+        assert setting.kind is settings_io.Kind.ENUM
+        assert setting.default == "7d"
+        section = next(s for s in settings_io.SECTIONS if s.name == setting.section)
+        assert section.name == "asks"
+        assert section.scope is settings_io.Scope.LIVE
+
+    def test_the_choices_are_exactly_the_readers_table(self) -> None:
+        from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
+
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        values = [choice.value for choice in setting.choices]
+        assert values == ["at_expiry", "1h", "24h", "7d"]
+        assert set(values) == set(LAPSED_VISIBLE_FOR_S)
+
+    @pytest.mark.parametrize("value", ["at_expiry", "1h", "24h", "7d"])
+    def test_every_choice_validates(self, value: str) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["asks.lapsed_visible_for"], value) is None
+
+    @pytest.mark.parametrize("value", ["2h", "", "7D", 3600, None])
+    def test_a_value_outside_the_dropdown_is_refused(self, value: object) -> None:
+        assert (
+            settings_io.validate(settings_io.BY_KEY["asks.lapsed_visible_for"], value) is not None
+        )
+
+    def test_the_help_fits_with_the_default_clause(self) -> None:
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help

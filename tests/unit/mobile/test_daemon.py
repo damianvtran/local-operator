@@ -3033,3 +3033,200 @@ def test_durable_projection_reads_a_stale_open_ask_as_timed_out_with_no_mirror(
     asks = projection.asks or []
     assert [(row.ask_id, row.status) for row in asks] == [("stale-1", "timed_out")]
     assert projection.pending is None
+
+
+def test_durable_projection_hides_a_lapsed_ask_past_the_configured_window(
+    tmp_path, monkeypatch
+) -> None:
+    """``asks.lapsed_visible_for`` reaches a STOPPED conversation's screen
+    (decision D8): its lapsed ask leaves once the window passes. The daemon's
+    started watcher is what follows another process's edit; the explicit poll
+    here stands in for that watcher's next tick."""
+    import time
+
+    from local_operator import settings_io
+    from local_operator.asks import store as ask_store
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import process_watcher
+    from local_operator.mobile.daemon import _durable_projection
+
+    cfg = _durable_ask_session(tmp_path, monkeypatch, "window-session")
+    now = int(time.time() * 1000)
+    ask_store.write_entry(
+        cfg,
+        "window-session",
+        cwd="/tmp/w",
+        asks=[
+            {
+                "ask_id": "lapsed-2h",
+                "created_at": now - 2 * 3_600_000 - 600_000,
+                "expires_at": now - 2 * 3_600_000,
+                "timeout_s": 600,
+                "urgent": False,
+                "status": "timed_out",
+                "delivered": False,
+                "questions": [],
+            }
+        ],
+    )
+    before = _durable_projection("window-session")
+    assert before is not None and [row.ask_id for row in before.asks or []] == ["lapsed-2h"]
+
+    settings_io._store(ConfigManager(cfg), settings_io.BY_KEY["asks.lapsed_visible_for"].path, "1h")
+    process_watcher(cfg).poll_now()
+    after = _durable_projection("window-session")
+    assert after is not None
+    # An entry whose rows are all hidden installs an EMPTY fold (rows ``[]``,
+    # tally 0) rather than absence, so the frame's version still advances past a
+    # screen that was viewed with rows (QA round 1, Q1). No entry at all stays
+    # absence (``test_durable_projection_leaves_asks_absent_without_an_index_entry``).
+    assert after.asks == [] and after.asks_open == 0
+
+
+def _seed_lapsed_stopped_screen(tmp_path, monkeypatch, session_id: str):
+    """A stopped conversation whose only ask lapsed 2 h ago (index row still
+    written ``open``, the stopped-runtime shape QA round 1 seeded)."""
+    import time
+
+    from local_operator.asks import store as ask_store
+
+    cfg = _durable_ask_session(tmp_path, monkeypatch, session_id)
+    now = int(time.time() * 1000)
+    ask_store.write_entry(
+        cfg,
+        session_id,
+        cwd="/tmp/w",
+        asks=[
+            {
+                "ask_id": "stale-2h",
+                "created_at": now - 2 * 3_600_000 - 600_000,
+                "expires_at": now - 2 * 3_600_000,
+                "timeout_s": 600,
+                "urgent": False,
+                "status": "open",
+                "delivered": False,
+                "questions": [],
+            }
+        ],
+    )
+    return cfg
+
+
+def _set_window(cfg, choice: str) -> None:
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io._store(
+        ConfigManager(cfg), settings_io.BY_KEY["asks.lapsed_visible_for"].path, choice
+    )
+
+
+def test_a_viewed_stopped_screen_drops_its_lapsed_asks_when_the_window_hides_them_all(
+    tmp_path, monkeypatch
+) -> None:
+    """QA round 1, Q1: through the RETAINED-projection path a phone actually
+    uses. The screen was viewed (retained at version 2 with one ask); the
+    window then hides every row. A re-capture must carry the empty fold — rows
+    ``[]`` and tally 0 — rather than lose the version race and re-serve the
+    retained four-row frame."""
+    from local_operator.config_watch import process_watcher
+
+    cfg = _seed_lapsed_stopped_screen(tmp_path, monkeypatch, "viewed-stopped")
+    daemon = MobileDaemon(port=0, password="pw")
+    daemon.table.session_subscribers["viewed-stopped"] = {asyncio.Queue()}
+
+    first = asyncio.run(daemon._capture_durable_projection("viewed-stopped"))
+    assert first is not None and [row.ask_id for row in first.asks or []] == ["stale-2h"]
+    assert first.asks_open == 1
+
+    _set_window(cfg, "at_expiry")
+    process_watcher(cfg).poll_now()
+    second = asyncio.run(daemon._capture_durable_projection("viewed-stopped"))
+    assert second is not None
+    assert second.asks == [] and second.asks_open == 0
+    assert daemon.session_projections["viewed-stopped"] is second
+
+
+def test_the_daemon_repaints_an_open_stopped_screen_when_the_window_changes(
+    tmp_path, monkeypatch
+) -> None:
+    """QA round 1, Q3: a phone screen already OPEN on a stopped conversation
+    gets a fresh frame when ``asks.lapsed_visible_for`` changes — the daemon
+    follows the key the way it follows ``display.*`` — with no reconnect."""
+    from local_operator.config_watch import process_watcher
+
+    cfg = _seed_lapsed_stopped_screen(tmp_path, monkeypatch, "open-stopped")
+
+    async def scenario() -> list[dict[str, Any]]:
+        daemon = MobileDaemon(port=0, password="pw")
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
+        daemon.table.session_subscribers["open-stopped"] = {queue}
+        seeded = await daemon._capture_durable_projection("open-stopped")
+        assert seeded is not None and seeded.asks_open == 1
+        daemon.watch_ask_visibility()
+        _set_window(cfg, "at_expiry")
+        process_watcher(cfg).poll_now()
+        frames = [await asyncio.wait_for(queue.get(), timeout=5)]
+        while not queue.empty():
+            frames.append(queue.get_nowait())
+        return frames
+
+    frames = asyncio.run(scenario())
+    last = frames[-1]
+    assert last.get("asks") == [] and last.get("asks_open") == 0
+
+
+def test_a_stopped_screen_the_daemon_watched_end_drops_hidden_asks_on_a_window_change(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 2, R2-1: the COMMON stopped shape is a conversation this
+    daemon watched die. The scan's ``terminal=True`` capture fences every later
+    non-terminal capture of the route (``state.terminal and not terminal``), so
+    without dropping the retained payload a window change re-served the frame
+    with the hidden rows — on the open stream AND on reopen. Both must carry
+    rows ``[]``, tally 0 and keep the ended receipt."""
+    from local_operator.config_watch import process_watcher
+
+    cfg = _seed_lapsed_stopped_screen(tmp_path, monkeypatch, "ended-stopped")
+    record = SessionRecord(
+        pid=9_999_901,
+        kind="tui",
+        session_id="ended-stopped",
+        conversation_name="ended",
+        cwd="/tmp/w",
+        model_label="m",
+        control_port=4999,
+        control_key="synthetic-ended-key",
+        started_at=10.0,
+    )
+
+    async def scenario() -> tuple[list[dict[str, Any]], Any]:
+        daemon = MobileDaemon(port=0, password="pw")
+        entry = SessionEntry(record)
+        entry.ended = True
+        daemon.table.entries[record.pid] = entry
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
+        daemon.table.session_subscribers["ended-stopped"] = {queue}
+        # The scan proving the pid dead: the terminal capture that sets the fence.
+        dead = await daemon._capture_durable_projection(
+            "ended-stopped", record=record, terminal=True, ended=True
+        )
+        assert dead is not None and [row.ask_id for row in dead.asks or []] == ["stale-2h"]
+        assert daemon._projection_generations["ended-stopped"].terminal is True
+
+        daemon.watch_ask_visibility()
+        _set_window(cfg, "at_expiry")
+        process_watcher(cfg).poll_now()
+        frames = [await asyncio.wait_for(queue.get(), timeout=5)]
+        while not queue.empty():
+            frames.append(queue.get_nowait())
+        # A reopen after the change: the SSE route's own capture for this route.
+        reopened = await daemon._capture_durable_projection("ended-stopped", ended=True)
+        return frames, reopened
+
+    frames, reopened = asyncio.run(scenario())
+    pushed = frames[-1]
+    assert pushed.get("asks") == [] and pushed.get("asks_open") == 0
+    assert pushed.get("ended") is True
+    assert reopened is not None
+    assert reopened.asks == [] and reopened.asks_open == 0 and reopened.ended is True

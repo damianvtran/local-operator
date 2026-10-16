@@ -63,8 +63,16 @@ from textual.message import Message
 from textual.widget import Widget
 
 from local_operator.asks import store
+
+# i18n: the ask bar's and list header's counts are user-facing copy, extracted
+# so a locale can carry them. `_t` is bound BELOW the whole import block (a
+# binding between imports makes every later import read as not-at-top, E402).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
+
+_t = tr("tui.small")
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
 #: composer chip vocabulary already leaves free (``!`` is the sidebar's
@@ -112,7 +120,11 @@ STATUS_EXPIRED = store.STATUS_EXPIRED
 #: round 1, D6/U3: ``late`` was painted "timed out — still answerable" and stayed
 #: in the answerable set). ``withdrawn`` joins them because the ASKER retracted
 #: the question (design §12) — nobody is waiting on it, and a stale tap can only
-#: be refused. ``expired`` injects nothing at all (§2.2).
+#: be refused. ``expired`` injects nothing at all (§2.2). ``timed_out`` joins
+#: them on this surface (decision D10/D11): its deadline fired and the agent went
+#: ahead without an answer, so no surface offers one any more — the store still
+#: counts it outstanding and still takes a late answer through chat, but the list
+#: reads it the way it reads a declined ask, one settled line with a status word.
 #:
 #: A SURFACE NO LONGER DROPS THEM (design §4): the list keeps every row and the
 #: three-way filter picks the half, so what this set is FOR now is the question a
@@ -128,16 +140,10 @@ SETTLED_STATUSES = frozenset(
         STATUS_DISMISSED,
         STATUS_WITHDRAWN,
         STATUS_EXPIRED,
+        STATUS_TIMED_OUT,
     }
 )
 
-#: `Moved on` is the drawer's own word for a row whose deadline passed but
-#: which is still answerable (the fold's ``timed_out``) — §5's copy has said
-#: "the agent moved on" since the first surface, and the filter's middle label
-#: ("Waiting or moved on") only reads honestly if both halves are named the
-#: same way here. The BAR still says "timed out": it is the chip register
-#: (``queue_headline``), and the two registers are deliberately different
-#: statements about one queue (see ``drawer_headline``).
 STATUS_DELIVERING = frozenset({STATUS_ANSWERED, STATUS_LATE})
 
 # ---------------------------------------------------------------------------
@@ -151,14 +157,14 @@ FILTER_SETTLED = "settled"
 #: Press order, left to right, and the cycle order for `[`/`]`.
 FILTER_ORDER: tuple[str, ...] = (FILTER_ALL, FILTER_OUTSTANDING, FILTER_SETTLED)
 
-#: EXACT labels, from the desktop's own filter control (``ask-panel.tsx``).
-#: The middle one is deliberately NOT "Waiting": a moved-on ask is in that
-#: half and the agent is not waiting for it, so the short word would be a
-#: second name for a population the row itself spells "moved on" (design
-#: round 1, M1 = UX U1 on the desktop — the same finding, same wording).
+#: EXACT labels, shared with the desktop's own filter control (``ask-panel.tsx``).
+#: The middle one is "Pending", the code's own word for that half (``pending`` =
+#: answerable or delivering). It used to be "Waiting or moved on" because a
+#: timed-out ask sat in it; since D11 every timed-out ask is Settled, so the old
+#: label named a population the half can no longer hold (#2481 design D1).
 FILTER_LABELS: dict[str, str] = {
     FILTER_ALL: "All",
-    FILTER_OUTSTANDING: "Waiting or moved on",
+    FILTER_OUTSTANDING: "Pending",
     FILTER_SETTLED: "Settled",
 }
 
@@ -176,8 +182,8 @@ FILTER_KEYS: dict[str, str] = {
 #: (design round 1, D1 = UX U2), so each half states its OWN emptiness and names
 #: the half that is holding the rows.
 EMPTY_ALL = "No asks outstanding. The agent is not waiting on anything."
-EMPTY_OUTSTANDING = "No asks are waiting or moved on. They have all settled — see Settled."
-EMPTY_SETTLED = "No asks have settled yet. They are all still under Waiting or moved on."
+EMPTY_OUTSTANDING = "No asks are pending. They have all settled — see Settled."
+EMPTY_SETTLED = "No asks have settled yet. They are all still pending."
 
 #: The scope the list is reading: this conversation's queue, or every
 #: conversation's. The TUI has no session-less screen, so the FLEET scope is
@@ -204,13 +210,17 @@ SETTLED_CHIPS: dict[str, tuple[str, str]] = {
     STATUS_DISMISSED: ("dismissed", "muted"),
     STATUS_WITHDRAWN: ("withdrawn", "muted"),
     STATUS_EXPIRED: ("expired", "muted"),
+    # Muted like `declined` (D11): a lapse is the quiet end of the scale — the
+    # agent carried on, nothing failed. "Timed out" is Ben's word for it and the
+    # bar's own register already uses it.
+    STATUS_TIMED_OUT: ("timed out", "muted"),
 }
 #: ...which is to say: everything the reader must not be asked to answer. THE
-#: OUTSTANDING SET, taken from the fold rather than re-listed here: a row the
-#: user can still answer is ``open`` or timed out and unanswered, and that ONE
-#: rule decides the wire's tally, this surface's rows and the sidebar mark, so
-#: it lives in ``asks.store.OUTSTANDING_STATUSES`` and nowhere else.
-_ANSWERABLE = store.OUTSTANDING_STATUSES
+#: OUTSTANDING SET, taken from the fold rather than re-listed here, MINUS the
+#: lapsed set (D10): "answerable now" is outstanding AND NOT lapsed, and both
+#: halves live in ``asks.store`` so no surface re-lists the statuses. The wire's
+#: tally keeps counting the whole outstanding set; only the OFFER narrows.
+_ANSWERABLE = store.OUTSTANDING_STATUSES - store.LAPSED_STATUSES
 
 #: THE DELIVERING HALF's word (§10): answered, response row not yet durable. It
 #: belongs to the PENDING side — the user's queue is not finished until the agent
@@ -229,14 +239,12 @@ SESSION_HANDLE_CELLS = 24
 
 #: Closed-set glyphs for the list's status column. Deliberately NOT a spinner
 #: and not an animated set: a queued ask is not doing anything, it is waiting.
-#: ``●`` open, ``◷`` timed out but still answerable (the wake glyph's meaning —
-#: "a clock decided something"). A SETTLED row paints no glyph and no fallback
-#: bit of punctuation either: its status is a WORD in the tail
+#: ``●`` open. A SETTLED row — a lapsed one included (D11) — paints no glyph and
+#: no fallback bit of punctuation either: its status is a WORD in the tail
 #: (``settled_chip``), because once there is nothing left to act on the status
 #: IS the row.
 STATUS_MARKS: dict[str, str] = {
     STATUS_OPEN: "●",
-    STATUS_TIMED_OUT: "◷",
 }
 
 #: The glyph an ANSWERED-but-undelivered row wears in the list's status column
@@ -304,19 +312,19 @@ class AskRow:
 
     @property
     def answerable(self) -> bool:
-        """Whether the user can still do something about this row."""
+        """Whether this surface OFFERS an answer for the row (open, not lapsed)."""
         return self.status in _ANSWERABLE
 
     @property
-    def moved_on(self) -> bool:
-        """Whether the agent walked past this row's deadline but can still hear it.
+    def lapsed(self) -> bool:
+        """Whether the row's deadline fired with no answer (``store.is_lapsed``).
 
-        The drawer's half of the outstanding set: a timed-out ask is not
-        something the agent waits on any more (see :attr:`waiting`) and it is
-        not settled either — a late answer is still attributable, which is the
-        whole reason it stays outstanding.
+        Still outstanding to the store, but read-only here (D10): it sits in the
+        Settled half behind its ``timed out`` chip, and the only gesture it takes
+        is ``x`` dismiss — the one op the queue accepts on a timed-out ask, which
+        answers nobody.
         """
-        return self.status == STATUS_TIMED_OUT
+        return store.is_lapsed(self.status)
 
     @property
     def delivering(self) -> bool:
@@ -343,9 +351,9 @@ class AskRow:
     def waiting(self) -> bool:
         """Whether anyone is still WAITING for this row's answer.
 
-        Narrower than :attr:`answerable`, and the distinction is the copy's: a
-        timed-out ask is answerable (the user may still reply, and the agent is
-        told) but nobody is waiting on it — the agent moved on.
+        The same population as :attr:`answerable` since D10 made a lapsed row
+        read-only; kept as its own name because the copy asks the question in
+        these words.
         """
         return self.status == STATUS_OPEN
 
@@ -470,6 +478,34 @@ def delivering_chip(row: AskRow) -> tuple[str, str] | None:
     return (word, SETTLED_CHIPS.get(row.status, (word, "success"))[1])
 
 
+def _openable(row: AskRow) -> bool:
+    """Whether Enter or a click on ``row`` opens a card.
+
+    An ANSWERABLE row opens its answer card. A LAPSED row opens the same card
+    READ-ONLY (#2481 UX U1): the list row is one truncated line, and the card is
+    the only place the whole question and its options can be read. Seeing it is
+    the explicit look Ben asked for, and the card sends nothing (D10). Every
+    other settled row, and a delivering one, stays inert.
+    """
+    return row.answerable or row.lapsed
+
+
+def compact_headline(open_count: int, timed_out_count: int) -> str:
+    """The bar's count when :func:`queue_headline` does not fit (#2481 design D6).
+
+    Whole clauses, never cells: ``N waiting · N timed out``. A cut inside the full
+    sentence read ``… 1 question`` at 50 columns — a third count of something
+    waiting — and took the chevron with it. Urgency has no clause here; the amber
+    glyph still carries it.
+    """
+    parts: list[str] = []
+    if open_count:
+        parts.append(_t(_x.ask_queue_waiting_clause(shown=str(open_count))))
+    if timed_out_count:
+        parts.append(_t(_x.ask_queue_timed_out_clause(shown=str(timed_out_count))))
+    return " · ".join(parts)
+
+
 def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0) -> str:
     """The queue's count, in ONE vocabulary for the bar and the list header.
 
@@ -486,8 +522,11 @@ def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0)
     """
     parts: list[str] = []
     if open_count:
-        noun = "question" if open_count == 1 else "questions"
-        parts.append(f"{open_count} {noun} waiting")
+        # The noun's number agreement moves into the message's own ICU plural
+        # (`one `{shown} question waiting``/`other `{shown} questions waiting``),
+        # with `count` selecting the branch and `shown` staying a RAW digit
+        # string so the rendered bytes are unchanged (no grouping, no re-format).
+        parts.append(_t(_x.ask_queue_question_waiting(count=open_count, shown=str(open_count))))
     if urgent_count:
         # URGENCY IN WORDS, because the bar's amber glyph is a hue and a hue is
         # not a channel a reader without colour has: D8's own principle, which
@@ -495,10 +534,14 @@ def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0)
         # also removes the mismatch D13 found — the glyph is painted from
         # `any(row.urgent)`, so with no word for it the amber annotated the ONE
         # question the bar happened to name, which need not be the urgent one.
-        parts.append(f"{urgent_count} urgent")
+        parts.append(_t(_x.ask_queue_urgent_clause(shown=str(urgent_count))))
     if timed_out_count:
-        noun = "ask" if timed_out_count == 1 else "asks"
-        parts.append(f"{timed_out_count} {noun} timed out")
+        # "question", the noun the waiting clause uses and the phone and desktop
+        # use for the same state, so one bar never counts in two nouns (D5) —
+        # now carried by the key's own plural branches.
+        parts.append(
+            _t(_x.ask_queue_question_timed_out(count=timed_out_count, shown=str(timed_out_count)))
+        )
     return " · ".join(parts)
 
 
@@ -515,16 +558,16 @@ def drawer_headline(
     under it read "moved on; you can still answer" (the desktop's UX round 1,
     U5 — the same finding, transferred with the surface).
 
-    So a MIXED queue spells both halves here, in the drawer's own words, and
-    the single-half cases name that half in the DRAWER's vocabulary — "moved
-    on", never the chip's "timed out" — because the segments above and the rows
-    below this line already say "moved on" for that half, and one surface must
-    not carry two words for one state (round 2: F3/D4). The bar keeps the chip
-    clause; the two registers are named in §11.
+    A mixed queue used to spell a second "moved on" half here for timed-out
+    rows. Since D11 a lapsed row is SETTLED — one line behind its ``timed out``
+    chip — so the pending half holds only waiting and delivering rows, and this
+    sentence counts those. The bar keeps the chip clause (it still names timed-out
+    asks, because it is the door to their Dismiss); the two registers are named
+    in §11.
 
     THE DELIVERING HALF IS PENDING AND MUST NEVER READ AS SETTLED (round 2:
     F3/Q1/U4). ``pending`` = answerable ∪ delivering (§10), so an
-    answered-but-undelivered row sits in the "Waiting or moved on" segment while
+    answered-but-undelivered row sits in the "Pending" segment while
     the old fallback printed `N settled` over it — the header contradicting its
     own segment. It says so in §5's words instead, and without the desktop's
     "you can still change it": the TUI has no revise wire at all, and promising
@@ -533,7 +576,7 @@ def drawer_headline(
     settled`) rather than inventing a second form for it.
 
     THE TRUNCATED FRAME STATES THE BACKEND'S TALLY (``open_count``) AND
-    WITHHOLDS THE SPLIT: the wire caps the list, so a waiting/moved-on split
+    WITHHOLDS THE SPLIT: the wire caps the list, so a pending/settled split
     computed from the rows this frame carries would be a prefix passing for the
     whole queue. This is the desktop's `askSplitIsKnowable` rule ("the louder
     number wins"); `open_count is None` means the caller has no backend tally to
@@ -543,25 +586,16 @@ def drawer_headline(
     if truncated:
         return f"{open_count or 0} outstanding"
     waiting = sum(1 for row in rows if row.waiting)
-    moved_on = sum(1 for row in rows if row.moved_on)
     delivering = sum(1 for row in rows if row.delivering)
     # OPEN rows only, the same set the bar counts (review round 3, MINOR-1): an
     # urgent ask is one whose deadline is imminent, and a timed-out ask has no
     # imminent deadline left — counting it here made the list say `1 urgent · 1
     # ask timed out` over a bar showing only the amber hue.
     urgent = sum(1 for row in rows if row.waiting and row.urgent)
-    if waiting and moved_on:
-        clause = f"{waiting} waiting, {moved_on} moved on"
-        # THE URGENCY WORD IS NOT PART OF THE MIXED CLAUSE and must not be lost
-        # with it: the drawer's own sentence replaced the chip's, and the chip's
-        # was the only place urgency was ever stated in words (D13). It is
-        # appended rather than interleaved so the half-counts stay a prefix.
-        clause = f"{clause} · {urgent} urgent" if urgent else clause
-    elif moved_on:
-        noun = "question" if moved_on == 1 else "questions"
-        clause = f"{moved_on} {noun} moved on"
-    else:
-        clause = queue_headline(waiting, 0, urgent)
+    # NO "MOVED ON" HALF ANY MORE (D11): a lapsed row is settled, so the pending
+    # half holds only what is waiting and what is delivering, and the drawer
+    # counts it the way the chip does.
+    clause = queue_headline(waiting, 0, urgent)
     if delivering:
         noun = "answer" if delivering == 1 else "answers"
         # §10's own words for this half (design §5's copy contract: "Answered —
@@ -649,9 +683,9 @@ class AskBar(Widget):
         ``count`` is what the user still OWES — the OPEN asks — while
         ``present`` says whether there is anything at all to open. The two
         differ for exactly one state, and it is the reason both exist: a queue
-        of nothing but TIMED-OUT asks owes nobody a wait (the agent moved on),
-        but those asks are still answerable (§5's copy), so a bar hidden by
-        ``count == 0`` would make them unreachable from the TUI.
+        of nothing but TIMED-OUT asks owes nobody anything (the agent went ahead
+        without them, D10), but ``x`` dismiss lives behind the bar, so a bar
+        hidden by ``count == 0`` would make them unreachable from the TUI.
         """
         if present is None:
             present = count > 0 or timed_out > 0
@@ -709,7 +743,18 @@ class AskBar(Widget):
         fg = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         warning = Style(color=theme_mod.semantic_color("warning"))
-        glyph_style = Style(bold=True) + (warning if self._urgent else accent)
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        # A bar that owes nothing (only timed-out asks behind it) is painted in
+        # the SETTLED register: the accent `?` is the "a question is waiting"
+        # ink, and a lapsed ask is not one (#2481 design D4 / UX U2). The bar
+        # stays — it is the door to `x` dismiss — it just stops calling.
+        if self._urgent:
+            glyph_style = Style(bold=True) + warning
+        elif self._count:
+            glyph_style = Style(bold=True) + accent
+        else:
+            glyph_style = muted
+        copy_style = fg if self._count else muted
 
         # Read from `self.size` rather than assumed: a bar rendered before its
         # first layout pass has width 0.
@@ -723,8 +768,23 @@ class AskBar(Widget):
             text = Text(no_wrap=True, overflow="ellipsis")
             text.append(ASK_MARKER, style=glyph_style)
             return text
-        base = f"{ASK_MARKER} {queue_headline(self._count, self._timed_out, self._urgent_count)}"
-        verb = "collapse" if self._expanded else "answer"
+        # SHED WHOLE CLAUSES (#2481 design D6): the full sentence, then without
+        # its urgent clause (the amber glyph keeps saying it), then the compact
+        # form. Measured against `avail`, which already reserves the chevron.
+        headline = queue_headline(self._count, self._timed_out, self._urgent_count)
+        for candidate in (
+            headline,
+            queue_headline(self._count, self._timed_out),
+            compact_headline(self._count, self._timed_out),
+        ):
+            headline = candidate
+            if cell_len(f"{ASK_MARKER} {candidate}") <= avail:
+                break
+        base = f"{ASK_MARKER} {headline}"
+        # "view", not "answer", over a queue that owes nothing: a lapsed-only bar
+        # opens a list of read-only rows (D10), and the verb must not promise an
+        # answer box the list will not offer.
+        verb = "collapse" if self._expanded else ("answer" if self._count else "view")
         tail = f" — {ASK_TOGGLE_KEY} or click to {verb}"
         head_part = f" · {self._head}" if self._head else ""
         used = cell_len(base)
@@ -742,17 +802,19 @@ class AskBar(Widget):
             tail = ""
         text = Text(no_wrap=True, overflow="ellipsis")
         text.append(ASK_MARKER, style=glyph_style)
-        text.append(
-            f" {queue_headline(self._count, self._timed_out, self._urgent_count)}", style=fg
-        )
+        # Clipped at the reserve, never past it: the chevron is the only thing
+        # saying which way this control goes, so the copy gives way to it.
+        text.append(f" {_clip_cells(headline, avail - 1)}", style=copy_style)
         if head_part:
-            text.append(head_part, style=fg)
+            text.append(head_part, style=copy_style)
         if tail:
             text.append(tail, style=dim)
         padding = width - 1 - cell_len(text.plain)
         if padding > 0:
             text.append(" " * padding)
-        text.append(chevron, style=Style(bold=True) + accent)
+        # Muted with the rest of the bar when nothing is owed (#2481 UX U14):
+        # one cell of accent on a bar that says nothing is waiting still calls.
+        text.append(chevron, style=Style(bold=True) + accent if self._count else muted)
         return text
 
 
@@ -857,7 +919,7 @@ class AskQueueList(Widget):
         # with the bindings above (verified against this list), and the segments
         # are also press targets — the mouse path A9 requires.
         Binding("1", "filter_all", "All asks", show=False),
-        Binding("2", "filter_outstanding", "Waiting or moved on", show=False),
+        Binding("2", "filter_outstanding", "Pending", show=False),
         Binding("3", "filter_settled", "Settled asks", show=False),
         Binding("left_square_bracket", "filter_prev", "Previous filter", show=False),
         Binding("right_square_bracket", "filter_next", "Next filter", show=False),
@@ -885,7 +947,11 @@ class AskQueueList(Widget):
     HEADER_HINTS = (
         "enter answer",
         "d decline",
+        # `x` before `enter view` (#2481 UX U8): on a lapsed row dismiss is the
+        # only key that changes anything, so it is the hint a narrow header keeps
+        # (the first hint outbids the drawer clause, see `header_atoms`).
         "x dismiss",
+        "enter view",
         PASSIVE_TAB_HINT,
         "esc collapse",
     )
@@ -910,7 +976,10 @@ class AskQueueList(Widget):
     ) -> None:
         super().__init__(id=widget_id, classes="prompt-slot")
         self._rows: list[AskRow] = list(rows)
-        self._index = 0
+        # THE CURSOR STARTS ON THE FIRST ANSWERABLE ROW (#2481 UX U3): rows are
+        # ordered by status, not by what the user owes, and a list opened over a
+        # timed-out row first put the cursor on the one row Enter cannot answer.
+        self._index = next((i for i, row in enumerate(self._rows) if row.answerable), 0)
         self._now_ms = now_ms
         #: True for a list the open-by-default policy put up and the user has not yet
         #: engaged: the composer still holds the caret, so NONE of this list's keys
@@ -997,7 +1066,7 @@ class AskQueueList(Widget):
         self.refresh(layout=True)
 
     def cycle_filter(self, delta: int) -> None:
-        """``[``/``]``: walk all → waiting-or-moved-on → settled → all."""
+        """``[``/``]``: walk all → pending → settled → all."""
         at = FILTER_ORDER.index(self._filter)
         self.set_filter(FILTER_ORDER[(at + delta) % len(FILTER_ORDER)])
 
@@ -1157,7 +1226,7 @@ class AskQueueList(Widget):
 
     def action_pick(self) -> None:
         row = self.current()
-        if row is not None and row.answerable and row.ask_id not in self._in_flight:
+        if row is not None and _openable(row) and row.ask_id not in self._in_flight:
             self.post_message(self.Picked(row.ask_id))
 
     def action_collapse(self) -> None:
@@ -1169,8 +1238,10 @@ class AskQueueList(Widget):
             self.post_message(self.Decline(row.ask_id))
 
     def action_dismiss(self) -> None:
+        # LAPSED rows only (D11): dismiss is the queue's `timed_out`-only op, so
+        # offering it over an open row could only collect a refusal.
         row = self.current()
-        if row is not None and row.answerable and row.ask_id not in self._in_flight:
+        if row is not None and row.lapsed and row.ask_id not in self._in_flight:
             self.post_message(self.Dismiss(row.ask_id))
 
     def action_filter_all(self) -> None:
@@ -1279,7 +1350,7 @@ class AskQueueList(Widget):
         self._index = row
         self.refresh()
         target = self.visible_rows[row]
-        if target.answerable and target.ask_id not in self._in_flight:
+        if _openable(target) and target.ask_id not in self._in_flight:
             self.post_message(self.Picked(target.ask_id))
 
     def on_focus(self, event: events.Focus) -> None:  # type: ignore[override]
@@ -1344,9 +1415,9 @@ class AskQueueList(Widget):
         exactly inverted against the rows: advertised where the keys do nothing,
         absent where they are live.
 
-        So the set is derived from the VISIBLE rows (the filter half on screen)
-        and the keys' own objects: `enter`/`d` need an ANSWERABLE row, `x` needs
-        a moved-on one (dismiss is only ever offered on a timed-out ask, so
+        So the set is derived from the row under the cursor and the keys' own
+        objects: `enter answer`/`d` need an ANSWERABLE row, `enter view`/`x` a
+        lapsed one (dismiss is only ever offered on a timed-out ask, so
         advertising it over open rows names a key the row would refuse), and
         `esc` needs nothing — it is how a reader leaves any view, including an
         empty half. Order is still ``HEADER_HINTS``' own.
@@ -1362,10 +1433,18 @@ class AskQueueList(Widget):
             if any(row.answerable for row in visible):
                 live.add(PASSIVE_TAB_HINT)
             return tuple(hint for hint in self.HEADER_HINTS if hint in live)
-        if any(row.answerable for row in visible):
-            live |= {"enter answer", "d decline"}
-        if any(row.moved_on for row in visible):
-            live.add("x dismiss")
+        # THE ROW UNDER THE CURSOR decides, not "any visible row" (#2481 UX U3):
+        # with an open and a timed-out row on screen the header used to promise
+        # `enter answer · d decline` while the cursor sat on the timed-out one,
+        # where Enter could not answer. A lapsed row takes `enter view` (the
+        # read-only card, U1) and `x dismiss`; an answerable one takes the two
+        # answer keys. A row in flight takes nothing until its reply lands.
+        row = self.current()
+        if row is not None and row.ask_id not in self._in_flight:
+            if row.answerable:
+                live |= {"enter answer", "d decline"}
+            elif row.lapsed:
+                live |= {"enter view", "x dismiss"}
         return tuple(hint for hint in self.HEADER_HINTS if hint in live)
 
     def header_atoms(self, width: int) -> list[HeaderAtom]:
@@ -1447,6 +1526,14 @@ class AskQueueList(Widget):
         # yields to the hint the way it already yields to the numbers.
         hints = self.header_hints()
         reserve = [HeaderAtom("  ·  " + hints[0], "muted")] if hints else []
+        current = self.current()
+        if current is not None and current.lapsed and "enter view" in hints:
+            # A LAPSED row has two keys and neither is guessable: `x` is the only
+            # one that changes anything (U8) and `enter view` is the only way to
+            # read the whole question (U1). The clause yields to BOTH, so the look
+            # is discoverable at the default 80 columns (#2481 UX round 2, U10) —
+            # the segments already carry the counts the clause would repeat.
+            reserve = [HeaderAtom("  ·  " + hint, "muted") for hint in hints[:2]]
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))
@@ -1659,7 +1746,9 @@ def expiry_text(row: AskRow, now_ms: int) -> str:
     transcript, so the row says ``urgent`` too.
     """
     if row.status == STATUS_TIMED_OUT:
-        return "timed out — still answerable"
+        # Reached only by a caller painting a lapsed row's tail itself: the list
+        # paints the settled chip instead (D11), and neither may promise an answer.
+        return "timed out"
     if not row.expires_at or not now_ms:
         return "urgent" if row.urgent else ""
     remaining_s = int((row.expires_at - now_ms) // 1000)
@@ -1700,7 +1789,7 @@ def expiry_room(row: AskRow, expiry: str) -> int:
     urgency word are the meaning the hue alone cannot carry).
     """
     if row.status == STATUS_TIMED_OUT:
-        widest = cell_len("timed out — still answerable")
+        widest = cell_len("timed out")
     else:
         prefix = "urgent · expires in " if row.urgent else "expires in "
         span_s = (row.expires_at - row.created_at) // 1000 if row.created_at else 0

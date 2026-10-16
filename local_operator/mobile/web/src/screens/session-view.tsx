@@ -265,7 +265,7 @@ function Header({
 					aria-label={`queued asks in this session (${
 						askTally.waiting > 0
 							? `${askTally.waiting} question${askTally.waiting === 1 ? "" : "s"} waiting)`
-							: `${askTally.lapsed} lapsed)`
+							: `${askTally.lapsed} timed out)`
 					}`}
 					className={cn(
 						HEADER_CONTROL,

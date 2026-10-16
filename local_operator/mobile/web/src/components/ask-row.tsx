@@ -12,7 +12,7 @@
  *
  * ONE LINE AT REST (§7.4), and the line is the runtime's own — `entry.text` is
  * the shared `harness/rows.py` copy ("Answered — delivering (ask …)", "Timed out
- * after 42m — the agent moved on; you can still answer (ask …)"), the same
+ * after 42m — the agent goes ahead without your answer (ask …)"), the same
  * sentence the TUI prints. Re-authoring it here would be a second wording of one
  * rule, which is exactly what that shared function exists to prevent.
  *

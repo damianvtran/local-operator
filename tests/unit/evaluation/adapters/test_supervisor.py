@@ -940,6 +940,25 @@ def _adapter_error(phase: str) -> RpcRemoteError:
     )
 
 
+def _invalid_state_error() -> RpcRemoteError:
+    """The wire error a worker answers when it REFUSES before ``_dispatch``.
+
+    Emitted by ``Worker._handle`` when ``_state`` is not live for the method, so
+    no adapter code ran -- a refusal, not an ambiguous mutation.
+    """
+
+    return RpcRemoteError(
+        "invalid_state",
+        "method is invalid in current state",
+        RpcErrorDetail(
+            exception_type="invalid_state",
+            message="method is invalid in current state",
+            method="execute",
+            operation_id="exec-5fdcadffdce7-obs2",
+        ),
+    )
+
+
 def test_declared_observation_phase_failure_keeps_the_session_usable(
     tmp_path: Path,
 ) -> None:
@@ -971,6 +990,77 @@ def test_declared_observation_phase_failure_keeps_the_session_usable(
     # The worker was left ALIVE and no rescue was demanded, which is what makes
     # a subsequent re-read possible at all.
     assert not raw.terminated and rescue_required == []
+
+
+def test_a_predispatch_refusal_keeps_the_session_usable(
+    tmp_path: Path,
+) -> None:
+    """The MIRROR of ``episode._refused_before_dispatch``: an ``invalid_state``
+    refusal must NOT poison either.
+
+    The worker answers ``invalid_state`` before ``_dispatch``, so nothing was
+    applied -- a refusal is provably non-committed and safe to keep alive. If
+    this poisoned instead, the runner's widened re-bind would hit the poison
+    gate and pay a full backoff to die anyway (the mirror-drift the predicates
+    warn about).
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_invalid_state_error()])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+    )
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        # Usable, not poisoned: the very next call must reach the adapter.
+        session._ensure_usable()
+
+    import asyncio
+
+    asyncio.run(run())
+    assert not raw.terminated and rescue_required == []
+
+
+def test_a_predispatch_refusal_on_a_non_execute_method_still_poisons(
+    tmp_path: Path,
+) -> None:
+    """Negative control: the refusal stay-usable rule is scoped to ``execute``.
+
+    Only the bridge's read-only ``observe`` re-bind consumes a refusal; a
+    refusal on any other mutating method must keep the pre-existing
+    poison-on-ambiguous-failure behaviour, or the supervisor widening would be
+    method-agnostic scope drift.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_invalid_state_error()])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.reset_start(
+                ResetStartParams(
+                    operation_id="reset",
+                    task_id="task",
+                    episode_id="episode",
+                    artifact_root=str(tmp_path),
+                ),
+                timeout=1,
+            )
+        # A refusal here is NOT the bridge's re-bind path: the session is poisoned.
+        with pytest.raises(SupervisionError, match="poisoned"):
+            await session.observe(ObserveParams(episode_id="episode"), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("phase", ["unknown", "observation"])

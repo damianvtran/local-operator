@@ -59,6 +59,12 @@ function renderCard(row: PendingAsk, onSettled?: () => void) {
 	);
 }
 
+/** Open a lapsed card's collapsed header — the explicit tap D11 requires before
+ *  anything inside a timed-out ask (its Dismiss included) is reachable. */
+function expandLapsed() {
+	fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+}
+
 afterEach(() => {
 	cleanup();
 	vi.clearAllMocks();
@@ -130,19 +136,55 @@ describe("AskCard", () => {
 		expect(screen.getByText(/not shown in the transcript/)).toBeTruthy();
 	});
 
-	it("shows a timed-out ask as lapsed: the question, no answer controls, Dismiss kept", () => {
+	it("collapses a timed-out ask behind a Timed out badge until the user expands it", () => {
+		/* Decision D11 (Ben, 2026-10-15): a lapsed ask reads the way a declined one
+		   does on the desktop — one collapsed row with a status badge. Seeing it is
+		   an explicit tap; nothing about it is answerable, so the collapsed header
+		   offers no control but the disclosure itself. */
+		renderCard(ask({ status: "timed_out" }));
+		const header = screen.getByRole("button", { name: /Timed out/ });
+		expect(header.getAttribute("aria-expanded")).toBe("false");
+		expect(header.textContent).toContain("ship the fix?");
+		expect(screen.queryByText(/the agent goes ahead without your answer/)).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		/* Mounting it takes no focus: a lapsed ask never claims the user (D12). */
+		expect(document.activeElement).not.toBe(header);
+	});
+
+	it("expands a timed-out ask to the read-only card: the question, no answer controls, Dismiss kept", () => {
 		/* Ben's report (2026-10-15): the phone offered the options of an ask whose
 		   deadline had passed, as if the agent were still waiting on them. The
-		   agent has gone ahead without the answer, so the card reads that and
-		   offers only the one op the queue accepts on a timeout — dismiss. */
+		   agent has gone ahead without the answer, so the expanded card reads that
+		   and offers only the one op the queue accepts on a timeout — dismiss. */
 		renderCard(ask({ status: "timed_out" }));
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+		expect(
+			screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded"),
+		).toBe("true");
+		/* UX round 2, U13: the badge already says "Timed out" one line above, so
+		   the body starts at what that means rather than repeating the word. */
+		expect(screen.getByText("the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.queryByText(/^Timed out —/)).toBeNull();
 		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
-		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
-		expect(screen.getByText("ship the fix?")).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+		/* UX U7: the question is stated once. Expanded, the header carries only
+		   the badge and the body states the question in full. */
+		expect(screen.getAllByText("ship the fix?").length).toBe(1);
+	});
+
+	it("dismisses a timed-out ask from inside its expanded body", async () => {
+		const settled = vi.fn();
+		renderCard(ask({ status: "timed_out" }), settled);
+		expandLapsed();
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
+		);
+		await waitFor(() => expect(settled).toHaveBeenCalled());
 	});
 
 	it("keeps an OPEN ask answerable when only the phone's clock says its deadline passed", () => {
@@ -155,7 +197,7 @@ describe("AskCard", () => {
 		expect(screen.getByRole("button", { name: /^yes$/ })).toBeTruthy();
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
 		expect(screen.getByText("Queued — the agent is continuing; deadline passed")).toBeTruthy();
-		expect(screen.queryByText(/^Lapsed/)).toBeNull();
+		expect(screen.queryByText(/^Timed out —/)).toBeNull();
 		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
 	});
 
@@ -186,6 +228,7 @@ describe("AskCard", () => {
 		   used to be rendered on an open ask, where every tap collected a
 		   refusal sentence that was false about the row under it. */
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
@@ -197,6 +240,7 @@ describe("AskCard", () => {
 		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
 		unmount();
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
 	});
 
@@ -323,6 +367,7 @@ describe("AskCard", () => {
 			),
 		);
 		renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		await waitFor(() => expect(screen.getByText(/nothing was sent/)).toBeTruthy());
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
@@ -354,6 +399,7 @@ describe("AskCard", () => {
 			new Error("only a timed-out ask can be dismissed; it is still open."),
 		);
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		const sentence = await screen.findByText(/only a timed-out ask/);
 		const dismiss = screen.getByRole("button", { name: /dismiss — send no reply/ });
@@ -367,9 +413,11 @@ describe("AskCard", () => {
 		   conversation the relay also brings it up to RECORD the dismissal — the
 		   conversation surfaces as active, which the copy owed the reader. */
 		const cold = renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expandLapsed();
 		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
 		cold.unmount();
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
 	});
 

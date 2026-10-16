@@ -6359,8 +6359,15 @@ def busy():
     is_busy = flag.exists()
     # The first call seeds _Armed; this line proves the sampler itself observed
     # False before the test advances either case to the timer fire.
-    if calls > 1 and not is_busy:
-        sampled_idle.write_text("sampled idle", encoding="utf-8")
+    # WHY write once, atomically: the sampler keeps calling this probe for the
+    # child's whole life, and a bare ``write_text`` truncates the file on every
+    # call — so the parent could read the file back empty when the child's exit
+    # landed in the middle of a rewrite (CI 38863032433: rc=0, content '').
+    # Publish the fact once via a rename so readers only ever see it whole.
+    if calls > 1 and not is_busy and not sampled_idle.exists():
+        staging = sampled_idle.with_suffix(".staging")
+        staging.write_text("sampled idle", encoding="utf-8")
+        os.replace(staging, sampled_idle)
     return is_busy
 
 assert stall_watchdog.arm(seconds=bound, busy=busy), "the child did not arm"

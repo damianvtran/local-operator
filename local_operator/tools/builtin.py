@@ -2520,15 +2520,15 @@ class BashParams(BaseModel):
         ),
     )
     # Terse on purpose, like every field here: the schema rides every request.
-    # The semantics are the three the reader needs — unset = config, 0 = no
-    # budget for this call, > 0 = explicit ceiling in MB.
+    # A positive value chooses a ceiling, never overrides the machine-wide
+    # off switch. Advertise that condition rather than promising a cap which
+    # compute_budget intentionally disables when bash.memory.enabled is false.
     memory_mb: float | None = Field(
         default=None,
         description=(
-            "Optional RAM ceiling in MB for this command's process group. Omit to "
-            "use the configured budget; 0 disables the limit for this call; a "
-            "positive number overrides it. Exceeding the limit kills the command's "
-            "group."
+            "Process-group RAM ceiling in MB. Omit for configured budget; "
+            "0 disables this call's limit. Positive overrides the budget only when "
+            "bash.memory.enabled=true. Exceeding the limit kills the group."
         ),
     )
 

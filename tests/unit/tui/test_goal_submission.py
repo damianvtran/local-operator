@@ -42,7 +42,9 @@ async def test_composer_goal_submits_or_steers_one_plain_user_message(busy):
     session.streaming = busy
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        # Wait for adoption: a drained frame can precede the session worker.
+        # Submitting before it attaches drops the goal.
+        await _await_goal_session(app, pilot, session)
         app._editor().load_text("/goal ship the checklist")
         await pilot.press("enter")
         await app.workers.wait_for_complete()
@@ -93,7 +95,9 @@ async def test_current_viewer_consumes_goal_receipt_through_plain_submission(leg
     session = GoalSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        # Wait for adoption: _goal_slash_result reads the session, which a
+        # drained frame does not guarantee.
+        await _await_goal_session(app, pilot, session)
         result = app._goal_slash_result("ship it", SlashResult)
         assert session.prompts == []
         outcome = result.model_dump()
@@ -166,7 +170,9 @@ async def test_routed_goal_stores_and_submits_paste_payload_not_private_chip():
     marker = "[Paste #1, 40 lines]"
     payload = "\n".join(f"task {index}" for index in range(40))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        # Wait for adoption: routing before the session worker attaches
+        # drops the goal.
+        await _await_goal_session(app, pilot, session)
         app._run_slash_command(f"/goal {marker}", {1: PastedText(payload, marker)})
         await app.workers.wait_for_complete()
         await pilot.pause()
