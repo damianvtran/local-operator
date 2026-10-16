@@ -116,7 +116,8 @@ export function questionTally(rows: PendingAsk[] | undefined | null): {
  *  default" claimed more than the agent was told. "Timed out", Ben's word and
  *  the badge's, byte-identical to the desktop's `ASK_STATUS_COPY.timed_out` and
  *  the TUI card title (#2481 design D2): one state, one name on every surface. */
-const LAPSED_LINE = "Timed out — the agent goes ahead without your answer";
+export const LAPSED_BODY = "the agent goes ahead without your answer";
+const LAPSED_LINE = `Timed out — ${LAPSED_BODY}`;
 
 /** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
  *

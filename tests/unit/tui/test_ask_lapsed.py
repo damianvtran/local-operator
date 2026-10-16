@@ -735,10 +735,10 @@ async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipp
         card = app.query_one(Card)
         assert card.read_only
         lines = "\n".join(card.render_lines_for_test())
-        if "showing" in lines:
-            assert "↑↓ scroll" in lines, lines
-        else:
-            assert "↑↓" not in lines, lines
+        # 80x16 windows the four options to one and has no room for the
+        # position row; the arrows still scroll, so they are named.
+        assert len(card._window()) < card.row_count
+        assert "↑↓ scroll" in lines, lines
     short = _app(_AskSession())
     async with short.run_test(size=(120, 40)) as pilot:
         await _settle(pilot)
@@ -760,6 +760,7 @@ async def test_a_read_only_card_drops_the_type_your_own_invitation():
 
     row = ask_rows([_row("a1", "Deploy now?", status="timed_out")])[0]
     questions = OperatorApp._drawable_questions(None, row)  # type: ignore[arg-type]
+    assert questions is not None
     card = AskPickerScreen(questions, lambda _a: None)
     card.set_read_only()
     lines = "\n".join(card.render_lines_for_test())

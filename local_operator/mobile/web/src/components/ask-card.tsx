@@ -40,6 +40,7 @@ import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
 	askStateLine,
+	LAPSED_BODY,
 	isAnswerable,
 	isDeadConversation,
 	isLapsed,
@@ -388,7 +389,10 @@ export function AskCard({
 			    The refusal sentence is the whole state. */}
 			{terminal ? null : (
 				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
-					<span role="status">{state.text}</span>
+					{/* Under the `Timed out` badge the line starts at what that means:
+					    the badge says the word one line above (#2481 UX round 2, U13). A
+					    lapsed, non-terminal card is always inside that Disclosure. */}
+					<span role="status">{lapsed ? LAPSED_BODY : state.text}</span>
 					{row.urgent && offered ? (
 						<span className="text-ink-dim">· urgent</span>
 					) : null}
