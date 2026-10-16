@@ -22,7 +22,7 @@ device-id or UUID reference that collides with nothing is admitted at the plan g
 today and after; those are the CONTROLS below, and they are why this file pins both
 classes rather than only the failing one.
 
-Measured at the seam over the 34-row corpus below, executed on the base tree and on this
+Measured at the seam over the 38-row corpus below, executed on the base tree and on this
 one from the SAME file: the corpus digest is identical on both sides (retention's own
 answers do not move), and the plan gate's verdict flips on exactly the six admitted-
 reference rows — a colliding id in a read's ``q`` (with and without a raw JSON carrier,
@@ -426,6 +426,12 @@ async def test_no_session_surface_shows_the_exempt_value(tmp_path, monkeypatch):
 #: ``admits`` marks the ONLY rows this slice is allowed to change — the plan gate's
 #: verdict must flip on them, and their RETENTION verdict must stay ``True``.
 #:
+#: Each carrier is masked on its OWN contents: the argument dict and a parseable raw JSON
+#: are viewed independently, and a position is blanked only where THAT copy holds an
+#: admitted reference. So a secret sibling that rides only the raw carrier, and an admitted
+#: value that appears in only one of the two copies, are both still refused — the whole
+#: point of failing closed when the two carriers disagree.
+#:
 #: The two positions are refused today for DIFFERENT reasons, which is why the colliding
 #: and non-colliding ids both appear: a read's ``path`` is guarded with the ``path`` value
 #: as an ordinary string, so only a chance shape collision (``DEVICE_ID``, IBAN mod-97)
@@ -488,6 +494,30 @@ _RETENTION_CORPUS: list[tuple[str, Any, str | None, bool]] = [
         False,
     ),
     # malformed and unparseable carriers, and non-memory controls
+    (
+        "memory",
+        {"op": "recall", "text": DEVICE_ID},
+        json.dumps({"op": "recall", "text": DEVICE_ID, "other": IBAN}),
+        False,
+    ),
+    (
+        "memory",
+        {"op": "recall", "text": "the rig"},
+        json.dumps({"op": "recall", "text": DEVICE_ID}),
+        False,
+    ),
+    (
+        "read",
+        {"path": f"memory://global?q={DEVICE_ID}"},
+        json.dumps({"path": f"memory://global?q={DEVICE_ID}", "other": IBAN}),
+        False,
+    ),
+    (
+        "read",
+        {"path": "memory://global?q=staging host"},
+        json.dumps({"path": f"memory://global?q={DEVICE_ID}"}),
+        False,
+    ),
     ("read", {"path": f"memory://global?q={DEVICE_ID}&"}, None, False),
     (
         "read",
@@ -510,7 +540,7 @@ _RETENTION_CORPUS: list[tuple[str, Any, str | None, bool]] = [
 #: executing the corpus against the base tree and against this one. They agree — this is
 #: that digest, and the corpus runs on both sides from the same file, so a change to what
 #: retention RETAINS (rather than to which copy it is asked about) moves this pin.
-_RETENTION_DIGEST = "2d8b7e26cd782a98b44f9b391956bbad02ff73d0676025b68728d3d2bf75f25d"
+_RETENTION_DIGEST = "d9a3a5a4ee92ca1f6a5ab275afdd21ad9675fce09b66559026ae2949d498e6d6"
 
 
 def _retention_rows() -> list[list[Any]]:
