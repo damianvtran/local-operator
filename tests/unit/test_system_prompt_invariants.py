@@ -98,6 +98,26 @@ def test_rules_restored_in_review_round_one(queued: str) -> None:
     assert "grepping code instead is how you end up editing a file nothing reads" in queued
 
 
+def test_a_finished_deliverable_is_named_and_never_denied(queued: str) -> None:
+    """The callout is the delivery surface: a file the turn wrote surfaces on
+    its own, so the answer names the path instead of claiming it cannot
+    attach. A live session wrote a PDF and said "I can't attach the file to
+    chat" — the file was already shown under the answer."""
+    assert "Deliverables surface themselves" in queued
+    assert "A file the turn wrote or named surfaces under your answer as a file callout" in queued
+    assert "name each deliverable and its path" in queued
+    assert "never say you cannot attach or send one" in queued
+
+
+def test_written_html_and_charts_are_never_denied(queued: str) -> None:
+    """The counterweight to a denied file is what CAN be produced: a
+    standalone HTML write renders as an inline preview on the desktop UI and
+    a turn's structured numbers can be drawn as a graphic."""
+    assert "A standalone `.html` you write can render as an inline preview (desktop UI)" in queued
+    assert "a turn's structured numbers can be drawn as a graphic" in queued
+    assert "never deny a file or visual you can produce" in queued
+
+
 def test_peer_messaging_never_shells_out(queued: str) -> None:
     assert "never shell out to `lop send`, cmux, or another multiplexer" in queued
 
