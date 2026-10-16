@@ -62,7 +62,9 @@
     "local_operator/tui/widgets/wake_panel.py",
     "local_operator/tui/widgets/org_chart_view.py",
     "local_operator/tui/widgets/tool_card.py",
-    "local_operator/tui/widgets/session_picker.py"
+    "local_operator/tui/widgets/session_picker.py",
+    "local_operator/tui/widgets/goal_panel.py",
+    "local_operator/tui/widgets/network_panel.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -202,8 +204,6 @@
     "local_operator/tui/projects_render.py": 23,
     "local_operator/tui/session_move.py": 3,
     "local_operator/tui/widgets/analytics_panel.py": 0,
-    "local_operator/tui/widgets/goal_panel.py": 8,
-    "local_operator/tui/widgets/network_panel.py": 11,
     "local_operator/tui/widgets/settings_view.py": 14,
     "local_operator/tui/widgets/status_line.py": 0,
     "local_operator/tui/widgets/todo_panel.py": 13,

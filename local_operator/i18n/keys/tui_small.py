@@ -70,6 +70,42 @@ def draft_attachment_count(*, images: int | float, shown: str) -> Msg:
     return Msg("tui.small.draft.attachment_count", {"images": images, "shown": shown})
 
 
+def goal_panel_done_suffix() -> Msg:
+    return Msg("tui.small.goal_panel.done_suffix", {})
+
+
+def goal_panel_judge_absent() -> Msg:
+    return Msg("tui.small.goal_panel.judge_absent", {})
+
+
+def goal_panel_judge_line(*, words: str) -> Msg:
+    return Msg("tui.small.goal_panel.judge_line", {"words": words})
+
+
+def goal_panel_judge_run(*, run: str, cap: str) -> Msg:
+    return Msg("tui.small.goal_panel.judge_run", {"run": run, "cap": cap})
+
+
+def goal_panel_more_settled(*, hidden: str) -> Msg:
+    return Msg("tui.small.goal_panel.more_settled", {"hidden": hidden})
+
+
+def goal_panel_more_settled_indent(*, hidden: str) -> Msg:
+    return Msg("tui.small.goal_panel.more_settled_indent", {"hidden": hidden})
+
+
+def goal_panel_no_goal_hint() -> Msg:
+    return Msg("tui.small.goal_panel.no_goal_hint", {})
+
+
+def goal_panel_none_yet() -> Msg:
+    return Msg("tui.small.goal_panel.none_yet", {})
+
+
+def goal_panel_settled_heading() -> Msg:
+    return Msg("tui.small.goal_panel.settled_heading", {})
+
+
 def info_panel_busy_word() -> Msg:
     return Msg("tui.small.info_panel.busy_word", {})
 
@@ -92,6 +128,50 @@ def link_picker_title() -> Msg:
 
 def model_picker_window_position(*, shown: str, total: str) -> Msg:
     return Msg("tui.small.model_picker.window_position", {"shown": shown, "total": total})
+
+
+def network_panel_checking_indent() -> Msg:
+    return Msg("tui.small.network_panel.checking_indent", {})
+
+
+def network_panel_identity_row(*, identity: str) -> Msg:
+    return Msg("tui.small.network_panel.identity_row", {"identity": identity})
+
+
+def network_panel_installed_row(*, value: str) -> Msg:
+    return Msg("tui.small.network_panel.installed_row", {"value": value})
+
+
+def network_panel_member_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.network_panel.member_count", {"count": count, "shown": shown})
+
+
+def network_panel_no_members() -> Msg:
+    return Msg("tui.small.network_panel.no_members", {})
+
+
+def network_panel_relay_checking_indent() -> Msg:
+    return Msg("tui.small.network_panel.relay_checking_indent", {})
+
+
+def network_panel_relay_not_running() -> Msg:
+    return Msg("tui.small.network_panel.relay_not_running", {})
+
+
+def network_panel_relay_running(*, pid: str, state: str) -> Msg:
+    return Msg("tui.small.network_panel.relay_running", {"pid": pid, "state": state})
+
+
+def network_panel_stale_tag() -> Msg:
+    return Msg("tui.small.network_panel.stale_tag", {})
+
+
+def network_panel_suspect_tag() -> Msg:
+    return Msg("tui.small.network_panel.suspect_tag", {})
+
+
+def network_panel_trust_field(*, trust: str) -> Msg:
+    return Msg("tui.small.network_panel.trust_field", {"trust": trust})
 
 
 def org_chart_view_chart_suffix() -> Msg:
