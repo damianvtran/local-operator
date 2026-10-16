@@ -3573,6 +3573,15 @@ async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
     assert any("no visible output" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
+    # THE LADDERED HALF OF THE SAME MISREAD CLASS (review m1). This end used to
+    # be bare, and a bare end reads as a COMPLETED ANSWER on every surface -- the
+    # exact shape that let a cut-off child reach its parent saying it had
+    # finished. Branding it costs no extra request (the retries were already
+    # spent); it only stops the end from lying. The `auto` half (no rung at all,
+    # after the one re-ask) is pinned by
+    # ``test_a_second_silent_length_turn_ends_the_run_NAMED``.
+    assert end.aborted is True
+    assert end.cut_off_cause == "output-limit", end.cut_off_cause
 
 
 @pytest.mark.asyncio
@@ -3710,6 +3719,10 @@ async def test_a_silent_length_turn_with_a_lower_rung_still_takes_the_retreat():
     )
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and not end.aborted
+    # NEGATIVE CONTROL for m1's widening: a laddered run that RECOVERS through
+    # its retreat is NOT branded. The flag is reset per model call, so a run
+    # that answers after a cut-off must not be reported to its parent as cut.
+    assert end.cut_off_cause == "", end.cut_off_cause
 
 
 @pytest.mark.asyncio
