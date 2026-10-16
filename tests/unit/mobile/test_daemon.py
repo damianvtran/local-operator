@@ -3033,3 +3033,48 @@ def test_durable_projection_reads_a_stale_open_ask_as_timed_out_with_no_mirror(
     asks = projection.asks or []
     assert [(row.ask_id, row.status) for row in asks] == [("stale-1", "timed_out")]
     assert projection.pending is None
+
+
+def test_durable_projection_hides_a_lapsed_ask_past_the_configured_window(
+    tmp_path, monkeypatch
+) -> None:
+    """``asks.lapsed_visible_for`` reaches a STOPPED conversation's screen
+    (decision D8): its lapsed ask leaves once the window passes. The daemon's
+    started watcher is what follows another process's edit; the explicit poll
+    here stands in for that watcher's next tick."""
+    import time
+
+    from local_operator import settings_io
+    from local_operator.asks import store as ask_store
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import process_watcher
+    from local_operator.mobile.daemon import _durable_projection
+
+    cfg = _durable_ask_session(tmp_path, monkeypatch, "window-session")
+    now = int(time.time() * 1000)
+    ask_store.write_entry(
+        cfg,
+        "window-session",
+        cwd="/tmp/w",
+        asks=[
+            {
+                "ask_id": "lapsed-2h",
+                "created_at": now - 2 * 3_600_000 - 600_000,
+                "expires_at": now - 2 * 3_600_000,
+                "timeout_s": 600,
+                "urgent": False,
+                "status": "timed_out",
+                "delivered": False,
+                "questions": [],
+            }
+        ],
+    )
+    before = _durable_projection("window-session")
+    assert before is not None and [row.ask_id for row in before.asks or []] == ["lapsed-2h"]
+
+    settings_io._store(ConfigManager(cfg), settings_io.BY_KEY["asks.lapsed_visible_for"].path, "1h")
+    process_watcher(cfg).poll_now()
+    after = _durable_projection("window-session")
+    assert after is not None
+    # Nothing left worth showing is ABSENCE, the stopped-screen contract above.
+    assert after.asks is None and after.asks_open is None

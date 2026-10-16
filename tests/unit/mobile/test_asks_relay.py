@@ -973,3 +973,33 @@ async def test_a_malformed_images_list_is_a_422_at_the_relay_door() -> None:
     )
     assert reply.status_code == 422, reply.text
     assert handle.ask_calls == []
+
+
+def test_the_aggregate_follows_a_window_written_after_the_daemon_started() -> None:
+    """``asks.lapsed_visible_for`` (decision D8) on the phone's sheet: a
+    ``config.yml`` written while the daemon is up applies on the NEXT request,
+    with no restart, and only to the lapsed row."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    now = int(time.time() * 1000)
+    _session_dir(SESSION_A)
+    lapsed = {"expires_at": now - 2 * 3_600_000, "created_at": now - 2 * 3_600_000 - 900_000}
+    ask_store.write_entry(
+        config_dir(),
+        SESSION_A,
+        cwd="/tmp/aaa",
+        asks=[
+            _pending({"ask_id": "ask-lapsed", "status": "timed_out", **lapsed}),
+            _pending({"ask_id": "ask-answered", "status": "answered", **lapsed}),
+        ],
+    )
+    client = _client()
+    before = [row["ask_id"] for row in client.get("/api/asks").json()["asks"]]
+    assert sorted(before) == ["ask-answered", "ask-lapsed"]
+
+    settings_io._store(
+        ConfigManager(config_dir()), settings_io.BY_KEY["asks.lapsed_visible_for"].path, "1h"
+    )
+    after = [row["ask_id"] for row in client.get("/api/asks").json()["asks"]]
+    assert after == ["ask-answered"]

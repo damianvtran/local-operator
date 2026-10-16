@@ -1282,3 +1282,86 @@ def test_the_wire_row_omits_attachments_while_none_and_publishes_refs_once_prese
     assert "attachments" not in PendingAskWire(**open_row).to_json()
     # NEVER the bytes: the whole published row is small however large the image was.
     assert len(json.dumps(answered_row)) < 1500
+
+
+# ---------------------------------------------------------------------------
+# `asks.lapsed_visible_for` on the wire (decisions D8/D9)
+# ---------------------------------------------------------------------------
+
+
+def _write_config(config_dir: Path, choice: str) -> None:
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io._store(
+        ConfigManager(config_dir), settings_io.BY_KEY["asks.lapsed_visible_for"].path, choice
+    )
+
+
+def test_ask_wire_drops_a_hidden_lapsed_row_from_rows_and_tally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The setting reaches the live wire: under ``1h`` a timed-out ask is gone
+    from BOTH the rows and ``asks_open`` once its window passes, so no surface
+    counts a question it no longer shows."""
+    from local_operator.config_watch import process_watcher
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    # The queue's own config directory is where its window is read from.
+    config_dir = tmp_path
+    session, queue = _live_session(tmp_path)
+    clock = getattr(queue, "_test_clock")
+    queue.enqueue(_questions(), 600)
+    clock["now"] = BASE + 600_000 + 3_600_000 + 1  # 1 h + 1 ms past the deadline
+
+    rows, outstanding = ask_wire(session)
+    assert rows is not None and [r["status"] for r in rows] == ["timed_out"]
+    assert outstanding == 1, "the 7 d default keeps today's result"
+
+    _write_config(config_dir, "1h")
+    process_watcher(config_dir).poll_now()
+    rows, outstanding = ask_wire(session)
+    assert rows is None and outstanding == 0
+
+
+def test_a_running_session_republishes_when_the_window_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D9 (i): a ``config.yml`` edit from ANOTHER process hides a lapsed row on
+    a running session's wire at once, through the real
+    ``Session._apply_config_change`` listener — no new turn."""
+    from local_operator.config_watch import process_watcher
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_aside import RecordingStream, make_session
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = make_session(tmp_path, RecordingStream())
+    session.set_ask_handler(_noop_hook)  # type: ignore[arg-type]
+
+    async def _drive() -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            queue = session.ask_queue()
+            assert queue is not None
+            root = config_dir()
+            watcher = process_watcher(root)
+            session.add_dispose_hook(watcher.subscribe(session._apply_config_change))
+            # A real ask whose deadline passed 2 h ago (the log is written with
+            # the queue's clock, then the clock moves on).
+            queue._now = lambda: store.now_ms() - 2 * 3_600_000 - 120_000
+            queue.enqueue(_questions(), 120)
+            queue._now = store.now_ms
+            session.publish_ask_state()
+            before = session.frontend_state.model_dump(mode="json")
+            _write_config(root, "1h")
+            change = watcher.poll_now()
+            assert change is not None and "asks.lapsed_visible_for" in change.changed_keys
+            after = session.frontend_state.model_dump(mode="json")
+            return before, after
+        finally:
+            await session.dispose()
+
+    before, after = asyncio.run(_drive())
+    assert [row["status"] for row in before["asks"]] == ["timed_out"]
+    assert before["asks_open"] == 1
+    assert "asks" not in after
+    assert after["asks_open"] == 0
