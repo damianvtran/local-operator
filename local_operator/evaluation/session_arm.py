@@ -691,9 +691,10 @@ RecordBatch = Callable[[str, Mapping[str, Any]], None]
 ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 
 #: The re-bind seam: one bounded attempt to fetch the observation the episode
-#: may continue from, called by the bridge only after an execute failure the
-#: adapter declared COMMITTED (``_observation_phase_failure``). The driver
-#: fills it with the read-only ``observe`` call; tests fill it with a fake.
+#: may continue from, called by the bridge after an execute failure that is
+#: RE-BINDABLE (``_rebindable_failure``: the committed read-back class, or a
+#: pre-dispatch refusal). The driver fills it with the read-only ``observe``
+#: call; tests fill it with a fake.
 #: ``None`` means the bridge has no re-read path and a failed execute is
 #: terminal -- legibly (see ``ActionBridge._after_failed_execute``).
 RecoverObservation = Callable[[], Awaitable[Observation]]
@@ -778,10 +779,10 @@ class ActionBridge:
     #: a receipt (see ``_split_ask_delivery``).
     ask: Callable[[ActionBatch], Awaitable[Any]] | None = None
     #: The re-bind seam (see :data:`RecoverObservation`): exactly ONE read of
-    #: the environment's current observation, attempted only after an execute
-    #: failure the adapter declared committed. The bridge owns WHEN; the
-    #: driver owns the RPC. ``None`` degrades a failed execute to a legible
-    #: end rather than a silent one.
+    #: the environment's current observation, attempted after an execute
+    #: failure that is re-bindable (``_rebindable_failure``). The bridge owns
+    #: WHEN; the driver owns the RPC. ``None`` degrades a failed execute to a
+    #: legible end rather than a silent one.
     recover: RecoverObservation | None = None
     #: The task as it was stated -- the reset observation's text -- restated by
     #: the completion challenge (the same source the runner's gate uses).
@@ -2486,8 +2487,8 @@ async def run_session_episode(
             surface=surface,
             render=renderer.render,
             execute=_make_execute(adapter_session, config, record),
-            # The re-bind seam: one read-only ``observe`` after a failed
-            # execute the adapter declared committed (see ``_make_recover``).
+            # The re-bind seam: one read-only ``observe`` after a re-bindable
+            # failed execute (see ``_make_recover``).
             recover=_make_recover(adapter_session, config, spec.episode_id),
             max_steps=config.max_steps,
             record=lambda kind, payload: record.write(
@@ -3475,11 +3476,13 @@ def _make_recover(
     """The re-bind seam: ONE bounded read of the environment's current state.
 
     WHY ONE, AND WHY THIS CALL. The bridge calls this only after an execute
-    failure the adapter declared committed (``phase == "observation"``: the
-    batch applied, only the read-back lost) and whose configured read-back
-    retries have already run out -- so this is NOT a retry of that read-back
-    (raising those is a comparability-affecting change, see INFRA.md) but a
-    fresh state read through the read-only ``observe`` method every adapter
+    failure that is RE-BINDABLE -- the committed read-back class
+    (``phase == "observation"``: the batch applied, only the read-back lost) or
+    a pre-dispatch refusal (``invalid_state``: nothing applied) -- and whose
+    configured read-back retries have already run out, so this is NOT a retry
+    of that read-back (raising those is a comparability-affecting change, see
+    INFRA.md) but a fresh state read through the read-only ``observe`` method
+    every adapter
     already answers (``reset_start`` reads observation zero through it). It
     re-establishes what the bridge lost: a current observation the token can
     be re-armed with. When it cannot -- the environment is still unable to
