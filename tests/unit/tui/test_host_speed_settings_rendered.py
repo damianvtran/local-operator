@@ -284,35 +284,30 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 async def _await_transcript_scroll_settled(proof, pilot, *, tries: int = 400) -> None:
-    """Await the transcript's OWN scroll completion before sampling a frame.
+    """FAIL-LOUD WEDGE BACKSTOP only -- NOT the completion condition.
 
-    WHY THIS REPLACES A PRE-LOOP SETTLE. A single
-    ``pilot.wait_for_scheduled_animations()`` before the loop did NOT stop the
-    between-sample motion (CI run 38842431374: the two ownership frames still
-    differed by exactly two rows at both widths). The published sidecar says why:
-    the transcript's ``virtual_size`` is IDENTICAL in both frames ([96, 47]), so
-    nothing was appended between the samples -- the scroll OFFSET moved. Both
-    moved cards shift by the same two rows, which is an offset change, not a
-    relayout and not new content.
+    THE REAL FIX is structural and lives elsewhere: the ownership fixture's card
+    scroll is now NON-ANIMATED (``scroll_visible(animate=False, immediate=True)``),
+    so no in-flight scroll animation can straddle the two samples. That is what
+    removes the two-row delta; this helper is not it.
 
-    The producer is an in-flight ANIMATED scroll. The fixture calls
-    ``card.scroll_visible(immediate=True)``, and ``animate`` defaults to True;
-    Textual's ``immediate=True`` only skips the ``call_after_refresh`` deferral --
-    it still routes to ``_scroll_to(animate=True)``, which animates over the
-    default duration. ``wait_for_scheduled_animations`` is a CPU-idle heuristic
-    (20 ms granularity, 1 s cap) and so is not a completion condition for that
-    animation.
+    WHY A BACKSTOP AND NOT THE SYNC. Two attempts to OBSERVE the old animation
+    (a pre-loop ``pilot.wait_for_scheduled_animations()`` in CI run 38842431374,
+    then a per-sample animator-plus-scroll-target await) both still measured the
+    identical two-row offset delta. Watching an in-flight animation is therefore
+    not a reliable fixed point on this machine, which is exactly why the fix had
+    to be structural.
 
-    So this waits on the harness's own named state, the same predicate
-    ``tests/unit/tui/test_rendered_history_paging.py`` uses: the animator is no
-    longer driving this view's ``scroll_y`` AND the scroll has reached its
-    target. That is a bounded await on a completion condition, NOT polling until
-    the two geometries happen to agree (still forbidden) and NOT a longer idle
-    guess. Running it before EACH sample is the point: motion that begins after
-    sample 1 is covered by sample 2's own wait.
+    KEPT ONLY SO A WEDGED TRANSCRIPT FAILS LOUDLY instead of silently shipping an
+    unstable pair: a transcript that never settles raises here. The predicate
+    merely documents the settled state (``scroll_y == scroll_target_y`` with
+    nothing animating for this view), the same reading
+    ``tests/unit/tui/test_rendered_history_paging.py`` takes. It is NOT polling
+    until the two geometries agree.
 
-    ``tries`` is a wedge backstop, not the assertion: a transcript that never
-    settles fails loudly here rather than silently shipping an unstable pair.
+    LIMIT, unchanged: it does not await a not-yet-completed async task -- an
+    in-flight ``to_thread`` or provider call can still land between samples; the
+    non-animated fixture scroll is what removes the observed motion.
     """
     view = proof.app._transcript_view()
     for _ in range(tries):
