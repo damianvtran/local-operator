@@ -22,11 +22,13 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # TWELVE: the Wave-3 ten retain their audited source pins, and the reviewed
-    # transcript and wire.settings unions each add a row for the newer English
-    # source. Keep the cardinality pin: adding an audited union must not silently
-    # admit an unrelated held namespace or discard the previous audit history.
-    assert len(hindi) == 12
+    # THIRTEEN: the Wave-3 ten retain their audited source pins, and the reviewed
+    # transcript union and two wire.settings unions (the hub-setting deletion and
+    # the asks.lapsed_visible_for 12-key delta) each add a row for the newer
+    # English source. Keep the cardinality pin: adding an audited union must not
+    # silently admit an unrelated held namespace or discard the previous audit
+    # history.
+    assert len(hindi) == 13
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

@@ -9750,3 +9750,54 @@ async def test_the_list_route_tolerates_a_malformed_notice_record(draft_api) -> 
     assert answer["delegated_cleanup_notice"] is None
     ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
     assert ack.status_code == 200 and ack.json()["result"] == {"acknowledged": True}
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_asks_route_follows_a_window_written_after_start(
+    tmp_path, monkeypatch
+) -> None:
+    """``asks.lapsed_visible_for`` on ``GET /v1/desktop/asks`` (decisions D8/D9).
+
+    The desktop server starts no config watcher, so the route polls the file on
+    each request; a ``config.yml`` written after the app is up must apply on the
+    very next request, hide only the LAPSED row, and keep the answered one."""
+    from local_operator import settings_io
+    from local_operator.asks import store as ask_store
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    root = tmp_path / "config"
+    (root / "sessions" / "s-window").mkdir(parents=True)
+    now = int(time.time() * 1000)
+
+    def row(ask_id: str, status: str) -> dict[str, Any]:
+        return {
+            "ask_id": ask_id,
+            "created_at": now - 3 * 3_600_000,
+            "expires_at": now - 2 * 3_600_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "status": status,
+            "delivered": False,
+            "questions": [],
+        }
+
+    ask_store.write_entry(
+        root, "s-window", cwd="/tmp/w", asks=[row("lapsed", "timed_out"), row("done", "answered")]
+    )
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(root)
+    app.include_router(routes.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        first = await client.get("/v1/desktop/asks")
+        assert first.status_code == 200, first.text
+        assert sorted(r["ask_id"] for r in first.json()["result"]["asks"]) == ["done", "lapsed"]
+        settings_io._store(
+            ConfigManager(root), settings_io.BY_KEY["asks.lapsed_visible_for"].path, "1h"
+        )
+        second = await client.get("/v1/desktop/asks")
+        assert [r["ask_id"] for r in second.json()["result"]["asks"]] == ["done"]
