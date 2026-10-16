@@ -762,3 +762,94 @@ async def test_a_tier_with_no_level_stamps_no_requested_effort(tmp_path, monkeyp
     assert job.requested_effort is None
     await wait_for(lambda: job.status == "completed")
     await session.dispose()
+
+
+def test_a_two_hop_episode_leaves_the_notice_on_the_first_hop() -> None:
+    """Review round 1, MINOR 1 / QA Q1: the notice is the ANNOUNCEMENT, the row
+    is the RECORD.
+
+    The notice fires once per fallback episode, on the first descent, while the
+    row's effort is rewritten on every hop — so a second hop that clamps the
+    level further, or restores it, moves the durable row and leaves the notice
+    as it was spoken. Both directions are pinned here, because both are
+    reachable against a real chain and stating only the convenient one would
+    leave the other to be discovered as a contradiction. This is why the relay's
+    comment and the notice's docstring say which surface owns which fact.
+    """
+    from local_operator.session.session import Session
+
+    # Arm A: hop 1 keeps the level, hop 2 clamps it away. The notice — built for
+    # hop 1 — mentions no effort; the row, written by hop 2, names the drop.
+    kept_then_dropped = _effort_pinned_job()
+    emitted: list[Any] = []
+    relay = _relay(kept_then_dropped, emitted)
+    asyncio.run(relay(_fallback_event(effort="xhigh")))
+    asyncio.run(relay(_fallback_event(effort=None)))
+    notices = [e for e in emitted if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1, "one episode, one announcement"
+    assert "effort" not in notices[0].text
+    assert kept_then_dropped.model_fallback_effort is None
+    row = Session._job_result_message("designer1", "x", kept_then_dropped).details["text"]
+    assert f"(pinned {PIN}, ran on {EFFECTIVE}, effort xhigh → model default" in row
+
+    # Arm B: the reverse. The notice names the level the descent cost; the row is
+    # silent because the child ended up back at the level it asked for.
+    dropped_then_restored = _effort_pinned_job()
+    emitted_b: list[Any] = []
+    relay_b = _relay(dropped_then_restored, emitted_b)
+    asyncio.run(relay_b(_fallback_event(effort=None)))
+    asyncio.run(relay_b(_fallback_event(effort="xhigh")))
+    [notice_b] = [e for e in emitted_b if isinstance(e, NoticeEvent)]
+    assert ", effort xhigh → model default" in notice_b.text
+    assert dropped_then_restored.model_fallback_effort == "xhigh"
+    row_b = Session._job_result_message("designer1", "x", dropped_then_restored).details["text"]
+    assert f"(pinned {PIN}, ran on {EFFECTIVE}" in row_b
+    assert "effort" not in row_b
+
+
+@pytest.mark.asyncio
+async def test_a_level_equal_to_the_origin_default_is_not_stamped(tmp_path, monkeypatch) -> None:
+    """Review round 1, MINOR 2 / QA Q2: the case this leaves silent, pinned as a
+    decision rather than an oversight.
+
+    ``effort: high`` on a model whose own default is ``high`` — the value an
+    operator is likeliest to write — is indistinguishable from asking for
+    nothing by the time the spec exists: ``_with_tier_effort`` sees the clamp
+    land on the level the spec is already at and returns it untouched. So the
+    hop that follows adds no clause, even though it may well have dropped the
+    level. That matches ``spec_for_target``'s own rule (asking for the default
+    is asking for omission), and the route out — if it ever matters — is the
+    resolution-SOURCE argument ``_requested_effort``'s docstring names, not a
+    second reader guessing here.
+    """
+    from local_operator.session.session import Session
+    from tests.unit.session.test_pinned_subagent_model import (
+        make_session,
+        wait_for,
+        write_tiers,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": PIN, "effort": "high"})
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(
+        label="designer", prompt="review it", agent="designer", effort="hi"
+    )
+    job = session.jobs.get(job_id)
+    assert job is not None
+    assert job.requested_model_label == PIN
+    assert job.requested_effort is None, "equal to the model's own default"
+    await wait_for(lambda: job.status == "completed")
+
+    emitted: list[Any] = []
+    await _relay(job, emitted)(_fallback_event(effort=None))
+    # The edge is real and recorded; only the level it dropped had no stamp to
+    # compare against, which is what makes the silence this test's subject.
+    assert job.model_fallback is True
+    assert job.model_fallback_effort is None
+    [notice] = [e for e in emitted if isinstance(e, NoticeEvent)]
+    assert "effort" not in notice.text
+    row = Session._job_result_message("designer1", "x", job).details["text"]
+    assert f"(pinned {PIN}, ran on {EFFECTIVE} — provider failure)" in row
+    assert "effort" not in row
+    await session.dispose()

@@ -1115,12 +1115,21 @@ def _requested_effort(spec: ModelSpec | None) -> str | None:
 
     "Asked for" is read as DIVERGENCE from the model's own default, because that
     is the only difference the spec still carries once it exists. A
-    bare-selector tier, an explicit ``model=`` pick and the inherit sentinel all
-    resolve to a spec sitting ON ``reasoning_default_effort`` — the field whose
-    docstring is exactly "what ``/effort auto`` restores, as distinct from
+    bare-selector tier and an explicit ``model=`` pick both resolve to a spec
+    sitting ON ``reasoning_default_effort`` — the field whose docstring is
+    exactly "what ``/effort auto`` restores, as distinct from
     ``reasoning_effort``, which is what is selected right now" — so nothing was
     asked for and ``None`` is the honest answer rather than the target's own
     rung dressed up as a request.
+
+    The inherit sentinel is the case to read carefully, and NOT a third member
+    of that list: it resolves to the PARENT's spec (``self.model``), so the
+    parent's own ``/effort`` choice rides along and a parent sitting at ``max``
+    stamps ``max`` for every child inheriting into it. That is the right answer
+    rather than a leak — those children do run at ``max``, and a hop off it costs
+    them exactly the level this stamp exists to name, which no caller could
+    recover by asking "was a tier named": the parent's level is a real request,
+    just made one layer up.
 
     EXTENSION POINT (PR A, team members): the ``tier``/``effort`` pair resolves
     into this same spec field, so an override is covered without a second stamp.
@@ -1951,6 +1960,14 @@ def _pinned_fallback_notice(
     sits between the model pair and the cause clause in both this sentence and
     the durable completion row, so the reader sees one relation in one order.
 
+    It states the hop it is built FOR — the first descent of an episode, the
+    only one that gets a notice — and not the episode's final state: a later hop
+    may clamp the level further or restore it, and the durable completion row
+    (``Session._job_result_message``) is the surface that follows the child to
+    where it ended up. A reader comparing the two across a multi-hop episode can
+    see them differ, which is why the split is stated here rather than left to be
+    discovered.
+
     The two models are stated in the PRODUCT's vocabulary — resolved display
     names where naming can vouch for one, else the selector — and as an
     ``A → B`` pair, the same relation spelling the band's badge uses, rather
@@ -2218,7 +2235,17 @@ def _make_relay(
                             # another fallback updates the row's label (and so
                             # the badge) without re-announcing the descent, and
                             # a recovery clears the flag so a genuinely new
-                            # episode speaks again.
+                            # episode speaks again. That makes this notice the
+                            # ANNOUNCEMENT rather than the record: it describes
+                            # the hop that TRIGGERED it, while a later hop in the
+                            # same episode may clamp the level further (or
+                            # restore it) with no second notice. The row's
+                            # effort is rewritten on every hop, so the durable
+                            # COMPLETION ROW is the surface that follows the
+                            # child to where it ended up, and the two legitimately
+                            # differ across a multi-hop episode —
+                            # ``test_a_two_hop_episode_leaves_the_notice_on_the_first_hop``
+                            # pins both directions.
                             await emit(
                                 NoticeEvent(
                                     text=_pinned_fallback_notice(
