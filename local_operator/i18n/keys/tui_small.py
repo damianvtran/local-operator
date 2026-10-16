@@ -70,6 +70,22 @@ def draft_attachment_count(*, images: int | float, shown: str) -> Msg:
     return Msg("tui.small.draft.attachment_count", {"images": images, "shown": shown})
 
 
+def info_panel_busy_word() -> Msg:
+    return Msg("tui.small.info_panel.busy_word", {})
+
+
+def info_panel_deeper_below_depth(*, deeper: str, depth: str) -> Msg:
+    return Msg("tui.small.info_panel.deeper_below_depth", {"deeper": deeper, "depth": depth})
+
+
+def info_panel_last_heartbeat_ago(*, age: str) -> Msg:
+    return Msg("tui.small.info_panel.last_heartbeat_ago", {"age": age})
+
+
+def info_panel_needs_pending(*, pending: str) -> Msg:
+    return Msg("tui.small.info_panel.needs_pending", {"pending": pending})
+
+
 def link_picker_title() -> Msg:
     return Msg("tui.small.link_picker.title", {})
 
@@ -94,6 +110,14 @@ def spend_channel_not_itemised() -> Msg:
     return Msg("tui.small.spend.channel_not_itemised", {})
 
 
+def subagent_view_no_longer_on_ledger() -> Msg:
+    return Msg("tui.small.subagent_view.no_longer_on_ledger", {})
+
+
+def subagent_view_row_name() -> Msg:
+    return Msg("tui.small.subagent_view.row_name", {})
+
+
 def subagents_of_scope(*, scope: str) -> Msg:
     return Msg("tui.small.subagents.of_scope", {"scope": scope})
 
@@ -104,3 +128,22 @@ def subagents_title() -> Msg:
 
 def timing_no_samples() -> Msg:
     return Msg("tui.small.timing.no_samples", {})
+
+
+def wake_panel_monitors_armed(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.wake_panel.monitors_armed", {"count": count, "shown": shown})
+
+
+def wake_panel_monitors_need_attention(*, count: int | float, shown: str, total: str) -> Msg:
+    return Msg(
+        "tui.small.wake_panel.monitors_need_attention",
+        {"count": count, "shown": shown, "total": total},
+    )
+
+
+def wake_panel_monitors_title() -> Msg:
+    return Msg("tui.small.wake_panel.monitors_title", {})
+
+
+def wake_panel_wakes_title() -> Msg:
+    return Msg("tui.small.wake_panel.wakes_title", {})
