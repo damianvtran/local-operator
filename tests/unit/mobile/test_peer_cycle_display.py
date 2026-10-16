@@ -269,6 +269,13 @@ def test_live_phone_keeps_a_nonpeer_delivery_visible_and_uncertified(custom_type
     assert not any("peer_cycle" in row.details for row in rows), [r.kind for r in rows]
     assert not any(row.kind == "peer_message" and row.text == body for row in rows)
     assert any(row.text == body for row in rows), "the typed delivery must stay visible"
+    # The notice documents that it carries the ORIGINAL custom kind, so the
+    # reader can tell a bridge card from a future kind. It rides as a display
+    # key only: an extra detail key must never certify the row (the absence
+    # assertion above is the guard), and the phone tolerates keys it ignores.
+    boundary = next(row for row in rows if row.text == body)
+    assert boundary.details.get("custom_kind") == custom_type
+    assert "peer_cycle" not in boundary.details
 
 
 def test_live_phone_legacy_empty_custom_type_still_reads_as_a_peer():

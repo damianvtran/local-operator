@@ -2172,7 +2172,10 @@ class ProjectionFold:
             else:
                 self._peer_replay.reset_pending()
                 self.note_nonpeer_delivery(
-                    event.body, sender=event.sender, message_id=event.message_id
+                    event.body,
+                    sender=event.sender,
+                    message_id=event.message_id,
+                    custom_type=event.custom_type,
                 )
         elif isinstance(event, ToolExecutionEndEvent):
             # The live stream settles a call with a typed END EVENT; the
@@ -2730,7 +2733,12 @@ class ProjectionFold:
         self._bump()
 
     def note_nonpeer_delivery(
-        self, text: str, *, sender: dict[str, Any] | None = None, message_id: str | None = None
+        self,
+        text: str,
+        *,
+        sender: dict[str, Any] | None = None,
+        message_id: str | None = None,
+        custom_type: str | None = None,
     ) -> None:
         """Keep a NON-peer typed delivery visible as its own boundary row.
 
@@ -2740,7 +2748,13 @@ class ProjectionFold:
         entirely hid a real delivery from the phone (the observed C1-2 RED), so
         it paints as a notice carrying its own message id, sender and ORIGINAL
         custom kind. It is never a ``peer_message`` row, never participates in
-        proof, and any reserved ``peer_cycle`` stamp is stripped."""
+        proof, and any reserved ``peer_cycle`` stamp is stripped.
+
+        ``custom_type`` rides under ``custom_kind`` -- a DISPLAY key, not a
+        provenance one: only the declared peer kind grants ownership, and that
+        decision is made by the caller BEFORE this method is reached (§ the
+        ``PeerMessageDeliveredEvent`` arm). The phone tolerates detail keys it
+        does not read, so this stays additive on the wire."""
         if cross_session_hidden():
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
@@ -2748,6 +2762,8 @@ class ProjectionFold:
         details: dict[str, Any] = {"notice_kind": "cross_session_boundary"}
         if isinstance(sender, dict) and sender:
             details["sender"] = dict(sender)
+        if custom_type:
+            details["custom_kind"] = _compact(custom_type, _NOTICE_CHARS)
         self._append(
             TranscriptEntry(
                 id=message_id or f"nonpeer-{time.time_ns()}",
