@@ -10,6 +10,10 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def approval_pending() -> Msg:
+    return Msg("wire.voice.approval_pending", {})
+
+
 def description() -> Msg:
     return Msg("wire.voice.description", {})
 
@@ -18,8 +22,16 @@ def empty_transcript() -> Msg:
     return Msg("wire.voice.empty_transcript", {})
 
 
+def invalid_message(*, reason: str) -> Msg:
+    return Msg("wire.voice.invalid_message", {"reason": reason})
+
+
 def invalid_request() -> Msg:
     return Msg("wire.voice.invalid_request", {})
+
+
+def invalid_request_id() -> Msg:
+    return Msg("wire.voice.invalid_request_id", {})
 
 
 def max_spoken_chars_help() -> Msg:

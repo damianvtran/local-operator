@@ -3,7 +3,7 @@
 The SERVER decides what is spoken: the speech route takes a source reference
 (a message id, a gate), resolves the text itself and passes it through here. A
 renderer never posts free text, so nothing outside the agent's own words — or a
-host-authored gate card — can ever be voiced.
+pending approval card as the server reads it — can ever be voiced.
 
 What this does, in order:
 
@@ -14,8 +14,11 @@ What this does, in order:
    ``[text](url)`` links keep their text.
 3. Bare URLs are replaced by the word "link". A URL read aloud is a string of
    letters nobody can act on.
-4. Whitespace is folded.
-5. The result is capped at ``max_spoken_chars`` on a sentence boundary when one
+4. ``[[…]]`` embedded commands (a control token the agent writes for the
+   harness, never prose) are removed outright: there is nothing in one for a
+   listener, and reading one aloud would voice the machinery.
+5. Whitespace is folded.
+6. The result is capped at ``max_spoken_chars`` on a sentence boundary when one
    exists inside the cap, else a word boundary, and a short closing sentence
    says the rest is on screen.
 
@@ -44,6 +47,9 @@ LINK_WORD = "link"
 TRUNCATION_TAIL = "The rest is on screen."
 
 _FENCE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+#: Non-greedy and single-line-bounded so one stray ``[[`` cannot swallow the rest
+#: of a reply; an unclosed opener stays as text rather than eating the answer.
+_EMBEDDED_COMMAND = re.compile(r"\[\[[^\n]*?\]\](?:\([^()\s]*\))?")
 _MD_LINK = re.compile(r"\[([^\]]+)\]\((?:[^()\s]+)\)")
 _URL = re.compile(r"\bhttps?://\S+", re.IGNORECASE)
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
@@ -81,8 +87,11 @@ def normalise_max_chars(value: object) -> int:
 
 
 def clean(text: str) -> str:
-    """Steps 1-4 of the module docstring: what a listener should hear."""
+    """Steps 1-5 of the module docstring: what a listener should hear."""
     text = _FENCE.sub(f" {CODE_PLACEHOLDER} ", text)
+    # Before the link pass, and taking a trailing ``(target)`` with it: a
+    # ``[[x]](y)`` would otherwise be read as a link whose text is ``[x``.
+    text = _EMBEDDED_COMMAND.sub(" ", text)
     text = _MD_LINK.sub(r"\1", text)
     text = _URL.sub(LINK_WORD, text)
     text = _TABLE_RULE.sub(" ", text)
@@ -98,7 +107,7 @@ def clean(text: str) -> str:
 
 
 def cap(text: str, max_chars: int) -> Speakable:
-    """Step 5: cut ``text`` to ``max_chars`` at the best boundary inside it.
+    """Step 6: cut ``text`` to ``max_chars`` at the best boundary inside it.
 
     The closing sentence counts against the cap, so the spoken total never
     exceeds it: ``X-Voice-Spoken-Chars`` is a promise the renderer can trust.

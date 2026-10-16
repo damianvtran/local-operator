@@ -12,10 +12,10 @@ V7 is pinned twice, deliberately of two kinds:
 * STATIC: ``desktop_voice`` neither imports nor calls ``answer_gate`` nor the
   ``/answers`` handler, read off the module's AST. A later edit that adds a
   spoken "yes" fails here before it can be reviewed past.
-* BEHAVIOURAL: with an approval pending (the turn is streaming), an utterance
-  reaches the owner as a STEER through ``admit_prompt`` and the facade records
-  zero gate answers. The runtime half (what the session does with that steer)
-  is ``tests/unit/voice/test_steer_during_approval.py``.
+* BEHAVIOURAL (V13): with an approval pending, an utterance is refused 409
+  ``approval_pending`` before STT and before any owner op, and the facade
+  records zero gate answers. The runtime half, against a real ``bash`` card, is
+  ``tests/unit/voice/test_utterance_during_approval.py``.
 """
 
 from __future__ import annotations
@@ -121,10 +121,12 @@ class FakeBridge:
 class FakePool:
     """``DesktopSessions``-shaped: the door both routes take."""
 
-    def __init__(self) -> None:
+    def __init__(self, root: Path) -> None:
+        self.root = root
         self.remote = FakeRemote()
         self.bridge = FakeBridge(self.remote)
         self.doors: list[tuple[str, bool]] = []
+        self.deleted: list[str] = []
 
     @contextlib.asynccontextmanager
     async def session(self, session_id: str, *, read: bool = False, allow_draft: bool = False):
@@ -138,6 +140,13 @@ class FakePool:
 
     async def announce_admission_failure(self, *_: Any, **__: Any) -> bool:
         return False
+
+    async def delete(self, session_id: str) -> dict[str, Any]:
+        import shutil
+
+        shutil.rmtree(self.root / "sessions" / session_id)
+        self.deleted.append(session_id)
+        return {"session_id": session_id, "deleted": True}
 
 
 def _resolution(path: VoicePath, servable: bool) -> VoicePathResolution:
@@ -160,7 +169,7 @@ async def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.state.config_manager = ConfigManager(tmp_path)
     app.state.env_config = SimpleNamespace(radient_api_base_url="http://radient.invalid")
     app.state.instance_id = "inst-test"
-    pool = FakePool()
+    pool = FakePool(tmp_path)
     app.state.desktop_sessions = pool
     app.include_router(desktop_voice.router)
     app.include_router(desktop_sessions.router)
@@ -336,10 +345,15 @@ async def test_the_utterance_steers_while_the_turn_is_streaming(rig: Any) -> Non
 
 @pytest.mark.asyncio
 async def test_a_slash_command_is_refused_as_on_messages(rig: Any) -> None:
-    """Same door, same rule: a transcript that IS a command never becomes paid chat."""
+    """Same rule as ``/messages``, but a DECLARED refusal naming the problem (B1)."""
     await _enable(rig, SESSION_A)
-    with pytest.raises(Exception):
-        await _utter(rig, SESSION_A, "/login openai")
+    response = await _utter(rig, SESSION_A, "/login openai")
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_voice_request"
+    # The validator's own sentence, not the "exactly one of" body-shape copy.
+    assert "/login is a command, not a message" in detail["text"], detail
+    assert "exactly one" not in detail["text"]
     assert rig.pool.remote.admissions == []
 
 
@@ -360,14 +374,15 @@ async def test_malformed_utterances_are_refused_before_anything_runs(rig: Any) -
         data={"session_id": SESSION_A, "request_id": "not-a-uuid", "text": "x"},
     )
     blank = await _utter(rig, SESSION_A, "   ")
-    for response, code in (
-        (neither, "invalid_voice_request"),
-        (both, "invalid_voice_request"),
-        (bad_id, "invalid_voice_request"),
-        (blank, "empty_transcript"),
+    for response, code, words in (
+        (neither, "invalid_voice_request", "exactly one of a recording or a text"),
+        (both, "invalid_voice_request", "exactly one of a recording or a text"),
+        (bad_id, "invalid_voice_request", "dashed UUID"),
+        (blank, "empty_transcript", "Nothing was heard"),
     ):
         assert response.status_code == 422, response.text
         assert response.json()["detail"]["code"] == code
+        assert words in response.json()["detail"]["text"]
     assert rig.pool.remote.admissions == []
 
 
@@ -454,6 +469,25 @@ async def test_speech_reads_the_agents_message_cleaned_with_its_headers(rig: Any
 
 
 @pytest.mark.asyncio
+async def test_each_spoken_reply_gets_its_own_correlation_id(rig: Any, monkeypatch) -> None:
+    """B4: two replies in the same millisecond must not share a spend id."""
+    monkeypatch.setattr(desktop_voice.time, "time", lambda: 1_792_000_000.0)
+    await _enable(rig, SESSION_A)
+    for _ in range(2):
+        response = await rig.client.post(
+            "/v1/desktop/voice/speech",
+            json={
+                "session_id": SESSION_A,
+                "source": {"kind": "message", "message_id": ASSISTANT_ID},
+            },
+        )
+        assert response.status_code == 200, response.text
+    first, second = (record["request_id"] for record in rig.spend)
+    assert first != second
+    assert first.startswith(f"voice-{SESSION_A}-1792000000000-")
+
+
+@pytest.mark.asyncio
 async def test_speech_honours_the_configured_cap(rig: Any) -> None:
     from local_operator import settings_io
 
@@ -488,7 +522,7 @@ async def test_speech_never_reads_a_non_assistant_or_unknown_source(rig: Any) ->
 
 
 @pytest.mark.asyncio
-async def test_speech_announces_a_pending_approval_from_host_text(rig: Any) -> None:
+async def test_speech_announces_a_pending_approval_from_its_card_text(rig: Any) -> None:
     await _enable(rig, SESSION_A)
     rig.pool.remote.pending_gate = SimpleNamespace(
         request_id="gate-1", kind="approval", title="bash", detail="rm -rf build/"
@@ -526,20 +560,115 @@ def test_desktop_voice_has_no_import_or_call_path_to_answer_gate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_utterance_during_a_pending_approval_is_a_steer_not_an_answer(rig: Any) -> None:
-    """V7, behaviourally: "yes" spoken at a parked approval card is a steer."""
+async def test_an_utterance_during_a_pending_approval_is_refused(rig: Any, monkeypatch) -> None:
+    """V7 + V13: "yes" spoken at a parked approval card is refused, text or audio."""
+    stt_calls: list[Any] = []
+
+    async def transcribe(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - V13
+        stt_calls.append((args, kwargs))
+        raise AssertionError("STT ran while an approval was pending")
+
+    monkeypatch.setattr("local_operator.stt.cascade.transcribe_audio", transcribe)
     await _enable(rig, SESSION_A)
     remote = rig.pool.remote
     remote.is_streaming = True  # a parked approval sits inside a streaming turn
     remote.pending_gate = SimpleNamespace(
         request_id="gate-1", kind="approval", title="bash", detail="rm -rf build/"
     )
-    response = await _utter(rig, SESSION_A, "yes")
-    assert response.status_code == 200, response.text
-    assert response.json()["result"]["admission"]["detail"] == "steering queued"
-    assert remote.admissions[-1]["steer"] is True and remote.admissions[-1]["text"] == "yes"
+    spoken = await _utter(rig, SESSION_A, "yes")
+    recorded = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4())},
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+    )
+    for response in (spoken, recorded):
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "approval_pending"
+        assert detail["text"] == "Answer the approval on screen first."
+    assert stt_calls == [], "a refused recording was transcribed"
+    assert rig.spend == [], "a refused recording was billed"
+    assert remote.admissions == [], "the utterance reached the owner"
     assert remote.gate_answers == [], "an utterance reached answer_gate"
     assert remote.pending_gate is not None
+
+    # An ASK is not an approval: a steer does not cancel it, so it is not refused.
+    remote.pending_gate = SimpleNamespace(request_id="ask-1", kind="ask", title="", detail="")
+    asked = await _utter(rig, SESSION_A, "the blue one")
+    assert asked.status_code == 200, asked.text
+    assert remote.admissions[-1]["steer"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_parks_during_stt_still_refuses(rig: Any, monkeypatch) -> None:
+    """V13's second check: STT takes seconds and a card can park inside them."""
+    from local_operator.stt import AudioPath, SttOutcome
+
+    remote = rig.pool.remote
+
+    async def transcribe(path: Path, **kwargs: Any) -> SttOutcome:
+        remote.is_streaming = True
+        remote.pending_gate = SimpleNamespace(
+            request_id="gate-2", kind="approval", title="bash", detail="ls"
+        )
+        return SttOutcome(text="yes", path=AudioPath.PROVIDER_STT_OPENAI, attempts=())
+
+    monkeypatch.setattr("local_operator.stt.cascade.transcribe_audio", transcribe)
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4())},
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "approval_pending"
+    assert remote.admissions == []
+
+
+# -- B3: a deleted conversation leaves the slot ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_slot_naming_a_removed_conversation_reads_as_empty(rig: Any) -> None:
+    """Deleted by another surface: the slot file stays, but nothing treats it as live."""
+    import shutil
+
+    await _enable(rig, SESSION_A)
+    shutil.rmtree(rig.root / "sessions" / SESSION_A)
+    status = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert status["active"] is None
+    speak = await rig.client.post(
+        "/v1/desktop/voice/speech",
+        json={"session_id": SESSION_A, "source": {"kind": "message", "message_id": ASSISTANT_ID}},
+    )
+    utter = await _utter(rig, SESSION_A, "hello")
+    for response in (speak, utter):
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "voice_not_enabled"
+    # Enabling another conversation does not report the vanished one as replaced.
+    moved = (await _enable(rig, SESSION_B)).json()["result"]
+    assert moved["replaced"] is None and moved["active"]["session_id"] == SESSION_B
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_slot_holder_clears_the_slot(rig: Any) -> None:
+    """The delete route clears the file, which is what moves the feed's frame."""
+    await _enable(rig, SESSION_A)
+    response = await rig.client.request(
+        "DELETE", f"/v1/desktop/sessions/{SESSION_A}", json={"confirmed": True}
+    )
+    assert response.status_code == 200, response.text
+    assert rig.pool.deleted == [SESSION_A]
+    assert voice_slot.read_slot(rig.root) is None
+    # Deleting a conversation that does NOT hold the slot leaves the slot alone.
+    await _enable(rig, SESSION_B)
+    (rig.root / "sessions" / SESSION_A).mkdir(parents=True)
+    other = await rig.client.request(
+        "DELETE", f"/v1/desktop/sessions/{SESSION_A}", json={"confirmed": True}
+    )
+    assert other.status_code == 200, other.text
+    current = voice_slot.read_slot(rig.root)
+    assert current is not None and current.session_id == SESSION_B
 
 
 # -- the machine-feed frame ------------------------------------------------------

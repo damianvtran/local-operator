@@ -8,9 +8,12 @@
   "wire.voice.unknown_session": "There is no conversation with id {session_id}.",
   "wire.voice.unknown_source": "There is nothing to read aloud for that reference.",
   "wire.voice.stt_unavailable": "This device cannot transcribe speech: {reason} Type the message instead.",
-  "wire.voice.invalid_request": "Send exactly one of a recording or a text message.",
+  "wire.voice.invalid_request": "Send exactly one of a recording or a text message, not both and not neither.",
   "wire.voice.unsupported_audio": "That recording format is not supported. Use WAV, WebM, Ogg or MP4.",
   "wire.voice.upload_too_large": "That recording is too large. Keep it under {limit_mib} MiB.",
   "wire.voice.empty_transcript": "Nothing was heard in that recording, so nothing was sent.",
-  "wire.voice.store_busy": "Something else on this device is changing voice mode. Try again in a moment."
+  "wire.voice.store_busy": "Something else on this device is changing voice mode. Try again in a moment.",
+  "wire.voice.invalid_request_id": "The request id must be a dashed UUID, so nothing was sent.",
+  "wire.voice.invalid_message": "That message was not sent: {reason}",
+  "wire.voice.approval_pending": "Answer the approval on screen first."
 }

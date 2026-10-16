@@ -9,8 +9,10 @@ The frozen contract, which both repositories build against:
     POST /v1/desktop/voice             body {op: enable|disable, session_id}
         200 {active, replaced}; 404 unknown_session;
         409 voice_unavailable | voice_store_busy
-    POST /v1/desktop/voice/utterance   multipart session_id, request_id, file | text
-        200 {text, path, admission}; 409 voice_not_enabled | stt_unavailable
+    POST /v1/desktop/voice/utterance   multipart session_id, request_id (dashed UUID),
+                                       file | text
+        200 {text, path, admission}; 422 invalid_voice_request | empty_transcript;
+        409 voice_not_enabled | approval_pending | stt_unavailable
     POST /v1/desktop/voice/speech      body {session_id, source}
         200 audio, X-Voice-Path, X-Voice-Spoken-Chars;
         409 voice_not_enabled; 404 unknown_source
@@ -24,7 +26,9 @@ Refusals use the i18n envelope with a machine ``code``, the shape
 
 ONE SESSION AT A TIME (V3). Every route but the status read refuses a session
 that is not in the slot, so a stale renderer cannot keep talking to the
-conversation another window switched away from.
+conversation another window switched away from. A slot whose conversation was
+deleted reads as EMPTY: the delete route clears it, and a read that finds the
+directory gone (a delete from another surface) treats it as cleared.
 
 THE UTTERANCE IS AN ORDINARY PROMPT (V5). It is admitted through the same door
 and the same owner op as ``POST /v1/desktop/sessions/{id}/messages``: the pool's
@@ -35,16 +39,25 @@ transcribed. The steer-or-prompt choice is ``admit_receipt_request``'s own rule
 (``desktop_sessions.py``): steer while the session is streaming, else prompt.
 
 V7, A HARD RULE: THIS MODULE NEVER ANSWERS A GATE. It has no import of, and no
-call to, ``answer_gate`` or the ``/answers`` handler. While an approval is
-pending, the turn is still streaming, so an utterance is admitted as a STEER:
-it is queued against the turn and folds in at the next boundary, AFTER the gate
-settles. The operator approves on screen through the existing presence-gated
-card. ``tests/unit/server/test_desktop_voice.py`` pins both halves: the static
-absence and the steer-during-pending-approval behaviour.
+call to, ``answer_gate`` or the ``/answers`` handler. The operator approves on
+screen through the existing presence-gated card.
+
+V13: NO UTTERANCE WHILE AN APPROVAL IS PENDING. A steer is not an answer, but it
+is not harmless either: an INTERRUPTIBLE tool's card (``bash``) is cancelled by
+a steer ("Tool call skipped: interrupted by steering."), so a word heard at the
+card would make the card vanish. The utterance route therefore refuses with
+409 ``approval_pending`` while the slot session has a pending approval gate,
+for the text door and for audio alike, and audio is refused BEFORE STT runs so
+nothing is spent. ``tests/unit/server/test_desktop_voice.py`` pins the static
+absence; ``tests/unit/voice/test_utterance_during_approval.py`` pins the refusal
+against a real runtime with the card still parked.
 
 THE SERVER DECIDES WHAT IS SPOKEN (V8). ``/speech`` takes a source reference,
-never text: a message id resolved from the session's own durable journal, or a
-pending gate's host-authored card. The text goes through
+never text: a message id resolved from the session's own durable journal, or the
+pending approval card as the server resolves it (its title and description).
+That description is the tool's own approval summary, which can quote
+MODEL-WRITTEN arguments (a bash command, a path), so it is not host-authored
+prose; it is the same text the card shows on screen. Every source goes through
 ``voice/speakable.py`` (no code blocks, no URLs, a cap) before synthesis.
 """
 
@@ -55,6 +68,7 @@ import logging
 import shutil
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -151,14 +165,29 @@ def _max_spoken_chars(config_manager: ConfigManager) -> int:
     return voice_speakable.normalise_max_chars(value)
 
 
-def _active(config_dir: Path) -> VoiceActive | None:
+def _live_slot(config_dir: Path) -> voice_slot.VoiceSlot | None:
+    """The slot, or ``None`` when it names a conversation that no longer exists.
+
+    The delete route clears the slot, but a conversation can also be removed by
+    another surface (the TUI, ``lop``) that knows nothing about voice. A slot
+    left naming it must not keep answering ``active``, so the read treats a
+    missing ``sessions/<id>`` as an empty slot. The stale file stays until the
+    next enable or disable rewrites it: a read never writes.
+    """
     current = voice_slot.read_slot(config_dir)
+    if current is None or not _session_exists(config_dir, current.session_id):
+        return None
+    return current
+
+
+def _active(config_dir: Path) -> VoiceActive | None:
+    current = _live_slot(config_dir)
     return VoiceActive(**current.public()) if current is not None else None
 
 
 def require_slot(config_dir: Path, session_id: str) -> None:
     """Refuse every route call for a session that is not the voice-enabled one."""
-    current = voice_slot.read_slot(config_dir)
+    current = _live_slot(config_dir)
     if current is None or current.session_id != session_id:
         raise _refuse(409, "voice_not_enabled", _wv.not_enabled())
 
@@ -274,10 +303,18 @@ async def voice_control(
     except (WakeLockBusy, WakeLockUnavailable) as exc:
         logger.info("voice slot write refused: %s", exc)
         raise _refuse(409, "voice_store_busy", _wv.store_busy()) from None
+    # A deleted conversation is not a slot holder (B3): neither the slot it left
+    # behind nor a "replaced" naming it is news the renderer can act on.
+    active = change.active
+    if active is not None and not _session_exists(config_dir, active.session_id):
+        active = None
+    replaced = change.replaced
+    if replaced is not None and not _session_exists(config_dir, replaced):
+        replaced = None
     return reply(
         VoiceControlResult(
-            active=VoiceActive(**change.active.public()) if change.active else None,
-            replaced=change.replaced,
+            active=VoiceActive(**active.public()) if active is not None else None,
+            replaced=replaced,
         ),
     )
 
@@ -385,10 +422,13 @@ async def voice_utterance(
     try:
         _REQUEST_ID.validate_python(request_id)
     except ValidationError:
-        raise _refuse(422, "invalid_voice_request", _wv.invalid_request()) from None
+        raise _refuse(422, "invalid_voice_request", _wv.invalid_request_id()) from None
     if (file is None) == (text is None):
         raise _refuse(422, "invalid_voice_request", _wv.invalid_request())
     require_slot(_config_dir(request), session_id)
+    # V13, before STT: a refused recording must cost nothing.
+    if await _approval_pending(request, session_id):
+        raise _refuse(409, "approval_pending", _wv.approval_pending())
 
     if file is not None:
         spoken, path = await _transcribe(
@@ -399,6 +439,10 @@ async def voice_utterance(
             env_config=env_config,
             store=store,
         )
+        # STT takes seconds, and a card can park inside them. The money is spent
+        # by now; the card is not, so check again before the steer can cancel it.
+        if await _approval_pending(request, session_id):
+            raise _refuse(409, "approval_pending", _wv.approval_pending())
     else:
         spoken, path = text or "", None
     spoken = spoken.strip()
@@ -411,6 +455,31 @@ async def voice_utterance(
             text=spoken, path=path, admission=MessageAdmission.model_validate(admission)
         ),
     )
+
+
+async def _approval_pending(request: Request, session_id: str) -> bool:
+    """V13: does the session have an approval card parked right now?
+
+    Read through the CONTROL door for ``_streaming``'s reason: a cold read-door
+    answer would report a parked card as absent. A facade whose frontend state
+    has not synchronized yet has no card to show either, so that reads as
+    ``False``; the owner's own steer handling is the backstop for that window.
+    """
+    async with errors(request):
+        async with host(request).session(session_id) as bridge:
+            remote = bridge.remote
+            try:
+                gate = remote.pending_gate if remote is not None else None
+            except RuntimeError:
+                gate = None
+    return gate is not None and getattr(gate, "kind", "") == "approval"
+
+
+def _validation_reason(exc: ValidationError) -> str:
+    """The first validator sentence, without pydantic's ``Value error,`` prefix."""
+    errors_ = exc.errors()
+    message = str(errors_[0].get("msg", "")) if errors_ else str(exc)
+    return message.removeprefix("Value error, ").strip()
 
 
 async def _streaming(request: Request, session_id: str) -> bool:
@@ -440,18 +509,30 @@ async def _admit(
     ``admit_receipt_request``'s rule (steer while streaming), because
     ``/messages`` itself takes the mode from its client.
 
+    The ``Prompt`` is built BEFORE the streaming read, so a body ``/messages``
+    would refuse (a transcript that IS a slash command, an oversize frame) is a
+    declared 422 ``invalid_voice_request`` naming the validator's own reason,
+    and is refused before any owner op (the generic "invalid fields" 422 the
+    app's shaper would otherwise publish named nothing the speaker could fix).
+
     V7: the owner op this reaches is ``prompt``/``steer``. Neither settles a
     gate: gate futures are resolved only by the owner's answer ops, which the
     ``/answers`` route reaches and this module does not.
     """
-    steer = await _streaming(request, session_id)
-    body = Prompt(
-        request_id=request_id,
-        text=text,
-        mode="steer" if steer else "prompt",
-        input_mode="dictated",
-        input_path=path,
-    )
+    try:
+        body = Prompt(
+            request_id=request_id,
+            text=text,
+            mode="prompt",
+            input_mode="dictated",
+            input_path=path,
+        )
+    except ValidationError as exc:
+        raise _refuse(
+            422, "invalid_voice_request", _wv.invalid_message(reason=_validation_reason(exc))
+        ) from None
+    if await _streaming(request, session_id):
+        body = body.model_copy(update={"mode": "steer"})
     admitted = await messages_route(session_id, body, request)
     return dict(admitted.result or {})
 
@@ -488,10 +569,13 @@ async def _message_text(request: Request, session_id: str, message_id: str) -> s
 
 
 async def _gate_text(request: Request, session_id: str, gate_request_id: str) -> str | None:
-    """The pending APPROVAL card's host-authored text, or ``None``.
+    """The pending APPROVAL card's text as the server resolves it, or ``None``.
 
-    Read-only: the pending gate is read off the facade, never answered. Only
-    an approval is spoken in slice 1. An ask's question is model-written and is
+    Read-only: the pending gate is read off the facade, never answered. The
+    title is the tool name; the detail is the tool's approval summary, which can
+    quote model-written arguments (the command, the path). That is the same
+    text the card shows on screen, so speaking it reveals nothing new, but it is
+    not host-authored prose. Only an approval is spoken in slice 1; an ask is
     slice 2.
     """
     async with errors(request):
@@ -552,7 +636,9 @@ async def voice_speech(
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
 
-    request_id = f"voice-{body.session_id}-{int(time.time() * 1000)}"
+    # The uuid suffix keeps two replies spoken inside one millisecond (a gate
+    # announcement and a reply) from sharing a correlation id on the spend row.
+    request_id = f"voice-{body.session_id}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
     try:
         outcome = await synthesize_speech(
             spoken.text,
