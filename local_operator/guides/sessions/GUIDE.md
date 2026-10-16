@@ -125,25 +125,28 @@ exclusive; `regex` needs `query`; `digest` stands alone.
 ## Raising another session's ask
 
 An ask belongs to ONE session. Its `a-xxxx` id is unique within that session,
-only that session's own engine can settle it, and nothing links a copy of an ask
-to the ask it came from. So a watcher that re-asks a watched session's question
-creates a SECOND ask: the operator answers the copy, and the original stays
-open, unread, and in every list.
+no OTHER session's tools can settle it (the operator's surfaces — desktop,
+phone, terminal — answer it in place), and nothing links a copy of an ask to the
+ask it came from. So re-asking a watched session's question creates a SECOND
+ask: the operator answers the copy, and the original stays open, unread, and in
+every list.
 
-- **Read before relaying.** `peek` the session before surfacing anything it
-  asked; never re-ask a question already settled there.
+- **Read before relaying.** `sessions op=list` already marks a live session
+  whose ask is pending; `peek` it for what was asked, and never re-ask a settled
+  question.
 - **Point rather than copy.** "<session title> (<sid>) has open ask a-xxxx: <one
   line>; answer it there." The operator answers once, in the session that owns
   the question.
 - **If you must copy an ask into your own** — the operator is not looking at the
   origin — keep the copy attributable: its first line is `From <session title>
   (<sid>), ask a-xxxx:`, its questions copied verbatim, and one original per
-  copy, never mixed with your own items.
+  copy, never mixed with your own items. Never copy a SECRET question: only its
+  own card can answer it, so point at the origin ask.
 - **Settle both ends.** Your copy answered: `send` the answer to the origin
-  session, asking it to settle with `ask_withdraw reason=answered_in_chat` — one
-  of the tool's only two reasons, for a question whose answer is the user's own
-  words. Origin settled first: withdraw your copy with `ask_withdraw
-  reason=moot`.
+  session — the operator answered it, words verbatim — asking it to settle with
+  `ask_withdraw reason=answered_in_chat`, one of the tool's two reasons, which
+  records those words in `answers`. Origin settled first: withdraw your copy
+  with `ask_withdraw reason=moot`.
 
 ## What it does NOT do
 
