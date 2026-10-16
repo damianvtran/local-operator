@@ -96,6 +96,31 @@ describe("the quiet-group bar", () => {
 		expect(screen.getAllByText("echo hi")).toHaveLength(3);
 	});
 
+	it("states the hidden work at ONE tool, in this surface's own wording", () => {
+		/* The 1-tool shape the old >=3 gate rendered with NO clause at all, and
+		 * the shape PF-2's plural is reachable at. Pinning the RENDERER (not
+		 * just the shared helper) is what makes a revert of the gate alone fail:
+		 * with the inline conditions restored, no clause renders and both
+		 * assertions below die. */
+		render(<Transcript pid="s1" entries={[peer("p1", "first"), bash("t1"), peer("p2", "second")]} />);
+		expect(screen.getByText("· 1 action")).toBeTruthy();
+		/* The singular is correct copy, not `1 actions` (PF-2). */
+		expect(screen.queryByText("· 1 actions")).toBeNull();
+	});
+
+	it("states the hidden work at TWO tools with the plural, and stays silent at none", () => {
+		/* 2 tools: the other half of the 1-2 tool range the old gate swallowed. */
+		const { unmount } = render(
+			<Transcript pid="s2" entries={[peer("p1", "first"), bash("t1"), bash("t2"), peer("p2", "second")]} />,
+		);
+		expect(screen.getByText("· 2 actions")).toBeTruthy();
+		unmount();
+		/* A workless group states no actions clause at all — never `0 actions`. */
+		render(<Transcript pid="s3" entries={[peer("p1", "first"), peer("p2", "second")]} />);
+		expect(screen.queryByText("· 0 actions")).toBeNull();
+		expect(screen.queryByText(/· \d+ action/)).toBeNull();
+	});
+
 	it("folds consecutive receipts into one bar, and the press lists them with their actions", () => {
 		render(
 			<Transcript pid="s1" entries={[peer("p1", "first"), bash("t1"), peer("p2", "second")]} />,
