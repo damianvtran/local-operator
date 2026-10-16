@@ -75,6 +75,12 @@ def _pinned_job() -> SimpleNamespace:
         model_label=PIN,
         model_fallback=False,
         model_fallback_reason="",
+        # The effort half of the same registration stamp, and the level the
+        # fallback is actually running at while one stands. Both default to the
+        # unrecorded ``None``, which is what a child that asked for no level
+        # carries; the effort tests set them.
+        requested_effort=None,
+        model_fallback_effort=None,
     )
 
 
@@ -93,12 +99,17 @@ def _relay(job: Any, emitted: list[Any]) -> Any:
     )
 
 
-def _fallback_event(reason: str = "provider failure") -> ModelChangeEvent:
+def _fallback_event(
+    reason: str = "provider failure", *, effort: str | None = None
+) -> ModelChangeEvent:
+    """A descent edge; ``effort`` is the level the TARGET will run at, which is
+    ``None`` for a model with no effort knob (``failover.spec_for_target``)."""
     return ModelChangeEvent(
         provider="deepseek",
         model_id="deepseek-flash",
         reason=reason,
         is_fallback=True,
+        effort=effort,
         context_window=160_000,
     )
 
@@ -558,8 +569,12 @@ async def test_an_unpinned_launch_records_no_requested_model(tmp_path, monkeypat
     assert job is not None
     assert job.owns_model is False
     assert job.requested_model_label is None
+    # Both halves of the pin stamp stay unset: there is no pin to ask for a
+    # level, so the receipt has no effort clause to build either.
+    assert job.requested_effort is None
     await wait_for(lambda: job.status == "completed")
     assert job.requested_model_label is None
+    assert job.requested_effort is None
     await session.dispose()
 
 
@@ -578,3 +593,172 @@ def test_the_wire_row_carries_the_pin_to_an_attached_viewer() -> None:
 
     unpinned = JobState.from_job(SimpleNamespace(model_label="test/m"))
     assert unpinned.requested_model_label is None
+
+
+# ---------------------------------------------------------------------------
+# the effort half of the same disclosure (design §6, #2428)
+# ---------------------------------------------------------------------------
+
+
+def _effort_pinned_job(level: str | None = "xhigh") -> SimpleNamespace:
+    """A pinned row that ASKED for a reasoning level.
+
+    ``requested_effort`` is what the launch records off the resolved spec — the
+    level a ``{model, effort}`` tier (#2428) carries — and, like
+    ``requested_model_label``, it is registration-stamped and never overwritten;
+    the runner's later effective write must not be able to erase it.
+    """
+    job = _pinned_job()
+    job.requested_effort = level
+    return job
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_level_is_named_by_the_notice_and_the_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    """Plan §6 PR B-1, through the real writers end to end.
+
+    A hop keeps the requested level only where the target's ladder accepts it
+    (``failover.spec_for_target``), so a pin launched at ``xhigh`` can come back
+    thinking at its substitute's own default. Both writers are exercised —
+    the launch's registration stamp and the relay's descent edge — because each
+    can be individually right and jointly useless: a stamp no reader asks for,
+    or a clause comparing two permanently empty fields.
+    """
+    from local_operator.session.session import Session
+    from tests.unit.session.test_pinned_subagent_model import (
+        make_session,
+        wait_for,
+        write_tiers,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": PIN, "effort": "xhigh"})
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(
+        label="designer", prompt="review it", agent="designer", effort="hi"
+    )
+    job = session.jobs.get(job_id)
+    assert job is not None
+    assert job.requested_model_label == PIN  # the pin the launch resolved
+    assert job.requested_effort == "xhigh"  # the LEVEL that pin runs at
+    await wait_for(lambda: job.status == "completed")
+    # The runner's effective-label write does not touch the stamp: it is the
+    # only record of what was asked for once a hop has moved the child.
+    assert job.model_label == PIN
+    assert job.requested_effort == "xhigh"
+
+    emitted: list[Any] = []
+    # ``deepseek/deepseek-flash`` exposes no effort knob (``effort_support``
+    # answers None), so the hop's own event carries no level — the drop exactly
+    # as the failover driver produces it.
+    await _relay(job, emitted)(_fallback_event(effort=None))
+    assert job.model_fallback is True
+    assert job.model_fallback_effort is None
+
+    [notice] = [e for e in emitted if isinstance(e, NoticeEvent)]
+    assert ", effort xhigh → model default" in notice.text
+    # Both relations in one sentence, in one order: what it ran on, then what it
+    # ran AT, then the cause.
+    assert "pinned Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0Flash, effort xhigh" in (
+        notice.text
+    )
+
+    text = Session._job_result_message("designer1", "the findings", job).details["text"]
+    assert (
+        f"(pinned {PIN}, ran on {EFFECTIVE}, effort xhigh → model default — provider failure)"
+        in text
+    )
+
+    # A target that HAS a ladder but a different rung names that rung instead —
+    # "model default" is the no-knob case, not a stand-in for "not the one you
+    # asked for".
+    await _relay(job, emitted)(_fallback_event(effort="medium"))
+    assert job.model_fallback_effort == "medium"
+    lowered = Session._job_result_message("designer1", "the findings", job).details["text"]
+    assert "effort xhigh → medium — provider failure)" in lowered
+    await session.dispose()
+
+
+def test_a_hop_that_keeps_the_level_adds_no_effort_clause() -> None:
+    """Plan §6 PR B-2: the level that survived is not news.
+
+    The descent is still announced — the model DID change — but the sentence
+    must not grow a clause for a fact that is unchanged, which is what keeps the
+    clause a signal rather than part of the boilerplate.
+    """
+    from local_operator.session.session import Session
+
+    job = _effort_pinned_job()
+    emitted: list[Any] = []
+    asyncio.run(_relay(job, emitted)(_fallback_event(effort="xhigh")))
+
+    [notice] = [e for e in emitted if isinstance(e, NoticeEvent)]
+    assert "effort" not in notice.text
+    assert "DeepSeek\u00a0Flash — provider failure." in notice.text
+    assert job.model_fallback_effort == "xhigh"
+
+    text = Session._job_result_message("designer1", "x", job).details["text"]
+    assert f"(pinned {PIN}, ran on {EFFECTIVE} — provider failure)" in text
+    assert "effort" not in text
+
+
+def test_the_recovery_edge_clears_the_effort_clause() -> None:
+    """Plan §6 PR B-3: the clause lives exactly as long as the substitution.
+
+    A level is only "dropped" while the model serving is the substitute; once
+    the pin serves again the child runs at the level it asked for, so a clause
+    left behind would report a loss that has ended. The clause's presence BEFORE
+    the recovery is asserted too — otherwise clearing an absent clause would
+    pass this test vacuously.
+    """
+    from local_operator.session.session import Session
+
+    job = _effort_pinned_job()
+    relay = _relay(job, [])
+    asyncio.run(relay(_fallback_event(effort=None)))
+    assert job.model_fallback is True
+    assert (
+        ", effort xhigh → model default"
+        in Session._job_result_message("designer1", "x", job).details["text"]
+    )
+
+    asyncio.run(relay(_recovery_event()))
+    assert job.model_fallback is False
+    assert job.model_fallback_effort is None
+    recovered = Session._job_result_message("designer1", "x", job).details["text"]
+    assert "effort" not in recovered and "(pinned" not in recovered
+
+
+@pytest.mark.asyncio
+async def test_a_tier_with_no_level_stamps_no_requested_effort(tmp_path, monkeypatch) -> None:
+    """The negative arm of the stamp, and the reason it is not simply "whatever
+    the spec says".
+
+    A bare-selector tier resolves to a spec sitting ON its model's own default
+    (``reasoning_default_effort`` — ``high`` for Anthropic's 5-series), which is
+    the level the child would run at anyway. Stamping it would make the receipt
+    assert the operator asked for ``high`` and then announce a "drop" the first
+    time a hop landed on a model with any other default — a substitution stated
+    as a loss of something nobody chose.
+    """
+    from tests.unit.session.test_pinned_subagent_model import (
+        make_session,
+        wait_for,
+        write_tiers,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi=PIN)
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(
+        label="designer", prompt="review it", agent="designer", effort="hi"
+    )
+    job = session.jobs.get(job_id)
+    assert job is not None
+    assert job.owns_model is True
+    assert job.requested_model_label == PIN
+    assert job.requested_effort is None
+    await wait_for(lambda: job.status == "completed")
+    await session.dispose()
