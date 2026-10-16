@@ -122,6 +122,29 @@ result's `details` carries a `spill` handle you can expand.
 One window per call: `steps`, `head`, `before_id` and `around_id` are mutually
 exclusive; `regex` needs `query`; `digest` stands alone.
 
+## Raising another session's ask
+
+An ask belongs to ONE session. Its `a-xxxx` id is unique within that session,
+only that session's own engine can settle it, and nothing links a copy of an ask
+to the ask it came from. So a watcher that re-asks a watched session's question
+creates a SECOND ask: the operator answers the copy, and the original stays
+open, unread, and in every list.
+
+- **Read before relaying.** `peek` the session before surfacing anything it
+  asked; never re-ask a question already settled there.
+- **Point rather than copy.** "<session title> (<sid>) has open ask a-xxxx: <one
+  line>; answer it there." The operator answers once, in the session that owns
+  the question.
+- **If you must copy an ask into your own** — the operator is not looking at the
+  origin — keep the copy attributable: its first line is `From <session title>
+  (<sid>), ask a-xxxx:`, its questions copied verbatim, and one original per
+  copy, never mixed with your own items.
+- **Settle both ends.** Your copy answered: `send` the answer to the origin
+  session, asking it to settle with `ask_withdraw reason=answered_in_chat` — one
+  of the tool's only two reasons, for a question whose answer is the user's own
+  words. Origin settled first: withdraw your copy with `ask_withdraw
+  reason=moot`.
+
 ## What it does NOT do
 
 - **No messaging or steering** — delivery, wake modes and model switches are
