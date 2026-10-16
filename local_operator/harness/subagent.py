@@ -431,8 +431,35 @@ def resolve_member_model(
     tier_effort: str | None = None
     unavailable = ""
     unavailable_quiet = False
+
+    def _effort_of(
+        tier_level: str | None,
+    ) -> tuple[str | None, Literal["team", "tier", "model_default"]]:
+        if member_effort:
+            return str(member_effort), "team"
+        if tier_level:
+            return str(tier_level), "tier"
+        return None, "model_default"
+
     if tier is not None:
-        targets = read_effort_tier_targets() if tier_targets is None else tier_targets
+        try:
+            targets = read_effort_tier_targets() if tier_targets is None else tier_targets
+        except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
+            # Reported as ``unavailable`` rather than raised, so BOTH callers get
+            # the right sentence: the strict launch refuses with this reason
+            # (the read used to live in the launch and said exactly this), and
+            # the lenient naming path cannot die in its retry, which would
+            # otherwise re-read the same broken config.
+            logger.warning("subagents.models could not be read (%s)", exc)
+            effort, effort_source = _effort_of(None)
+            return MemberModelResolution(
+                tier=tier,
+                tier_source=tier_source,
+                selector=None,
+                effort=effort,
+                effort_source=effort_source,
+                unavailable=f"config could not be read ({exc})",
+            )
         raw_selector, tier_effort = targets.get(tier, (None, None))
         if raw_selector is not None and not isinstance(raw_selector, str):
             unavailable = malformed_tier_reason(tier, raw_selector)
@@ -448,16 +475,11 @@ def resolve_member_model(
             else:
                 selector = str(raw_selector)
 
-    if member_effort:
-        effort: str | None = str(member_effort)
-        effort_source: Literal["team", "tier", "model_default"] = "team"
-    elif tier_effort:
-        effort = str(tier_effort)
-        effort_source = "tier"
-    else:
-        effort = None
-        effort_source = "model_default"
-
+    # The effort is resolved from the member first and the tier's map second, and
+    # an ``unavailable`` tier contributes no level: an entry the shared reader
+    # could not parse never carries one, so the member's own effort (or the
+    # model's default) stands either way.
+    effort, effort_source = _effort_of(tier_effort)
     return MemberModelResolution(
         tier=tier,
         tier_source=tier_source,
@@ -1261,10 +1283,43 @@ def resolve_launch_target(
         is_team_launch=bool(sub_name),
         # BOTH branches: the override lives on the slot that named this launch,
         # and that slot is on the PARENT's roster -- which for a ``team:pod``
-        # launch is not ``team`` (pod). One value, so an agent slot and a
-        # nested-team slot resolve against the same roster.
-        roster=parent_team,
+        # launch is not ``team`` (pod). Read FRESH, not from the attached object:
+        # see :func:`_reread_roster`.
+        roster=_reread_roster(
+            parent_session, str(getattr(parent_team, "name", "") or ""), parent_team
+        ),
     )
+
+
+def _reread_roster(parent_session: "Session", name: str, fallback: Any) -> Any:
+    """The registry's CURRENT copy of the roster named ``name``, else ``fallback``.
+
+    WHY this is not just ``session.active_team``: that object is assigned once,
+    in ``attach_team``, and nothing refreshes it -- an edit through
+    ``update_team`` stages a detached candidate, so the attached object keeps
+    the roster as it was when the session attached the team. Every other reader
+    of the override (the resume, the desktop ``/effective``) reads the registry,
+    so a launch that used the snapshot would disagree with them about the model
+    a child runs on -- display-versus-launch drift, on a COST pin, until the
+    next ``/team`` re-attach. The P3 editor's whole loop is "edit the override,
+    then the next launch uses it".
+
+    One registry read per launch, the same cost the row pin already pays
+    (``_row_effort_tier`` calls ``refresh_now``).
+
+    ``fallback`` covers the cases where the registry cannot answer at all -- a
+    reduced host with no registry, an unreadable row -- where the attached
+    object is still the best available answer and is what every path used
+    before.
+    """
+    if not name:
+        return fallback
+    try:
+        found = lookup_team(parent_session, name)
+    except Exception:  # noqa: BLE001 — an unreadable registry falls back
+        logger.debug("could not re-read roster %r", name, exc_info=True)
+        return fallback
+    return found if found is not None else fallback
 
 
 def _carried_roster(
@@ -1285,22 +1340,11 @@ def _carried_roster(
     no team, and for a registry the session does not expose.
     """
     if not is_team_launch:
-        # Read the roster that named this slot FRESH from the registry, not the
-        # session's attached ``active_team`` object: a resume is documented to
-        # follow an override edited since the child last ran (comms.py resume),
-        # and the attached object is a snapshot from ``attach_team`` time that
-        # nothing re-reads -- using it would freeze the overrides at the child's
-        # birth. The registry read is the same one ``update_team`` writes
-        # through, so a same-process edit is visible immediately.
-        if carried.team_name:
-            try:
-                fresh = lookup_team(parent_session, carried.team_name)
-            except Exception:  # noqa: BLE001 — fall back to the carried object
-                logger.debug("could not re-read roster %r", carried.team_name, exc_info=True)
-                fresh = None
-            if fresh is not None:
-                return fresh
-        return team
+        # The roster that named this slot, read FRESH from the registry for the
+        # same reason the fresh-launch branch re-reads it: a resume is documented
+        # to follow an override edited since the child last ran, and the session's
+        # attached ``active_team`` object is a snapshot from ``attach_team`` time.
+        return _reread_roster(parent_session, carried.team_name, team)
     lineage = tuple(carried.team_lineage)
     if len(lineage) < 2:
         return None

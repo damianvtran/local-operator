@@ -249,7 +249,15 @@ def _apply_overrides(members: list[TeamMember], overrides: list[TeamOverride]) -
                 continue
             fields[field] = None if value.strip().lower() == "inherit" else value.strip().lower()
         if fields:
-            updated[index] = updated[index].model_copy(update=fields)
+            # Validate through the MODEL, not ``model_copy(update=...)``: the
+            # copy skips the field validators, so a bad word used to reach
+            # ``team.yml`` and the next load dropped it -- the receipt claimed a
+            # pin that did not exist, and the child then ran on a model the
+            # operator was not told about. The registry re-validates at save for
+            # the transports that never come through here; this arm is for the
+            # caller that can still correct its call.
+            current = updated[index]
+            updated[index] = TeamMember.model_validate({**current.model_dump(), **fields})
     return updated
 
 
@@ -423,6 +431,12 @@ async def _op_write(
             )
         instructions = _bounded_field(params.instructions, "collaboration instructions")
         project = _bounded_field(params.project, "project instructions")
+    except ValidationError as exc:
+        # A word outside the vocabulary is the model's own call to correct, so it
+        # gets the per-field ``invalid arguments:`` refusal rather than a bare
+        # sentence (and stays a model fault, not an environmental one). Raised by
+        # ``_apply_overrides``, which validates the merged slot through the model.
+        return _validation_error(tool_call_id, "team", exc)
     except ValueError as exc:
         return _error(tool_call_id, "team", str(exc))
 

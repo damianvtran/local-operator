@@ -65,6 +65,7 @@ from pydantic import (
     BaseModel,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_serializer,
@@ -182,6 +183,36 @@ _READ_RECOVERY_COOLDOWN_S = 1.0
 MAX_ORG_DEPTH = 8
 
 
+#: The lenient-load warnings already emitted, keyed ``(team, field, value)``.
+#: A bad word sits in ``team.yml`` until the operator fixes it and the registry
+#: re-validates every row on every refresh, so without this the same warning
+#: repeats on every read (QA round 1 measured four identical pairs inside one
+#: request burst). The cap is a memory guard on a set whose keys come from a
+#: file: past it a new key is not recorded and its warning repeats, which is
+#: noise rather than growth.
+_WARNED_LOAD_OVERRIDES: set[tuple[str, str, str]] = set()
+_WARNED_LOAD_OVERRIDES_CAP = 256
+
+
+def _warn_once_about_override(where: str, field: str, value: object, detail: str) -> None:
+    """One warning per (team, field, value) for a hand-edited override word.
+
+    The message still names the fault and the row it is in; what it stops doing
+    is repeating for a row nothing has changed since the last read.
+    """
+    key = (where, field, repr(value))
+    if len(_WARNED_LOAD_OVERRIDES) < _WARNED_LOAD_OVERRIDES_CAP:
+        if key in _WARNED_LOAD_OVERRIDES:
+            return
+        _WARNED_LOAD_OVERRIDES.add(key)
+    logger.warning(
+        "team %s member %s: %s; ignoring the override rather than dropping the team",
+        where or "<unknown>",
+        field,
+        detail,
+    )
+
+
 class TeamMember(BaseModel):
     """One roster slot: a named agent/role, or a nested TEAM, possibly repeated."""
 
@@ -286,11 +317,8 @@ class TeamMember(BaseModel):
         else:
             detail = f"{value!r} is not one of {'|'.join(allowed)}"
         if (info.context or {}).get("team_load"):
-            logger.warning(
-                "team member %s: %s; ignoring the override rather than dropping the team",
-                field,
-                detail,
-            )
+            context = info.context or {}
+            _warn_once_about_override(str(context.get("team_id") or ""), field, value, detail)
             return None
         raise ValueError(f"member {field} {detail}")
 
@@ -341,8 +369,8 @@ def find_member(
     return None
 
 
-def refuse_conflicting_overrides(members: Iterable["TeamMember"]) -> None:
-    """Refuse a roster whose duplicate slots carry DIFFERENT overrides.
+def conflicting_overrides(members: Iterable["TeamMember"]) -> str | None:
+    """The refusal for a roster whose duplicate slots carry DIFFERENT overrides.
 
     ``parse_members`` collapses every ``(kind, role)`` into one slot, so a tool
     or CLI roster cannot collide -- but the desktop route takes a raw
@@ -353,8 +381,9 @@ def refuse_conflicting_overrides(members: Iterable["TeamMember"]) -> None:
     so. Accepted when they carry the SAME override, because no reader can tell
     those two slots apart.
 
-    Structural, so it is checked at the save choke point rather than per field:
-    the individual words are already validated by ``TeamMember`` itself.
+    Returns the message rather than raising it so the save choke point can tell
+    a conflict this write INTRODUCES from one the row already had on disk (see
+    :func:`refuse_conflicting_overrides`).
     """
     seen: dict[tuple[str, str], TeamMember] = {}
     for member in members:
@@ -364,11 +393,42 @@ def refuse_conflicting_overrides(members: Iterable["TeamMember"]) -> None:
             seen[key] = member
             continue
         if (first.tier, first.effort) != (member.tier, member.effort):
-            raise ValueError(
+            return (
                 f"two {member.kind} slots are named {member.role!r} with different "
                 f"overrides ({_override_word(first)} vs {_override_word(member)}); "
                 "a launch reads the first match, so make them agree or drop one"
             )
+    return None
+
+
+def refuse_conflicting_overrides(members: Iterable["TeamMember"], *, stored: Any = None) -> None:
+    """Refuse a write that INTRODUCES or CHANGES a conflicting duplicate slot.
+
+    A row whose ``team.yml`` was hand-edited into the conflict already exists and
+    loads (the load is lenient by design), so refusing every later write would
+    brick it: a description edit, a label tweak, anything at all would fail on a
+    fault the operator did not just introduce -- the same reasoning
+    ``update_team`` uses for its key-uniqueness check, which runs only when the
+    write touches the keys it can collide on.
+
+    So the rule is DELTA-based: ``stored`` is the row as it is on disk before
+    this write, and a conflict identical to the one already there is tolerated
+    with a warning. A conflict that is new, or that differs from the stored one
+    (the slots or the values moved), is the write's own fault and is refused.
+    """
+    conflict = conflicting_overrides(members)
+    if conflict is None:
+        return
+    if (
+        stored is not None
+        and conflicting_overrides(getattr(stored, "members", None) or ()) == conflict
+    ):
+        logger.warning(
+            "%s; already on disk from a hand-edited team.yml, so this unrelated save is allowed",
+            conflict,
+        )
+        return
+    raise ValueError(conflict)
 
 
 def _override_word(member: "TeamMember") -> str:
@@ -1477,8 +1537,12 @@ class TeamRegistry:
                 # Lenient on the member overrides: a hand-edited ``tier``/
                 # ``effort`` word degrades to "unset" with a warning instead of
                 # raising, because a raising row is SKIPPED below and the whole
-                # team would disappear from every listing.
-                team = Team.model_validate(data, context={"team_load": True})
+                # team would disappear from every listing. The id rides along so
+                # the warning is emitted once per (team, field, value) rather
+                # than on every refresh.
+                team = Team.model_validate(
+                    data, context={"team_load": True, "team_id": str(data.get("id") or "")}
+                )
                 if team.id != child.name:
                     logger.warning(
                         "ignoring team directory %s: metadata id %s does not match",
@@ -2188,11 +2252,21 @@ class TeamRegistry:
         # Defense in depth for ``model_construct`` and validation-bypassing
         # transports: reject before mkdir, temp creation, rename, or cleanup.
         team_id = validate_team_id(team.id)
-        # Same reason, for the roster: every write path (create, update, save,
-        # the hub import) passes here, and the desktop route is the one caller
-        # that can hand in a raw list of slots (``parse_members`` collapses
-        # duplicates for the tool and the CLI).
-        refuse_conflicting_overrides(team.members)
+        # Same reason, for the roster, and it is not hypothetical: the ``team``
+        # tool builds an updated slot with ``model_copy(update=...)``, which
+        # SKIPS the field validators, so without this a bad override word is
+        # serialised into ``team.yml`` -- and the next load drops it with a
+        # warning, i.e. the operator was told about a pin that does not exist.
+        # Re-validating through the model is what makes "strict at every writer"
+        # true for a roster that arrives as already-built objects.
+        for member in team.members:
+            try:
+                TeamMember.model_validate(member.model_dump())
+            except ValidationError as exc:
+                raise ValueError(
+                    f"member {member.role!r} carries an invalid override: {exc}"
+                ) from exc
+        refuse_conflicting_overrides(team.members, stored=self._teams.get(team_id))
         name_key = team.name.casefold()
         occupant = next(
             (
@@ -2618,8 +2692,11 @@ def _parse_metadata_text(text: str | None) -> Team | None:
     try:
         # Same leniency as ``_load``: this parses a captured revision of a row
         # that is already on disk, so an invalid override word must not turn a
-        # readable row into an "unavailable snapshot".
-        return Team.model_validate(data, context={"team_load": True})
+        # readable row into an "unavailable snapshot". The id rides along for
+        # the once-per-(team, field, value) warning, as at the other load site.
+        return Team.model_validate(
+            data, context={"team_load": True, "team_id": str(data.get("id") or "")}
+        )
     except Exception:  # noqa: BLE001 - invalid metadata is an unavailable snapshot
         return None
 
