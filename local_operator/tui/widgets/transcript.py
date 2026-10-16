@@ -89,10 +89,12 @@ from local_operator.tui.internal_work_membership import (
 from local_operator.tui.quiet_groups import (
     QuietGroup,
     QuietGroupRecord,
+    QuietGroupSender,
     group_splitter_of,
     quiet_family_of,
     quiet_group_of_segment,
     quiet_group_stretches,
+    quiet_sender_label,
 )
 
 #: The turn spine (D20): user prompts sit at the gutter; everything else
@@ -5029,16 +5031,27 @@ class QuietGroupTracker:
         span_records = records[start:end]
         if _last_splitter_index(span_records) >= 0:
             # Typed attention can legitimately change a member into a splitter.
-            # Refuse the old owner's split rather than borrowing its OPEN bit for
-            # either new half, and never leave its newly-important row hidden.
+            # The row that became a boundary must not stay hidden — but the
+            # rows already condensed must not be handed back either: restoring
+            # every member and removing the bar is the unfold/refold pair that
+            # reads to the operator as the traces flickering between the full
+            # detail and the condensed form (see `_dissolve`). Release only the
+            # splitter and the rows behind it from its owner, and leave a bar
+            # whose own members hold no splitter alone — it still describes
+            # exactly the rows it hides. Either way this replan refuses to
+            # borrow the old owner's OPEN bit for a new half.
             prior_bar = owner_of.get(changed)
             if prior_bar is not None:
-                for member in prior_bar._members:
-                    member.display = not member.work_dormant
-                self._view.remove_block(prior_bar)
+                # Which member, if any, is the row that became a boundary — read
+                # off the stamped membership, never a context-less record walk
+                # (see `_boundary_member_index`). No such member means the bar
+                # still describes exactly the rows it hides, so it is left
+                # standing.
+                own = self._boundary_member_index(list(prior_bar._members))
+                if own >= 0:
+                    self._release_splitter(prior_bar, own)
             self._reconnect_tail()
-            return
-        # Bounds are decided in SOURCE space, with the SAME vocabulary the walk
+            return  # Bounds are decided in SOURCE space, with the SAME vocabulary the walk
         # used: the row above the span is a real source row (or the window
         # edge), never a synthetic bar. The physical helper reads the bar
         # whenever the span sits under an old one, which is precisely the
@@ -5094,11 +5107,30 @@ class QuietGroupTracker:
         focus_refusal = (
             contextual and not reader_open and any(member in focused_ancestors for member in span)
         )
+        replacing = group is not None and not focus_refusal
         for bar in touched:
-            for member in bar._members:
-                member.display = True
-            self._view.remove_block(bar)
+            if replacing:
+                # A replacement fold is about to be formed over this span, so
+                # this bar must go or the two would stand together — the
+                # duplicate-bar reading the operator also reported.
+                for member in bar._members:
+                    member.display = not member.work_dormant
+                self._view.remove_block(bar)
+                continue
+            # NOTHING is replacing this fold (the span no longer qualifies, or
+            # the reader's focus refuses it), so handing every member back is
+            # pure loss: the rows come back on screen now and are taken away
+            # again by the next append. That unfold/refold pair IS the reported
+            # flicker. Keep the fold and release only the members that actually
+            # became boundary rows (a failure, an interruption, a `never sent`,
+            # an ask), which is the fact this reconciliation exists to carry.
+            own = self._boundary_member_index(list(bar._members))
+            if own >= 0:
+                self._release_splitter(bar, own)
         if group is not None and not focus_refusal:
+            # Written as the explicit pair rather than as `replacing`: a boolean
+            # variable does not narrow `group` for the type checker, and the
+            # whole-tree pyright gate is fail-closed on exactly that error.
             self._form(span, group, partial, reader_open=reader_open)
         # Reconnect to the ACTUAL tail, formed or refused, touched or not:
         # `_last_record` becomes the true last source row and an untouched live
@@ -5204,8 +5236,8 @@ class QuietGroupTracker:
         last_splitter = _last_splitter_index(records)
         if last_splitter >= 0:
             # A member re-reads as a splitter: the bar would hide a row a
-            # reader must see. Dissolve — the safe direction every refusal in
-            # this module takes.
+            # reader must see. Release THAT row (and the rows behind it) and
+            # keep the fold over what is left — see :meth:`_dissolve`.
             self._dissolve(bar, last_splitter)
             return
         group = quiet_group_of_segment(
@@ -5214,23 +5246,170 @@ class QuietGroupTracker:
         if group is not None:
             bar.restate_group(group)
 
-    def _dissolve(self, bar: QuietGroupBlock, last_splitter: int) -> None:
-        """Unfold a bar whose span no longer holds, and re-seat the state.
+    @staticmethod
+    def _boundary_member_index(members: Sequence[TranscriptBlock]) -> int:
+        """The first member whose OWN row became attention-bearing, or ``-1``.
 
-        The belt-for-belt path: a member re-read as a splitter means the bar
-        is hiding a row the definition says must stay visible, so the fold
-        gives way to the rows — every member is shown again, the bar is
-        removed, and the stretch after the splitter keeps accumulating
-        (:meth:`_reseed_trailing`). Unreachable while the mount order and the
-        empty-assistant boundary hold; kept as the honest fallback for what
-        the fold must never do.
+        Read off the membership the projection stamped on the row
+        (``internal_work_membership.attention``) rather than from a fresh
+        record walk over the bar's members. A walk started at the bar's first
+        member has no row ABOVE the bar to give that member its family and
+        coordinate, so it reports index 0 as a boundary for every bar — and a
+        release driven by that index has an empty prefix, unfolds the whole
+        fold, and reproduces the very flicker this change removes. The stamped
+        membership is also the better fact: it is what the fold admitted the
+        row on, so a row that has since become a failure, an interruption, a
+        ``never sent`` or an ``ask`` is exactly the row a reader must see.
+        """
+        for index, member in enumerate(members):
+            membership = getattr(member, "internal_work_membership", None)
+            if membership is not None and membership.attention != "none":
+                return index
+        return -1
+
+    def _release_splitter(self, bar: QuietGroupBlock, last_splitter: int) -> int:
+        """Release the row that became a boundary; keep the fold standing.
+
+        This is the reported flicker's one cause, and both live teardown sites
+        route through here. A member re-reads as a splitter whenever its OWN row
+        comes to state something a reader must see — most often a tool that
+        FAILED, but equally an interrupted or never-sent one, whose projection
+        becomes attention-bearing (``internal_work_membership``: attention is
+        set and the role stays ``boundary``). The old reading of that fact
+        restored EVERY member and removed the bar, so a fold that had just
+        swallowed a batch handed all of its rows back a frame later; the next
+        append folded them again. That unfold/refold pair is what reads as the
+        traces flickering between the full detail and the condensed form.
+
+        So the fold gives way only where it must: the splitter and the rows
+        after it leave the fold and paint in place, while the rows already
+        condensed stay condensed. The bar is LATCHED, matching the rule the
+        other clients already hold (``docs/design/quiet-turns.md`` §5: the
+        native client's "once condensed stays condensed"), which is why the
+        surviving prefix keeps its bar even when what remains no longer clears
+        the formation floor that admitted it — those rows have already been
+        taken off the reader's screen once, and giving them back and taking
+        them again is the defect, not the floor.
+
+        A prefix with nothing left in it has no fold to keep, so that case
+        still unfolds and removes the bar. Returns the index the release was
+        decided on, which is what the caller re-seats the trailing span at.
         """
         members = list(bar._members)
-        for member in members:
-            member.display = True
-        self._view.remove_block(bar)
-        self._open = None
-        self._reseed_trailing(members, last_splitter)
+        splitter = self._boundary_member_index(members)
+        if splitter < 0:
+            # No member's own row carries attention, so fall back to the index
+            # the caller derived. That index comes from a record walk over the
+            # bar's OWN members, which is trustworthy only INSIDE the bar: with
+            # no row above it the walk cannot give the first member a family and
+            # coordinate, so a split it reports at index 0 is the bar's own head
+            # rather than a row inside it. An interior index is accepted; the
+            # head case falls through to the unfold below, which is what a
+            # first-member boundary means.
+            splitter = last_splitter if last_splitter > 0 else 0
+        kept = members[:splitter]
+        released = members[splitter:]
+        if not kept:
+            for member in members:
+                member.display = not member.work_dormant
+            self._view.remove_block(bar)
+            self._open = None
+            return splitter
+        # Adopt the prefix: `adopt_members` re-states the bar's identity from
+        # the members it now holds and hides them again (visibility is the
+        # fold's switch, so the release below is the only row set that shows).
+        bar.adopt_members(kept, expanded=bar._expanded)
+        self._open = bar
+        records = _records_of_blocks(list(kept))
+        group = quiet_group_of_segment(
+            records,
+            (0, len(records) - 1),
+            span_head_loaded=not bar.partial,
+            open=False,
+        )
+        if group is None:
+            # The prefix no longer clears the formation floor that admitted it
+            # (the released row was part of its count). The fold is LATCHED —
+            # handing these rows back is the flicker this change removes — so
+            # the bar keeps standing, restated over the rows it still holds
+            # rather than over the ones it let go: a bar that went on counting
+            # a released row would claim work it no longer hides.
+            group = self._latched_group(bar, records)
+        bar.restate_group(group)
+        for member in released:
+            if not member.work_dormant:
+                member.display = True
+        return splitter
+
+    @staticmethod
+    def _latched_group(bar: QuietGroupBlock, records: Sequence[QuietGroupRecord]) -> QuietGroup:
+        """The facts of a latched bar, re-derived from the rows it still holds.
+
+        A latched bar stands over a prefix too small to have formed a group on
+        its own, so the shared derivation refuses it and the facts have to be
+        recomputed here instead of re-used. Everything a reader can see is
+        rebuilt from the kept rows: the family narrows to the receipt kinds
+        still inside (``mixed`` when more than one survives) and falls back to
+        the bar's own word when none does — the fold's family can only narrow as
+        rows leave it, which is the direction the definition already permits.
+        The count, the work rows and the failures are counted over the kept rows
+        only, so the one line never claims a row the fold has released.
+        """
+        from dataclasses import replace
+
+        from local_operator.harness.rows import is_quiet_turn_name
+
+        triggers = [record for record in records if quiet_family_of(record) is not None]
+        families = {quiet_family_of(record) for record in triggers}
+        family = bar.group.family if not families else next(iter(families))
+        if len(families) > 1:
+            family = "mixed"
+        sender_counts: dict[str, int] = {}
+        for record in triggers:
+            if record.sender:
+                label = quiet_sender_label(record.sender)
+                sender_counts[label] = sender_counts.get(label, 0) + 1
+        return replace(
+            bar.group,
+            family=family,
+            count=len(triggers),
+            actions=sum(
+                1
+                for record in records
+                if record.kind == "tool" and not is_quiet_turn_name(record.tool_name)
+            ),
+            failed=sum(
+                1 for record in records if record.kind == "tool" and record.tool_state == "failed"
+            ),
+            senders=(
+                tuple(
+                    QuietGroupSender(label=label, count=count)
+                    for label, count in sender_counts.items()
+                )
+                if family in ("peer", "mixed")
+                else ()
+            ),
+            row_ids=tuple(record.id for record in records),
+            # These two are painted as chips on the bar's line, so they are
+            # re-derived from the kept triggers exactly as `count` is: a chip
+            # announcing a reply request or a steer for a row the fold has let
+            # go would be the same lie as a stale count.
+            reply_requested=sum(1 for record in triggers if record.expects_reply is True),
+            steered=sum(1 for record in triggers if record.steer is True),
+            open=False,
+        )
+
+    def _dissolve(self, bar: QuietGroupBlock, last_splitter: int) -> None:
+        """Release the boundary row, then keep the live tail coherent.
+
+        The tracker's own seam over :meth:`_release_splitter`. Read the release
+        rule there; what this adds is the tracker's state: the suffix that left
+        the fold must re-seat the trailing span (:meth:`_reseed_trailing`) or
+        the rows after the splitter are never judged again.
+        """
+        members = list(bar._members)
+        splitter = self._release_splitter(bar, last_splitter)
+        self._reseed_trailing(members, splitter)
 
     def _reseed_trailing(self, blocks: list[TranscriptBlock], last_splitter: int) -> None:
         """Re-seat the trailing span at the stretch after the last splitter.

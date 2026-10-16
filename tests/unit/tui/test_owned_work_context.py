@@ -566,6 +566,89 @@ def test_source_generation_changes_only_for_real_clear_or_session_change(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> None:
+    """The reported flicker, pinned on the real mount path.
+
+    Operator report (2026-10-16, v0.73.3): "the traces flicker between showing
+    the full tool details and the collapsed/condensed tool traces … sometimes
+    when starting a new conversation". A member's row re-reads as a boundary
+    whenever it becomes attention-bearing — most often a tool that FAILED. The
+    fold used to answer that by showing every member and removing the bar, so a
+    batch that had just been condensed came back a frame later and was folded
+    again by the next append; that unfold/refold pair is the flicker. The fold
+    must now keep standing over the rows it condensed and release only the row
+    a reader has to see.
+    """
+    from local_operator.harness.types import (
+        ToolCallComposeEvent,
+        ToolExecutionStartEvent,
+    )
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.events import ToolComposing, ToolStarted, UserMessageStart
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from local_operator.tui.widgets.transcript import QuietGroupBlock, TranscriptView
+    from tests.unit.tui.conftest import await_session_boot
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    session._history = []
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        app.post_message(UserMessageStart("do the work", 0, message_id="m-user"))
+        for _ in range(10):
+            await pilot.pause()
+        # Three owned tool rows in ONE batch: the fold forms on the third.
+        for index, name in enumerate(("read", "grep", "bash")):
+            call_id = f"call-{index}"
+            app.post_message(
+                ToolComposing(
+                    ToolCallComposeEvent(
+                        tool_call_id=call_id, tool_name=name, intent=f"step {index}"
+                    )
+                )
+            )
+            app.post_message(
+                ToolStarted(
+                    ToolExecutionStartEvent(
+                        tool_call_id=call_id,
+                        tool_name=name,
+                        args={"cmd": "ls"},
+                        started_at_epoch=1000.0 + index,
+                    )
+                )
+            )
+            for _ in range(6):
+                await pilot.pause()
+        view = app.query_one(TranscriptView)
+        (bar,) = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+        held = list(bar._members)
+        assert len(held) == 3, "the batch is folded"
+        assert not any(member.display for member in held), "and hidden behind the bar"
+        failed = held[2]
+        # `_members` is typed as the base block while the batch's rows are
+        # ledger cards: the isinstance narrows for the checker (CI's whole-tree
+        # pyright gate is fail-closed on the miss) and pins what this test is
+        # driving.
+        assert isinstance(failed, ToolCard), "the batch member is a ledger card"
+        # What `on_tool_ended` does: settle the card, then reconcile its seat.
+        failed.mark_failed("boom")
+        view.note_quiet_source_part(failed)
+        for _ in range(6):
+            await pilot.pause()
+        bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+        assert len(bars) == 1, "the fold neither dissolves nor duplicates"
+        assert bars[0] is bar
+        assert failed.display, "the failed row is released and visible"
+        kept = list(bar._members)
+        assert kept and all(member is not failed for member in kept)
+        assert not any(
+            member.display for member in kept
+        ), "the rows already condensed stay condensed — handing them back is the the flicker"
+
+
+@pytest.mark.asyncio
 async def test_mounted_dormant_report_keeps_empty_state_extent_and_source_once() -> None:
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.transcript import TranscriptView
