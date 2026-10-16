@@ -4343,7 +4343,7 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #:   the ellipsis is the only signal that anything is missing.
 #:
 #: So the rule here, and the constraint a later editor must keep: on the
-#: ANSWERING surface a bound may bound the NUMBER of things carried, never the
+#: ANSWERING surface a bound may bound the NUMBER of asks carried, never the
 #: LENGTH of a field the user must read or act on. A truncated LIST is
 #: recoverable — ``dropped`` marks it (``asks_truncated`` on the wire), the true
 #: count still rides (``asks_open``), and the aggregate routes
@@ -4359,13 +4359,24 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #: notice, and the TUI picker keeps its labels whole instead of cutting them
 #: (``ask_picker._labels_must_all_fit``). Neither is this surface.
 #:
-#: The counts below are that bound, and a review finding is why they exist
-#: rather than symmetry: with only a byte budget the FIRST row was exempt from
-#: it, so one ask carrying a hundred questions could spend the whole frame by
-#: itself. An ask is put to a human one screen at a time, so the wire carries a
-#: screenful and ``dropped`` says when it could not.
-ASK_WIRE_QUESTIONS_MAX = 12
-ASK_WIRE_OPTIONS_MAX = 10
+#: The same rule one level up: A BOUND MAY DROP WHOLE ROWS, NEVER PART OF ONE.
+#: An ask is answered atomically — ``AskQueue.respond`` refuses an answer that
+#: leaves any question out (``_partial_answer_error``) — so a row missing a
+#: question is a row nobody can submit, and a row missing an option is a choice
+#: the reader never saw. Earlier revisions capped each row at 12 questions and
+#: 10 options; a live 16-question ask then rendered 12, the card answered those
+#: 12, and the queue refused every submit ("every question must be answered at
+#: once: … has no entry"). A row-level drop is recoverable (``dropped`` /
+#: ``asks_truncated``, and the aggregate routes carry the rest); a partial row
+#: is not. What bounds the BYTES of one huge head row is the frame, not this
+#: function, and each route has its own backstop. On the attach snapshot,
+#: ``_yield_asks_when_the_frame_has_no_room`` drops the asks field (with
+#: ``asks_open``) and says so. On the delta route nothing yields the field
+#: alone: ``fit_frame_for_wire`` → ``relay_frame_or_degraded`` sheds the WHOLE
+#: ``frontend_update`` body — every other change in that delta with it — as a
+#: sequenced ``degraded`` placeholder, and the viewer re-syncs. Either way the
+#: ask stays answerable through the aggregate ``GET /v1/desktop/asks``.
+#:
 #: The ask field's text budget, and the allowance for the TAIL only. Spent in the
 #: fold's own order (open first) so the rows that survive are the ones a user
 #: must answer; a row that would push the field past it is left out WHOLE
@@ -4389,21 +4400,20 @@ def bound_ask_rows(
     for jobs ("a bound placed only at the snapshot boundary holds for the first
     frame and leaks on every one after it").
 
-    TEXT IS NOT CUT (see the constants above for the measured corruption that
-    clipping caused): the bounds drop whole QUESTIONS past
-    ``ASK_WIRE_QUESTIONS_MAX``, whole OPTIONS past ``ASK_WIRE_OPTIONS_MAX`` and
-    whole ROWS past the budget, so every string a surface shows — and the label
-    an answer records — is the string the model wrote. A bound removes a whole
-    unit or nothing; it never trims a field the reader or the answer needs.
+    NOTHING INSIDE A ROW IS CUT (see the comment block above for the measured
+    corruption that clipping text, and capping question counts, caused): the
+    bound drops whole ROWS past the budget and nothing else, so every question,
+    every option and every string a surface shows — and the label an answer
+    records — is what the model wrote, and the ask a surface shows is one it
+    can submit.
 
-    The FIRST row always survives, bounded only in its question and option
-    COUNTS, and it does NOT spend the tail's allowance: it is the ask the user
-    must answer, so charging its bytes into the budget would leave the field
-    already over and drop every later row — an over-budget head ask silently
-    taking the tail asks off the wire is the opposite of what the exemption is
-    for (review round 1, MAJOR-1). ``dropped`` says whether anything was left
-    out, so a client can be told the list is a prefix instead of inferring it
-    from a count.
+    The FIRST row always survives whole, and it does NOT spend the tail's
+    allowance: it is the ask the user must answer, so charging its bytes into
+    the budget would leave the field already over and drop every later row — an
+    over-budget head ask silently taking the tail asks off the wire is the
+    opposite of what the exemption is for (review round 1, MAJOR-1).
+    ``dropped`` says whether anything was left out, so a client can be told the
+    list is a prefix instead of inferring it from a count.
     """
     if not isinstance(rows, list):
         return [], False
@@ -4414,18 +4424,14 @@ def bound_ask_rows(
         if not isinstance(row, dict):
             continue
         raw_questions = [q for q in (row.get("questions") or []) if isinstance(q, dict)]
-        if len(raw_questions) > ASK_WIRE_QUESTIONS_MAX:
-            dropped = True
         questions: list[dict[str, Any]] = []
         charge = 0
-        for question in raw_questions[:ASK_WIRE_QUESTIONS_MAX]:
+        for question in raw_questions:
             raw_options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
-            if len(raw_options) > ASK_WIRE_OPTIONS_MAX:
-                dropped = True
             # ``dict(option)`` rather than a rebuilt pair: the whole option rides,
             # and any key a later schema adds rides with it instead of being
             # dropped by a two-key reconstruction.
-            options = [dict(option) for option in raw_options[:ASK_WIRE_OPTIONS_MAX]]
+            options = [dict(option) for option in raw_options]
             questions.append({**question, "options": options})
             charge += len(str(question.get("question") or ""))
             charge += sum(

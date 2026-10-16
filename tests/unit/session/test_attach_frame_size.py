@@ -870,10 +870,13 @@ _CAPPED_COLLECTION_FIELDS = {
     # model-authored free text. Twenty rows of the widest shape measured
     # ~28 KB against a frame with ~110 B of slack at this head -- a field
     # that could put the attach frame through the socket line without any
-    # of it being wrong on its own.
+    # of it being wrong on its own. Nothing inside a row is ever cut: an ask
+    # is answered whole, so the bound drops whole tail rows past a text
+    # budget, and the frame-level yield drops the whole field.
     "asks": (
-        "text clipped and the list yielded when the frame has no room "
-        "(_bound_asks_in_place / _yield_asks_when_the_frame_has_no_room)"
+        "whole tail rows dropped past a text budget, and the list yielded when "
+        "the frame has no room (_bound_asks_in_place / "
+        "_yield_asks_when_the_frame_has_no_room)"
     ),
     "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
     # Swept at the RECORD (GOAL_HISTORY_MAX, newest-first) and yielded at the
