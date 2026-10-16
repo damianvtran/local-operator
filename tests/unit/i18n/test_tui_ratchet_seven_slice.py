@@ -30,10 +30,11 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.i18n import catalogues
+from local_operator.i18n import catalogues, resolve, text
 from local_operator.i18n.keys import tui_small as _s
 from local_operator.i18n.keys import tui_usage as _u
 from local_operator.i18n.text import tr
+from local_operator.tui.widgets import settings_view
 
 REPO = Path(__file__).resolve().parents[3]
 _small = tr("tui.small")
@@ -192,11 +193,61 @@ def test_the_scroll_counter_reassembles_to_the_original_row() -> None:
 
 
 def test_the_live_catalogue_namespaces_still_contain_their_older_keys() -> None:
-    # tui.usage's five paid.* keys predate this slice; extending the namespace
-    # must not disturb them. (The slice-6 log record is the tui.small guard.)
+    # tui.usage's paid.* keys predate this slice, and the consolidation of the
+    # function-local import into the module-level resolver rides on them being
+    # untouched — so ALL FIVE are pinned, not a sample. Their source call sites
+    # are asserted to resolve through the hoisted resolver in the same test.
     live = catalogues.load_catalogue("en", "tui.usage")
     assert live["tui.usage.paid.continue"] == "included quota used; credits will continue"
+    assert live["tui.usage.paid.family_caps"] == "model-family caps still apply"
+    assert live["tui.usage.paid.blocked"] == "Spend unavailable"
+    assert live["tui.usage.paid.eligibility_unknown"] == "Spend eligibility unknown"
     assert live["tui.usage.paid.unlimited"] == "Unlimited paid allowance"
+    # And the five source sites now read the hoisted `_x` alias rather than the
+    # removed function-local module name.
+    source = (REPO / "local_operator/tui/widgets/usage_panel.py").read_text(encoding="utf-8")
+    assert "tui_usage." not in source
+    assert source.count("_x.paid_") >= 5
+
+
+@pytest.fixture
+def fr_corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Only this fixture may make a synthetic locale eligible, never production."""
+    vals = catalogues.load_catalogue("en", "tui.small")
+    for locale, values in (("en", vals), ("fr", {k: "FR " + v for k, v in vals.items()})):
+        folder = tmp_path / locale
+        folder.mkdir()
+        (folder / "tui.small.json").write_text(json.dumps(values), encoding="utf-8")
+    monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
+    monkeypatch.setattr(text, "_active_locale", "en")
+    monkeypatch.setattr(text, "_refreshers", [settings_view._reload_copy])
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "fr"))
+    monkeypatch.delenv("LOP_I18N", raising=False)
+    text._sources.cache_clear()
+    yield
+    # Restore materialised constants and the real catalogue root, so fixture
+    # translations never escape this test.
+    text.set_active_locale("en")
+    settings_view._reload_copy()
+    text._sources.cache_clear()
+
+
+def test_the_bool_choices_follow_a_live_language_change(fr_corpus) -> None:
+    """Q1: the import-time constant must not pin the language it was built in.
+
+    Before this module registered a refresher, a locale move changed what the
+    resolver returned per call while ``_BOOL_CHOICES`` kept the import-time
+    language — a half-translated settings row that only shows up after a live
+    switch, which is why the reproduction (not the reading) is the evidence.
+    """
+    assert [c.label for c in settings_view._BOOL_CHOICES] == ["on", "off"]
+    assert _small(_s.settings_view_bool_on()) == "on"
+
+    text.set_active_locale("fr")
+
+    # Both halves must move together: the per-call resolution AND the constant.
+    assert _small(_s.settings_view_bool_on()) == "FR on"
+    assert [c.label for c in settings_view._BOOL_CHOICES] == ["FR on", "FR off"]
 
 
 def test_every_activated_file_lost_its_ceiling() -> None:

@@ -56,7 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
@@ -6203,10 +6203,41 @@ class _Row:
 #: The two members a BOOL row expands into, in the order they are offered.
 #: `on` first so the list reads the way the value column does, and so the
 #: cursor's resting position on a defaulted flag is the top row.
-_BOOL_CHOICES = (
-    settings_io.Choice(value=True, label=_t(_x.settings_view_bool_on())),
-    settings_io.Choice(value=False, label=_t(_x.settings_view_bool_off())),
-)
+def _bool_choices() -> tuple[settings_io.Choice, ...]:
+    """The two members a BOOL row expands into, built from the live locale.
+
+    A builder rather than a bare tuple so :func:`_reload_copy` can re-run the
+    SAME expression the import-time binding uses: two spellings of one list
+    could drift, and this module is now an activated file where drift is a
+    finding rather than a nuisance.
+    """
+    return (
+        settings_io.Choice(value=True, label=_t(_x.settings_view_bool_on())),
+        settings_io.Choice(value=False, label=_t(_x.settings_view_bool_off())),
+    )
+
+
+_BOOL_CHOICES: tuple[settings_io.Choice, ...] = _bool_choices()
+
+
+def _reload_copy() -> None:
+    """Re-materialise this module's import-time copy after a locale move.
+
+    ``local_operator.i18n.text`` runs registered re-materialisers when the
+    process's ACTIVE language changes (``/language``, the config watcher,
+    boot). Only CONSTANTS need an entry: everything this module resolves per
+    paint reads the active locale at each call and follows on its own.
+
+    Without this the two BOOL labels would keep the language in force at
+    import — the exact failure ``register_refresh`` exists to prevent
+    (docs/I18N.md, "Resolve at render time"), and the one QA round 1 (Q1)
+    reproduced with a fixture catalogue before this was added.
+    """
+    global _BOOL_CHOICES
+    _BOOL_CHOICES = _bool_choices()
+
+
+register_refresh(_reload_copy)
 
 
 def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
