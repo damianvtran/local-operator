@@ -504,22 +504,35 @@ _DSN_PATTERN = re.compile(
 #: separator), extended to the case where the host is gone.
 #:
 #: **A host tail DISQUALIFIES a value, and that is not a heuristic.** This rule is
-#: for a value that was CUT, so a completed ``userinfo`` followed by the separator
-#: and then MORE authority text is a whole connection string, which the rules
-#: above already own. The pattern therefore refuses a match whose password run is
-#: followed by the tail separator — the same test that keeps this module's own
-#: prose (which documents the complete spelling) from matching itself.
+#: for a value that was CUT, so a completed ``userinfo`` followed by the tail
+#: separator is a whole connection string, which the rules above already own. The
+#: pattern therefore refuses a match followed by the separator — the same test
+#: that keeps this module's own prose (which documents the complete spelling)
+#: from matching itself.
+#:
+#: **The run takes the WHOLE remainder, and that is load-bearing.** A password is
+#: a token, not a word: stopping the run at the first space published the tail of
+#: a multi-word passphrase (``correct horse battery staple`` became ``[redacted]
+#: horse battery staple`` — a leak with an incident row claiming the credential
+#: was masked) and, worse, CLIPPED a whitespace-bearing placeholder
+#: (``<your password here>``, ``[[fixture name]]``, ``${CI TOKEN}``) so the guard
+#: saw a broken prefix it could neither recognise nor back out, publishing
+#: ``[redacted] password here>``. So the class admits whitespace (but not a
+#: newline, the one boundary a line-oriented sink needs) and is POSSESSIVE
+#: (``{4,}+``): it cannot give characters back, so the separator check below
+#: refuses a whole connection string rather than allowing the engine to shorten
+#: the run to slip past it, and a whole ``<…>``/``[[…]]``/``${…}`` reference is
+#: handed INTACT to the guard, which correctly leaves it unmasked.
 #:
 #: **What it deliberately does NOT decide.** A bare ``x:y`` with no scheme — a
 #: host and port and a user and password are the same spelling with no in-band
 #: signal between them — is left alone, as is an all-digit password
-#: (indistinguishable from a port). Both are recorded residuals, not oversights.
-#: The password class reuses the DSN's own exclusions (no whitespace, quote,
-#: colon, slash, backtick or tail separator), so a cut tail cannot run into the
-#: next token.
+#: (indistinguishable from a port), and a value cut exactly AT the separator
+#: (``…:pass@``), which the rules above already own. All are recorded residuals,
+#: not oversights.
 _DSN_TRUNCATED_PATTERN = re.compile(
     rf"(?i)\b((?:{_DSN_TRUNCATED_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
-    r"((?![0-9]+(?:[/:?#]|\s|$))[^\s:/@\"'`]{4,})(?![^\s\"'`]*@)"
+    r"((?![0-9]+(?:[/:?#]|\s|$))[^\n:/@\"'`]{4,}+)(?!@)"
 )
 
 #: Triple-grouped so the password can be masked with the user and host kept:
@@ -1190,6 +1203,28 @@ def _is_structural_placeholder_reference(value: str) -> bool:
     # This narrower release needs a complete token: partial references can be
     # actual credentials and must retain their original DSN/CLI mask.
     return not value.startswith("$") or value.startswith("${") == value.endswith("}")
+
+
+def _is_complete_brace_reference(value: str) -> bool:
+    """A WHOLE ``${...}`` token, whitespace inside its braces included.
+
+    The truncated-DSN rule must hand a COMPLETE reference to the release path
+    rather than mask a prefix of it (agent review round 2, R2-1). The general
+    predicate above spells the braced form as a bare identifier, so a reference
+    written with a space inside -- ``${CI TOKEN}`` -- fails it and would be
+    masked. The assignment rule already releases that exact string, so refusing
+    it here would be STRICTER than the policy this shape sits beside; this helper
+    only makes the two agree. It is deliberately narrow: a single balanced
+    ``${...}`` with no nested brace, so an unterminated ``${`` or a nested one
+    stays a credential-shaped value.
+    """
+    return (
+        value.startswith("${")
+        and value.endswith("}")
+        and value.count("${") == 1
+        and "{".join(value.split("{")[1:]).count("{") == 0
+        and value.count("}") == 1
+    )
 
 
 def _repeats_its_own_name(value: str, name: str) -> bool:
@@ -3710,14 +3745,20 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         _DSN_PATTERN,
         None,  # guarded path preserves the user/host and masks only group 2
         2,
-        guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
+        guard=lambda match: not (
+            _is_structural_placeholder_reference(match.group(2))
+            or _is_complete_brace_reference(match.group(2))
+        ),
     ),
     Shape(
         "dsn-password-plain",
         _DSN_PATTERN_PLAIN,
         None,  # guarded path preserves the user/host and masks only group 2
         2,
-        guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
+        guard=lambda match: not (
+            _is_structural_placeholder_reference(match.group(2))
+            or _is_complete_brace_reference(match.group(2))
+        ),
     ),
     # A connection string CUT BEFORE ITS HOST: the userinfo is complete and the
     # ``@host`` tail the rules above require is simply gone. Same guarded path as
@@ -3730,7 +3771,10 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         _DSN_TRUNCATED_PATTERN,
         None,  # guarded path preserves the scheme/user and masks only group 2
         2,
-        guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
+        guard=lambda match: not (
+            _is_structural_placeholder_reference(match.group(2))
+            or _is_complete_brace_reference(match.group(2))
+        ),
     ),
     # A named URL/URI/endpoint value that CARRIES a credential: a userinfo
     # password, or a credential-shaped query parameter.

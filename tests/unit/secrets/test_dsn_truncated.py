@@ -125,6 +125,59 @@ class TestOrdinaryTextIsNotMasked:
         assert scrubbed == text, scrubbed
 
 
+class TestWhitespaceBearingValuesAreNotClipped:
+    """A token is not a word: the whole remainder must be captured, not clipped.
+
+    The rule's run admits whitespace on purpose (review round 2, R2-1). When it
+    stopped at the first space it published the TAIL of a multi-word passphrase
+    while recording a ``dsn-password-truncated`` hit — a leak dressed as a
+    containment — and CLIPPED a whitespace-bearing placeholder so the guard saw
+    a broken prefix it could neither recognise nor back out, corrupting
+    ``<your password here>`` into ``[redacted] password here>``.
+    """
+
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            "<" + "your password here" + ">",
+            "[[" + "fixture name" + "]]",
+            "${" + "CI TOKEN" + "}",
+        ],
+        ids=["angle-with-space", "bracket-with-space", "braced-with-space"],
+    )
+    def test_a_whitespace_placeholder_comes_back_intact(self, reference: str) -> None:
+        """A whole reference is handed INTACT to the guard, which refuses it."""
+        for text in (
+            f"postgres://user:{reference}@db.invalid/prod",
+            f"postgres://user:{reference}",
+        ):
+            scrubbed, _ = _scrub(text)
+            assert scrubbed == text, scrubbed
+            assert reference in scrubbed, "the placeholder must not be clipped"
+
+    def test_a_multi_word_passphrase_masks_in_full(self) -> None:
+        """No tail may survive: the whole run is the credential.
+
+        Built from parts because this file is read through the very pass it
+        describes -- a literal passphrase would be rewritten before ci could
+        assert the tail was gone.
+        """
+        tail = "battery " + "staple"
+        passphrase = "correct " + "horse " + tail
+        text = "postgres://" + USER + ":" + passphrase
+        scrubbed, labels = _scrub(text)
+        assert labels == ["dsn-password-truncated"]
+        assert passphrase not in scrubbed
+        assert tail not in scrubbed, "the passphrase tail was published"
+        assert scrubbed == "postgres://" + USER + ":" + REDACTION_MARKER
+
+    def test_a_cut_at_the_separator_is_a_recorded_residual(self) -> None:
+        """``…:pass@`` is owned by the rules above; unchanged here (base also open)."""
+        text = f"postgres://{USER}:[redacted]@"
+        scrubbed, _ = _scrub(text)
+        assert scrubbed == text, scrubbed
+
+
 class TestFullDsnAndNeighboursAreUnchanged:
     """The new rule must not disturb the rules that already worked."""
 
