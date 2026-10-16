@@ -130,6 +130,81 @@ def test_merge_is_additive_and_order_preserving():
     assert merged.identifiers == ["#1", "#2"]
 
 
+def test_identifier_eviction_is_newest_kept_like_the_other_tiers():
+    """MAJOR 3: identifiers must not silently keep the OLDEST when full.
+
+    An earlier revision frequency-ranked identifiers and sliced ``[:cap]``,
+    dropping the NEWEST references while asks/decisions kept newest — the
+    asymmetry that lost the reference stated on the current task. All tiers now
+    keep newest uniformly.
+    """
+    cap = CARRY_IDENTIFIER_ITEMS
+    carry = Carry()
+    for i in range(cap + 30):
+        carry = merge_carry(carry, Carry(identifiers=[f"/path/step{i:03d}/x.py"]))
+    assert len(carry.identifiers) == cap
+    assert "/path/step000/x.py" not in carry.identifiers  # oldest evicted
+    assert f"/path/step{cap + 29:03d}/x.py" in carry.identifiers  # newest kept
+
+
+def test_mined_identifiers_keep_first_seen_order():
+    """The miner must emit identifiers chronologically, not by frequency, or the
+    newest-kept merge slice keeps the oldest (MAJOR 3)."""
+    text = "[Tool result: bash]\n#999 #999 #999 /old.py\n" "[Tool result: bash]\n/new.py\n"
+    carry = mine_carry(text)
+    assert carry.identifiers.index("/old.py") < carry.identifiers.index("/new.py")
+
+
+def test_carry_is_never_re_mined_as_history():
+    """MAJOR 2: a replayed carry must not be re-mined into asks (self-echo).
+
+    The carry replays as leading text in the next pass's ``to_summarize``; if
+    the miner re-reads it, every ``- `` row under the replayed block becomes an
+    ask and the digest nests and evicts the genuine asks.
+    """
+    carried = (
+        "[User]\n## Operator asks\n- old ask one\n- old ask two\n"
+        "## Identifiers\n- /keep/me.py\n"
+        "[Assistant]\nreminder note\n"
+    )
+    carry = mine_carry(carried)
+    assert carry.asks == []
+    assert carry.identifiers == []
+    # And a NON-carry history with the same words still mines normally.
+    plain = "[User]\nplease do the thing in thread 7\n"
+    assert mine_carry(plain).asks == ["please do the thing in thread 7"]
+
+
+def test_forced_cut_never_publishes_a_fragment():
+    """MAJOR 4: a token bisected by ``_MAX_LINE_SCAN`` is refused, not truncated."""
+    from local_operator.compaction.mine import _MAX_LINE_SCAN
+
+    uri = "https://example.com/" + "a" * (_MAX_LINE_SCAN + 50)
+    carry = mine_carry(f"[Tool result: bash]\nsee {uri}\n")
+    assert carry.identifiers == []  # not a 200-char prefix of the URI
+
+
+def test_carry_render_includes_headings_in_the_budget():
+    """MINOR 6: the rendered digest fits ``CARRY_CHAR_BUDGET`` with headings."""
+    carry = Carry()
+    for i in range(400):
+        carry = merge_carry(
+            carry,
+            Carry(
+                asks=[f"ask {i} " + "a" * ASK_ITEM_CHARS],
+                decisions=[f"decision {i} " + "d" * 300],
+                identifiers=[f"/path/{i}/x.py"],
+            ),
+        )
+    assert len(render_carry(carry)) <= CARRY_CHAR_BUDGET
+
+
+def test_tool_error_line_is_not_an_assistant_decision():
+    """NIT 9: a tool ERROR line is not a stated assistant decision."""
+    carry = mine_carry("[Tool ERROR: bash]\nnever delete the production bucket\n")
+    assert carry.decisions == []
+
+
 def test_digest_lines_are_bounded_and_tier_labelled():
     carry = Carry(asks=["ask one"], decisions=["dec one"], identifiers=["#9"])
     lines = carry_digest_lines(carry, max_chars=1000)

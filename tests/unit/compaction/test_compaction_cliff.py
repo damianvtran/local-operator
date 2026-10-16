@@ -147,3 +147,37 @@ def test_legacy_archive_without_carry_replays_unchanged():
     legacy = archive.model_copy(update={"carry": ""})
     assert history_blocks(legacy) == history_blocks(archive)[1:]
     assert estimate_archive_tokens(legacy) < estimate_archive_tokens(archive)
+
+
+def test_replay_including_carry_stays_inside_the_pass_budget():
+    """The carry is RESERVED inside the archive's own token budget, so a pass
+    that exists to get under the line does not overshoot it once the carry is
+    counted (review round 1, MINOR 5)."""
+    import local_operator.compaction.snapcompact as sc
+    from local_operator.harness.types import Message, TextContent
+
+    shape = sc.resolve_shape(PROVIDER, MODEL)
+    for window in (60_000, 120_000):
+        prev_text: str | None = None
+        prev_carry: str | None = None
+        archive = None
+        for i in range(8):
+            msgs = [
+                Message.user(f"ask {i} keep /Users/damian/proj{i}/file.py in thread {i}"),
+                Message(
+                    role="user",
+                    content=[TextContent(text=f"dense {i} " + "w" * shape.capacity)],
+                ),
+            ]
+            archive = sc.compact_to_archive(
+                msgs,
+                PROVIDER,
+                MODEL,
+                prev_text,
+                context_window=window,
+                previous_carry=prev_carry,
+            )
+            prev_text = archive.text
+            prev_carry = archive.carry or None
+        assert archive is not None
+        assert estimate_archive_tokens(archive) <= window // 2

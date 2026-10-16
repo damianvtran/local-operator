@@ -51,6 +51,7 @@ from local_operator.harness.types import ImageContent, Message, ModelSpec, TextC
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
 from .mine import (
+    CARRY_FRESH_TOKEN_ALLOWANCE,
     CARRY_TOKEN_BUDGET,
     carry_digest_lines,
     merge_carry,
@@ -315,12 +316,11 @@ def _edge_chars_for(shape: Shape, context_window: int | None) -> int:
 
 
 def carry_token_budget() -> int:
-    """Tokens this archive reserves for the carry digest, inside its own budget.
+    """Tokens an archive may reserve for its carry digest.
 
     A one-line indirection over :data:`~local_operator.compaction.mine.CARRY_TOKEN_BUDGET`
-    so the reservation is named once and ``compact_to_archive``'s budget loop
-    reads it through the same module that bounds the carry's characters —
-    keeping the char cap and the token reservation from drifting apart.
+    so the reservation is named once; ``compact_to_archive`` charges it only when
+    a carry can exist (see the budget loop).
     """
     return CARRY_TOKEN_BUDGET
 
@@ -850,15 +850,23 @@ def compact_to_archive(
     # per-iteration re-estimate tokenized ~126k chars of unchanged text each
     # round through tiktoken.
     per_frame = frame_token_estimate_for(provider, model_id)
+    # The carry reservation, charged as a REAL rather than a fixed cost. A
+    # carried-forward digest is priced at its actual size (the char budget is a
+    # ceiling, and a converged same-session carry sits well under it — measured
+    # ~2.4k chars), plus the bounded fresh allowance only when this pass has
+    # pages to mine. Charging a flat :data:`CARRY_TOKEN_BUDGET` cost a prose-only
+    # pass two pages (measured: cw=60000 dropped 4 → 2 pages for a carry the
+    # miner kept nothing from) and could drive a small window's budget negative,
+    # breaking the ``max(per_frame, …)`` floor (review round 1, MINOR 5). With no
+    # prior carry and nothing to mine the reservation is zero.
+    prior_carry_text = previous_carry or ""
+    carry_reserve = estimate_tokens(Message.assistant(prior_carry_text)) if prior_carry_text else 0
+    if pages:
+        carry_reserve += CARRY_FRESH_TOKEN_ALLOWANCE
     if pages and context_window and context_window > 0:
-        # Reserve the carry's tokens inside the SAME budget the pages compete
-        # for: the carry is mined from what this loop drops, so pricing the
-        # archive without it would let the pass commit above its own target —
-        # the "a pass meant to get under the line ends up above it" failure
-        # this budget exists to prevent, one layer down. The carry's cost is
-        # charged whether or not this pass mints anything (a prior carry is
-        # carried forward), which is the conservative side.
-        budget = max(per_frame, int(context_window * 0.5)) - carry_token_budget()
+        # Budget floored at one frame, as before the reservation existed: a pass
+        # must still be able to try to get under the line on a small window.
+        budget = max(per_frame, int(context_window * 0.5) - carry_reserve)
         edge_tokens = estimate_archive_tokens(
             Archive(frames=[], text_head=text_head, text_tail=text_tail)
         )
@@ -866,6 +874,10 @@ def compact_to_archive(
             truncated_chars += len(pages[0])
             dropped_pages.append(pages[0])
             pages = pages[1:]
+        # The reservation is charged by a page DROP being possible at all; once
+        # the loop has run, the carry's own cost is covered by whatever the loop
+        # gave up. Nothing more is subtracted, so a pass that never drops keeps
+        # its full budget (see the MINOR 5 note above).
 
     # ONE cumulative marker for everything both passes dropped, appended
     # after both have run. One marker per pass double-counted: the budget
@@ -892,7 +904,10 @@ def compact_to_archive(
     # budget (the frame cap or the token budget) are covered.
     dropped_text = "\n".join(dropped_pages)
     fresh = mine_carry(dropped_text) if dropped_text else mine_carry("")
-    prior = parse_carry(previous_carry or "")
+    # ``parse_carry`` reads the archive's own ``render_carry`` form (plain
+    # headings); the caller always hands this function the archive's exact
+    # ``carry`` field, so no narrowing is needed.
+    prior = parse_carry(prior_carry_text)
     merged = merge_carry(prior, fresh)
     carry = render_carry(merged)
 

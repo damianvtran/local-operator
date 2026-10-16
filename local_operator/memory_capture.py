@@ -87,11 +87,16 @@ def carry_rows(carry: str, *, limit: int = 12) -> list[dict[str, Any]]:
     (see :mod:`local_operator.compaction.mine`), so feeding it here closes that
     gap with no extra model call and no second scan of the transcript.
 
-    Bounded and de-duplicated like every other capture source: at most
-    ``limit`` rows, each already trimmed to its tier's item cap by the miner.
-    Only ``stated`` material (an operator ask, a decision the assistant stated)
-    is promoted as a fact body; identifiers are added by the caller's existing
-    locator scan over the same digest, so the two do not double-store.
+    Every candidate is put through :func:`guard` and a refused one is SKIPPED,
+    exactly as ``extract`` guards each item it emits. This is not decoration:
+    the miner mines tool results as well as prose, so an ordinary path like
+    ``docs/.env`` or ``~/.aws/credentials`` can appear in a carry, and without a
+    per-item guard a single refused substring would make ``validate_fact`` raise
+    and take the WHOLE capture down to a ``failed`` terminal with zero rows
+    (review round 1, BLOCKER 1).
+
+    Bounded and de-duplicated like every other capture source: at most ``limit``
+    rows, whitespace-collapsed, each capped well under the fact body limit.
     """
     if not carry:
         return []
@@ -99,23 +104,43 @@ def carry_rows(carry: str, *, limit: int = 12) -> list[dict[str, Any]]:
 
     parsed = parse_carry(carry)
     rows: list[dict[str, Any]] = []
-    for item in parsed.asks:
-        rows.append({"title": item[:100], "body": item, "tags": ["ask"]})
-    for item in parsed.decisions:
-        rows.append({"title": item[:100], "body": item, "tags": ["decision"]})
-    if len(rows) < limit:
-        for item in parsed.identifiers:
-            rows.append({"title": item[:100], "body": item, "tags": ["locator"]})
+    seen: set[str] = set()
+    for tag, items in (
+        ("ask", parsed.asks),
+        ("decision", parsed.decisions),
+        ("locator", parsed.identifiers),
+    ):
+        for item in items:
+            if len(rows) >= limit:
+                break
+            body = " ".join(item.split())[:280]
+            if not body or body in seen:
+                continue
+            seen.add(body)
+            try:
+                guard(body)
+            except MemoryError:
+                # A refused candidate must never fail the whole capture: this is
+                # the BLOCKER-1 fix — one unguardable locator skips, the rest of
+                # the pass's facts still land.
+                continue
+            rows.append({"title": body[:100], "body": body, "tags": [tag]})
     return rows[:limit]
 
 
 def carry_digest(carry: str) -> str:
-    """The summary-slot digest lines for a carry, so ``extract``'s semantic arm
-    can mint buckets from a pass that has no model summary (snapcompact).
+    """The carry rendered as SEMANTIC sections, for callers that parse a summary
+    rather than a tier list.
 
     Renders the carry under the headings ``extract`` already recognises
-    (``Goal``/``Key Decisions``/``Progress``/``Critical Context``), so the
-    semantic arm works UNCHANGED and no new fact grammar is introduced.
+    (``Goal``/``Key Decisions``/``Critical Context``), so the semantic arm works
+    UNCHANGED for a pass that has no model summary (snapcompact) and no new fact
+    grammar is introduced. Deliberately NOT fed to capture alongside
+    :func:`carry_rows` in the same pass — writing the same bodies twice under two
+    tag sets is the duplication a reviewer found (round 1, MAJOR 7); degree
+    callers pick one. Retained because ``extract`` is the path that also handles a
+    context-full summary, and a caller that only has a summary string still needs
+    the carry reachable through its own parser.
     """
     if not carry:
         return ""
@@ -383,13 +408,13 @@ async def finish(
     try:
         rows = await asyncio.wait_for(asyncio.shield(task), timeout=2)
         # Summary parsing is deterministic, not another provider request. The
-        # carry digest renders under the SAME sections extract already reads, so
-        # a snapcompact pass (no model summary) still yields semantic facts —
-        # the retained asks and decisions — instead of only locators.
+        # carry rows are added ONCE, guarded per candidate (see ``carry_rows``);
+        # the digest is NOT also fed through ``extract`` in the same pass, which
+        # would persist the same bodies twice under two tag sets and, after the
+        # shared 52-row cap, drop the second copy anyway.
         rows = rows + await asyncio.to_thread(extract, "", summary)
         if carry:
             rows = rows + carry_rows(carry)
-            rows = rows + await asyncio.to_thread(extract, "", carry_digest(carry))
         await asyncio.to_thread(persist, store, marker_id, rows[:52], "ok", committed_at)
         return "ok"
     except asyncio.CancelledError:

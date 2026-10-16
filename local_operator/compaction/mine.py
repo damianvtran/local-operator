@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 __all__ = [
     "CARRY_CHAR_BUDGET",
     "CARRY_TOKEN_BUDGET",
+    "CARRY_FRESH_TOKEN_ALLOWANCE",
     "CARRY_ASK_ITEMS",
     "CARRY_DECISION_ITEMS",
     "CARRY_IDENTIFIER_ITEMS",
@@ -84,7 +85,18 @@ CARRY_CHAR_BUDGET = 30_000
 
 #: The token reservation the archive's own drop-budget loop honours, so the
 #: carry's cost is priced BEFORE pages are kept (see ``compact_to_archive``).
+#: Charged as the ACTUAL size of a carried-forward digest plus a bounded
+#: allowance for what this pass may mine: a fixed charge over-reserved a fresh
+#: pass (prose-only content the miner keeps nothing from still gave up pages)
+#: and could drive a small window's budget negative. The allowance is a fraction
+#: of the char budget and is a genuine upper bound on a newly-minted carry.
 CARRY_TOKEN_BUDGET = 8_000
+
+#: Fresh-mint allowance, consumed only when there is no carried digest to price.
+#: One third of :data:`CARRY_TOKEN_BUDGET`: a same-session carry converges well
+#: under the char budget (measured ~2.4k chars on dense real segments), so this
+#: keeps the pass clearing its own target while barely touching the page budget.
+CARRY_FRESH_TOKEN_ALLOWANCE = 2_500
 
 #: Per-tier item caps. Tier 1 is the widest because an identifier line is
 #: short; tier 2/3 are narrower because a sentence is long.
@@ -94,7 +106,7 @@ CARRY_DECISION_ITEMS = 40
 
 #: Per-item truncation: an ask is carried as its own substance, not the whole
 #: pasted blob that followed it.
-ASK_ITEM_CHARS = 320
+ASK_ITEM_CHARS = 240
 DECISION_ITEM_CHARS = 220
 
 #: The carry's section headings. ``memory_capture.extract`` recognises these as
@@ -136,8 +148,29 @@ _ROLE_HEADER = re.compile(
 #: of the biggest paste, mirroring ``memory_capture``'s bounded-window policy.
 #: Nothing load-bearing is lost: the ask for a long paste is carried as its own
 #: collapsed first line, and identifiers deep in a 100k-char blob are not the
-#: material a resumed session cannot re-derive from the workspace.
+#: material a resumed session cannot re-derive from the workspace. A match that
+#: runs INTO this cut is refused, exactly as ``extract`` refuses one (a fragment
+#: is worse than a miss).
 _MAX_LINE_SCAN = 8192
+
+#: The rendered carry's own headings and bullet prefixes, so a replayed digest
+#: is never re-mined as history (see ``_is_carry_digest_line``).
+_CARRY_HEADING_RE = re.compile(r"^#{1,4}\s*" + "(?:" + "|".join(CARRY_HEADINGS) + r")\b")
+
+
+def _is_carry_digest_line(line: str) -> bool:
+    """True for a line belonging to a carried digest rather than real history.
+
+    Recognises the digest's own headings and any bullet row already tagged with
+    a tier label (``- Identifiers: …`` / ``- Asks: …`` / ``- Decisions: …``),
+    which is how ``carry_digest_lines`` and ``archive_summary`` render them. The
+    headings alone are ambiguous — a real transcript can contain ``# Goal`` — so
+    the structural signal is the tagged bullet, which the digest always emits.
+    """
+    return bool(_CARRY_HEADING_RE.match(line)) or bool(_CARRY_TAGGED_ROW_RE.match(line))
+
+
+_CARRY_TAGGED_ROW_RE = re.compile(r"^-\s+(?:Asks|Decisions|Identifiers):\s")
 
 
 @dataclass
@@ -172,19 +205,47 @@ def mine_carry(text: str) -> Carry:
     decisions: list[str] = []
 
     role = "assistant"
+    in_carry = False
     for raw in text.splitlines():
         header = _ROLE_HEADER.match(raw.strip())
         if header:
-            role = "user" if header.group(1) == "User" else "assistant"
+            title = header.group(1)
+            # Tool blocks are their own role: a tool ERROR line reading "do not
+            # delete …" is an error message, not an assistant decision, and
+            # mining it as one wrote a commitment the assistant never made
+            # (review round 1, NIT 9).
+            role = (
+                "user"
+                if title == "User"
+                else ("tool" if title.startswith("Tool") else "assistant")
+            )
+            in_carry = False  # a role header always ends a carried section
             continue
         line = raw.strip()
         if not line:
             continue
+        # A carry DIGEST is never re-mined. A prior pass's carry replays as a
+        # leading text block (see ``snapcompact._with_carry_block``), so it sits
+        # inside the NEXT pass's ``to_summarize``; without this guard the miner
+        # would re-mine its own headings and rows — every ``- `` line under the
+        # replayed block would be re-classified as an operator ask and the carry
+        # would echo and nest itself (``- - - <ask>``), evicting the genuine asks
+        # it exists to retain (review round 1, MAJOR 2). Once a carry heading is
+        # seen, every following line is skipped until a role header: the section
+        # is not history, whether or not a line carries the tagged-row marker.
+        if in_carry or _is_carry_digest_line(line):
+            in_carry = True
+            continue
         # Identifiers: one bounded scan per line. The scan examines at most
-        # ``_MAX_LINE_SCAN`` chars and never windows mid-token, so a forced cut
-        # cannot publish half a URI or hex id as its own fact.
+        # ``_MAX_LINE_SCAN`` chars and, like ``memory_capture.extract``, refuses
+        # to publish a token a forced cut bisected — a truncated URL prefix or a
+        # half hex id is a fragment no reader can use and that lands in memory as
+        # a fact (review round 1, MAJOR 4).
+        forced_cut = len(line) > _MAX_LINE_SCAN and not line[_MAX_LINE_SCAN].isspace()
         scanned = line[:_MAX_LINE_SCAN]
         for match in _LOCATOR.finditer(scanned):
+            if forced_cut and match.end() == len(scanned):
+                continue  # the cut, not a delimiter, ended this match
             value = match.group().rstrip(".,;:)]}")
             if not value or len(value) > 200:
                 continue
@@ -200,24 +261,41 @@ def mine_carry(text: str) -> Carry:
             collapsed = " ".join(line.split())
             if collapsed:
                 asks.append(collapsed[:ASK_ITEM_CHARS])
-        elif _DECISION_CUE.search(line):
+        elif role == "assistant" and _DECISION_CUE.search(line):
             decisions.append(" ".join(line.split())[:DECISION_ITEM_CHARS])
 
+    # Identifiers in FIRST-SEEN order, not by frequency: merge keeps the newest
+    # rows of every tier uniformly (see ``merge_carry``), and a frequency ranking
+    # here would reorder them so that "newest-kept" silently kept the OLDEST
+    # references instead (review round 1, MAJOR 3). Ordering is chronological so
+    # the merge slice is a real recency bound; a Counter still gives the dedupe.
     return Carry(
-        identifiers=[value for value, _ in identifiers.most_common()],
+        identifiers=list(identifiers),
         asks=_dedupe(asks),
         decisions=_dedupe(decisions),
     )
 
 
 def parse_carry(text: str) -> Carry:
-    """Revive a rendered carry so a later pass can merge into it rather than restart."""
+    """Revive a rendered carry so a later pass can merge into it rather than restart.
+
+    Parses :func:`render_carry`'s own plain-heading form (``## Operator asks`` /
+    ``## Decisions / constraints`` / ``## Identifiers``). The caller always hands
+    the archive's exact ``carry`` field, so no narrowing is needed — and the
+    headings themselves are what :func:`_is_carry_digest_line` recognises to keep
+    a replayed digest from being re-mined.
+    """
     carry = Carry()
     section = ""
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
+        # Headings and bullets use ``elif`` rather than ``continue`` so a
+        # fragment that a cut left WITHOUT its newline — ``… - Identifiers:``
+        # glued onto the tail of the last edge row — is still recovered: the
+        # tagged-literal match in ``_as_prior_carry`` can hand ``parse_carry``
+        # text whose heading trails a row.
         if line.startswith("## "):
             section = line[3:].strip()
             continue
@@ -226,12 +304,9 @@ def parse_carry(text: str) -> Carry:
         value = line[2:].strip()
         if not value:
             continue
-        if section == "Identifiers":
-            carry.identifiers.append(value)
-        elif section == "Operator asks":
-            carry.asks.append(value)
-        elif section == "Decisions / constraints":
-            carry.decisions.append(value)
+        attribute = _CARRY_TIER_SECTIONS.get(section)
+        if attribute:
+            getattr(carry, attribute).append(value)
     return carry
 
 
@@ -255,56 +330,43 @@ def carry_is_empty(carry: Carry) -> bool:
     return not (carry.asks or carry.decisions or carry.identifiers)
 
 
-def _cap_tier(
-    items: list[str], cap: int, *, budget: int, used: int, oldest_first: bool
-) -> tuple[list[str], int]:
-    """Keep at most ``cap`` items of a tier, newest-kept, inside ``budget``.
-
-    ``oldest_first`` chooses which end survives when the tier overflows:
-    ``False`` drops the oldest (asks/decisions — a live ask outranks a spent
-    one); ``True`` drops the newest only for tiers where order is meaningless
-    (identifiers are pre-ranked by frequency, so this is never used there).
-    """
-    if cap <= 0:
-        return [], used
-    kept: list[str] = []
-    for item in reversed(items) if not oldest_first else items:
-        cost = len(item) + 3
-        if kept and (used + cost > budget or len(kept) >= cap):
-            break
-        kept.append(item)
-        used += cost
-    if not oldest_first:
-        kept.reverse()
-    return kept, used
+#: Rendered section heading -> the ``Carry`` attribute it feeds on ``parse_carry``.
+_CARRY_TIER_SECTIONS: dict[str, str] = {
+    "Operator asks": "asks",
+    "Decisions / constraints": "decisions",
+    "Identifiers": "identifiers",
+}
 
 
 def merge_carry(previous: Carry, fresh: Carry) -> Carry:
     """Fold a pass's fresh candidates into the prior carry, tier by tier.
 
     Ordering INSIDE a tier is oldest→newest so the rendered digest reads
-    chronologically; EVICTION is by tier (identifiers last to go), and within
-    the ask/decision tiers oldest-first, which is the architect's
-    importance-not-age ranking.
-    """
-    identifiers = _dedupe(previous.identifiers + fresh.identifiers)[:CARRY_IDENTIFIER_ITEMS]
+    chronologically. When a tier overflows its cap EVICTION IS NEWEST-KEPT for
+    all three tiers, uniformly: a reference, ask or decision stated on the
+    CURRENT task is what a resumed session must have to continue, and the older
+    material is not lost either — it still rides the archive's verbatim oldest
+    edge, its frames, and (via ``memory_capture``) ``memory://session``. The
+    identifier tier keeps the same direction as the other two on purpose; an
+    earlier revision kept OLDEST identifiers while the other tiers kept newest,
+    an asymmetry that silently dropped the newest references (review round 1,
+    MAJOR 3).
 
-    # Identifiers are tier 1 and never evicted inside the cap.
-    used = sum(len(item) + 3 for item in identifiers)
-    asks_pool = _dedupe(previous.asks + fresh.asks)
-    asks, used = _cap_tier(
-        asks_pool, CARRY_ASK_ITEMS, budget=CARRY_CHAR_BUDGET, used=used, oldest_first=False
-    )
-    decisions_pool = _dedupe(previous.decisions + fresh.decisions)
-    # Tier 3 and the first to shed: give it whatever budget remains up to its cap.
-    decisions, used = _cap_tier(
-        decisions_pool,
-        CARRY_DECISION_ITEMS,
-        budget=CARRY_CHAR_BUDGET,
-        used=used,
-        oldest_first=False,
-    )
-    return Carry(identifiers=identifiers, asks=asks, decisions=decisions)
+    After capping, the rendered digest is trimmed from the LOWEST tier up until
+    it fits :data:`CARRY_CHAR_BUDGET` INCLUDING its headings, so the character
+    budget is a real bound rather than a line budget that headings overshoot
+    (review round 1, MINOR 6).
+    """
+    identifiers = _dedupe(previous.identifiers + fresh.identifiers)[-CARRY_IDENTIFIER_ITEMS:]
+    asks = _dedupe(previous.asks + fresh.asks)[-CARRY_ASK_ITEMS:]
+    decisions = _dedupe(previous.decisions + fresh.decisions)[-CARRY_DECISION_ITEMS:]
+    merged = Carry(identifiers=identifiers, asks=asks, decisions=decisions)
+    # Trim lowest-value tier first while the RENDERED digest overshoots: the cap
+    # counts characters, and the headings and bullet prefixes are part of them.
+    for tier in ("decisions", "asks", "identifiers"):
+        while len(render_carry(merged)) > CARRY_CHAR_BUDGET and getattr(merged, tier):
+            getattr(merged, tier).pop(0)  # drop the oldest row of the lowest tier in play
+    return merged
 
 
 def carry_digest_lines(carry: Carry, *, max_chars: int = 2_000) -> list[str]:
