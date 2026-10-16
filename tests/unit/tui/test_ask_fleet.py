@@ -287,7 +287,7 @@ async def test_the_drawer_register_speaks_moved_on_for_a_moved_on_only_queue():
 async def test_the_drawer_register_never_calls_a_delivering_row_settled():
     """§10's second half, and the contradiction round 2 found (F3/Q1/U4).
 
-    A delivering row is PENDING — it sits in the `Waiting or moved on` segment
+    A delivering row is PENDING — it sits in the `Pending` segment
     and keeps the session's mark — so `N settled` over it was the header
     contradicting its own segment. It gets §5's own words instead, and never the
     desktop's "you can still change it": this surface has no revise wire.
@@ -401,7 +401,7 @@ async def test_the_header_carries_the_scope_subject_and_the_three_segments():
     session_head = AskQueueList(rows, scope=SCOPE_SESSION).header_text(200)
     assert session_head.startswith("? ")
     assert "This conversation" not in session_head
-    for segment in ("All · 2", "Waiting or moved on · 1", "Settled · 1"):
+    for segment in ("All · 2", "Pending · 1", "Settled · 1"):
         assert segment in session_head, session_head
     fleet_head = AskQueueList(rows, scope=SCOPE_FLEET).header_text(200)
     assert fleet_head.startswith("? All conversations · 1 question waiting")
@@ -417,7 +417,7 @@ async def test_the_header_keeps_the_control_longest_and_drops_the_clause_whole()
     assert cell_len(narrow) <= 60
     # The control outlives everything: a filtered view that cannot be
     # un-filtered is worse than an unadvertised key.
-    assert "Waiting or moved on" in narrow
+    assert "Pending" in narrow
     assert "1 question waiting" not in narrow
 
 
@@ -439,7 +439,8 @@ async def test_the_header_hints_follow_the_view():
     assert delivering.header_hints() == ("esc collapse",)
     # A LAPSED row is read-only (D10): `x dismiss` is the one key it honours.
     lapsed = AskQueueList(ask_rows([_row("a1", status="timed_out")]))
-    assert lapsed.header_hints() == ("x dismiss", "esc collapse")
+    # `enter view` opens its read-only card (#2481 UX U1).
+    assert lapsed.header_hints() == ("x dismiss", "enter view", "esc collapse")
     # An OPEN row cannot be dismissed (dismiss is offered on a timed-out ask
     # alone), so that key is not advertised over it.
     opened = AskQueueList(ask_rows([_row("a1")]))
@@ -473,18 +474,25 @@ async def test_the_primary_hint_outlives_the_irreversible_one():
             assert "d decline" in painted, (width, painted)
     # U3/D4's own case: a SESSION-scope width with room for the clause and ONE
     # hint — the surviving hint is the primary action, not the one that was there
-    # before the user pressed Tab. (90, not the original 100: D11 made the clause
-    # "1 question waiting", three cells shorter than "1 waiting, 1 moved on".)
-    assert "enter answer" in listing.header_text(90)
-    assert "d decline" not in listing.header_text(90)
+    # before the user pressed Tab. (80, not the original 100: D11 made the clause
+    # "1 question waiting", three cells shorter than "1 waiting, 1 moved on", and
+    # #2481's "Pending" segment is twelve cells shorter than "Waiting or moved on".)
+    assert "enter answer" in listing.header_text(80)
+    assert "d decline" not in listing.header_text(80)
     # The FLEET scope spends 6 more cells on its subject, and the FIRST hint now
     # outbids the drawer clause (U3), so a hint survives even where the clause
     # does not fit with it.
     fleet = AskQueueList(rows, scope=SCOPE_FLEET)
-    assert "All conversations" in fleet.header_text(100)
-    assert "enter answer" in fleet.header_text(100)
-    assert "d decline" in fleet.header_text(100)
+    assert "All conversations" in fleet.header_text(90)
+    assert "enter answer" in fleet.header_text(90)
+    assert "d decline" in fleet.header_text(90)
+    # The hints follow the row under the cursor (#2481 UX U3): `x` is offered
+    # once the cursor is on the timed-out row, and the answer keys are not.
+    fleet.action_move(1)
+    current = fleet.current()
+    assert current is not None and current.status == "timed_out"
     assert "x dismiss" in fleet.header_text(150)
+    assert "d decline" not in fleet.header_text(150)
 
 
 async def test_the_segments_are_one_painted_line_and_never_split_a_hint():
@@ -660,13 +668,14 @@ async def test_the_fleet_tally_sums_the_index_and_the_marks_cover_every_session(
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
         counts, total = app._read_fleet_asks()
-        assert counts == {"s-other": 2}
-        assert total == 2
+        # The timed-out b2 owes no answer, so it marks nothing (#2481 design D3).
+        assert counts == {"s-other": 1}
+        assert total == 1
         app._ask_marks = dict(counts)
         app._sync_ask_surface(ask_rows([_row("a1")]))
         await _settle(pilot)
         marks = app._session_sidebar._asking
-        assert marks["s-other"] == 2
+        assert marks["s-other"] == 1
         # The current session's LIVE wire count is unioned in — the index lags it.
         session = app._session
         assert session is not None
@@ -674,7 +683,7 @@ async def test_the_fleet_tally_sums_the_index_and_the_marks_cover_every_session(
         # A4: the total is the SUM of the unioned marks, so a live ask the index
         # has not learned about yet is still counted — the footer and the marks
         # on screen state one number for one fleet.
-        assert app._session_sidebar._asks_total == 3
+        assert app._session_sidebar._asks_total == 2
 
 
 async def test_an_index_with_nothing_outstanding_marks_nobody_and_totals_zero(

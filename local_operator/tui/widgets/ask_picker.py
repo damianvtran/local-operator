@@ -936,6 +936,13 @@ class AskPickerScreen(Container):
         if self._read_only:
             return
         self._read_only = True
+        # Text typed before the lapse is half an answer that will never be sent;
+        # left painted in the Other row it read as pending (#2481 UX U6). Checked
+        # boxes go for the same reason.
+        self.state.typed = ""
+        self.state.checked.clear()
+        # The Other row's description is cached per width; it changes now.
+        self._invalidate_description_wraps()
         self._repaint()
 
     def restore_focus(self) -> None:
@@ -1046,6 +1053,8 @@ class AskPickerScreen(Container):
         would either be Enter under another name or a selection the user cannot
         see the effect of.
         """
+        if self._read_only:
+            return  # D10: a lapsed card takes no selection (#2481 review m1)
         if not self.question.multi or self.state.selected == self.other_row:
             return
         index = self.state.selected
@@ -1138,7 +1147,10 @@ class AskPickerScreen(Container):
         if self.settled:
             return True
         if self._read_only:
-            # The phone's route in: a lapsed ask takes no answer from it either.
+            # DEFENSIVE (#2481 review m4): this route is the blocking card's
+            # (`tui_handle._ask_pending`), where no queued card is registered
+            # today. A phone answers a queued ask through `ask_respond`, which the
+            # queue still accepts as `late` (D10 leaves the store alone).
             raise ValueError("that ask timed out — the agent went ahead without an answer")
         if not values:
             # Nothing chosen. On Q0 this is "the user answered nothing" — settle
@@ -1253,6 +1265,12 @@ class AskPickerScreen(Container):
         value would land in the composer behind the card instead.
         """
         if self.state.selected != self.other_row:
+            return
+        if self._read_only:
+            # D10: nothing typed or pasted lands on a lapsed card (#2481 review m1).
+            # Stopped so the paste does not fall through to the composer behind.
+            event.stop()
+            event.prevent_default()
             return
         text = getattr(event, "text", "") or ""
         if not text:
@@ -2831,6 +2849,9 @@ class AskPickerScreen(Container):
 
     def _row_description(self, index: int) -> str:
         if index == self.other_row:
+            if self._read_only:
+                # "type it here" invites input a lapsed card refuses (review m1).
+                return ""
             return SECRET_HINT if self.question.secret else OTHER_HINT
         return self.question.options[index].description
 

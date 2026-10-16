@@ -638,16 +638,21 @@ export function AskCard({
 				   refusal sentence is the whole state and must stay readable. */
 				<Disclosure
 					headerClassName="gap-2"
-					header={
+					header={(open: boolean) => (
 						<>
 							<span className="shrink-0 rounded-sm border border-hairline px-1.5 text-meta text-ink-muted">
 								Timed out
 							</span>
-							<span className="min-w-0 truncate text-body-sm text-ink-muted">
-								{questions[0]?.question ?? ""}
-							</span>
+							{/* The header names the question only while CLOSED (#2481 UX U7):
+							    open, the body states it in full, and a truncated copy one line
+							    above it said the same thing twice. */}
+							{open ? null : (
+								<span className="min-w-0 truncate text-body-sm text-ink-muted">
+									{questions[0]?.question ?? ""}
+								</span>
+							)}
 						</>
-					}
+					)}
 				>
 					<div className="flex flex-col gap-2 pt-1">{body}</div>
 				</Disclosure>

@@ -149,14 +149,14 @@ FILTER_SETTLED = "settled"
 #: Press order, left to right, and the cycle order for `[`/`]`.
 FILTER_ORDER: tuple[str, ...] = (FILTER_ALL, FILTER_OUTSTANDING, FILTER_SETTLED)
 
-#: EXACT labels, from the desktop's own filter control (``ask-panel.tsx``).
-#: The middle one is deliberately NOT "Waiting": a moved-on ask is in that
-#: half and the agent is not waiting for it, so the short word would be a
-#: second name for a population the row itself spells "moved on" (design
-#: round 1, M1 = UX U1 on the desktop — the same finding, same wording).
+#: EXACT labels, shared with the desktop's own filter control (``ask-panel.tsx``).
+#: The middle one is "Pending", the code's own word for that half (``pending`` =
+#: answerable or delivering). It used to be "Waiting or moved on" because a
+#: timed-out ask sat in it; since D11 every timed-out ask is Settled, so the old
+#: label named a population the half can no longer hold (#2481 design D1).
 FILTER_LABELS: dict[str, str] = {
     FILTER_ALL: "All",
-    FILTER_OUTSTANDING: "Waiting or moved on",
+    FILTER_OUTSTANDING: "Pending",
     FILTER_SETTLED: "Settled",
 }
 
@@ -174,8 +174,8 @@ FILTER_KEYS: dict[str, str] = {
 #: (design round 1, D1 = UX U2), so each half states its OWN emptiness and names
 #: the half that is holding the rows.
 EMPTY_ALL = "No asks outstanding. The agent is not waiting on anything."
-EMPTY_OUTSTANDING = "No asks are waiting or moved on. They have all settled — see Settled."
-EMPTY_SETTLED = "No asks have settled yet. They are all still under Waiting or moved on."
+EMPTY_OUTSTANDING = "No asks are pending. They have all settled — see Settled."
+EMPTY_SETTLED = "No asks have settled yet. They are all still pending."
 
 #: The scope the list is reading: this conversation's queue, or every
 #: conversation's. The TUI has no session-less screen, so the FLEET scope is
@@ -470,6 +470,18 @@ def delivering_chip(row: AskRow) -> tuple[str, str] | None:
     return (word, SETTLED_CHIPS.get(row.status, (word, "success"))[1])
 
 
+def _openable(row: AskRow) -> bool:
+    """Whether Enter or a click on ``row`` opens a card.
+
+    An ANSWERABLE row opens its answer card. A LAPSED row opens the same card
+    READ-ONLY (#2481 UX U1): the list row is one truncated line, and the card is
+    the only place the whole question and its options can be read. Seeing it is
+    the explicit look Ben asked for, and the card sends nothing (D10). Every
+    other settled row, and a delivering one, stays inert.
+    """
+    return row.answerable or row.lapsed
+
+
 def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0) -> str:
     """The queue's count, in ONE vocabulary for the bar and the list header.
 
@@ -497,7 +509,9 @@ def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0)
         # question the bar happened to name, which need not be the urgent one.
         parts.append(f"{urgent_count} urgent")
     if timed_out_count:
-        noun = "ask" if timed_out_count == 1 else "asks"
+        # "question", the noun the waiting clause uses and the phone and desktop
+        # use for the same state, so one bar never counts in two nouns (D5).
+        noun = "question" if timed_out_count == 1 else "questions"
         parts.append(f"{timed_out_count} {noun} timed out")
     return " · ".join(parts)
 
@@ -524,7 +538,7 @@ def drawer_headline(
 
     THE DELIVERING HALF IS PENDING AND MUST NEVER READ AS SETTLED (round 2:
     F3/Q1/U4). ``pending`` = answerable ∪ delivering (§10), so an
-    answered-but-undelivered row sits in the "Waiting or moved on" segment while
+    answered-but-undelivered row sits in the "Pending" segment while
     the old fallback printed `N settled` over it — the header contradicting its
     own segment. It says so in §5's words instead, and without the desktop's
     "you can still change it": the TUI has no revise wire at all, and promising
@@ -533,7 +547,7 @@ def drawer_headline(
     settled`) rather than inventing a second form for it.
 
     THE TRUNCATED FRAME STATES THE BACKEND'S TALLY (``open_count``) AND
-    WITHHOLDS THE SPLIT: the wire caps the list, so a waiting/moved-on split
+    WITHHOLDS THE SPLIT: the wire caps the list, so a pending/settled split
     computed from the rows this frame carries would be a prefix passing for the
     whole queue. This is the desktop's `askSplitIsKnowable` rule ("the louder
     number wins"); `open_count is None` means the caller has no backend tally to
@@ -700,7 +714,18 @@ class AskBar(Widget):
         fg = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         warning = Style(color=theme_mod.semantic_color("warning"))
-        glyph_style = Style(bold=True) + (warning if self._urgent else accent)
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        # A bar that owes nothing (only timed-out asks behind it) is painted in
+        # the SETTLED register: the accent `?` is the "a question is waiting"
+        # ink, and a lapsed ask is not one (#2481 design D4 / UX U2). The bar
+        # stays — it is the door to `x` dismiss — it just stops calling.
+        if self._urgent:
+            glyph_style = Style(bold=True) + warning
+        elif self._count:
+            glyph_style = Style(bold=True) + accent
+        else:
+            glyph_style = muted
+        copy_style = fg if self._count else muted
 
         # Read from `self.size` rather than assumed: a bar rendered before its
         # first layout pass has width 0.
@@ -737,10 +762,11 @@ class AskBar(Widget):
         text = Text(no_wrap=True, overflow="ellipsis")
         text.append(ASK_MARKER, style=glyph_style)
         text.append(
-            f" {queue_headline(self._count, self._timed_out, self._urgent_count)}", style=fg
+            f" {queue_headline(self._count, self._timed_out, self._urgent_count)}",
+            style=copy_style,
         )
         if head_part:
-            text.append(head_part, style=fg)
+            text.append(head_part, style=copy_style)
         if tail:
             text.append(tail, style=dim)
         padding = width - 1 - cell_len(text.plain)
@@ -851,7 +877,7 @@ class AskQueueList(Widget):
         # with the bindings above (verified against this list), and the segments
         # are also press targets — the mouse path A9 requires.
         Binding("1", "filter_all", "All asks", show=False),
-        Binding("2", "filter_outstanding", "Waiting or moved on", show=False),
+        Binding("2", "filter_outstanding", "Pending", show=False),
         Binding("3", "filter_settled", "Settled asks", show=False),
         Binding("left_square_bracket", "filter_prev", "Previous filter", show=False),
         Binding("right_square_bracket", "filter_next", "Next filter", show=False),
@@ -879,7 +905,11 @@ class AskQueueList(Widget):
     HEADER_HINTS = (
         "enter answer",
         "d decline",
+        # `x` before `enter view` (#2481 UX U8): on a lapsed row dismiss is the
+        # only key that changes anything, so it is the hint a narrow header keeps
+        # (the first hint outbids the drawer clause, see `header_atoms`).
         "x dismiss",
+        "enter view",
         PASSIVE_TAB_HINT,
         "esc collapse",
     )
@@ -904,7 +934,10 @@ class AskQueueList(Widget):
     ) -> None:
         super().__init__(id=widget_id, classes="prompt-slot")
         self._rows: list[AskRow] = list(rows)
-        self._index = 0
+        # THE CURSOR STARTS ON THE FIRST ANSWERABLE ROW (#2481 UX U3): rows are
+        # ordered by status, not by what the user owes, and a list opened over a
+        # timed-out row first put the cursor on the one row Enter cannot answer.
+        self._index = next((i for i, row in enumerate(self._rows) if row.answerable), 0)
         self._now_ms = now_ms
         #: True for a list the open-by-default policy put up and the user has not yet
         #: engaged: the composer still holds the caret, so NONE of this list's keys
@@ -991,7 +1024,7 @@ class AskQueueList(Widget):
         self.refresh(layout=True)
 
     def cycle_filter(self, delta: int) -> None:
-        """``[``/``]``: walk all → waiting-or-moved-on → settled → all."""
+        """``[``/``]``: walk all → pending → settled → all."""
         at = FILTER_ORDER.index(self._filter)
         self.set_filter(FILTER_ORDER[(at + delta) % len(FILTER_ORDER)])
 
@@ -1151,7 +1184,7 @@ class AskQueueList(Widget):
 
     def action_pick(self) -> None:
         row = self.current()
-        if row is not None and row.answerable and row.ask_id not in self._in_flight:
+        if row is not None and _openable(row) and row.ask_id not in self._in_flight:
             self.post_message(self.Picked(row.ask_id))
 
     def action_collapse(self) -> None:
@@ -1275,7 +1308,7 @@ class AskQueueList(Widget):
         self._index = row
         self.refresh()
         target = self.visible_rows[row]
-        if target.answerable and target.ask_id not in self._in_flight:
+        if _openable(target) and target.ask_id not in self._in_flight:
             self.post_message(self.Picked(target.ask_id))
 
     def on_focus(self, event: events.Focus) -> None:  # type: ignore[override]
@@ -1340,9 +1373,9 @@ class AskQueueList(Widget):
         exactly inverted against the rows: advertised where the keys do nothing,
         absent where they are live.
 
-        So the set is derived from the VISIBLE rows (the filter half on screen)
-        and the keys' own objects: `enter`/`d` need an ANSWERABLE row, `x` needs
-        a lapsed one (dismiss is only ever offered on a timed-out ask, so
+        So the set is derived from the row under the cursor and the keys' own
+        objects: `enter answer`/`d` need an ANSWERABLE row, `enter view`/`x` a
+        lapsed one (dismiss is only ever offered on a timed-out ask, so
         advertising it over open rows names a key the row would refuse), and
         `esc` needs nothing — it is how a reader leaves any view, including an
         empty half. Order is still ``HEADER_HINTS``' own.
@@ -1358,10 +1391,18 @@ class AskQueueList(Widget):
             if any(row.answerable for row in visible):
                 live.add(PASSIVE_TAB_HINT)
             return tuple(hint for hint in self.HEADER_HINTS if hint in live)
-        if any(row.answerable for row in visible):
-            live |= {"enter answer", "d decline"}
-        if any(row.lapsed for row in visible):
-            live.add("x dismiss")
+        # THE ROW UNDER THE CURSOR decides, not "any visible row" (#2481 UX U3):
+        # with an open and a timed-out row on screen the header used to promise
+        # `enter answer · d decline` while the cursor sat on the timed-out one,
+        # where Enter could not answer. A lapsed row takes `enter view` (the
+        # read-only card, U1) and `x dismiss`; an answerable one takes the two
+        # answer keys. A row in flight takes nothing until its reply lands.
+        row = self.current()
+        if row is not None and row.ask_id not in self._in_flight:
+            if row.answerable:
+                live |= {"enter answer", "d decline"}
+            elif row.lapsed:
+                live |= {"enter view", "x dismiss"}
         return tuple(hint for hint in self.HEADER_HINTS if hint in live)
 
     def header_atoms(self, width: int) -> list[HeaderAtom]:

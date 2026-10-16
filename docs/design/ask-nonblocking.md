@@ -355,8 +355,9 @@ with a bracketed header (the `wake_prompt` shape), never as "the user denied".
 
 - **Normal:** *"[Ask timed out] No reply to ask a-7f3 arrived within 1h (asked 14:02).
   Q1 <≤200 chars>… Proceed without it: use your recommended option or best judgment and state
-  the assumption in your report. The ask stays open for the user; if they answer later you
-  will be told."*
+  the assumption in your report."* (Until #2481 it ended *"The ask stays open for the user; if
+  they answer later you will be told."* Decision D10 made a lapsed ask read-only on every
+  surface, so no surface offers that late answer and the promise was dropped.)
 - **Urgent (≤15 min):** adds *"This ask was urgent. Do not wait — resolve it now: delegate the
   question to a `task` subagent with the relevant expertise (e.g. `architect`, `reviewer`) and
   decide on its answer."*

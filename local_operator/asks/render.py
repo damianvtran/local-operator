@@ -431,10 +431,11 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
 
     Only an ``open`` ask is mirrored, deliberately: a ``timed_out`` ask is past
     its deadline, and painting the old "waiting for you" card for it would tell
-    the user their answer still counts as one did before the deadline. It is
-    still answerable — that is the ``ask_timeout`` row's message and the
-    ``late`` fold — but the mirror is the pre-deadline shape and must not lie
-    about the clock.
+    the user their answer still counts as one did before the deadline. Since D10
+    a timed-out ask is read-only on every surface (the ``ask_timeout`` row now
+    says the agent goes ahead without the answer); the store still folds a late
+    chat answer as ``late``, but no surface offers one, so the mirror has nothing
+    to show for it.
 
     ``None`` means "no ask to mirror": the caller publishes its own empty card
     exactly as it does today.
