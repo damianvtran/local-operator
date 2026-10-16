@@ -44,14 +44,72 @@ def test_refusal_is_value_free(tmp_path):
     [
         "MR !1234 is green; next step: tag v1.2.3",
         "commit 8f3ac21 merged, CI green",
-        "HOLD pending review",
-        "next step: cut the release window",
+        "PR #2463 is merged; CI green",
+        "HOLD pending review on PR #12",
+        "the release lane next step is the merge",
         "PR #99 CHANGES",
+        "next step: cut the release window",
+        "remaining work on the branch",
     ],
 )
 def test_scope_fit_refuses_work_shapes(text):
     with pytest.raises(MemoryError):
         scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
+
+
+# QA round 1 (M-1) regression set: these were WRONGLY refused by the first matcher.
+# A bare `#N`, a bare `next step` or a bare `HOLD` is ordinary personal prose.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Read #1 Foundation, #2 Dune, #3 Hyperion",
+        "Office #4 is on the third floor of the Lambton building",
+        "My apartment is #7 in the Wakefield complex",
+        "My Amazon order #1123 arrives Tuesday",
+        "Policy #44120 is the home insurance",
+        "I take bus #5 to the market every Saturday",
+        "I am up to chapter #12 of the manuscript",
+        "Call the clinic on extension #22",
+        "My season seat is row 3, seat #18",
+        "My gym membership is #88123 and renews in March",
+        "Flight NZ #442 lands at 6pm",
+        "The invoice #9931 for the heat pump is paid",
+        "Room #3 is where the sewing machine lives",
+        "Chapter #7 is my favourite in the book",
+        "#1 priority is family",
+        "The vet is on extension #4",
+        "Next step is to let the dough rest for an hour",
+        "Recipe: next step is to fold in the flour",
+        "Note to self: the next step in the sourdough is the overnight proof",
+        "The bank put a HOLD on the cheque for three days",
+        "The dry cleaner put a HOLD on my suit until Friday",
+        "I keep a HOLD on the parcel at the depot",
+    ],
+)
+def test_ordinary_personal_fact_not_refused(tmp_path, text):
+    """NEGATIVE control from QA round 1: personal prose must still store to global."""
+    store = _store(tmp_path)
+    done = store.put("global", {"title": "Personal note", "body": text, "tags": []})
+    assert done["scope"] == "global"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Priya holds the spare key for my flat",
+        "I commit to morning workouts",
+        "I live at 123 Kowhai Street",
+        "Tag Nakamura is the designer",
+        "Hold the stretch for thirty seconds",
+        "Sha Verma handles the lease",
+        "Ci Chen is my accountant",
+        "My bank checks were reordered",
+        "I build model ships in the garage",
+    ],
+)
+def test_personal_words_that_look_workish_store(tmp_path, text):
+    store = _store(tmp_path)
+    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
 
 
 @pytest.mark.parametrize(
