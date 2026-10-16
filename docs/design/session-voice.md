@@ -60,7 +60,7 @@ not a separate voice model with its own personality. "Aida only first" is droppe
 - **V7 — Approvals.**
   **Taken:** voice never answers a gate.
   - Approvals are ANNOUNCED aloud from the gate's text as the server resolves it (the tool name and the tool's approval summary), then approved on screen through the existing card and presence path. *Amendment (slice 1, round 1):* that summary is not host-authored prose: it can quote model-written arguments (a bash command, a path). It is the same text the card shows, so speaking it reveals nothing new.
-  - The utterance route has no code path to `answer_gate`. While an approval is pending, an utterance is refused (V13), never admitted as an answer.
+  - The utterance route has no code path to `answer_gate`. While a card is pending, an utterance is refused (V13), never admitted as an answer.
   **Rejected:** a spoken "yes". A transcript is produced by a provider pipeline, and the mic hears the app's own TTS output. A model-written reply could therefore become an approval, which breaks approval-authority.md §0.
   - Spoken deny and answers to non-secret asks are ordinary under §1 and allowed in principle. They are deferred to slice 3.
   **Overturned by:** never by voice transcription alone. It would need a presence gesture.
@@ -94,15 +94,18 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   - "Unanswered is not a denial" (acp-agent.md D2).
   - The desktop approve route is presence-gated, so voice cannot approve (acp-agent.md D1).
   **Rejected:** merging `feat/acp-poc`. It solves an external-front-end topology that V1 rejects.
-- **V13 — Utterances while an approval is pending.** *(Added slice 1, round 1, from QA Q3.)*
-  **Taken:** while the slot session has a pending APPROVAL gate, `POST /v1/desktop/voice/utterance` refuses with 409 `approval_pending` ("Answer the approval on screen first.").
+- **V13 — Utterances while a card is pending.** *(Added slice 1, round 1, from QA Q3; widened and the race recorded in round 2.)*
+  **Taken:** while the slot session has ANY pending card (an approval, or a blocking ask), `POST /v1/desktop/voice/utterance` refuses with 409 `approval_pending` ("Answer the question or approval on screen first.").
   - It covers the text door and audio alike.
   - Audio is refused BEFORE STT runs, so a refused recording spends nothing. The check repeats after STT, because a card can park while a transcription is running.
-  - Asks are not covered: an ask is not cancelled by a steer, and spoken asks are slice 2.
+  - Asks: a QUEUED ask (the default) parks no card, so it never refuses. A BLOCKING ask (`LOP_ASK_NONBLOCKING=0`) parks one, and the `ask` tool is interruptible, so a steer withdraws it exactly as it skips `bash`. Refusing every pending card was the smaller correct choice, smaller than a per-kind rule that would have to know which tools are interruptible. Spoken answers to asks stay slice 2/3.
+  **Known race, accepted (round 2, review N2):** the route reads the facade's pending card, and the steer is a separate owner op. A card that parks between the two (reproduced at 1-4 ms) is not seen, and the steer cancels it, exactly as a typed steer does today. The safety property still holds: nothing is approved and the tool does not run (the gate's future is cancelled, never resolved to approve). `tests/unit/voice/test_utterance_during_approval.py::test_the_known_race_admits_a_steer_but_never_approves` pins that property as one that must never change, and pins the card-skip as current behaviour that may improve.
+  - Why it is not closed here: an owner-side "refuse if a card is pending" option would have to be carried through six layers (the `/messages` `Prompt` body, `AttachedSession.admit_prompt`, the attach client's frame, the runtime server's `steer` dispatch, `ServingSessionHandle.steer`, and the TUI handle's steer). It would also need a capability flag, because an older owner ignores an unknown frame key and would admit the steer anyway. That is more than the contained edit this feature should carry.
   **Rejected:**
   - Admitting the steer (V5 as first written). A steer cancels an interruptible tool's card, so a word the mic heard, including the app's own announcement of the card, would make the card vanish and skip the tool. Not an approval, but the operator loses the decision.
   - Queuing the utterance in the daemon until the gate settles. That is a second admission queue beside the owner's, with its own lifetime and replay rules.
   - Changing steer semantics for every surface. Typed steers behave the same way today (QA 13b); that is a harness decision outside this feature.
+  **Overturned by:** the owner-side refusal landing, which closes the race; the pinned test's "current behaviour" half then flips to a 409.
   **Owner:** coder.
 - **V12 — Input mode.**
   **Taken:** push-to-talk only in v1, reusing `keymap.push_to_talk`. Hands-free (VAD, echo cancellation, barge-in) is deferred.
@@ -123,7 +126,7 @@ Every route uses `require_desktop`.
   - Body: `session_id`, `request_id`, and either `file` (wav/webm/ogg/mp4, ≤16 MiB) or `text`.
   - `request_id` is a dashed lowercase UUID, the `RequestID` type of `/messages` (`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`). It is the receipt journal key, so a retry reuses it and a new utterance mints a new one. *(Stated in slice 1, round 1; the type was always `/messages`' own.)*
   - 200: `{text, path, admission: MessageAdmission}`.
-  - 409: `voice_not_enabled`, `approval_pending` (V13), or `stt_unavailable` with the cascade's reason.
+  - 409: `voice_not_enabled`, `approval_pending` (V13: any pending card), or `stt_unavailable` with the cascade's reason.
   - 422: `invalid_voice_request` (a malformed `request_id`, both or neither of `file`/`text`, an unsupported recording, or a transcript `/messages` would refuse, such as a whole-draft slash command), or `empty_transcript`.
 - `POST /v1/desktop/voice/speech`
   - Body: `{session_id, source: {kind: "message", message_id} | {kind: "gate", request_id} | {kind: "ask", ask_id}}`.

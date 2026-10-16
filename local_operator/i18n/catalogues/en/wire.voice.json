@@ -15,5 +15,5 @@
   "wire.voice.store_busy": "Something else on this device is changing voice mode. Try again in a moment.",
   "wire.voice.invalid_request_id": "The request id must be a dashed UUID, so nothing was sent.",
   "wire.voice.invalid_message": "That message was not sent: {reason}",
-  "wire.voice.approval_pending": "Answer the approval on screen first."
+  "wire.voice.approval_pending": "Answer the question or approval on screen first."
 }
