@@ -210,6 +210,7 @@ export type MessageParams = {
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
   "wire.errors.desktop.skill_not_found": undefined;
+  "wire.errors.desktop.sort_unknown": { "sorts": string };
   "wire.errors.desktop.start_after_end": undefined;
   "wire.errors.desktop.unknown_command": undefined;
   "wire.errors.desktop.unknown_provider": undefined;
