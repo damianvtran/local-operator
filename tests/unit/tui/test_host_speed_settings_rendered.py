@@ -213,9 +213,7 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from scripts import visual_capture
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    assert Path(app_module.__file__).resolve() == (
-        SOURCE_ROOT / "local_operator/tui/app.py"
-    )
+    assert Path(app_module.__file__).resolve() == (SOURCE_ROOT / "local_operator/tui/app.py")
     assert app_module.OperatorApp.CSS_PATH == "local_operator.tcss"
     assert (SOURCE_ROOT / "local_operator/tui/local_operator.tcss").is_file()
 
@@ -232,9 +230,7 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # A fresh synthetic HOME is deliberately not a first attended install.
     # Only this unrelated onboarding route is replaced, not boot/adoption,
     # on_mount, polling, Settings handlers or their real ConfigManager writes.
-    monkeypatch.setattr(
-        app_module.OperatorApp, "_route_first_run_boot", no_attended_onboarding
-    )
+    monkeypatch.setattr(app_module.OperatorApp, "_route_first_run_boot", no_attended_onboarding)
     for name in (
         "_check_for_update",
         "_start_terminal_title",
@@ -329,9 +325,7 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
     with (target / ".manifest.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         manifest_path = target / "manifest.json"
-        manifest = (
-            json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-        )
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
         head = checkout_revision(SOURCE_ROOT)
         assert phase in proof.expected_phases
         incoming = {}
@@ -340,9 +334,7 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
             assert name.endswith((".svg", ".geometry.json"))
             incoming[name] = (proof.output / name).read_bytes()
         existing = {
-            p.name: p.stat().st_size
-            for p in target.iterdir()
-            if p.suffix in (".svg", ".json")
+            p.name: p.stat().st_size for p in target.iterdir() if p.suffix in (".svg", ".json")
         }
         assert sum(n.endswith(".svg") for n in existing.keys() | names) <= 48
         sources = (
@@ -377,15 +369,10 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
                 for name in sources
             },
         )
-        manifest.setdefault("expected_phases", {})[case] = sorted(
-            proof.expected_phases
-        )
+        manifest.setdefault("expected_phases", {})[case] = sorted(proof.expected_phases)
         manifest.setdefault("cases", {}).setdefault(case, {})[phase] = {
             "grid": list(proof.app.size),
-            "files": {
-                name: hashlib.sha256(incoming[name]).hexdigest()
-                for name in sorted(names)
-            },
+            "files": {name: hashlib.sha256(incoming[name]).hexdigest() for name in sorted(names)},
             "external_attempts_at_capture": len(proof.violations),
             "coverage_note": proof.case_note,
         }
