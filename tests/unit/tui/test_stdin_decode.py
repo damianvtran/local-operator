@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import select
+import selectors
 import sys
 import time
 from pathlib import Path
@@ -537,17 +537,30 @@ class _BootArm:
 
     def drain(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([self._master], [], [], 0.05)
-            if not readable:
-                continue
-            try:
-                data = os.read(self._master, 65536)
-            except OSError:
-                return
-            if not data:
-                return
-            self._chunks.append(data)
+        # A SELECTOR, NOT ``select.select`` — the fd NUMBER is the trap.
+        # ``select.select`` indexes a bit set by the raw fd number, so an
+        # ``os.openpty()`` descriptor at or above ``FD_SETSIZE`` (1024) makes it
+        # raise ``ValueError: filedescriptor out of range in select()`` instead of
+        # ever reading the wire, and a loaded pytest worker hands back the next
+        # free fd — which on a long-lived shard sits above that ceiling (this is
+        # the parent harness's own limit, not a decode failure; the same
+        # conversion the sibling pty harnesses ``test_pixel_mouse_latch`` /
+        # ``test_pixel_mouse_gate`` already carry, reproduced deterministically by
+        # holding 1100 fds before this helper). ``selectors.DefaultSelector`` is
+        # epoll on Linux and kqueue on macOS, neither of which has the limit, and
+        # it watches the same bytes on the same pty with the same 0.05 s budget.
+        with selectors.DefaultSelector() as reader:
+            reader.register(self._master, selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                if not reader.select(0.05):
+                    continue
+                try:
+                    data = os.read(self._master, 65536)
+                except OSError:
+                    return
+                if not data:
+                    return
+                self._chunks.append(data)
 
     def wait_for_paint(self, minimum: int, timeout: float = 60.0) -> None:
         """Wait until the app has painted at least ``minimum`` bytes.
