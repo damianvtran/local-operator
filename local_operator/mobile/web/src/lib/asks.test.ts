@@ -18,6 +18,7 @@ import {
 	orderedForDisplay,
 	outstandingAsks,
 	questionProgress,
+	questionTally,
 	unansweredQuestions,
 } from "./asks";
 import type { PendingAsk } from "../types";
@@ -52,11 +53,13 @@ describe("askStateLine", () => {
 		);
 	});
 
-	it("states a timed-out ask as lapsed: the agent took its default", () => {
+	it("states a timed-out ask as lapsed: the agent goes ahead without the answer", () => {
 		/* Ben's report (2026-10-15): "you can still answer" invited an answer to a
-		   question the agent had already settled for itself. */
+		   question the agent had already gone ahead without. The wording holds for
+		   every timeout notice, including a secret ask's, which has no default
+		   (design round 1, D3). */
 		const line = askStateLine(ask({ status: "timed_out" }), 1);
-		expect(line.text).toBe("Lapsed — the agent took its default and moved on");
+		expect(line.text).toBe("Lapsed — the agent goes ahead without your answer");
 		expect(line.tone).toBe("gone");
 	});
 
@@ -76,12 +79,15 @@ describe("askStateLine", () => {
 		expect(isAnswerable("withdrawn")).toBe(false);
 	});
 
-	it("states an open ask past its deadline on the phone's clock as lapsed", () => {
-		/* The index keeps reporting `open` for a runtime stopped before its
-		   deadline, so the phone's clock is the check (`isLapsed`). */
+	it("does not claim an open ask past its deadline on the phone's clock is lapsed", () => {
+		/* The phone's clock may run ahead, and the runtime's host is what judges
+		   the deadline (a stale `open` row arrives already re-derived to
+		   `timed_out`), so an `open` row stays answerable: the line says the
+		   deadline has passed locally without calling it over (review round 1,
+		   R3). */
 		const line = askStateLine(ask({ expires_at: 500 }), 1000);
-		expect(line.text).toBe("Lapsed — the agent took its default and moved on");
-		expect(line.tone).toBe("gone");
+		expect(line.text).toBe("Queued — the agent is continuing; deadline passed");
+		expect(line.tone).toBe("attention");
 	});
 });
 
@@ -153,14 +159,28 @@ describe("outstanding / answerable", () => {
 		expect(outstandingAsks(rows).map((row) => row.ask_id)).toEqual(["o", "t"]);
 	});
 
-	it("reads a lapse from timed_out, or from an open ask past its deadline — and nothing else", () => {
-		expect(isLapsed(ask({ status: "timed_out" }), 1)).toBe(true);
-		expect(isLapsed(ask({ expires_at: 500 }), 500)).toBe(true);
-		expect(isLapsed(ask({ expires_at: 500 }), 499)).toBe(false);
-		/* No deadline is not a passed deadline. */
-		expect(isLapsed(ask({ expires_at: 0 }), 1000)).toBe(false);
+	it("reads a lapse from the status alone — timed_out, and nothing else", () => {
+		expect(isLapsed(ask({ status: "timed_out" }))).toBe(true);
+		/* An open row past its deadline on the phone's clock is NOT lapsed here:
+		   the runtime's host judges the deadline (review round 1, R3). */
+		expect(isLapsed(ask({ expires_at: 500 }))).toBe(false);
 		/* A settled ask past its deadline is settled, not lapsed. */
-		expect(isLapsed(ask({ status: "answered", expires_at: 500 }), 1000)).toBe(false);
+		expect(isLapsed(ask({ status: "answered", expires_at: 500 }))).toBe(false);
+	});
+
+	it("splits the outstanding questions into waiting and lapsed", () => {
+		const two = [
+			{ id: "q1", question: "a", options: [], multi: false, secret: false, persist: false },
+			{ id: "q2", question: "b", options: [], multi: false, secret: false, persist: false },
+		];
+		expect(
+			questionTally([
+				ask({ ask_id: "o", questions: two }),
+				ask({ ask_id: "t", status: "timed_out" }),
+				ask({ ask_id: "a", status: "answered" }),
+			]),
+		).toEqual({ waiting: 2, lapsed: 1 });
+		expect(questionTally(undefined)).toEqual({ waiting: 0, lapsed: 0 });
 	});
 
 	it("treats a timed-out ask as answerable and an answered one as not", () => {

@@ -877,6 +877,21 @@ def _shown_rows(session_id: str, entry: Mapping[str, Any], stamp: int) -> list[d
         if expires_at and stamp - expires_at > horizon_ms:
             continue
         row = dict(ask)
+        # THE DEADLINE IS JUDGED HERE, NOT TAKEN FROM THE FILE. The index holds
+        # each ask's status as the runtime last WROTE it, and a runtime stopped
+        # before the deadline never writes again, so its row keeps saying
+        # ``open`` long after ``expires_at``. The queue itself would fold that
+        # log to ``timed_out`` (rule 6 of :func:`fold`) and accept a dismiss, so
+        # a reader that repeated the stale word showed a lapsed ask as live: the
+        # legacy mirror painted it as waiting, every count called it waiting,
+        # and the phone withheld the dismiss the queue would take. Re-deriving on
+        # the COPY, against the reader's ``now``, makes this agree with the
+        # fold; no clock skew is involved, because every reader of this index
+        # (the relay, the desktop plane, the TUI) runs on the runtime's own host.
+        # ``delivered`` is left as written: it is a fact about the response
+        # rows, which a deadline does not change.
+        if status == STATUS_OPEN and expires_at and expires_at <= stamp:
+            row["status"] = STATUS_TIMED_OUT
         row["session_id"] = session_id
         row["cwd"] = str(entry.get("cwd") or "")
         rows.append(row)

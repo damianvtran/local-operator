@@ -229,12 +229,12 @@ export function AskCard({
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
 	/* A LAPSED ASK IS SHOWN, NOT OFFERED (Ben's report, 2026-10-15). Its deadline
-	   has passed and the agent has taken its default, so options and a send under
+	   has passed and the agent has gone ahead without it, so options and a send under
 	   it read as though the agent were still waiting on them. The store would still
 	   take a late answer on `timed_out` (`isAnswerable` keeps saying so); the phone
 	   deliberately stops inviting one. `lapsed` gates the controls only — the dead
 	   and dismiss rules below are unchanged. */
-	const lapsed = isLapsed(row, nowMs);
+	const lapsed = isLapsed(row);
 	const offered = answerable && !lapsed;
 
 	/* A ROW THE AGGREGATE ALREADY KNOWS IS DEAD IS TERMINAL BEFORE THE TAP
@@ -245,7 +245,7 @@ export function AskCard({
 	   transcript was shown as a dead end while `ask_respond` on it returned
 	   `200 {"ok": true, "detail": "answered"}` — the same class of lie in the
 	   other direction, and the reason the predicate lives in `lib/asks.ts` and is
-	   shared by this card, the sheet's strip and its `open` control. Gated
+	   shared by this card, the sheet's strip and the sheet's title count. Gated
 	   further on `answerable`: a SETTLED row in a dead conversation is a receipt,
 	   not a dead end, and must keep its receipt. */
 	const goneFromWire = isDeadConversation(row) && answerable;
@@ -416,11 +416,12 @@ export function AskCard({
 			) : lapsed ? (
 				<>
 					{/* READ-ONLY: the question the agent asked, so the reader knows what
-					    lapsed, and nothing to answer it with. Dismiss is the only op, and
-					    only on `timed_out` — the queue refuses it on a row still `open`
-					    (`asks/queue.py` `dismiss`), which is what a lapsed-open row is.
-					    It stays apart from any Decline: declining ANSWERS the agent,
-					    dismissing answers nobody and buys no turn. */}
+					    lapsed, and nothing to answer it with. Dismiss is the only op. A
+					    lapsed row is always `timed_out` (`isLapsed`; the index readers
+					    re-derive a stale `open` past its deadline), so the Dismiss gate and
+					    the queue's own rule are the same statement. It stays apart from any
+					    Decline: declining ANSWERS the agent, dismissing answers nobody and
+					    buys no turn. */}
 					{questions.map((question, index) => (
 						<span
 							key={String(question.id ?? index)}
@@ -447,7 +448,9 @@ export function AskCard({
 							{/* ITS OWN STATE LINE, because on a cold conversation the promise
 							    it makes ("send no reply") is no longer the whole truth: the
 							    relay brings the conversation up to RECORD the dismissal, so the
-							    conversation surfaces as active (UX round 1, U3). Stated before
+							    conversation surfaces as active (UX round 1, U3). Only that new
+							    fact — the button above already says "send no reply" (design
+							    round 1, D4). Stated before
 							    the tap, in the same quiet register as the deadline lines.
 
 							    NO BUDGET HERE (UX round 2, U8): the sheet's strip one element
@@ -455,7 +458,7 @@ export function AskCard({
 							    second copy of the number buys nothing the first line did not. */}
 							{cold ? (
 								<p className="text-meta text-ink-dim">
-									sends no reply — the conversation is brought up to record it.
+									the conversation is brought up to record it.
 								</p>
 							) : null}
 							{/* The cold dismissal's clock (design round 1, D1 = UX U1): an

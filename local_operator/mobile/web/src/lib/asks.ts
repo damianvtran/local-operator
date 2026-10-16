@@ -74,26 +74,47 @@ export function isOutstanding(status: string): boolean {
 	return isAnswerable(status);
 }
 
-/** Whether an ask's deadline has passed — the agent took its default and moved
- *  on — so the card shows the question read-only instead of offering options.
+/** Whether an ask's deadline has passed and the agent has gone ahead without
+ *  it, so the card shows the question read-only instead of offering options.
  *
- *  `timed_out` is the runtime's own word for it. The `open` half exists because
- *  `asks/store.py` `index_asks` returns the status the runtime last WROTE and
- *  never re-folds it against the clock: a session stopped before its deadline
- *  keeps reporting `open` past it until its runtime runs again and reconciles
- *  (the asks in Ben's 2026-10-15 report lapsed while their runtime was stopped).
- *  The phone's clock is the only check that runs without a turn. An absent or
- *  zero `expires_at` means no deadline, never a lapsed one. */
-export function isLapsed(row: PendingAsk, nowMs: number): boolean {
-	const status = String(row.status || "open");
-	if (status === "timed_out") return true;
-	if (status !== "open") return false;
-	const expires = Number(row.expires_at) || 0;
-	return expires > 0 && expires <= nowMs;
+ *  THE STATUS ALONE DECIDES, never the phone's clock. The deadline is judged on
+ *  the runtime's host: a live runtime folds it on its own tick, and the index
+ *  readers (`asks/store.py` `_shown_rows`, behind both the aggregate and a
+ *  stopped conversation's screen) re-derive a stale `open` row to `timed_out`
+ *  against their own `now`. A phone running minutes ahead would otherwise strip
+ *  the controls from an ask the agent is still waiting on (review round 1, R3). */
+export function isLapsed(row: PendingAsk): boolean {
+	return String(row.status || "open") === "timed_out";
 }
 
-/** The one line a lapsed ask (`isLapsed`) states, whichever status carried it. */
-const LAPSED_LINE = "Lapsed — the agent took its default and moved on";
+/** How many QUESTIONS the outstanding set holds, split by whether they can still
+ *  be answered: `waiting` (offered) and `lapsed` (shown read-only).
+ *
+ *  ONE SPLIT FOR EVERY ENTRY POINT (design round 1, D1): the dock, the header
+ *  and the sheet's title all called a lapsed question "waiting", the most
+ *  prominent marks on a stopped conversation's screen stating a live decision
+ *  above a card that says there is none. */
+export function questionTally(rows: PendingAsk[] | undefined | null): {
+	waiting: number;
+	lapsed: number;
+} {
+	let waiting = 0;
+	let lapsed = 0;
+	for (const row of outstandingAsks(rows)) {
+		const count = Array.isArray(row.questions) ? row.questions.length : 0;
+		if (isLapsed(row)) lapsed += count;
+		else waiting += count;
+	}
+	return { waiting, lapsed };
+}
+
+/** The one line a lapsed ask (`isLapsed`) states.
+ *
+ *  Says what is true in every timeout notice the agent receives (design round 1,
+ *  D3): it may use its recommended option or its best judgment, and a secret ask
+ *  has no default at all ("do not run anything that needed it"), so "took its
+ *  default" claimed more than the agent was told. */
+const LAPSED_LINE = "Lapsed — the agent goes ahead without your answer";
 
 /** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
  *
@@ -180,15 +201,14 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 	const left = remainingMs(row, nowMs);
 	switch (status) {
 		case "open": {
-			if (isLapsed(row, nowMs)) {
-				/* The runtime has not folded the deadline yet — for seconds while it
-				   is live, indefinitely while it is stopped (see `isLapsed`). Either
-				   way the agent's deadline is over, so the line is the timed-out one. */
-				return { text: LAPSED_LINE, tone: "gone" };
-			}
 			if (left <= 0) {
-				/* `expires_at` absent or zero: no deadline to count down. */
-				return { text: "Queued — the agent is continuing", tone: "waiting" };
+				/* Past the deadline on the PHONE's clock while the runtime's side
+				   still says open: a live runtime folds on its own ≤60s tick, and a
+				   stopped one is re-derived by the index readers, so this is the
+				   fold's race window or a phone clock running ahead. Either way the
+				   ask is still answerable, and claiming "expires in 0 m" would be
+				   untrue. */
+				return { text: "Queued — the agent is continuing; deadline passed", tone: "attention" };
 			}
 			return {
 				text: `Queued — the agent is continuing; expires in ${durationLabel(left)}`,

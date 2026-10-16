@@ -44,7 +44,7 @@ import {
 	isDeadConversation,
 	isLapsed,
 	orderedForDisplay,
-	outstandingAsks,
+	questionTally,
 } from "../lib/asks";
 import { useAsksRevision, useSessions } from "../store";
 import type { PendingAsk } from "../types";
@@ -166,8 +166,13 @@ export function AsksSheet({
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
 	   round 1, R3): three surfaces answering "how much is waiting" in two units is
-	   the defect, even where their populations legitimately differ (this one
-	   spans every conversation, the bar is this session's).
+	   the defect. All three now count this one conversation's rows.
+
+	   ONLY OFFERED QUESTIONS ARE WAITING (design round 1, D1), the dock's and the
+	   header's rule: a lapsed question is shown read-only, so "asks · 1 question"
+	   above a card reading Lapsed stated a live decision one element above the
+	   card that says there is none. A lapsed-only sheet is titled for what it
+	   holds.
 
 	   DEAD ROWS' QUESTIONS ARE NOT WAITING ON ANYONE (agent review round 2,
 	   MINOR-3). A dead conversation's ask still carries `open`, so it enters
@@ -176,16 +181,13 @@ export function AsksSheet({
 	   of claim this whole lane exists to remove. It is the sheet's own rule
 	   ("no contradiction one element apart") applied to the title, one element
 	   above the strip that already honours it. */
-	const outstandingQuestions = outstandingAsks(rows)
-		.filter((row) => !isDeadConversation(row))
-		.reduce(
-			(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
-			0,
-		);
+	const { waiting, lapsed } = questionTally(rows.filter((row) => !isDeadConversation(row)));
 	const title =
-		outstandingQuestions > 0
-			? `asks · ${outstandingQuestions} question${outstandingQuestions === 1 ? "" : "s"}`
-			: "asks";
+		waiting > 0
+			? `asks · ${waiting} question${waiting === 1 ? "" : "s"}`
+			: lapsed > 0
+				? `asks · ${lapsed} lapsed`
+				: "asks";
 
 	return (
 		<Sheet open={open} onClose={onClose} title={title}>
@@ -245,7 +247,7 @@ export function AsksSheet({
 							    so "answering will bring it up" would promise a tap the card one
 							    element below does not have. */}
 							{isAnswerable(String(row.status || "open")) &&
-							!isLapsed(row, nowMs) &&
+							!isLapsed(row) &&
 							!isDeadConversation(row) &&
 							(ended || row.runtime_live === false) ? (
 								<p className="text-meta text-ink-dim">

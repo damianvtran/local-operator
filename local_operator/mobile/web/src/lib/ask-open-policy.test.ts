@@ -97,26 +97,16 @@ describe("readQueue — what ONE frame says about the queue", () => {
 		   answer goes, and the tally (which counts them outstanding) is the
 		   store's word for "not settled", so the reading is the one clause 3
 		   gives settled rows: SETTLED, and the view stays closed. */
-		const at = 10_000;
-		expect(readQueue([{ ask_id: "t", status: "timed_out" }], 1, at)).toBe("settled");
-		expect(readQueue([{ ask_id: "o", status: "open", expires_at: at - 1 }], 1, at)).toBe("settled");
-		expect(
-			readQueue(
-				[
-					{ ask_id: "t", status: "timed_out" },
-					{ ask_id: "o", status: "open", expires_at: at },
-				],
-				2,
-				at,
-			),
-		).toBe("settled");
+		expect(readQueue([row("t", "timed_out")], 1)).toBe("settled");
+		expect(readQueue([row("t1", "timed_out"), row("t2", "timed_out")], 2)).toBe("settled");
 		/* The dropped-rows guard still holds: a tally larger than the lapsed rows
 		   named means an outstanding row the frame does not carry. */
-		expect(readQueue([{ ask_id: "t", status: "timed_out" }], 2, at)).toBe("unresolved");
-		/* An open ask whose deadline is still ahead is still pending. */
-		expect(readQueue([{ ask_id: "f", status: "open", expires_at: at + 60_000 }], 1, at)).toBe(
-			"pending",
-		);
+		expect(readQueue([row("t", "timed_out")], 2)).toBe("unresolved");
+		/* An `open` row is pending whatever the phone's clock says: the deadline is
+		   judged on the runtime's host, which re-derives a stale `open` past its
+		   deadline to `timed_out` before the row reaches the phone (review round 1,
+		   R3 — a phone running ahead must not withhold a live ask). */
+		expect(readQueue([row("o", "open")], 1)).toBe("pending");
 	});
 });
 
