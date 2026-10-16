@@ -10333,7 +10333,7 @@ def _keep_pem_blocks_whole(
             return diff[:2] + ["…"]
         out.append(
             _format_hunk_header(
-                old_start + 1, old_end - old_start, new_start + 1, new_end - new_start
+                old_start, old_end - old_start, new_start, new_end - new_start
             )
         )
         out.extend(rendered)
@@ -10483,7 +10483,7 @@ def _render_groups(
         first, last = group[0], group[-1]
         rows.append(
             _format_hunk_header(
-                first[1] + 1, last[2] - first[1], first[3] + 1, last[4] - first[3]
+                first[1], last[2] - first[1], first[3], last[4] - first[3]
             )
         )
         for tag, old_from, old_to, new_from, new_to in group:
@@ -10515,10 +10515,28 @@ def _same_change_rows(original: Sequence[str], rendered: Sequence[str]) -> bool:
 
 
 def _format_hunk_header(old_start: int, old_count: int, new_start: int, new_count: int) -> str:
-    """``@@ … @@`` with the omitted-count spelling for a one-line side."""
-    old = str(old_start) if old_count == 1 else f"{old_start},{old_count}"
-    new = str(new_start) if new_count == 1 else f"{new_start},{new_count}"
+    """``@@ … @@`` for 0-BASED ``(start, count)`` pairs, spelled as ``difflib`` does.
+
+    A zero-length range prints the line JUST BEFORE it, not the first line of it:
+    a new file shows ``-0,0`` and a truncation to empty shows ``+0,0``. That is
+    ``difflib._format_range_unified``'s rule (the unified format's own), and the
+    whole point of this producer's widening is that its output stays the diff the
+    library would have written -- a header one line off is a UI artifact and a
+    lie about where the change starts (review round 3, R3-1).
+    """
+    old = str(old_start + 1) if old_count == 1 else _format_range(old_start, old_count)
+    new = str(new_start + 1) if new_count == 1 else _format_range(new_start, new_count)
     return f"@@ -{old} +{new} @@"
+
+
+def _format_range(start: int, count: int) -> str:
+    """``start,count`` with difflib's zero-length adjustment applied."""
+    beginning = start + 1
+    if not count:
+        # An empty range is reported as beginning at the line before it, which is
+        # what the unified spec's ``0,0`` for an empty side means.
+        beginning -= 1
+    return f"{beginning},{count}"
 
 
 def _marker_introduced(before: str, after: str) -> int:
