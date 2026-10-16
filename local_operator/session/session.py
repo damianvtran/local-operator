@@ -23678,9 +23678,14 @@ class Session:
             else:
                 command, result = queued
                 await self._persist_shell_record(command, result)
-            # Pop by identity, not by index: the list may have grown during the
-            # await above, but nothing else removes from it.
-            self._pending_shell_records.remove(queued)
+            # Pop by IDENTITY, not by the index read before the await: the list
+            # may have grown during it, though nothing else removes from it.
+            # (``list.remove`` would match by equality instead, and it is the
+            # filesystem-deletion guard's ``.remove`` shape.)
+            position = next(
+                i for i, item in enumerate(self._pending_shell_records) if item is queued
+            )
+            del self._pending_shell_records[position]
 
     async def _flush_queued_before_release(self) -> None:
         """The last flush before ``_turn_lock`` is released.
