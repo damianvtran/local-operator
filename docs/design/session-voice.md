@@ -94,6 +94,9 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   - "Unanswered is not a denial" (acp-agent.md D2).
   - The desktop approve route is presence-gated, so voice cannot approve (acp-agent.md D1).
   **Rejected:** merging `feat/acp-poc`. It solves an external-front-end topology that V1 rejects.
+- **V12 — Input mode.**
+  **Taken:** push-to-talk only in v1, reusing `keymap.push_to_talk`. Hands-free (VAD, echo cancellation, barge-in) is deferred.
+  **Rejected:** always-listening by default. Echo from the app's own TTS, accidental prompts to an agent that holds tools, and per-utterance STT spend.
 - **V13 — Utterances while a card is pending.** *(Added slice 1, round 1, from QA Q3; widened and the race recorded in round 2.)*
   **Taken:** while the slot session has ANY pending card (an approval, or a blocking ask), `POST /v1/desktop/voice/utterance` refuses with 409 `approval_pending` ("Answer the question or approval on screen first.").
   - It covers the text door and audio alike.
@@ -111,11 +114,10 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   **Taken:** a take is bound to the turn whose stream carries the user `message_start` with `message.id ==` the take's `request_id`; timing never binds. The id equality is pinned by `tests/e2e/test_voice_take_binding_e2e.py::test_a_take_binds_to_the_user_message_start_whose_id_is_its_request_id`.
   - It holds for every admission path: a take admitted as a prompt, a take steered mid-turn (delivered at a tool boundary), and a take steered into a turn's tail and carried by `_flush_parked_deliveries` after the turn ends. It holds live and on an `after_seq` replay.
   - `admission.command_id` in the utterance's 200 is the same UUID.
+  - The test discriminates both id carriages, proven by mutation in review round 6: a steer that drops `message_id` fails at index 1, and a prompt that drops it fails at index 0.
   **Rejected:** binding by arrival order or by "the next turn after the POST". A steer can land at a tool boundary, at the turn's end, or in the next turn, and a replay re-delivers frames out of wall-clock time.
   **Owner:** coder (backend pin), UI (the binding).
-- **V12 — Input mode.**
-  **Taken:** push-to-talk only in v1, reusing `keymap.push_to_talk`. Hands-free (VAD, echo cancellation, barge-in) is deferred.
-  **Rejected:** always-listening by default. Echo from the app's own TTS, accidental prompts to an agent that holds tools, and per-utterance STT spend.
+- **V15 — Turn generation guards an absorbed bound turn (UI).** *(Placeholder, slice 1, round 6: the row the UI fix lands against.)*
 
 ## Frozen contract (backend ↔ UI)
 
