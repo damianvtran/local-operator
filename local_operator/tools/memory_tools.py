@@ -85,6 +85,31 @@ def _guarded_path(path: str) -> str:
     return _QUERY_VALUE.sub("q=", path, count=1)
 
 
+def _guarded_fact_args(args: Any) -> Any:
+    """``args`` with a recall's ``text`` VALUE left out of the free-text guard.
+
+    ``execute_fact_memory`` guards its WHOLE argument dict before it validates or
+    delegates, so ``recall(<minted reference>)`` was refused HERE even after the read
+    path below admitted the same value: its own store-oriented refusal spoke first.
+    The exemption is that one VALUE of that one op — a ``store`` WRITES the same string
+    and keeps the guard, because storing a value is not the same act as looking one up,
+    and every sibling argument of the same call is inspected unchanged. The parameter
+    itself stays, emptied, exactly as the read path keeps its ``q`` and drops only the
+    value; there is nothing in an admitted reference to inspect.
+
+    Only the guard is handed this copy. Validation, the store delegation and the
+    retained-copy path all still see the caller's original arguments, and
+    ``memory_privacy.retained_arguments`` guards those independently and fails closed.
+
+    A non-dict, a call that is not a recall and a text that is not a reference all
+    return ``args`` untouched, so their refusals — the contract error included — are
+    unchanged.
+    """
+    if not isinstance(args, dict) or args.get("op") != "recall":
+        return args
+    return {**args, "text": ""} if structural_reference(args.get("text")) else args
+
+
 def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     from local_operator.memory_privacy import guard_encoded
 
@@ -264,7 +289,9 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
     from local_operator.memory_privacy import guard_encoded
 
     try:
-        guard_encoded(args)
+        # The one exemption this tool has is applied to the dict the guard receives
+        # rather than to the call; see _guarded_fact_args for why and what it covers.
+        guard_encoded(_guarded_fact_args(args))
         if not valid_memory_tool_arguments(args):
             raise MemoryError(MEMORY_TOOL_CONTRACT_ERROR)
         text = args["text"]
