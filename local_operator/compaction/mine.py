@@ -194,7 +194,16 @@ def _is_carry_digest_line(line: str) -> bool:
 
 @dataclass
 class Carry:
-    """The tiered digest: identifiers (never evicted), asks, decisions."""
+    """The tiered digest: identifiers, asks, decisions — all newest-kept at cap.
+
+    Identifiers are the recall anchors (paths, refs, secret names), asks are the
+    operator's own words and decisions are the assistant's stated commitments.
+    ``merge_carry`` evicts the OLDEST row of every tier once its cap binds, so a
+    resumed session keeps the material the current task depends on. That is a
+    deliberate reversal of an earlier revision whose identifier tier kept the
+    oldest while the other two kept the newest — the asymmetry that silently
+    dropped the reference stated on the live task (review round 1, MAJOR 3).
+    """
 
     identifiers: list[str] = field(default_factory=list)
     asks: list[str] = field(default_factory=list)
