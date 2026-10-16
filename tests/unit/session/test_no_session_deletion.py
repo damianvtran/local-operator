@@ -2586,6 +2586,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "clears the mkstemp FILE this call just staged, on the failure path",
     ),
+    # The voice slot (docs/design/qwen-voice.md, V3): every path is
+    # ``<config_dir>/voice/active.json`` or its mkstemp sibling in that same
+    # directory, built from the config root and fixed names alone, never from a
+    # session id, so none can name a path under ``sessions/``.
+    (
+        "local_operator/voice/slot.py::_write",
+        "os.replace",
+        "tmp FILE -> <config_dir>/voice/active.json FILE; fixed name, never sessions/",
+    ),
+    (
+        "local_operator/voice/slot.py::_write",
+        "os.unlink",
+        "clears the mkstemp FILE this call just wrote, on the failure path",
+    ),
+    (
+        "local_operator/voice/slot.py::_clear",
+        "<path>.unlink",
+        "removes the <config_dir>/voice/active.json slot FILE on disable",
+    ),
     (
         "local_operator/aida/state.py::_unlink_quietly",
         "<path>.unlink",

@@ -68,6 +68,7 @@ from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
+from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
@@ -137,6 +138,13 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# Voice mode's section reads its copy from ``wire.voice`` for the same reason:
+# a new section beside translated ones must not move their audited sources.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.voice"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -861,6 +869,17 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.speech_title()),
         Scope.LIVE,
         _t(_ws.speech_description()),
+    ),
+    # Per-session voice mode (docs/design/qwen-voice.md). LIVE: ``/voice/text``
+    # reads its key per request, so an edit changes the next spoken reply. Its
+    # own section rather than rows under ``speech``: that section is about how
+    # the assistant SOUNDS on every surface, this one is about the hands-free
+    # conversation with one session.
+    Section(
+        "voice",
+        _t(_wv.title()),
+        Scope.LIVE,
+        _t(_wv.description()),
     ),
     # Agent messages (Team Bridge, RFC §5): the local half of a feature whose
     # eligibility, consent and endpoint state are SERVER state. LIVE because
@@ -5279,6 +5298,23 @@ SETTINGS: tuple[Setting, ...] = (
             'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
         ),
         help=_t(_ws.speech_voice_instructions_help()),
+    ),
+    # -- voice mode (docs/design/qwen-voice.md) -------------------------------
+    # Literals, not imports: this module stays off ``local_operator.voice``'s
+    # import path, and ``_consumer_defaults()`` in tests/unit/test_settings_io.py
+    # pins the default and bounds against ``voice.speakable``'s constants.
+    Setting(
+        key="voice.max_spoken_chars",
+        path=("voice", "max_spoken_chars"),
+        section="voice",
+        label=_t(_wv.max_spoken_chars_label()),
+        kind=Kind.INT,
+        default=800,
+        minimum=100,
+        maximum=4000,
+        # No ``unit``: the label and help already say "characters", and the
+        # settings projection reserves ``unit`` for the one duration row.
+        help=_t(_wv.max_spoken_chars_help()),
     ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import
