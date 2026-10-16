@@ -172,7 +172,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     Imported lazily and gathered here rather than listed per host: this list
     having been copied INCOMPLETELY into the phone fold (it suppressed the
     third and rendered the first two) is the drift this function exists to
-    make impossible. A fourth prompt is added in one place.
+    make impossible. A new prompt is added in one place.
 
     This tuple is the EXACT-match half of the decision only. Chrome prompts
     with a family of shapes rather than a single string live in the producer's

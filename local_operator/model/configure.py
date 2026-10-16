@@ -115,6 +115,11 @@ DEFAULT_TOP_P = 0.9
 DEFAULT_MODEL_NAMES = _DEFAULT_MODEL_NAMES
 
 # Sensible ModelSpec fallbacks when the legacy registry knows nothing.
+# ``UNKNOWN_MAX_OUTPUT`` is NO LONGER a spec default — seeding a no-data route
+# with it is the defect ``build_model_spec`` documents (the 8k stand-in was read
+# as a published cap, and the budget clamped every router route to it); see that
+# function for the value a no-data route carries now. The constant is kept as
+# the documented history its neighbours cite.
 UNKNOWN_CONTEXT_WINDOW = 128_000
 UNKNOWN_MAX_OUTPUT = 8_192
 

@@ -581,7 +581,7 @@ MAX_WORDLESS_STOP_RECOVERIES = 1
 #: nor a reader of a resumed session can see why the conversation continues.
 #: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
 LENGTH_STOP_RECOVERY_PROMPT = (
-    "Harness recovery notice: your last message hit the model's output limit "
+    "Harness recovery notice: your last message hit your output limit "
     "before anything visible was produced — no text and no tool calls arrived, "
     "so the turn would have ended here with nothing to show for it. Continue "
     "the work: produce your next tool call, or your final answer if the work is "
@@ -2806,8 +2806,8 @@ class AgentLoop:
                             # ``auto`` sentinel, or a ladder already at its
                             # cheapest real rung.
                             if (
-                                retry_eligible
-                                and lower is None
+                                lower is None
+                                and retry_eligible
                                 and not graceful_length
                                 and length_silent_recoveries < MAX_LENGTH_SILENT_RECOVERIES
                             ):
@@ -2831,7 +2831,7 @@ class AgentLoop:
                                 new_messages.append(recovery)
                                 yield NoticeEvent(
                                     text=(
-                                        "model spent its whole output budget "
+                                        "the model spent its whole output budget "
                                         "thinking and produced nothing — "
                                         "re-asking it to continue the work"
                                     ),
@@ -2842,37 +2842,32 @@ class AgentLoop:
                                 # turn, so there is no live row to settle.
                                 has_more_tool_calls = True
                                 continue
-                            if (
-                                lower is None
-                                and retry_eligible
-                                and not graceful_length
-                                and length_silent_recoveries >= MAX_LENGTH_SILENT_RECOVERIES
-                            ):
-                                # The silent-length budget is SPENT (the re-ask
-                                # above already ran), so this second silent length
-                                # turn is the model's answer rather than an
-                                # accident, and the run must be NAMED at its end
+                            if lower is None and not graceful_length:
+                                # The turn is ending with NOTHING and the loop has
+                                # no move left to offer: either no rung exists at
+                                # all (the ``auto`` sentinel), its ONE re-ask is
+                                # already spent, or a laddered model spent its own
+                                # lower-effort retries and kept returning empty.
+                                # Every one of those ends must be NAMED at its end
                                 # instead of left bare -- a bare end every surface
                                 # reads as a completed answer, which is how a
                                 # cut-off child reached its parent saying it had
                                 # finished (``incidents.OUTPUT_LIMIT_CAUSE``;
-                                # ``Session._classify_cut_off`` turns the pair
-                                # into an involuntary error outcome).
+                                # ``Session._classify_cut_off`` turns the pair into
+                                # an involuntary error outcome).
                                 #
-                                # Gated on the counter rather than stamped at
-                                # every silent length end, and the difference is
-                                # the LADDERED model with retries left: it is
-                                # offered no re-ask (``lower`` is not None, so the
-                                # arm above retreats a rung instead), and once its
-                                # own lower-effort retries run out the loop DID
-                                # retreat -- the remaining move (stepping the
-                                # model down) is the operator's, and the shape
-                                # that shipped for it does not change here. The
-                                # boundary is read again here (the same predicate
-                                # the graceful arm above and the boundary below
-                                # use) so a requested stop can never be branded
-                                # involuntary. Reset per model call (above), so a
-                                # run that recovers and then answers is not
+                                # Reached only AFTER the re-ask arm above, which
+                                # continues when it fires, so ``length_silent_
+                                # recoveries`` is necessarily spent when that shape
+                                # gets here; ``retry_eligible`` being false (a
+                                # laddered model's retries spent) is the other
+                                # shape, and both are the same fact -- the loop
+                                # cannot continue this turn. The graceful boundary
+                                # is read again here (the same predicate the arms
+                                # above and the boundary below use) so a requested
+                                # stop can never be branded involuntary. Reset per
+                                # model call (above), so a run that recovers
+                                # through a late injection and then answers is not
                                 # branded with an earlier call's cut-off.
                                 length_silent_cut_off = True
                             # No cheaper rung to retry at (or the retries are

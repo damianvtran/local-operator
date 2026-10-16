@@ -383,7 +383,15 @@ _HINTS: dict[str, str] = {
     # rather than left as a pronoun with two candidate antecedents ("it" could
     # read as the turn or as the thing the turn was mid-way through — UX round 2,
     # U11), and it is true whichever owner the run had.
-    "cut-off": "The runtime was cut off before this turn produced a result. The transcript "
+    # TURN-SCOPED AND CAUSE-NEUTRAL, which the first line is deliberately not:
+    # "The runtime was cut off" is FALSE for this vocabulary's own
+    # ``output-limit`` member — the runtime kept running and the TURN ended at
+    # the model's output limit — and it contradicted the card's own first line
+    # (design review round 3, D1), which names a turn that hit the model's
+    # output limit. The lead now states the one fact every member of
+    # ``CUT_OFF_CAUSES`` shares — the previous turn ended without producing a
+    # result — and leaves the cause to the rendered sentence above it.
+    "cut-off": "The previous turn was cut off before it produced a result. The transcript "
     "holds whatever was written before it stopped and nothing after. Check the "
     "state of anything it was mid-way through before repeating the work; do not "
     "assume that work finished.",
