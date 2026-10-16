@@ -161,6 +161,105 @@ def _fold(text: str) -> str:
     return "".join(out)
 
 
+# Work/lane/progress locators and status verbs. GLOBAL memory is for durable user facts;
+# MR/CI/release status and lane next-steps belong in a session bank. These patterns are
+# deliberately narrow: they require WORK CONTEXT next to the locator, and are only ever
+# matched against the FOLDED copy (never stored or echoed).
+#
+# QA round 1 (M-1): a bare `#N` is how people write chapters, order/invoice/room/seat
+# and extension numbers (`Office #4`, `order #1123`), and `next step`/`HOLD` occur in
+# ordinary prose (`next step is to fold in the flour`, `a HOLD on the cheque`). A locator
+# alone is therefore NOT a marker: it must sit next to a work word.
+#
+# Code review rounds 1/3 (M-1/F-3): `mrs?` under re.I matched the honorific Mr/Mrs
+# (`Mr Okafor lives at #12`, `mr smith lives at #12`). The merge-request abbreviation
+# is therefore UPPERCASE-ONLY here (`MR`, `MRs`); the lowercase form is never a tracker
+# word. GitLab work uses `!N`, which is matched absolutely.
+#
+# KNOWN BOUNDARY (documented, not debt): this is a bounded SHAPE rule, so prose work
+# text with no locator (`Fleet scratchpad purge 2026-10-15/16: …`) and hyphenated keys
+# (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
+# deliberately rejects; the guide states this bound rather than overclaiming.
+_WORK_WORD = (
+    r"pr|pull request|merge request|(?-i:MRs?)|issue|ticket|ci|pipeline|build|commit|"
+    r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
+    r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
+)
+_WORK_REF = re.compile(
+    r"\b(?:" + _WORK_WORD + r")\b[^.\n]{0,24}(?<![\w#])#\d{1,6}\b"
+    r"|(?<![\w#])#\d{1,6}\b[^.\n]{0,24}\b(?:" + _WORK_WORD + r")\b"
+    r"|(?<![\w!])!\d{1,6}\b",
+    re.I,
+)
+# A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
+# all-letter abbreviation (`cafebabe`) is not.
+_WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
+_WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I)
+_WORK_STATUS = re.compile(
+    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
+    r"\b"
+    r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
+    r"\b(?:pr|(?-i:MRs?)|#\d|into main)\b"
+    # Noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between:
+    # `PR`/`MR` are also permanent residency, public relations and a person
+    # (`My PR application merged into the family one`, `The PR agency merged with a rival`),
+    # while `the PR was merged` / `MRs rebased onto main` are real work text.
+    r"|\b(?:pr|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
+    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b"
+    r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
+    r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
+    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
+    r"|\bremaining work\b",
+    re.I,
+)
+# A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI, not a
+# bank/parcel/dry-cleaner hold an ordinary person records.
+_WORK_HOLD = re.compile(
+    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + _WORK_NOUN + r")\b"
+    r"|\b(?:" + _WORK_NOUN + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+    re.I,
+)
+
+
+def work_progress_markers(text: str) -> list[str]:
+    """Names of work/lane/progress markers in ``text`` — value-free, never the match."""
+    folded = _fold(text)
+    found: list[str] = []
+    for name, pattern in (
+        ("tracker-ref", _WORK_REF),
+        ("named-commit", _WORK_SHA),
+        ("ci-release-status", _WORK_STATUS),
+        ("hold-token", _WORK_HOLD),
+    ):
+        if pattern.search(folded):
+            found.append(name)
+    return found
+
+
+def scope_fit(scope: str, fact: dict[str, Any]) -> None:
+    """Refuse work/lane/progress content in the GLOBAL bank, before any write.
+
+    A bounded SHAPE rule, not a classifier: it catches a tracker ref, a named commit,
+    a CI/release status verb or a `next step` phrase. Global is for durable personal
+    facts, contacts, preferences, environment; work state belongs in a session bank.
+    Value-free refusal (no offending text echoed); explicit session/team/agent writes
+    and every wire/import path are untouched, and forget is never reached here.
+    """
+    if scope != "global" or not isinstance(fact, dict):
+        return
+    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
+    for key in ("tags", "aliases"):
+        value = fact.get(key) or []
+        if isinstance(value, list):
+            haystack += "\n" + "\n".join(str(item) for item in value)
+    if work_progress_markers(haystack):
+        raise MemoryError(
+            "This looks like session-scoped work (a tracker reference, CI/release "
+            "status or a next step). Store work state in memory://session; global is "
+            "for durable personal facts, contacts, preferences and environment."
+        )
+
+
 def _card_issuer_range(digits: str) -> bool:
     """Known payment-card prefix AND length. Random 13-digit ids (unix-ms, order numbers)
     pass Luhn about one time in ten, so Luhn alone refused ordinary data (QA Q2)."""
@@ -772,6 +871,10 @@ class MemoryStore:
         # Retention creation is not verification; unknown external source time
         # stays null. Every writer uses the same pure, value-free validator.
         clean = None if forget else self.prepare_fact(fact)
+        if clean is not None:
+            # Scope-fit refusal BEFORE any DB/index/oplog write (and before the
+            # session export): global is for durable personal facts, not work state.
+            scope_fit(scope, clean)
         if scope == "session" and self.session_dir:
             self.import_session()
         if entity is not None and not self.path.exists():

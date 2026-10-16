@@ -42,7 +42,11 @@ def test_personal_helper_and_existing_privacy_limits_remain_explicit() -> None:
     body = _memory_guide()
 
     assert "Both operations are bound to global; there is **no scope argument**." in body
-    assert "not a content classifier or a guarantee" in body
+    # LOH-25: the helper gained a bounded SHAPE refusal, so the old absolute
+    # "not a content classifier" claim is retired for an honest, bounded one.
+    assert "not a content classifier" not in body
+    assert "bounded locator filter" in body
+    assert "memory://session" in body
     assert "Existing session rows are not promoted or rewritten." in body
     assert "Explicit role allowlists are never widened" in body
     assert "secret NAME references only" in body
