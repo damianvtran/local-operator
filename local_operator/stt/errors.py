@@ -120,6 +120,7 @@ _PROVIDER_ERROR_ENVELOPE = re.compile(r'\A\s*\{[^}]*?"error"\s*:', re.DOTALL)
 _DIRECT_PROVIDER_LABELS = {
     AudioPath.PROVIDER_STT_ELEVENLABS: "ElevenLabs",
     AudioPath.PROVIDER_STT_OPENAI: "OpenAI",
+    AudioPath.LOCAL_STT_LOOPBACK: "local STT server",
 }
 
 
