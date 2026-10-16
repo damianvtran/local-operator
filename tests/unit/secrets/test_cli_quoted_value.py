@@ -113,8 +113,8 @@ class TestQuotedReferencesAndPlaceholdersStayReadable:
         [
             FLAG + ' "NAME[=VALUE]"',
             FLAG + " 'NAME[=VALUE]'",
-            "--secret \"<password>\"",
-            "--password \"(redacted)\"",
+            '--secret "<password>"',
+            '--password "(redacted)"',
         ],
         ids=["brackets-double", "brackets-single", "angle-brackets", "parens"],
     )
