@@ -2144,7 +2144,11 @@ class Transcript:
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
-        self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False,
+        self,
+        custom_type: str,
+        details: dict[str, Any],
+        *,
+        preserve_mtime: bool = False,
         entry_id: str | None = None,
     ) -> TranscriptEntry:
         """Append a host bookkeeping entry (wake schedules, checkpoints, …).

@@ -2239,7 +2239,11 @@ class RuntimeServer:
                 # validation outright. See
                 # ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY``.
                 + (["display-history-entry-times-v1"] if hasattr(handle, "history_page") else [])
-                + (["display-history-peer-cycle-records-v1"] if hasattr(handle, "history_page") else [])
+                + (
+                    ["display-history-peer-cycle-records-v1"]
+                    if hasattr(handle, "history_page")
+                    else []
+                )
                 # TURN SUPPLEMENTS ("Highlights"): advertised only by a handle that
                 # implements the lazy read op, for the reason every entry here is
                 # gated on what the handle can honour. The attach gate is TWO halves --
@@ -3867,8 +3871,8 @@ class RuntimeServer:
             from local_operator.session.history_window import (
                 strip_audit_fields,
                 strip_entry_time_fields,
-                strip_peer_cycle_fields,
                 strip_input_metadata,
+                strip_peer_cycle_fields,
                 wire_payload,
             )
 
@@ -4100,7 +4104,9 @@ class RuntimeServer:
                     }
                 )
                 sync_payload["display_history"] = wire_payload(
-                    fallback, audit_capable=conn.audit_history, entry_times_capable=conn.entry_times,
+                    fallback,
+                    audit_capable=conn.audit_history,
+                    entry_times_capable=conn.entry_times,
                     peer_cycle_capable=conn.peer_cycle_records,
                 )
                 oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
@@ -8053,8 +8059,8 @@ class RuntimeServer:
             from local_operator.session.history_window import (
                 strip_audit_fields,
                 strip_entry_time_fields,
-                strip_peer_cycle_fields,
                 strip_input_metadata,
+                strip_peer_cycle_fields,
             )
 
             capture = getattr(h, "subscribe_frontend", None)
@@ -8080,7 +8086,9 @@ class RuntimeServer:
                     strip_entry_time_fields(
                         payload["display_history"], entry_times_capable=entry_times_capable
                     )
-                    strip_peer_cycle_fields(payload["display_history"], peer_cycle_capable=peer_cycle_capable)
+                    strip_peer_cycle_fields(
+                        payload["display_history"], peer_cycle_capable=peer_cycle_capable
+                    )
                 # Both message carriers of a sync payload, same as the pushed
                 # frame above: the page's messages and the live_events seed.
                 strip_input_metadata(payload, input_capable=input_capable)
@@ -8106,7 +8114,10 @@ class RuntimeServer:
                                     # join over blanked rows is cleared with
                                     # them, never left describing absent ids.
                                     "entry_times": {},
-                                    "peer_cycle_display_records": {"records": [], "status": "metadata_budget"},
+                                    "peer_cycle_display_records": {
+                                        "records": [],
+                                        "status": "metadata_budget",
+                                    },
                                 }
                             ).model_dump(mode="json"),
                             audit_capable=audit_capable,
@@ -8120,7 +8131,9 @@ class RuntimeServer:
                             payload["display_history"],
                             entry_times_capable=entry_times_capable,
                         )
-                        strip_peer_cycle_fields(payload["display_history"], peer_cycle_capable=peer_cycle_capable)
+                        strip_peer_cycle_fields(
+                            payload["display_history"], peer_cycle_capable=peer_cycle_capable
+                        )
                     if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
                         raise ValueError("canonical refresh exceeds the transport frame limit")
                 return payload
@@ -8143,8 +8156,8 @@ class RuntimeServer:
                 from local_operator.session.history_window import (
                     strip_audit_fields,
                     strip_entry_time_fields,
-                strip_peer_cycle_fields,
                     strip_input_metadata,
+                    strip_peer_cycle_fields,
                 )
 
                 strip_audit_fields(payload, audit_capable=audit_capable)

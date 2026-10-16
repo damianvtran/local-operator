@@ -684,7 +684,11 @@ class PreparedReplay(ReplayState):
             block.navigation_anchor_part = self._projection_part
         self._projection_part += 1
         from local_operator.tui.internal_work_membership import WorkProjector
-        from local_operator.tui.widgets.transcript import QuietGroupBlock, work_record_of_block
+        from local_operator.tui.widgets.transcript import (
+            QuietGroupBlock,
+            work_record_of_block,
+        )
+
         if self._projection_work is None:
             self._projection_work = WorkProjector()
         if self.blocks and not isinstance(self.blocks[-1], QuietGroupBlock):
@@ -692,6 +696,7 @@ class PreparedReplay(ReplayState):
             # before advancing, without caching or walking the whole transcript.
             self._projection_work.step(work_record_of_block(self.blocks[-1]))
         from local_operator.tui.widgets.transcript import sync_work_dormancy
+
         block.work_view_identity = self.view.work_identity
         block.internal_work_membership = self._projection_work.step(work_record_of_block(block))
         sync_work_dormancy(block, block.internal_work_membership)
@@ -823,8 +828,15 @@ class PreparedReplay(ReplayState):
             else None
         )
         end = min(len(history), anchor + bound) if anchor is not None else None
-        project_settled_rows(self, history, bound=bound, end=end, fold_width=fold_width,
-                             display_records=display_records, proof_transcript=proof_transcript)
+        project_settled_rows(
+            self,
+            history,
+            bound=bound,
+            end=end,
+            fold_width=fold_width,
+            display_records=display_records,
+            proof_transcript=proof_transcript,
+        )
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
@@ -1203,12 +1215,19 @@ def project_settled_rows(
     settled_results: set[str] = set()
     from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
     from local_operator.tui.closed_peer_cycles import PeerCycleReplay
+
     cycle_view = self._transcript_view()
-    cycle_view.bind_work_source(getattr(getattr(self, "_session", None), "session_id", cycle_view.work_session_id))
+    cycle_view.bind_work_source(
+        getattr(getattr(self, "_session", None), "session_id", cycle_view.work_session_id)
+    )
     cycle_projection = PeerCycleReplay(cycle_view.work_identity)
     cycle_certificates = cycle_view._quiet_groups._peer_cycle_certificates
-    from local_operator.harness.peer_cycle_display import validate_record, validate_indexed_record
+    from local_operator.harness.peer_cycle_display import (
+        validate_indexed_record,
+        validate_record,
+    )
     from local_operator.tui.closed_peer_cycles import PeerCycleCertificate
+
     display_validated = []
     display_children: dict[str, list[dict[str, Any]]] = {}
     display_roles: dict[str, str] = {}
@@ -1221,19 +1240,30 @@ def project_settled_rows(
             continue  # Unknown view identity is never ownership authority.
         if proof_transcript is not None and proof_bytes_left > 0:
             record, consumed = validate_indexed_record(
-                proof_transcript, candidate, str(cycle_view.work_session_id or ""), max_bytes=proof_bytes_left)
+                proof_transcript,
+                candidate,
+                str(cycle_view.work_session_id or ""),
+                max_bytes=proof_bytes_left,
+            )
             proof_bytes_left -= consumed
         elif proof_transcript is not None:
             record = None
         else:
-            record = validate_record(candidate,
+            record = validate_record(
+                candidate,
                 (proof_history if proof_history is not None else history)[-4096:],
-                str(cycle_view.work_session_id or ""))
+                str(cycle_view.work_session_id or ""),
+            )
         if record is None or any(key in display_roles for key in record["member_ids"]):
             continue
         display_validated.append(record)
-        certificate = PeerCycleCertificate(cycle_session_id, cycle_epoch, record["quiet_call_id"],
-            tuple(record["member_ids"]), owner_kind="peer_cycle_display")
+        certificate = PeerCycleCertificate(
+            cycle_session_id,
+            cycle_epoch,
+            record["quiet_call_id"],
+            tuple(record["member_ids"]),
+            owner_kind="peer_cycle_display",
+        )
         remember_peer_cycle_certificate(cycle_certificates, certificate)
         display_roles.update((member["source_id"], member["role"]) for member in record["members"])
         for child in record["child_rows"]:
@@ -1363,8 +1393,14 @@ def project_settled_rows(
             # A mounted replay consumes the actual quiet result at its original
             # ordered seat. Collected pages carry metadata to the list planner.
             replay_call_id = getattr(message, "tool_call_id", None)
-            replay_close = cycle_certificates.get(replay_call_id) if isinstance(replay_call_id, str) else None
-            if replay_close is not None and self._block_sink is None and getattr(message, "role", None) == "tool":
+            replay_close = (
+                cycle_certificates.get(replay_call_id) if isinstance(replay_call_id, str) else None
+            )
+            if (
+                replay_close is not None
+                and self._block_sink is None
+                and getattr(message, "role", None) == "tool"
+            ):
                 cycle_view._quiet_groups.consume_replayed_peer_cycle(replay_close, message)
             self._projection_message_id = str(getattr(message, "id", ""))
             self._projection_part = 0
@@ -1452,12 +1488,19 @@ def project_settled_rows(
                     # stays as it was, because nothing was appended.
                     if not hide_cross_session:
                         block = PeerMessageBlock(
-                            str(details.get("body", "")), details.get("sender") or {},
+                            str(details.get("body", "")),
+                            details.get("sender") or {},
                             fold_width=fold_width,
                         )
                         source_id = f"{getattr(message, 'id', '')}:0"
-                        certificate = next((close for close in cycle_certificates.values()
-                                            if close.first_peer_source_id == source_id), None)
+                        certificate = next(
+                            (
+                                close
+                                for close in cycle_certificates.values()
+                                if close.first_peer_source_id == source_id
+                            ),
+                            None,
+                        )
                         if certificate is not None:
                             block.peer_cycle_certificate = certificate
                         self._append_block(block)
@@ -1709,6 +1752,7 @@ def project_settled_rows(
             # omission policy; held/error attention is never subject to that gate.
             if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
                 from local_operator.tui.internal_work_membership import WorkRecord
+
                 details = getattr(message, "details", None) or {}
                 details = details if isinstance(details, dict) else {}
                 held = held_delivery_notice(details)
@@ -1720,21 +1764,33 @@ def project_settled_rows(
                     context = getattr(tracker, "_work_projector", None)
                     last_source = getattr(tracker, "_last_work_block", None)
                 if context is not None and last_source is not None:
-                    from local_operator.tui.widgets.transcript import work_record_of_block
+                    from local_operator.tui.widgets.transcript import (
+                        work_record_of_block,
+                    )
+
                     context.step(work_record_of_block(last_source))
                 from local_operator.tui.internal_work_membership import WorkProjector
                 from local_operator.tui.widgets.transcript import sync_work_dormancy
+
                 message_id = str(getattr(message, "id", ""))
                 if message_id and message_id in self._resume_mounted_ids:
                     continue
                 status, job_id = details.get("status"), details.get("job_id")
-                text, severity = held if held is not None else (str(details.get("text") or ""), "error" if status == "failed" else "note")
+                text, severity = (
+                    held
+                    if held is not None
+                    else (str(details.get("text") or ""), "error" if status == "failed" else "note")
+                )
                 block = NoticeBlock(text, kind=severity, fold_width=fold_width)
                 block.internal_work_source = WorkRecord(
-                    message_id, "custom", custom_type="job_result", producer="job_result",
+                    message_id,
+                    "custom",
+                    custom_type="job_result",
+                    producer="job_result",
                     job_id=job_id if isinstance(job_id, str) else None,
                     status=status if isinstance(status, str) else None,
-                    held=held is not None, level="error" if status == "failed" else "info",
+                    held=held is not None,
+                    level="error" if status == "failed" else "info",
                 )
                 block.internal_work_payload = dict(details)
                 block.owned_delivery_only = held is None
@@ -2081,11 +2137,17 @@ def project_settled_rows(
                 # its proven root seat. No nested Message enters replay/model
                 # history, and every raw eval/peer body stays its original row.
                 from types import SimpleNamespace
+
                 from local_operator.harness.types import ToolResult
+
                 for child in display_children.get(getattr(call, "id", ""), ()):
-                    child_call = SimpleNamespace(id=child["tool_call_id"], name="send", arguments=child["arguments"])
+                    child_call = SimpleNamespace(
+                        id=child["tool_call_id"], name="send", arguments=child["arguments"]
+                    )
                     child_result = ToolResult.model_validate(child["result"])
-                    self._replay_tool_call(child_call, {child_call.id: child_result}, fold_width=fold_width)
+                    self._replay_tool_call(
+                        child_call, {child_call.id: child_result}, fold_width=fold_width
+                    )
                 appended = True
             # A refused, failed or interrupted turn needs a notice the prose
             # alone does not carry — a refusal fires even when the model
@@ -2258,6 +2320,7 @@ def replay_tool_call(
     is_dict = isinstance(payload, dict)
     details = payload.get("details") if is_dict else None
     from local_operator.harness.types import ToolResult
+
     if isinstance(result, ToolResult):
         # A verified missing child is already a sanitized display ToolResult,
         # not an invented durable Message/provider_payload.

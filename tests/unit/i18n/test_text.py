@@ -50,7 +50,10 @@ def test_hub_group_english_clauses_keep_decimal_labels_and_pluralize_actions(cou
     # Numeric selectors make translated noun forms correct. Their separately
     # rendered label must not acquire grouping separators in existing EN frames.
     for message, suffix in (
-        (tui_transcript.group_actions(count=count, label=str(count)), "action" if count == 1 else "actions"),
+        (
+            tui_transcript.group_actions(count=count, label=str(count)),
+            "action" if count == 1 else "actions",
+        ),
         (
             tui_transcript.group_reply_requested(count=count, label=str(count)),
             "reply requested",

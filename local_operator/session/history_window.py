@@ -15,7 +15,14 @@ import json
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal, Sequence
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_serializer,
+    model_validator,
+)
 
 from local_operator.harness.rows import (
     ask_gate_diverted_call_ids,
@@ -343,14 +350,20 @@ def strip_peer_cycle_fields(payload: dict[str, Any], *, peer_cycle_capable: bool
 
 
 def wire_payload(
-    window: DisplayHistoryWindow, *, audit_capable: bool, entry_times_capable: bool = False,
+    window: DisplayHistoryWindow,
+    *,
+    audit_capable: bool,
+    entry_times_capable: bool = False,
     peer_cycle_capable: bool = False,
 ) -> dict[str, Any]:
     """Serialize a page for one viewer, honouring what that viewer negotiated."""
-    return strip_peer_cycle_fields(strip_entry_time_fields(
-        strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable),
-        entry_times_capable=entry_times_capable,
-    ), peer_cycle_capable=peer_cycle_capable)
+    return strip_peer_cycle_fields(
+        strip_entry_time_fields(
+            strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable),
+            entry_times_capable=entry_times_capable,
+        ),
+        peer_cycle_capable=peer_cycle_capable,
+    )
 
 
 def _sign(payload: dict[str, Any], key: bytes) -> str:
@@ -474,6 +487,7 @@ def display_window(
     # Copy only the selected page, never the whole canonical history.
     page = page.model_copy(deep=True)
     from local_operator.harness.peer_cycle_display import attach_page_records
+
     page = attach_page_records(page, transcript, max_wire_bytes=max_wire_bytes)
     if page.status != "reset":
         cache.put(key, page)

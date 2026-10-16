@@ -711,6 +711,7 @@ _BOUNDED_COLLECTION_FIELDS = {
     "loop": "five scalar keys, replaced per publish; both free-text values clipped at entry",
 }
 
+
 def _busy_peer_cycle_display(
     *, output_text: str | None = None, session_id: str = "frame-session", epoch: str = "frame-epoch"
 ) -> dict[str, Any]:
@@ -721,10 +722,15 @@ def _busy_peer_cycle_display(
     and no hand-built invalid proof is used to make the frame guard look busy.
     """
     from local_operator.harness.peer_cycle_display import (
-        DisplayCycleAccumulator, HOT_RECORDS, MAX_RECORD_BYTES,
+        HOT_RECORDS,
+        MAX_RECORD_BYTES,
+        DisplayCycleAccumulator,
     )
     from local_operator.harness.types import (
-        Message, MessageEndEvent, PeerMessageDeliveredEvent, ToolCall,
+        Message,
+        MessageEndEvent,
+        PeerMessageDeliveredEvent,
+        ToolCall,
     )
 
     near_limit = output_text is None
@@ -736,20 +742,55 @@ def _busy_peer_cycle_display(
         send = root + ":" + "a" * 32
         quiet = root + ":" + "b" * 32
         fold = DisplayCycleAccumulator(session_id, epoch, lambda text: text)
-        fold.observe(PeerMessageDeliveredEvent(message_id=f"frame-peer-{number}", body="incoming", sender={}))
-        fold.observe(MessageEndEvent(message=Message(
-            id=f"frame-parent-{number}", role="assistant",
-            tool_calls=[ToolCall(id=root, name="eval", arguments={"code": "opaque"})],
-        )))
-        fold.observe(ToolExecutionStartEvent(tool_name="eval", tool_call_id=root, args={"code": "opaque"}))
-        fold.observe(ToolExecutionStartEvent(tool_name="send", tool_call_id=send, args={"message": "reply"}))
-        fold.observe(ToolExecutionEndEvent(tool_name="send", tool_call_id=send, is_error=False,
-            result=ToolResult(tool_name="send", tool_call_id=send, content=[TextContent(text=output_text)])))
+        fold.observe(
+            PeerMessageDeliveredEvent(message_id=f"frame-peer-{number}", body="incoming", sender={})
+        )
+        fold.observe(
+            MessageEndEvent(
+                message=Message(
+                    id=f"frame-parent-{number}",
+                    role="assistant",
+                    tool_calls=[ToolCall(id=root, name="eval", arguments={"code": "opaque"})],
+                )
+            )
+        )
+        fold.observe(
+            ToolExecutionStartEvent(tool_name="eval", tool_call_id=root, args={"code": "opaque"})
+        )
+        fold.observe(
+            ToolExecutionStartEvent(tool_name="send", tool_call_id=send, args={"message": "reply"})
+        )
+        fold.observe(
+            ToolExecutionEndEvent(
+                tool_name="send",
+                tool_call_id=send,
+                is_error=False,
+                result=ToolResult(
+                    tool_name="send", tool_call_id=send, content=[TextContent(text=output_text)]
+                ),
+            )
+        )
         fold.observe(ToolExecutionStartEvent(tool_name="no_reply", tool_call_id=quiet, args={}))
-        fold.observe(ToolExecutionEndEvent(tool_name="no_reply", tool_call_id=quiet, is_error=False,
-            result=ToolResult(tool_name="no_reply", tool_call_id=quiet, details={"__quiet_turn": True})))
-        fold.observe(ToolExecutionEndEvent(tool_name="eval", tool_call_id=root, is_error=False,
-            result=ToolResult(tool_name="eval", tool_call_id=root, details={"kernel_generation": "opaque"})))
+        fold.observe(
+            ToolExecutionEndEvent(
+                tool_name="no_reply",
+                tool_call_id=quiet,
+                is_error=False,
+                result=ToolResult(
+                    tool_name="no_reply", tool_call_id=quiet, details={"__quiet_turn": True}
+                ),
+            )
+        )
+        fold.observe(
+            ToolExecutionEndEvent(
+                tool_name="eval",
+                tool_call_id=root,
+                is_error=False,
+                result=ToolResult(
+                    tool_name="eval", tool_call_id=root, details={"kernel_generation": "opaque"}
+                ),
+            )
+        )
         assert len(fold.records) == 1
         record = fold.records[0]
         record_bytes = len(json.dumps(record, ensure_ascii=False).encode())
@@ -760,16 +801,26 @@ def _busy_peer_cycle_display(
     return {"refs": [record["id"] for record in records], "records": records}
 
 
-def test_peer_cycle_hot_proof_is_byte_bounded_on_snapshot_and_delta_without_mutating_source() -> None:
-    from local_operator.session.frontend_state import PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
+def test_peer_cycle_hot_proof_is_byte_bounded_on_snapshot_and_delta_without_mutating_source() -> (
+    None
+):
+    from local_operator.session.frontend_state import (
+        PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES,
+    )
 
     proof = _busy_peer_cycle_display()
     original = json.loads(json.dumps(proof))
-    store = FrontendStateStore(FrontendSessionState(session_id="frame-session", epoch="frame-epoch"))
+    store = FrontendStateStore(
+        FrontendSessionState(session_id="frame-session", epoch="frame-epoch")
+    )
     update = store.mutate(peer_cycle_display=proof)
     assert update is not None
-    marker = {"refs": proof["refs"], "records": [],
-              "status": "metadata_budget", "remaining": proof["refs"]}
+    marker = {
+        "refs": proof["refs"],
+        "records": [],
+        "status": "metadata_budget",
+        "remaining": proof["refs"],
+    }
     assert update.changes["peer_cycle_display"] == marker
     assert len(json.dumps(marker).encode()) <= PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
     # Budget exhaustion must never fabricate HARD-refusal IDs: a consumer treats
@@ -787,11 +838,15 @@ def test_peer_cycle_hot_proof_is_byte_bounded_on_snapshot_and_delta_without_muta
 
 
 def test_small_complete_peer_cycle_hot_proof_is_not_replaced_by_an_unavailable_marker() -> None:
-    from local_operator.session.frontend_state import PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
+    from local_operator.session.frontend_state import (
+        PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES,
+    )
 
     proof = _busy_peer_cycle_display(output_text="sent")
     assert len(json.dumps(proof).encode()) <= PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
-    store = FrontendStateStore(FrontendSessionState(session_id="frame-session", epoch="frame-epoch"))
+    store = FrontendStateStore(
+        FrontendSessionState(session_id="frame-session", epoch="frame-epoch")
+    )
     update = store.mutate(peer_cycle_display=proof)
     assert update is not None
     assert update.changes["peer_cycle_display"] == proof
@@ -805,7 +860,9 @@ _CAPPED_COLLECTION_FIELDS = {
     # HOT_RECORDS × archive bytes is not a wire bound (escaping can multiply
     # child output). Snapshot/delta copies cap the complete payload at 64 KiB;
     # an overcrowded snapshot yields this optional accelerator, never raw rows.
-    "peer_cycle_display": "64-KiB aggregate wire budget; metadata-budget ID list / crowded-frame yield",
+    "peer_cycle_display": (
+        "64-KiB aggregate wire budget; metadata-budget ID list / crowded-frame yield"
+    ),
     "usage_components": "capped at accumulation (USAGE_COMPONENT_CAP)",
     # Capped at the WIRE by `_bound_asks_in_place`: the fold bounds the row
     # COUNT (PROJECTION_CAP, 20) and this bounds the BYTES, because a

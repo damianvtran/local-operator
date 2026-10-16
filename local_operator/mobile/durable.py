@@ -756,16 +756,22 @@ def _apply_prune_to(message: Message, notice: str) -> None:
 
 def _fold(history: list[AgentMessage], directory: Path | None = None) -> list[Any]:
     from local_operator.mobile.projection import fold_messages_to_entries
+
     if directory is None:
         return fold_messages_to_entries(history)
     from local_operator.harness.peer_cycle_display import discover_records
     from local_operator.session.transcript import Transcript
+
     # The existing cache supplies the selected raw window. Only deterministic
     # record IDs for its bounded roots use the existing index; no journal scan.
     transcript = Transcript(directory)
     records = discover_records(transcript, history[-4096:], directory.name)
-    return fold_messages_to_entries(history, session_id=directory.name,
-        peer_cycle_display_records=records, proof_transcript=transcript)
+    return fold_messages_to_entries(
+        history,
+        session_id=directory.name,
+        peer_cycle_display_records=records,
+        proof_transcript=transcript,
+    )
 
 
 #: Journal entries read per backward step of the archive walk. The reader's own
