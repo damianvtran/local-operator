@@ -221,7 +221,8 @@ async def test_ask_rows_keeps_every_status_and_carries_delivered():
     assert [row.ask_id for row in rows] == ["a1", "a2", "a3", "a4", "a5", "a6", "a7"]
     by = {row.ask_id: row for row in rows}
     assert by["a1"].waiting and by["a1"].answerable and by["a1"].pending
-    assert by["a2"].moved_on and by["a2"].pending and by["a2"].answerable
+    # LAPSED (D10/D11): settled on this surface, read-only, behind its chip.
+    assert by["a2"].lapsed and by["a2"].settled and not by["a2"].answerable
     assert by["a3"].settled and not by["a3"].delivering
     # ANSWERED BUT NOT DELIVERED is §10's in-flight half: pending, not answerable.
     assert by["a4"].delivering and by["a4"].pending and not by["a4"].answerable
@@ -231,8 +232,8 @@ async def test_ask_rows_keeps_every_status_and_carries_delivered():
     assert by["a7"].settled and not by["a7"].pending and not by["a7"].delivering
     assert filter_counts(rows) == {
         FILTER_ALL: 7,
-        FILTER_OUTSTANDING: 3,
-        FILTER_SETTLED: 4,
+        FILTER_OUTSTANDING: 2,
+        FILTER_SETTLED: 5,
     }
 
 
@@ -258,8 +259,10 @@ async def test_the_halves_partition_every_status():
 
 
 async def test_the_drawer_register_spells_both_halves_when_mixed():
-    mixed = ask_rows([_row("a1"), _row("a2", status="timed_out")])
-    assert drawer_headline(mixed) == "1 waiting, 1 moved on"
+    mixed = ask_rows([_row("a1"), _row("a2", status="answered", delivered=False)])
+    assert drawer_headline(mixed) == (
+        "1 question waiting · 1 answer delivering — the agent will be told"
+    )
     assert drawer_headline(ask_rows([_row("a1"), _row("a2")])) == "2 questions waiting"
     # All settled reads the DESKTOP DRAWER's own constant (round 2: D4/F3). The
     # chip register counts what is owed and has no words for this state, and
@@ -275,9 +278,10 @@ async def test_the_drawer_register_speaks_moved_on_for_a_moved_on_only_queue():
     the chip clause said "timed out" for the same half. One half, one word —
     and the bar keeps the chip register it owns.
     """
-    assert drawer_headline(ask_rows([_row("a1", status="timed_out")])) == "1 question moved on"
+    # D11: a lapsed row is SETTLED, so a lapsed-only drawer has nothing pending.
+    assert drawer_headline(ask_rows([_row("a1", status="timed_out")])) == "All asks settled"
     two = ask_rows([_row("a1", status="timed_out"), _row("a2", status="timed_out")])
-    assert drawer_headline(two) == "2 questions moved on"
+    assert drawer_headline(two) == "All asks settled"
 
 
 async def test_the_drawer_register_never_calls_a_delivering_row_settled():
@@ -368,12 +372,12 @@ async def test_the_drawer_register_keeps_the_urgency_word_when_the_halves_mix():
     rows = ask_rows([_row("a1", urgent=True), _row("a2", status="timed_out", urgent=True)])
     # OPEN urgent asks only — the same set the bar counts, so a timed-out one
     # cannot inflate the word beside a bar that shows the hue alone.
-    assert drawer_headline(rows) == "1 waiting, 1 moved on · 1 urgent"
+    assert drawer_headline(rows) == "1 question waiting · 1 urgent"
 
 
 async def test_a_truncated_frame_withholds_the_split_and_states_the_tally():
     rows = ask_rows([_row("a1"), _row("a2", status="timed_out")])
-    assert drawer_headline(rows) == "1 waiting, 1 moved on"
+    assert drawer_headline(rows) == "1 question waiting"
     assert drawer_headline(rows, open_count=20, truncated=True) == "20 outstanding"
 
 
@@ -397,10 +401,10 @@ async def test_the_header_carries_the_scope_subject_and_the_three_segments():
     session_head = AskQueueList(rows, scope=SCOPE_SESSION).header_text(200)
     assert session_head.startswith("? ")
     assert "This conversation" not in session_head
-    for segment in ("All · 2", "Waiting or moved on · 2", "Settled · 0"):
+    for segment in ("All · 2", "Waiting or moved on · 1", "Settled · 1"):
         assert segment in session_head, session_head
     fleet_head = AskQueueList(rows, scope=SCOPE_FLEET).header_text(200)
-    assert fleet_head.startswith("? All conversations · 1 waiting, 1 moved on")
+    assert fleet_head.startswith("? All conversations · 1 question waiting")
 
 
 async def test_the_header_keeps_the_control_longest_and_drops_the_clause_whole():
@@ -408,13 +412,13 @@ async def test_the_header_keeps_the_control_longest_and_drops_the_clause_whole()
     listing = AskQueueList(rows)
     wide = listing.header_text(200)
     assert "d decline" in wide and "esc collapse" in wide
-    assert "1 waiting, 1 moved on" in wide
+    assert "1 question waiting" in wide
     narrow = listing.header_text(60)
     assert cell_len(narrow) <= 60
     # The control outlives everything: a filtered view that cannot be
     # un-filtered is worse than an unadvertised key.
     assert "Waiting or moved on" in narrow
-    assert "1 waiting, 1 moved on" not in narrow
+    assert "1 question waiting" not in narrow
 
 
 async def test_the_header_hints_follow_the_view():
@@ -433,9 +437,9 @@ async def test_the_header_hints_follow_the_view():
     # delivering rows, which are pending but not answerable.
     delivering = AskQueueList(ask_rows([_row("a1", status="answered", delivered=False)]))
     assert delivering.header_hints() == ("esc collapse",)
-    # A moved-on row IS answerable, and `x dismiss` names a key it can honour.
-    moved = AskQueueList(ask_rows([_row("a1", status="timed_out")]))
-    assert moved.header_hints() == ("enter answer", "d decline", "x dismiss", "esc collapse")
+    # A LAPSED row is read-only (D10): `x dismiss` is the one key it honours.
+    lapsed = AskQueueList(ask_rows([_row("a1", status="timed_out")]))
+    assert lapsed.header_hints() == ("x dismiss", "esc collapse")
     # An OPEN row cannot be dismissed (dismiss is offered on a timed-out ask
     # alone), so that key is not advertised over it.
     opened = AskQueueList(ask_rows([_row("a1")]))
@@ -467,10 +471,12 @@ async def test_the_primary_hint_outlives_the_irreversible_one():
             assert "enter answer" in painted, (width, painted)
         if "x dismiss" in painted:
             assert "d decline" in painted, (width, painted)
-    # U3/D4's own case: the SESSION scope at 100x30 — the surviving hint is the
-    # primary action, not the one that was there before the user pressed Tab.
-    assert "enter answer" in listing.header_text(100)
-    assert "d decline" not in listing.header_text(100)
+    # U3/D4's own case: a SESSION-scope width with room for the clause and ONE
+    # hint — the surviving hint is the primary action, not the one that was there
+    # before the user pressed Tab. (90, not the original 100: D11 made the clause
+    # "1 question waiting", three cells shorter than "1 waiting, 1 moved on".)
+    assert "enter answer" in listing.header_text(90)
+    assert "d decline" not in listing.header_text(90)
     # The FLEET scope spends 6 more cells on its subject, and the FIRST hint now
     # outbids the drawer clause (U3), so a hint survives even where the clause
     # does not fit with it.
@@ -506,6 +512,7 @@ async def test_the_filter_keys_and_the_segments_scope_the_visible_rows(enabled):
                     _row("a1"),
                     _row("a2", status="timed_out"),
                     _row("a3", status="declined"),
+                    _row("a4"),
                 ]
             )
         )
@@ -513,15 +520,16 @@ async def test_the_filter_keys_and_the_segments_scope_the_visible_rows(enabled):
         app._expand_asks()
         await _settle(pilot)
         listing = app.query_one(AskQueueList)
-        assert [row.ask_id for row in listing.visible_rows] == ["a1", "a2", "a3"]
+        assert [row.ask_id for row in listing.visible_rows] == ["a1", "a2", "a3", "a4"]
         await pilot.press("3")
         await _settle(pilot)
         assert listing.filter_value == FILTER_SETTLED
-        assert [row.ask_id for row in listing.visible_rows] == ["a3"]
+        # The lapsed row files under Settled beside the declined one (D11).
+        assert [row.ask_id for row in listing.visible_rows] == ["a2", "a3"]
         await pilot.press("2")
         await _settle(pilot)
         assert listing.filter_value == FILTER_OUTSTANDING
-        assert [row.ask_id for row in listing.visible_rows] == ["a1", "a2"]
+        assert [row.ask_id for row in listing.visible_rows] == ["a1", "a4"]
         # `]` cycles all → outstanding → settled → all.
         await pilot.press("]")
         await _settle(pilot)
@@ -547,7 +555,7 @@ async def test_a_truncated_frame_MOUNTS_with_the_backend_tally(enabled):
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(
-            ask_rows([_row("a1"), _row("a2", status="timed_out")]),
+            ask_rows([_row("a1"), _row("a2")]),
             open_count=7,
             truncated=True,
         )
@@ -563,9 +571,9 @@ async def test_a_filtered_empty_half_still_names_the_half_holding_the_rows(enabl
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
-        # TWO outstanding rows, so the expansion lands on the LIST rather than a
+        # TWO answerable rows, so the expansion lands on the LIST rather than a
         # single ask's card — the filter only exists on the list.
-        app._sync_ask_surface(ask_rows([_row("a1"), _row("a2", status="timed_out")]))
+        app._sync_ask_surface(ask_rows([_row("a1"), _row("a2")]))
         await _settle(pilot)
         app._expand_asks()
         await _settle(pilot)
@@ -623,9 +631,7 @@ async def test_a_header_segment_is_a_press_target(enabled):
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
-        app._sync_ask_surface(
-            ask_rows([_row("a1"), _row("a2", status="timed_out"), _row("a3", status="declined")])
-        )
+        app._sync_ask_surface(ask_rows([_row("a1"), _row("a2"), _row("a3", status="declined")]))
         await _settle(pilot)
         app._expand_asks()
         await _settle(pilot)
@@ -795,7 +801,9 @@ async def test_a_bridge_card_answer_decides_through_the_verified_door(
         assert record["closed"] is True
 
 
-@pytest.mark.parametrize("status", ["open", "timed_out"])
+# OPEN only: a timed-out request's card is read-only since D10, so it takes no
+# decision from this card (``test_ask_lapsed`` pins the refusal).
+@pytest.mark.parametrize("status", ["open"])
 async def test_a_same_session_bridge_card_decides_through_the_owner_path(
     enabled, isolated_index, status: str
 ):

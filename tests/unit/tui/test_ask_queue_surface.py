@@ -571,6 +571,7 @@ async def test_the_list_declines_and_dismisses_explicitly(enabled):
             ask_rows(
                 [
                     _row("a1", "Deploy now?"),
+                    _row("a0", "Which tier?"),
                     _row("a2", "Which region?", status="timed_out"),
                 ]
             )
@@ -582,13 +583,15 @@ async def test_the_list_declines_and_dismisses_explicitly(enabled):
         await _settle(pilot)
         assert session.declined == [("a1", "terminal")]
         await pilot.press("down")
+        await pilot.press("down")
         await pilot.press("x")
         await _settle(pilot)
         assert session.dismissed == [("a2", "terminal")]
 
 
-async def test_the_list_marks_a_timed_out_ask_as_still_answerable(enabled):
-    """Honest states (§5): a timed-out ask is NOT renamed to finished."""
+async def test_the_list_marks_a_timed_out_ask_as_timed_out_and_read_only(enabled):
+    """Honest states (§5): a timed-out ask says so, and since D10 it promises no
+    late answer — it reads like a declined row, behind its ``timed out`` chip."""
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
@@ -597,6 +600,7 @@ async def test_the_list_marks_a_timed_out_ask_as_still_answerable(enabled):
             ask_rows(
                 [
                     _row("a1", "Deploy now?"),
+                    _row("a0", "Which tier?"),
                     _row("a2", "Which region?", status="timed_out"),
                 ]
             )
@@ -605,9 +609,10 @@ async def test_the_list_marks_a_timed_out_ask_as_still_answerable(enabled):
         app._expand_asks()
         await _settle(pilot)
         text = app.query_one(AskQueueList).render().plain
-        assert "timed out — still answerable" in text
+        assert "· timed out" in text
+        assert "answerable" not in text
         # ...and it does not inflate the bar's count of what the user owes.
-        assert "1 question waiting" in app.query_one(AskBar).render().plain
+        assert "2 questions waiting" in app.query_one(AskBar).render().plain
 
 
 async def test_a_refused_answer_says_so_and_does_not_lose_the_ask(enabled):
@@ -885,7 +890,12 @@ async def test_the_sidebar_mark_is_painted_for_the_current_session(enabled):
 
 
 async def test_the_sidebar_mark_survives_a_queue_that_only_timed_out(enabled):
-    """A timed-out-but-answerable ask keeps the mark: it is OUTSTANDING.
+    """A timed-out ask keeps the mark: it is OUTSTANDING to the store.
+
+    D10 makes it read-only on every surface, but leaves the store's contract
+    alone: the index and the wire's ``asks_open`` still count it, so the live
+    half of the mark must too, or a session's mark would disagree with its own
+    index entry.
 
     The mark used to be painted from the OPEN count alone, so a queue of nothing
     but timed-out asks dropped it to absence — even though the bar was still up
@@ -1408,7 +1418,13 @@ async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
     async with app.run_test(size=(120, 30)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(
-            ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?", status="timed_out")])
+            ask_rows(
+                [
+                    _row("a1", "Deploy now?"),
+                    _row("a0", "Which tier?"),
+                    _row("a2", "Which region?", status="timed_out"),
+                ]
+            )
         )
         await _settle(pilot)
         bar_text = app.query_one(AskBar).render().plain
@@ -1417,13 +1433,14 @@ async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
         header = app.query_one(AskQueueList).render().plain.splitlines()[0]
         # The CHIP: only the open half is "waiting"; the timed-out one is named
         # as what it is.
-        assert "1 question waiting · 1 ask timed out" in bar_text, bar_text
-        # The DRAWER: a mixed queue spells BOTH halves, in the drawer's words.
-        assert "1 waiting, 1 moved on" in header, header
+        assert "2 questions waiting · 1 ask timed out" in bar_text, bar_text
+        # The DRAWER: the lapsed row is SETTLED since D11, so the drawer counts
+        # what is waiting, and the segments file the lapsed row under Settled.
+        assert "2 questions waiting" in header, header
         # Same rows, same totals: the two registers describe ONE queue.
-        assert "All · 2" in header, header
+        assert "All · 3" in header, header
         assert "Waiting or moved on · 2" in header, header
-        assert "Settled · 0" in header, header
+        assert "Settled · 1" in header, header
 
 
 async def test_the_bar_keeps_its_chevron_at_eighty_columns(enabled):
@@ -1591,6 +1608,7 @@ async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
             ask_rows(
                 [
                     _row("a1", "Deploy now?", urgent=True),
+                    _row("a0", "Which tier?"),
                     _row("a2", "Which region?", status="timed_out", urgent=True),
                 ]
             )
