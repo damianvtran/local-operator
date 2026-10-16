@@ -756,7 +756,7 @@ readings.
 
 | Endpoint | Request | Result inside `CRUDResponse.result` |
 | --- | --- | --- |
-| GET `/v1/desktop/sessions` | `limit` 1..500, default100; `include_archived`; and with the `session_catalogue_page` key `scope_kind`, `scope_name`, `cursor`, `with_counts` | `{sessions:[...],truncated,limit,degraded,next_cursor,cursor_missing,scope,counts}` - canonical rows plus explicit desktop drafts, then any off-page pinned rows (**first page of the head only**) |
+| GET `/v1/desktop/sessions` | `limit` 1..500, default100; `include_archived`; and with the `session_catalogue_page` key `scope_kind`, `scope_name`, `cursor`, `with_counts` | `{sessions:[...],truncated,limit,degraded,next_cursor,cursor_missing,scope,counts}` - canonical rows plus explicit desktop drafts, then the first page's extras: **every running row** below the window (head and scoped pages alike) and, on the head answer only, the off-page pinned rows |
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
 | POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?, draft_id?}` | `{session_id}`; cwd must exist; a `draft_id` materialises that draft (unknown/expired → a fresh id; already materialised → `422` `draft_already_materialised`) |
 | POST `/v1/desktop/sessions/draft` | `{request_id, cwd, target?, model?}` | `{draft_id, replayed?}`; registers an in-memory warmable draft — no directory, no runtime, no listing row (`session_draft_warm`) |
@@ -865,11 +865,20 @@ with an empty page and a census entry of 0, because a team with no conversations
 yet is a legitimate state and a name in `attachment.json` outlives the registry
 entry it came from.
 
-Off-page pinned rows are appended to the **first page of the head** only: the
-pinned set as a whole rides the answer the Pinned section is drawn from, and a
-later page is merely the scope's continuation. A pinned row whose own rank the
-walk reaches still comes back there as an ordinary row -- the row union is
-id-keyed -- but it is never a second extra.
+A first page carries TWO populations of extras, and they are different promises.
+**Every running row** below the window -- ``status_code`` in ``approval``,
+``answer``, ``busy``, ``wedged`` or ``delegating`` -- is appended to the first
+page of ANY scope, head or group: the ranking puts work in progress behind every
+unread completion, so a page bound can leave a live turn out of the answer
+entirely, and a row the client is never handed is one it has no way to ask for
+again. **Off-page pinned rows** are appended to the **first page of the head**
+only: the pinned set as a whole rides the answer the Pinned section is drawn
+from, and a later page is merely the scope's continuation -- a scoped answer
+cannot speak for the pinned set, and a pinned extra there would be a row outside
+the scope that asked for it. Both populations ride in the page's own order,
+below every page row; a row whose own rank the walk reaches still comes back
+there as an ordinary row -- the row union is id-keyed -- but it is never a
+second extra.
 
 `POST .../{id}/seen` is the read receipt, and **a 2xx from it means this
 conversation is read**: `unseen: false`, the receipt advanced through the token's

@@ -549,6 +549,61 @@ class TestARunningRowRidesTheFirstPage:
             entry.id for entry in page.entries
         }, "another team's running row is not this page's business"
 
+    def test_a_scoped_page_carries_its_running_row_when_the_cursor_is_foreign(
+        self, tmp_path: Path
+    ) -> None:
+        """``cursor_missing`` IS A DISJUNCTION, and the running arm reads both halves.
+
+        A token minted for another scope DECODES, so there is no position to resume
+        from only in the sense that matters -- the answer is this scope's first
+        page -- while the resume filter is skipped only because the gate noticed.
+        Gating the running arm on ``position is None`` alone covers the UNDECODABLE
+        half (``TestCursorTolerance``'s tokens) and silently drops this one: the
+        client that sent the wrong cursor is answered with a re-read (``extending``
+        false on its side), so a running row missing from THAT answer is one it
+        never receives and has no way to ask for again -- the reported bug, reached
+        through the cursor path rather than through a full page.
+        """
+        for index in range(3):
+            session_id = f"lop{index:08d}"
+            _session(
+                tmp_path,
+                session_id,
+                team="lopdev",
+                created=5_000.0 + index,
+                stamp=5_000.0 + index,
+            )
+            _unread(tmp_path, session_id)
+        busy = "lopbusy00001"
+        _session(tmp_path, busy, team="lopdev", created=1_000.0, stamp=1_000.0)
+        for index in range(2):
+            _session(tmp_path, f"oth{index:08d}", team="otherteam", created=1_000.0 + index)
+
+        # A real token from a real answer, minted for a scope this request is not:
+        # the client bug the flag exists to absorb, rather than a fabricated string.
+        foreign = catalogue_page(tmp_path, scope=CatalogueScope("team", "otherteam"), limit=1)
+        assert foreign.next_cursor is not None, "the foreign scope must be truncatable"
+
+        with _live_pid() as pid:
+            _publish(tmp_path, busy, pid=pid, busy=True)
+            page = catalogue_page(
+                tmp_path,
+                scope=CatalogueScope("team", "lopdev"),
+                cursor=foreign.next_cursor,
+                limit=2,
+            )
+
+        assert page.cursor_missing is True
+        assert [entry.id for entry in page.entries] == [
+            "lop00000002",
+            "lop00000001",
+            busy,
+        ], "the scope's first page, plus its own running row, with no usable cursor"
+        # The negative half rides along: ``lop00000000`` is an unread completion
+        # below the cut and an ACTIVE row, and it does not ride -- the extra is the
+        # running row, not "whatever the cursor could not place".
+        assert "lop00000000" not in {entry.id for entry in page.entries}
+
     def test_the_rows_that_are_not_running_stay_behind_the_expander(self, tmp_path: Path) -> None:
         """THE NEGATIVES, and each one is a row that could plausibly have been
         swept in: ``idle`` and ``attached`` are LIVE but are not work in progress
