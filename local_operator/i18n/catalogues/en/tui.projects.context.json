@@ -89,6 +89,16 @@
     "tone": "plain",
     "note": "Textual binding description for existing Escape action; one short word."
   },
+  "tui.projects.detail.no_text": {
+    "role": "detail update body placeholder",
+    "tone": "plain, factual",
+    "note": "Drawn in place of a project update entry whose body is empty after clamping, so the row exists and reads as an explicit absence rather than a blank gap. Parentheses are part of the value, matching the '(unnamed)' convention in this catalogue. One dim no-wrap line. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.detail.no_description": {
+    "role": "detail description placeholder",
+    "tone": "plain, factual",
+    "note": "Drawn in place of a project description when the record has none (empty or whitespace-only), so the detail page's description section reads as an explicit absence rather than a blank gap. One dim no-wrap line. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
   "tui.projects.title": {
     "role": "project title copy",
     "tone": "plain",

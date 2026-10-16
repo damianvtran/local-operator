@@ -37,9 +37,15 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+# i18n: the window counter's grammar words are user-facing picker copy;
+# they stay separate fragments because the numerals carry a brighter style.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.move_targets import MoveTarget, filter_targets, looks_like_path
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 #: Width the card takes when the terminal allows it, and the floor it will not
 #: go below. Both are CELL counts of the card's content, inside its padding.
@@ -673,9 +679,9 @@ class MovePickerScreen(ModalScreen[str | None]):
         out.append("\n\n")
         if counter is not None:
             first, last, total = counter
-            out.append("showing ", style=faint)
+            out.append(_t(_x.picker_showing_prefix()), style=faint)
             out.append(f"{first:,}–{last:,}", style=dim)
-            out.append(" of ", style=faint)
+            out.append(_t(_x.picker_of_separator()), style=faint)
             out.append(f"{total:,}", style=dim)
             out.append("\n")
         for index, (key, what) in enumerate(_footer_hints(width, empty=not rows)):
