@@ -115,7 +115,9 @@ from local_operator.classification.types import (
     Question,
 )
 from local_operator.clients._http import scrub_secrets
+from local_operator.clients.radient_cost import cost_from_payload
 from local_operator.providers.registry import get_provider_definition
+from local_operator.session.channel_spend import BASIS_NOT_TRACKED
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -841,19 +843,109 @@ def _parse_response(
     usage = payload.get("usage")
     usage_map: Mapping[str, Any] = usage if isinstance(usage, Mapping) else {}
     raw_cost = usage_map.get("cost")
+    usage_cost = _reported_cost(raw_cost)
+    if usage_cost is not None:
+        # The leg stated its own charge inline (OpenRouter and TypeSafe both do).
+        # It wins, and it carries no basis: a `usage.cost` is the request's own
+        # receipt, and the basis field is the top-level object's vocabulary.
+        cost_usd, cost_basis = usage_cost, None
+    else:
+        # Radient's decision route sends NO `usage.cost` at all. Its charge is a
+        # top-level, versioned `cost` object stating the exact per-call amount
+        # — measured on the wire 2026-10-16 — which this parser used to drop on
+        # the floor, so a priced inference row sat beside a `$—` classification
+        # row tagged "price not stated" for every Radient decision call.
+        cost_usd, cost_basis = _server_cost_usd(payload)
     return DecisionResponse(
         vendor=vendor,
         model=str(payload.get("model") or model),
         answers=answers,
         input_tokens=_count(usage_map.get("input_tokens")),
         output_tokens=_count(usage_map.get("output_tokens")),
-        # Absent cost stays absent. The contract's alternative — derive it from
-        # a configured price row — has no row to read for a decision model in
-        # this repo, and inventing a number would put a fabricated figure in the
-        # PR's cost arithmetic.
-        cost_usd=_reported_cost(raw_cost),
+        cost_usd=cost_usd,
+        cost_basis=cost_basis,
         latency_s=latency_s,
     )
+
+
+def _server_cost_usd(payload: Mapping[str, Any]) -> tuple[float | None, str | None]:
+    """The top-level ``cost`` object's charge as ``(usd, basis)``, or ``(None, None)``.
+
+    WHY A VENDOR-REPORTED AMOUNT WINS OVER ANY DERIVED PRICE
+    -------------------------------------------------------
+    The ``cost`` object is the server's own statement of what this call was
+    charged (``basis: "billed"``) or would be charged (``basis: "quote"``). A
+    listing — a ``/v1/models`` row, a models.dev entry, a published rate table —
+    is an estimate OF that figure, made by someone who did not place the call.
+    So the server's figure is preferred and no derivation path exists here: the
+    "compute it from the configured price row" fallback the contract names has
+    no row to read for a decision model (Radient's own listing carries no
+    ``jev-1.13`` row, ``/v1/prices`` has no inference table, OpenRouter's public
+    listing has no ``typesafe/jev-1.13`` price and models.dev does not cover the
+    id — all checked 2026-10-16).
+
+    WHY UNKNOWN IS NOT ZERO
+    -----------------------
+    A body with neither source returns ``(None, None)``, never ``(0.0, ...)``.
+    Free and unknown are different facts, and a fabricated ``0`` would put a
+    confident "this call cost nothing" on the operator's cost line beside a
+    genuine figure — the exact unreadable claim this accounting removes.
+
+    THE UNIT RULE (do not "simplify" a multiply in here)
+    ----------------------------------------------------
+    ``amount_usd`` is an ABSOLUTE dollar amount for THIS call, not a rate.
+    Micro-USD is therefore ``amount_usd * 1e6`` and the USD figure is that
+    divided by ``1_000_000`` — a single constant factor, nothing per-token. The
+    per-1k vs per-1M trap belongs to TOKEN-RATE rows (``RadientModelPricing``,
+    models.dev ``$/MTok``), which multiply a token count by a published rate;
+    this path has no token count in the arithmetic and must not be converted as
+    though it did.
+
+    ``cost_from_payload`` is the repo's ONE adapter for this object's field
+    names (v / amount_usd / basis / units / unit_price_usd / price_version), so
+    it is reused rather than re-parsed here; ``quote`` already maps to
+    ``estimated`` inside it, which is what keeps a quote from being presented as
+    a charge.
+
+    THREE GUARDS THE ADAPTER'S RAW FIELDS STILL NEED
+    -----------------------------------------------
+    * The amount is RANGE-CHECKED before it is divided, against the same bound
+      :func:`~local_operator.classification.accounting.answered_record` applies
+      to the ledger row. A wire ``amount_usd`` of 401 nines parses to a
+      408-digit integer micro-USD, and ``int / 1_000_000`` on it raises
+      ``OverflowError: integer division result too large for a float`` — an
+      escape out of :func:`_parse_response` that the ``usage.cost`` arm never
+      had. An amount outside SQLite's signed INTEGER range is not a usable
+      receipt either, so it reads as unknown here: never a crash, never a
+      fabricated figure (same bound, same reason as the ledger's).
+    * The amount then goes through :func:`_reported_cost`, the same guard the
+      ``usage.cost`` arm applies: a negative or non-finite ``amount_usd`` is a
+      malformed receipt, not a credit and not a figure, so it reads as unknown
+      (``None``) instead of putting ``$-2.500000`` on the operator's cost line.
+    * An ABSENT wire ``basis`` maps to the adapter's ``not_tracked``, which is
+      OUR spelling for "nothing was stated" — the wire vocabulary is
+      ``quote``/``billed``/``estimated`` (plus the subscription spelling), so
+      the server never sends it. Returning that sentinel would be truthy and
+      ``answered_record``'s ``cost_basis or BASIS_BILLED`` default would keep
+      it, dropping a genuinely billed amount into ``not_tracked_micro``. It is
+      mapped to ``None`` here so the caller's honest default applies.
+    """
+    parsed = cost_from_payload(payload)
+    if parsed is None or parsed.amount_micro is None:
+        return None, None
+    if not 0 <= parsed.amount_micro <= (1 << 63) - 1:
+        # Outside the storable range, so not a usable receipt — and the only
+        # guard that can run before the division below, which would otherwise
+        # raise on a huge integer rather than read as unknown.
+        return None, None
+    # micro-USD -> USD: the adapter's integer micros divided by 1e6 (the mirror
+    # of ``micro_from_amount``'s multiply), NOT a per-token conversion.
+    usd = _reported_cost(parsed.amount_micro / 1_000_000)
+    if usd is None:
+        # Unusable amount: the basis describes nothing, so it goes with it.
+        return None, None
+    basis = None if parsed.basis == BASIS_NOT_TRACKED else parsed.basis
+    return usd, basis
 
 
 def _reported_cost(value: Any) -> float | None:

@@ -147,6 +147,117 @@ async def test_a_response_with_no_cost_is_an_unknown_amount_never_zero(manager) 
     assert published["total_micro"] == 0
 
 
+async def test_a_radient_top_level_cost_object_records_a_server_reported_row(manager) -> None:
+    """The measured Radient shape (no ``usage.cost``, a top-level ``cost``) is a receipt.
+
+    Before the cascade existed this row read ``amount_micro=None`` /
+    ``cost_source="none"``, so the session's classification spend was invisible
+    and the operator's cost line showed ``$—`` beside a priced inference row.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **answer_body(cost=None),
+                "cost": {
+                    "v": 1,
+                    "amount_usd": 0.000013692,
+                    "basis": "billed",
+                    "units": 326,
+                    "unit": "token",
+                    "provider": "typesafe",
+                    "model": "jev-1.13",
+                    "usage_record_id": "a1b2c3d4e5f60718293a4b5c",
+                    "price_version": "decisions-rate@2026-09-19",
+                },
+            },
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.amount_micro == 14, "13.692 micro-USD: the server's own exact figure"
+    assert (row.billing_basis, row.cost_source, row.status) == (
+        "billed",
+        "server_reported",
+        STATUS_OK,
+    )
+    assert row.cost_source != "none"
+    # The amount lands in the billed bucket, so the published object says exact.
+    published = combine(rows, tracked=True)
+    assert published["total_micro"] == 14
+    assert published["by_basis"]["billed"] == 14
+    assert published["knowledge"] == "exact"
+
+
+async def test_a_quoted_radient_figure_is_estimated_on_the_row(manager) -> None:
+    """A quote must reach the row as ``estimated`` — never printed as a charge."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **answer_body(cost=None),
+                "cost": {"v": 1, "amount_usd": 0.00042, "basis": "quote"},
+            },
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.amount_micro == 420
+    assert row.billing_basis == "estimated"
+    assert combine(rows, tracked=True)["by_basis"]["estimated"] == 420
+
+
+async def test_a_server_amount_with_no_basis_is_billed_not_not_tracked(manager) -> None:
+    """An object that states an amount but no basis lands in the BILLED bucket.
+
+    The wire's absent basis maps to the adapter's ``not_tracked`` sentinel, which is
+    truthy: without the parser mapping it to ``None`` the row kept it, so a genuinely
+    billed amount fell into ``not_tracked_micro`` and the row contradicted the
+    convention this module documents for a stated figure.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={**answer_body(cost=None), "cost": {"v": 1, "amount_usd": 0.000027}},
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.amount_micro == 27
+    assert row.billing_basis == "billed", "no stated basis defaults to today's billed"
+    assert row.cost_source == "server_reported"
+    published = combine(rows, tracked=True)
+    assert published["by_basis"]["billed"] == 27
+    assert published["by_basis"]["not_tracked_micro"] == 0
+
+
+async def test_a_negative_server_amount_records_an_unknown_row(manager) -> None:
+    """A negative wire amount is not a credit: the row records unknown, never -2_500_000."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={**answer_body(cost=None), "cost": {"v": 1, "amount_usd": -2.5}},
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.amount_micro is None
+    assert row.cost_source == "none"
+    assert combine(rows, tracked=True)["knowledge"] == "unknown"
+
+
 async def test_a_vendor_stated_zero_is_a_known_zero(manager) -> None:
     wire = Wire(lambda req: httpx.Response(200, json=answer_body(cost=0.0)))
     subject, rows = build(manager, wire)
