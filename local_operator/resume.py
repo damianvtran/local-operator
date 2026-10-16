@@ -25,7 +25,6 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from local_operator.harness.rows import user_row_text
 from local_operator.procstate import is_zombie, pid_liveness, process_sample
 
 # The archive index is imported at module scope deliberately: it is stdlib-only
@@ -3718,6 +3717,16 @@ def session_name(
     stored = stored_session_title(session_dir)
     if stored:
         return _condense(stored, max_chars) if condense else stored
+    # Imported HERE rather than at module scope, because this module sits in
+    # ``local_operator.cli``'s import closure and the harness package is banned
+    # there: ``tests/unit/test_cli_new.py::test_cli_import_pulls_no_engine_modules``
+    # exists so a bare `lop` does not drag the engine in on every startup, and a
+    # module-scope import of ``harness.rows`` put it back (a harness-package
+    # import is enough to fail the guard, not just ``harness.rows`` itself).
+    # Same shape ``harness.rows`` uses for ``skills.invoke``, and the cost is a
+    # ``sys.modules`` lookup on a path that has already read a file.
+    from local_operator.harness.rows import user_row_text
+
     # The opener is a persisted USER ROW, so the fallback is read through the
     # same "what did the user actually say" rule the transcript paints with.
     # A ``$skill`` invocation persists as its EXPANDED payload, and naming a
