@@ -4073,11 +4073,60 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # 8080:80``, ``ssh -p 2222``) and masking a port would be both unhelpful and
     # wrong. The binary name is the only thing that distinguishes the two, which
     # is why this rule exists at all rather than a bare ``-p`` pattern.
+    #
+    # **The anchor must be an INVOCATION, not a filename stem** (operator-reported
+    # 2026-10-16). ``\b`` treats the dot in a Rust module path as a boundary, so the
+    # old anchor fired on a SOURCE-FILE NAME — the prose of a coder session's own
+    # reasoning — and then masked whatever package-style flag sat within 200
+    # characters of it. Measured (session ``19b15d6e369d``): one such line masked
+    # the crate NAME and REGISTERED it, after which crate paths, ``cargo test -p
+    # <crate>``, ``git add`` pathspecs and a later ``project`` tool ``name:``
+    # argument all came back as the marker. The reported symptom was a cargo
+    # command whose package argument had become the marker and which failed with
+    # "package pattern(s) … not found in workspace".
+    #
+    # The invocation reading is what the rule always MEANT (see "the client
+    # binary" above): the name must not be a FRAGMENT of a longer token, and it
+    # must be followed by whitespace. The negative lookbehind states the first
+    # half — the name may not be preceded by a word character, a dot or a hyphen,
+    # which is what "a NAME" means here — and the `(?=[ \t])` lookahead states the
+    # second, which is what "being INVOKED" means: `<name>.rs`, `<name>/main.rs`,
+    # `<name>-driver` and `login-<name>` are all fragments, and none of them can
+    # anchor the rule any more.
+    #
+    # The lookbehind replaces an ENUMERATED leading class (`^`, space, tab, and
+    # the shell separators) that leaked, twice, in review round 1: a client at the
+    # start of a line inside a multi-line result (`\n` missing) and one inside a
+    # BACKTICK substitution both stopped masking, each measured as a true positive
+    # the old anchor caught. Enumerating the ways a command can be reached is a
+    # losing game — the separators are unbounded — so the class is now stated as
+    # the NEGATIVE space instead (everything that is not a fragment continues to
+    # work: `$(`, `|`, `&&`, `;`, a backtick, `--`, `exec(`, a quote, an absolute
+    # path, and the string start).
+    #
+    # Every true positive keeps its mask: the inline-password spellings pinned in
+    # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
+    # redis-cli, clickhouse-client, influx) match the anchored form, and the
+    # published-port negatives (``docker run -p``, ``ssh -p``) were never in this
+    # alternation.
+    #
+    # RESIDUAL (QA round 1, Q1 — deliberately NOT closed here). The flag still has
+    # to belong to the CLIENT, and a bare client WORD in ordinary prose satisfies
+    # this anchor: `the <client> driver … <another tool> -p <token>` inside 200
+    # characters still masks the token and registers it, which reaches the same
+    # operator-visible failure through a prose trigger. Closing it needs the
+    # flag's OWNER to be decided (candidate measured by the manager: refuse a gap
+    # that names a build/test tool — closes the class at zero true-positive cost,
+    # 0 lost / 0 new corpus negatives, but it ENUMERATES tool names, which is the
+    # losing bet this rule's own review round already made twice). That is its own
+    # change with its own round, not a widening of this one.
     Shape(
         "client-inline-password",
         re.compile(
-            r"(?i)(\b(?:mysql|mysqldump|psql|pg_dump|pg_restore|mongo|mongosh|"
-            r"clickhouse-client|redis-cli|influx)\b[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
+            r"(?i)((?<![A-Za-z0-9_.\-])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
+            r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
+            r"(?=[ \t])"
+            r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
         ),
         r"\1" + REDACTION_MARKER,
         2,
