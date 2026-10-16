@@ -5782,7 +5782,12 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
-        """Dismiss a timed-out ask from the view. Injects nothing, ever."""
+        """Dismiss a timed-out ask from the view. Asks the model nothing, ever.
+
+        The dismissal's own act injects nothing; the deadline notice the ask had
+        not delivered is a separate, still-owed row (fork A, 2026-10-16, design
+        §14), and ``dismiss_ask``'s ``_settled`` reconcile is what delivers it.
+        """
         outcome = self._session.dismiss_ask(ask_id, by=by or "remote")
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the dismissal was refused"))

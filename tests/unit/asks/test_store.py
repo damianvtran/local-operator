@@ -65,6 +65,16 @@ def _answered(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
     }
 
 
+def _dismissed(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": ask_id,
+        "at": at,
+        "by": {"surface": "phone"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # The fold: one row per rule in §2.2's precedence table
 # ---------------------------------------------------------------------------
@@ -326,6 +336,83 @@ def _withdrawn(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
         "at": at,
         "by": {"surface": "agent"},
     }
+
+
+# ---------------------------------------------------------------------------
+# dismissed: the notice a dismissal does not erase (fork A, §14)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dismissal_after_the_deadline_still_owes_the_notice():
+    """A DISMISSAL puts the ask away; it does not tell the model anything.
+
+    The dismissal's promise is about the USER's view ("the ask is gone from my
+    list"), and the deadline notice is the AGENT's fact ("you have no answer and
+    must proceed"). They are different facts, so a dismissal whose notice was
+    never delivered still owes it — before this the record folded to
+    ``dismissed``, left ``INJECTING_STATUSES`` and dropped the row for good, so
+    the agent was never told it had been waiting on nobody.
+    """
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(events, BASE + 200_001)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["dismissed_at"] == BASE + 200_000
+    assert record["notice_owed"] is True
+    # ``delivered_hint`` is UNCHANGED (decision D22): dismissed still means "any
+    # row present", so this reads False until the notice actually lands.
+    assert record["delivered"] is False
+    assert store.expected_row_ids(record) == [store.timeout_row_id("a-1")]
+
+
+def test_a_dismissed_notice_is_not_owed_past_the_late_window():
+    """The 7 d window is the notice's own bound, and a dismissal inherits it.
+
+    Past the window the notice is stale by exactly the rule that governs an
+    unanswered deadline (``fold`` rule 7), so a dismissal there owes nothing and
+    must not resurrect a row a week late.
+    """
+    expires_at = BASE + 120_000
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    past = expires_at + store.LATE_WINDOW_S * 1000 + 1
+    (record,) = store.fold(events, past)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
+
+
+def test_a_dismissal_before_the_deadline_owes_nothing():
+    """Only a deadline that had ALREADY passed can leave a notice undelivered.
+
+    A hand-written log may carry a dismissal dated inside the window (no surface
+    offers one — ``AskQueue.dismiss`` refuses a non-lapsed ask — but the fold is
+    total, so it has to answer). Nothing was owed at that instant, and the
+    dismissal does not invent an owed notice.
+    """
+    events = [_queued(at=BASE, timeout_s=3600), _dismissed(at=BASE + 1_000)]
+    (record,) = store.fold(events, BASE + 2_000)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
+
+
+def test_a_dismissed_notice_already_in_the_transcript_is_not_owed():
+    """The field says a row is still OWED, so a durable one clears it.
+
+    ``notice_owed`` was read off the dates alone, so a dismissed ask whose
+    ``ask-timeout-<id>`` row had already landed still said ``notice_owed: True``
+    (agent review round 1, MINOR-2) — and ``expected_row_ids``, the queue's
+    reconcile and every future reader take that field at its word. The fold has
+    the facts (``present_ids``), so it answers the question it is asked rather
+    than the rule behind it. ``delivered`` is the any-row form (see
+    ``delivered_hint``): a settled row a dismissal arrived AFTER is the answer
+    the model already has, which the notice's own N8 rule lets stand.
+    """
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(events, BASE + 200_001, present_ids=[store.timeout_row_id("a-1")])
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["delivered"] is True
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
 
 
 def test_a_withdrawn_row_folds_to_withdrawn_and_leaves_the_outstanding_set():

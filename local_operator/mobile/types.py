@@ -541,7 +541,8 @@ ControlOp = Literal[
     # ``error: unknown op`` gracefully, which the surfaces render as "this
     # session's runtime predates queued asks". ``ask_respond`` is atomic per ask
     # (whole-ask answers), ``ask_decline`` is the explicit no/decide-yourself,
-    # and ``ask_dismiss`` is a view-only removal that injects nothing.
+    # and ``ask_dismiss`` is a view-only removal that asks the model nothing (it
+    # can still deliver the deadline notice the ask never got — design §14).
     "ask_respond",  # {ask_id, answers: {qid: [str]}, by?}
     # ``ask_revise`` is the ONE sanctioned exception to the one-way answer rule
     # (design §10, #1936): the same atomic body, said as a CHANGE OF MIND rather

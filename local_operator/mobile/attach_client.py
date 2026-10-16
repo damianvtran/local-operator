@@ -2603,7 +2603,12 @@ class AttachClient:
         return await self._request("ask_decline", **fields)
 
     async def ask_dismiss(self, ask_id: str, *, by: str = "") -> str:
-        """Dismiss a TIMED-OUT ask from the view. Injects nothing, ever."""
+        """Dismiss a TIMED-OUT ask from the view. Asks the model nothing, ever.
+
+        What it can still OWE is the ask's deadline notice, when that was never
+        delivered (fork A, 2026-10-16, design §14): the queue's reconcile writes
+        it in its dismissed wording rather than the dismissal cancelling it.
+        """
         fields: dict[str, Any] = {"ask_id": ask_id}
         if by:
             fields["by"] = by
