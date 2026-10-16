@@ -117,7 +117,13 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   - The test discriminates both id carriages, proven by mutation in review round 6: a steer that drops `message_id` fails at index 1, and a prompt that drops it fails at index 0.
   **Rejected:** binding by arrival order or by "the next turn after the POST". A steer can land at a tool boundary, at the turn's end, or in the next turn, and a replay re-delivers frames out of wall-clock time.
   **Owner:** coder (backend pin), UI (the binding).
-- **V15 — Turn generation guards an absorbed bound turn (UI).** *(Placeholder, slice 1, round 6: the row the UI fix lands against.)*
+- **V15 — Turn generation guards an absorbed bound turn (UI).** *(Added slice 1, round 6; backend half filled in round 7, R7-M1.)*
+  **Taken:** the UI's generation guards (an idle or other-generation snapshot unbinds a take; an `agent_end` older than the live generation is dropped) rely on ONE counter. Snapshots, `frontend.update` frames and `agent_start`/`agent_end` all publish the generation of the last `agent_start` the session emitted (`Session._turn_generation`, read by `frontend_state.py`), never the raw per-run `_generation`.
+  - The raw counter also counts post-compaction continuation runs (`_drain_continuation` re-enters `_run_turn`), and those stay the same turn. Before the fix, a snapshot taken during a continuation said N+1 while that turn's `agent_end` said N, so the guard dropped the take's own answer.
+  - Between turns the published value stays at the last announced start. The next start is always above it, because `_run_turn` bumps the raw counter first.
+  - Pinned by `tests/unit/session/test_published_generation.py::test_the_snapshot_publishes_the_turn_events_generation_through_continuations` (one and two continuations; both fail before the fix) and `::test_the_next_turn_after_a_continued_one_still_moves_the_generation_forward`.
+  **Rejected:** publishing `_logical_generation`. It is cleared at `agent_end`, so the post-end refresh fell back to the raw counter and a live update still said N+1.
+  **Owner:** coder (backend counter), UI (the guards).
 
 ## Frozen contract (backend ↔ UI)
 
