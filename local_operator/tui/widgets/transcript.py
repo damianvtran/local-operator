@@ -66,6 +66,7 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
+from local_operator.harness.peer_cycles import PeerCycleCertificate
 from local_operator.i18n.format import format_number
 from local_operator.i18n.keys import tui_transcript
 from local_operator.i18n.text import active_locale, tr
@@ -383,6 +384,12 @@ class TranscriptBlock(Static):
     work_dormant: bool = False
     work_foreign: bool = False
     work_view_identity: tuple[str | None, int] | None = None
+    # Reconciliation alone attaches these local facts. Annotation-only keeps
+    # an unmarked block's attribute ABSENT (including hasattr/vars semantics),
+    # rather than making a new default value look like ownership evidence.
+    peer_cycle_certificate: PeerCycleCertificate | None
+    peer_cycle_closed: PeerCycleCertificate | None
+    peer_display_carrier_owner: tuple[str | None, int] | None
 
     DEFAULT_CSS = ""  # all styling lives in local_operator.tcss
 
@@ -4001,6 +4008,10 @@ def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
     anchor = getattr(block, "navigation_anchor_id", "") or ""
     part = getattr(block, "navigation_anchor_part", 0)
     source_id = f"{anchor}:{part}" if anchor else f"b{id(block):x}"
+    if isinstance(block, TeamBridgeBlock):
+        # The bridge deliberately reuses the peer card's presentation, not its
+        # ownership: contextual work must retain upstream's human/org boundary.
+        return WorkRecord(source_id, "notice")
     source = getattr(block, "internal_work_source", None)
     if isinstance(source, WorkRecord):
         if getattr(block, "notice_kind", None) in ("warning", "error"):
@@ -4177,9 +4188,9 @@ def peer_cycle_rows_of_blocks(blocks: Sequence[TranscriptBlock]):
     from local_operator.tui.widgets.tool_card import ToolCard
     rows = []
     for block in blocks:
-        identity = block.work_view_identity
+        identity = block.work_view_identity or (None, 0)
         source_id = work_record_of_block(block).source_id
-        if isinstance(block, PeerMessageBlock):
+        if isinstance(block, PeerMessageBlock) and not isinstance(block, TeamBridgeBlock):
             rows.append(PeerCycleRow(source_id, "peer", *identity, sender=block._sender))
         elif (isinstance(block, ToolCard) and getattr(block, "peer_display_carrier_owner", None) == identity):
             rows.append(PeerCycleRow(source_id, "carrier", *identity,
@@ -4263,9 +4274,9 @@ def quiet_group_plan(
         certificate = getattr(block, "peer_cycle_certificate", None)
         if not isinstance(certificate, PeerCycleCertificate) or len(positions) != len(kept):
             continue  # A duplicate source ID cannot certify one owner interval.
-        indices = [positions.get(source_id) for source_id in certificate.member_ids]
-        if not indices or any(position is None for position in indices):
+        if not certificate.member_ids or any(source_id not in positions for source_id in certificate.member_ids):
             continue
+        indices = [positions[source_id] for source_id in certificate.member_ids]
         start, end = indices[0], indices[-1]
         if start != index or indices != list(range(start, end + 1)) or any(position in occupied for position in indices):
             continue
@@ -4482,8 +4493,10 @@ class QuietGroupTracker:
         if len(set(ids)) != len(ids):
             return False
         positions = {source_id: index for index, source_id in enumerate(ids)}
-        indices = [positions.get(source_id) for source_id in certificate.member_ids]
-        if not indices or any(index is None for index in indices) or indices != list(range(indices[0], indices[-1] + 1)):
+        if not certificate.member_ids or any(source_id not in positions for source_id in certificate.member_ids):
+            return False
+        indices = [positions[source_id] for source_id in certificate.member_ids]
+        if indices != list(range(indices[0], indices[-1] + 1)):
             return False
         members = source[indices[0]:indices[-1] + 1]
         # An offscreen replay carries the local immutable certificate AFTER
@@ -4529,7 +4542,7 @@ class QuietGroupTracker:
             if block.work_view_identity != identity:
                 return False
             if role["role"] == "peer":
-                if not isinstance(block, PeerMessageBlock):
+                if not isinstance(block, PeerMessageBlock) or isinstance(block, TeamBridgeBlock):
                     return False
             elif role["role"] in {"send", "carrier"}:
                 if (not isinstance(block, ToolCard) or block.state != "success"
@@ -4541,7 +4554,10 @@ class QuietGroupTracker:
                     return False
             else:
                 return False
-        certificate = PeerCycleCertificate(*identity, record["quiet_call_id"], tuple(ids), owner_kind="peer_cycle_display")
+        session_id, view_epoch = identity
+        if not session_id:
+            return False
+        certificate = PeerCycleCertificate(session_id, view_epoch, record["quiet_call_id"], tuple(ids), owner_kind="peer_cycle_display")
         carriers = [block for block, role in zip(members, roles, strict=True) if role["role"] == "carrier"]
         for block in carriers:
             block.peer_display_carrier_owner = identity

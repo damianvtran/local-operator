@@ -1216,6 +1216,9 @@ def project_settled_rows(
     # the existing loaded raw window, not a synthesized nested tool history.
     proof_bytes_left = 512 * 1024
     for candidate in (display_records or {}).get("records", ()):
+        cycle_session_id, cycle_epoch = cycle_view.work_identity
+        if not cycle_session_id:
+            continue  # Unknown view identity is never ownership authority.
         if proof_transcript is not None and proof_bytes_left > 0:
             record, consumed = validate_indexed_record(
                 proof_transcript, candidate, str(cycle_view.work_session_id or ""), max_bytes=proof_bytes_left)
@@ -1229,7 +1232,7 @@ def project_settled_rows(
         if record is None or any(key in display_roles for key in record["member_ids"]):
             continue
         display_validated.append(record)
-        certificate = PeerCycleCertificate(*cycle_view.work_identity, record["quiet_call_id"],
+        certificate = PeerCycleCertificate(cycle_session_id, cycle_epoch, record["quiet_call_id"],
             tuple(record["member_ids"]), owner_kind="peer_cycle_display")
         remember_peer_cycle_certificate(cycle_certificates, certificate)
         display_roles.update((member["source_id"], member["role"]) for member in record["members"])
@@ -1359,7 +1362,8 @@ def project_settled_rows(
         for message in history:
             # A mounted replay consumes the actual quiet result at its original
             # ordered seat. Collected pages carry metadata to the list planner.
-            replay_close = cycle_certificates.get(getattr(message, "tool_call_id", None))
+            replay_call_id = getattr(message, "tool_call_id", None)
+            replay_close = cycle_certificates.get(replay_call_id) if isinstance(replay_call_id, str) else None
             if replay_close is not None and self._block_sink is None and getattr(message, "role", None) == "tool":
                 cycle_view._quiet_groups.consume_replayed_peer_cycle(replay_close, message)
             self._projection_message_id = str(getattr(message, "id", ""))

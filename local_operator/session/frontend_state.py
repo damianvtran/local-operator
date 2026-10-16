@@ -4025,6 +4025,9 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         _bound_live_events_in_place(snapshot)
         _bound_asks_in_place(snapshot)
         _bound_spend_channels_in_place(snapshot)
+        # Charge the proof's independent byte cap before residual consumers
+        # spend room on it; the final call below can also yield a crowded frame.
+        _bound_peer_cycle_display_in_place(snapshot)
         # The goal record is bounded at ENTRY by `GoalState` (a swept history, a
         # clipped judge reason) and yielded HERE at the wire, because an entry
         # cap is not a wire bound: the frame this field rides is the one the
@@ -4066,6 +4069,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
         # catalogue takes a residual budget where jobs take a fixed one.
         _bound_model_catalogue_in_place(payload, snapshot)
+        _bound_peer_cycle_display_in_place(snapshot, payload=payload)
         _yield_spend_channels_when_the_frame_has_no_room(payload, snapshot)
         _yield_asks_when_the_frame_has_no_room(snapshot, payload)
     return payload
@@ -4198,6 +4202,50 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
     bounds any attach that will outlive this reserve.
     """
     return len(json.dumps({"op": "result", "req": 9_999_999_999, "data": payload}).encode()) + 1
+
+
+# A hot proof is optional display acceleration, not the original transcript.
+# Sixteen 64-KiB UTF-8 records can exceed the ENTIRE 1-MiB socket frame once
+# JSON escapes non-ASCII child payloads. Charge actual wire bytes, in aggregate,
+# and keep the full attestations in the existing indexed archive/store instead.
+PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES = 64 * 1024
+
+
+def _bound_peer_cycle_display_in_place(
+    fields: dict[str, Any], *, payload: dict[str, Any] | None = None
+) -> None:
+    """Yield complete proof, never truncated proof that could grant ownership.
+
+    A metadata-budget marker is withholding, NOT proof refutation. Updated
+    history readers can obtain complete records from the indexed archive; other
+    readers keep the original rows visible. Only the wire copy is changed; the
+    authoritative store and indexed archive retain all the source facts. Like the
+    money-table yield, a snapshot with no residual room omits this OPTIONAL
+    accelerator altogether rather than preventing attach. Absence grants no
+    grouping authority and is already valid for legacy/non-capable owners.
+    """
+    value = fields.get("peer_cycle_display")
+    if not isinstance(value, dict):
+        return
+    if _live_row_cost(value) > PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES:
+        from local_operator.harness.peer_cycle_display import HOT_RECORDS
+
+        refs = value.get("refs")
+        # Budgeted DTO absence must not revoke a previously validated same-
+        # owner graph. `unavailable` is the consumer's HARD-refusal vocabulary;
+        # only source/validation conflicts, never this byte cap, belong there.
+        # Use the archive/page metadata-budget and remaining-ID vocabulary.
+        budgeted: dict[str, Any] = {"records": [], "status": "metadata_budget"}
+        if (isinstance(refs, list) and len(refs) <= HOT_RECORDS
+                and all(isinstance(ref, str) and ref for ref in refs)):
+            budgeted["refs"] = list(refs)
+            budgeted["remaining"] = list(refs)
+        if _live_row_cost(budgeted) > PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES:
+            budgeted = {"records": [], "status": "metadata_budget",
+                        "remaining_count": len(budgeted.get("remaining", ()))}
+        fields["peer_cycle_display"] = budgeted
+    if payload is not None and _frame_line_bytes(payload) > _MODEL_CATALOGUE_LINE_LIMIT:
+        fields.pop("peer_cycle_display", None)
 
 
 def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -6836,6 +6884,10 @@ class FrontendStateStore:
             for summary in summaries:
                 _elide_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
+        if "peer_cycle_display" in wire_changes:
+            # A live delta bypasses the attach serializer. Bound its independent
+            # wire copy too; normalized store/archive proof stays complete.
+            _bound_peer_cycle_display_in_place(wire_changes)
         if "spend_channels" in wire_changes:
             # The object rides every refresh's DELTA as well (the band's own
             # publish path), so the cap runs on this route too — a bound placed

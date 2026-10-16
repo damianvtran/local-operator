@@ -30,7 +30,10 @@ def test_live_and_provider_payload_details_have_identical_current_result_admissi
     result = ToolResult(tool_call_id="send", tool_name="send", details=details)
     result = Message.tool_result(result) if durable else result
     if durable:
-        assert result.provider_payload["details"] == details
+        assert isinstance(result, Message)
+        payload = result.provider_payload
+        assert payload is not None
+        assert payload["details"] == details
     assert current_peer_communication_succeeded(result, "send") is expected
 
 

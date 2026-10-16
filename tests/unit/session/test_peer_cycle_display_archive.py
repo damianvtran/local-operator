@@ -22,7 +22,8 @@ from local_operator.session.transcript import Transcript
 
 def make_cycle(index=0, *, wrapped_send=False, send_count=1, fold=None, root_output_lines=1, root_ids=None):
     fold = fold or DisplayCycleAccumulator("sess", "producer-epoch", lambda text: text.replace("SYNTHETIC_SECRET", "[redacted]"))
-    key = lambda suffix: uuid.uuid5(uuid.NAMESPACE_URL, f"display-cycle/{index}/{suffix}").hex
+    def key(suffix: str) -> str:
+        return uuid.uuid5(uuid.NAMESPACE_URL, f"display-cycle/{index}/{suffix}").hex
     peer = CustomMessage(id=key("peer"), custom_type=PEER_MESSAGE_MESSAGE_TYPE,
                          attribution="user", details={"body": "original incoming", "sender": {}})
     fold.observe(PeerMessageDeliveredEvent(message_id=peer.id, body="original incoming", sender={}))
@@ -64,12 +65,16 @@ def test_raw_parent_outcomes_cut_and_foreign_records_refuse_without_overlay():
         changed = dict(record, **{field: value})
         assert validate_record(changed, history, "sess") is None
     changed_history = copy.deepcopy(history)
-    changed_history[-1].content = [TextContent(text="changed/pruned result")]
+    changed_result = changed_history[-1]
+    assert isinstance(changed_result, Message)
+    changed_result.content = [TextContent(text="changed/pruned result")]
     assert validate_record(record, changed_history, "sess") is None
     for boundary in [Message.user("steer"), Message.assistant("real final"), Message.assistant()]:
         assert validate_record(record, [*history[:-1], boundary, history[-1]], "sess") is None
     forged = copy.deepcopy(history)
-    forged[0].details["peer_cycle"] = record
+    forged_peer = forged[0]
+    assert isinstance(forged_peer, CustomMessage)
+    forged_peer.details["peer_cycle"] = record
     assert validate_record(None, forged, "sess") is None
 
 
@@ -174,13 +179,16 @@ async def test_reused_root_ambiguity_stays_visible_and_never_borrows_another_res
     else:
         await transcript.append_messages(first)
         if mutation == "changed-hash":
-            second[2].content = [TextContent(text="not the certified outcome")]
+            changed_result = second[2]
+            assert isinstance(changed_result, Message)
+            changed_result.content = [TextContent(text="not the certified outcome")]
         await transcript.append_messages(second)
         if mutation == "duplicate-current-result":
             duplicate = second[2].model_copy(update={"id": uuid.uuid4().hex})
             await transcript.append_message(duplicate)
         target = second_record
     index = refresh_index(tmp_path, "sess")
+    assert index is not None
     cut = index.journal_rows[second[1].id] if mutation == "cut" else None
     validated, _used = validate_indexed_record(transcript, target, "sess", index=index, cut=cut)
     assert validated is None
@@ -190,7 +198,7 @@ def test_index_reference_budget_refuses_before_iteration_or_sort():
     from types import SimpleNamespace
     from local_operator.harness.peer_cycle_display import _indexed_root_result
 
-    class NoTraversal(list):
+    class NoTraversal(list[str]):
         def __iter__(self):
             raise AssertionError("over-budget metadata must not be traversed")
 
@@ -217,15 +225,21 @@ def test_owned_context_corpus_refuses_incomplete_or_attention_graphs(case):
     elif mutation == "missing-result":
         history.pop()
     elif mutation == "changed-outcome":
-        history[-1].content = [TextContent(text="changed")]
+        changed_result = history[-1]
+        assert isinstance(changed_result, Message)
+        changed_result.content = [TextContent(text="changed")]
     elif mutation == "genuine-user":
         history.insert(-1, Message.user("real steering input"))
     elif mutation == "empty-final":
         history.insert(-1, Message.assistant())
     elif mutation == "held-peer":
-        history[0].details["held"] = True
+        peer = history[0]
+        assert isinstance(peer, CustomMessage)
+        peer.details["held"] = True
     elif mutation == "attachment-peer":
-        history[0].details["attachments"] = ["typed attachment"]
+        peer = history[0]
+        assert isinstance(peer, CustomMessage)
+        peer.details["attachments"] = ["typed attachment"]
     elif mutation == "bad-child-namespace":
         record["child_rows"][0]["tool_call_id"] = "foreign:child"
     elif mutation == "duplicate-member":
@@ -241,9 +255,11 @@ def test_compatible_page_union_preserves_old_proof_and_refuses_collisions():
     _, _, first = make_cycle(0)
     _, _, last = make_cycle(64)
     merged = merge_page_records({"records": [first]}, {"records": [last]})
+    assert merged is not None
     assert [r["id"] for r in merged["records"]] == [first["id"], last["id"]]
     conflicting = copy.deepcopy(first)
     conflicting["logical_actions"] = 99
     refused = merge_page_records(merged, {"records": [conflicting]})
+    assert refused is not None
     assert first["id"] in refused["unavailable"]
     assert all(r["id"] != first["id"] for r in refused["records"])

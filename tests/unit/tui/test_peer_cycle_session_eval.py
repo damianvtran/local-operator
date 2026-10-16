@@ -20,7 +20,7 @@ import pytest
 
 from local_operator.harness.peer_cycles import PeerCycleReplay
 from local_operator.harness.types import (
-    AgentEndEvent, QUIET_TURN_KEY, StreamEndEvent, StreamTextDelta,
+    AgentEndEvent, QUIET_TURN_KEY, StreamEndEvent, StreamEvent, StreamTextDelta,
     StreamToolCallDelta, ToolContext, ToolExecutionEndEvent, ToolExecutionStartEvent,
     StreamReasoningDelta, StreamStartEvent, ReasoningDeltaEvent, ProviderTurnStartEvent, MessageStartEvent,
 )
@@ -32,11 +32,10 @@ from local_operator.tui.widgets.transcript import (
     QuietGroupBlock, TranscriptView, work_record_of_block,
 )
 from tests.unit.session.test_session import ScriptedStream, make_session
-from tests.unit.tui.test_app_pilot import _factory
 from tests.unit.tui.test_peer_message import _settle_for_session
 
 
-def _call(call_id, name, arguments):
+def _call(call_id, name, arguments) -> list[StreamEvent]:
     return [StreamToolCallDelta(index=0, id=call_id, name=name,
                                argument_delta=json.dumps(arguments)),
             StreamEndEvent(stop_reason="toolUse")]
@@ -229,7 +228,11 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
     directory = Path(os.environ.get("OWNED_WORK_EVIDENCE_DIR", str(tmp_path / "evidence"))) / scenario
     directory.mkdir(parents=True, exist_ok=True)
     worker_origin = None
-    app = OperatorApp(lambda: _factory(session))
+    async def existing_session():
+        # This path deliberately owns a REAL Session, not the pilot's FakeSession.
+        return session
+
+    app = OperatorApp(existing_session)
     try:
         if mode in {"eval", "mixed", "mixed-observer-failure", "wrapped-no-send", "same-eval-root", "eval-send-direct-quiet"}:
             worker_path = Path(eval_tool.__file__).resolve().with_name("eval_worker.py")
@@ -290,7 +293,9 @@ async def test_real_session_direct_eval_peer_send_quiet_cycle_records_live_and_d
             quiet_events = [event for event in events if isinstance(event, ToolExecutionEndEvent)
                             and event.tool_name == "no_reply"]
             assert len(quiet_events) == 1
-            assert quiet_events[0].result.details.get(QUIET_TURN_KEY) is True
+            quiet_details = quiet_events[0].result.details
+            assert quiet_details is not None
+            assert quiet_details.get(QUIET_TURN_KEY) is True
             bars = [block for block in app.query_one(TranscriptView).blocks() if isinstance(block, QuietGroupBlock)]
             if is_mixed:
                 # Both frames already exist BEFORE the expected RED. Assert the

@@ -37,7 +37,9 @@ def test_original_arguments_select_communication_not_model_mutation(name, argume
 ])
 def test_successful_send_named_model_or_nonmessage_call_never_certifies_replay(arguments):
     messages = raw_cycle()
-    messages[1].tool_calls[0].arguments = arguments
+    declaration = messages[1]
+    assert isinstance(declaration, Message)
+    declaration.tool_calls[0].arguments = arguments
     replay = PeerCycleReplay(IDENTITY)
     closed = [close for message in messages if (close := replay.step(message)) is not None]
     assert len(closed) == 0

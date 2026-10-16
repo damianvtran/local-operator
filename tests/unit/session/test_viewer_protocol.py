@@ -1336,9 +1336,11 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # control methods joined that protocol's declaration surface in the same
     # rung; they are not in THIS population because the app reaches them
     # through a computed ``getattr`` the derivation is blind to.)
-    assert len(viewer_only) == 74, (
+    # 74 → 75 is the optional loaded-window peer-cycle proof accessor. It is
+    # facade-only; the existing per-host and aggregate coverage floors stay put.
+    assert len(viewer_only) == 75, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 74, and the aggregate floor is set at 40 against that number. A "
+        "says 75, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

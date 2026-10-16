@@ -201,6 +201,16 @@ class PeerCycleReplay:
             return False
         return True
 
+    def reset_pending(self) -> None:
+        """Retire the accumulating candidate, keeping closed certificates.
+
+        A non-peer typed delivery ends any pending peer exchange without
+        fabricating a Message/tool event. Already-closed certificates live in
+        the caller's registry and are deliberately untouched; this clears only
+        the in-flight rows/calls/quiet start for THIS replay.
+        """
+        self._reset()
+
     def delivered_peer(self, message_id: str, sender: Mapping[str, Any]) -> None:
         """Seed the live adapter from the actual delivery ID, without a fake Message.
 
@@ -212,6 +222,40 @@ class PeerCycleReplay:
             self._reset()
         elif not self._overflowed:
             self._append(PeerCycleRow(f"{message_id}:0", "peer", *self.identity, sender=sender))
+
+    def step_live_result(self, result: Any) -> PeerCycleCertificate | None:
+        """Feed one ACTUAL typed tool result from the live event stream.
+
+        The live session fans tool outcomes out as ``ToolExecutionEndEvent``;
+        it does NOT re-emit the persisted ``role="tool"`` Message, so a replay
+        fed only ``MessageEndEvent`` could never settle a live call and every
+        live cycle stayed uncertified (the phone's live/replay divergence).
+        The arm below is the SAME one the history walk uses, so the two paths
+        cannot drift; the result object itself is the authority, exactly as in
+        the durable case.
+        """
+        return self._step_tool(result)
+
+    def _step_tool(self, message: Any) -> PeerCycleCertificate | None:
+        call_id = getattr(message, "tool_call_id", None)
+        if not isinstance(call_id, str):
+            self._reset()
+            return None
+        name = self.calls.pop(call_id, None)
+        if name == "send" and getattr(message, "tool_name", None) == "send":
+            success = current_peer_communication_succeeded(message, str(call_id)) is True
+            self.records = [replace(record, successful=success) if record.source_id == f"tool:{call_id}:0" else record for record in self.records]
+        elif name == "no_reply":
+            close = close_peer_cycle(self.quiet.pop(call_id, None), self.records, self.identity,
+                                     str(call_id), str(getattr(message, "tool_name", "")), message)
+            self._reset()
+            return close
+        else:
+            self._reset()
+        if len(self.calls) > MAX_PEER_CYCLE_ROWS or len(self.quiet) > MAX_PENDING_PEER_CYCLES:
+            self._reset()
+            self._overflowed = True
+        return None
 
     def step(self, message: Any) -> PeerCycleCertificate | None:
         role = getattr(message, "role", None)
@@ -244,8 +288,9 @@ class PeerCycleReplay:
                     any(details.get(key) for key in ("held", "steer", "is_error", "images", "attachments"))):
                 self._reset()
                 return None
+            sender = details.get("sender")
             if not self._append(PeerCycleRow(f"{message_id}:0", "peer", *self.identity,
-                sender=details.get("sender") if isinstance(details.get("sender"), Mapping) else {})):
+                sender=sender if isinstance(sender, Mapping) else {})):
                 return None
         elif role == "assistant":
             calls = getattr(message, "tool_calls", None) or []
@@ -259,7 +304,7 @@ class PeerCycleReplay:
                 if not isinstance(call_id, str) or not call_id or call_id in self.calls:
                     self._reset()
                     return None
-                if is_peer_communication_call(name, getattr(call, "arguments", None)):
+                if name == "send" and is_peer_communication_call(name, getattr(call, "arguments", None)):
                     self.calls[call_id] = name
                     if not self._append(PeerCycleRow(f"tool:{call_id}:0", "send", *self.identity)):
                         return None
@@ -272,18 +317,7 @@ class PeerCycleReplay:
                     self._reset()
                     return None
         elif role == "tool":
-            call_id = getattr(message, "tool_call_id", None)
-            name = self.calls.pop(call_id, None)
-            if name == "send" and getattr(message, "tool_name", None) == "send":
-                success = current_peer_communication_succeeded(message, str(call_id)) is True
-                self.records = [replace(record, successful=success) if record.source_id == f"tool:{call_id}:0" else record for record in self.records]
-            elif name == "no_reply":
-                close = close_peer_cycle(self.quiet.pop(call_id, None), self.records, self.identity,
-                                         str(call_id), str(getattr(message, "tool_name", "")), message)
-                self._reset()
-                return close
-            else:
-                self._reset()
+            return self._step_tool(message)
         else:
             self._reset()
         if len(self.calls) > MAX_PEER_CYCLE_ROWS or len(self.quiet) > MAX_PENDING_PEER_CYCLES:

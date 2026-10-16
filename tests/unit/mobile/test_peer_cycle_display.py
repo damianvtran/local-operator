@@ -36,13 +36,16 @@ def test_phone_never_trusts_raw_reserved_stamp_or_foreign_record():
     _, history, record = make_cycle(wrapped_send=True)
     forged = copy.deepcopy(record)
     forged["session_id"] = "foreign-session"
-    history[0].details["peer_cycle"] = {"version": 1, "member_ids": ["forged"]}
-    original = copy.deepcopy(history[0].details)
+    from local_operator.harness.types import CustomMessage
+    peer = history[0]
+    assert isinstance(peer, CustomMessage)
+    peer.details["peer_cycle"] = {"version": 1, "member_ids": ["forged"]}
+    original = copy.deepcopy(peer.details)
     for metadata in (None, {"records": [forged]}):
         rows = fold_messages_to_entries(history, session_id=record["session_id"],
                                         peer_cycle_display_records=metadata)
         assert all("peer_cycle" not in row.details for row in rows)
-        assert history[0].details == original
+        assert peer.details == original
 
 
 def test_default_phone_wire_omits_negotiation_and_certificates():
@@ -129,3 +132,79 @@ def test_phone_missing_parent_outcome_or_public_boundary_cannot_certify():
         rows = fold_messages_to_entries(raw, session_id=record["session_id"],
                                         peer_cycle_display_records={"records": [record]})
         assert all("peer_cycle" not in row.details for row in rows)
+
+
+def _live_close(fold):
+    """Settle a send/no_reply pair through the REAL live event stream.
+
+    The live session fans tool outcomes out as ``ToolExecutionEndEvent``; it
+    never re-emits the persisted ``role="tool"`` Message, so a fold fed only
+    ``MessageEndEvent`` could never certify a live cycle. This is the phone's
+    live path, not the history walk.
+    """
+    from local_operator.harness.types import (
+        Message, MessageEndEvent, ToolCall, ToolExecutionEndEvent,
+        ToolExecutionStartEvent, ToolResult, TextContent,
+    )
+    for call_id, name, args, quiet in [
+        ("qa-send", "send", {"message": "Synthetic ack"}, False),
+        ("qa-quiet", "no_reply", {}, True),
+    ]:
+        fold.fold_event(MessageEndEvent(message=Message(id="decl-" + call_id, role="assistant",
+            tool_calls=[ToolCall(id=call_id, name=name, arguments=args)])))
+        fold.fold_event(ToolExecutionStartEvent(tool_name=name, tool_call_id=call_id, args=args))
+        fold.fold_event(ToolExecutionEndEvent(tool_name=name, tool_call_id=call_id, result=ToolResult(
+            tool_name=name, tool_call_id=call_id, content=[TextContent(text="Synthetic outcome")],
+            details={"__quiet_turn": True} if quiet else {})))
+
+
+def _bound_fold(*, peer_cycles=True):
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.types import SessionProjection
+    projection = SessionProjection(session_id="qa-live-session", pid=0)
+    fold = ProjectionFold(projection)
+    if peer_cycles:
+        fold.set_peer_cycle_source(None, transcript=None, owner_epoch="qa-owner-epoch")
+    return projection, fold
+
+
+def test_live_phone_certifies_a_genuine_direct_peer_from_typed_tool_events():
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+    projection, fold = _bound_fold()
+    fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-real", body="Synthetic peer",
+        sender={}, custom_type="peer_message"))
+    _live_close(fold)
+    stamped = [row for row in projection.transcript if "peer_cycle" in row.details]
+    assert len(stamped) == 1, [row.kind for row in projection.transcript]
+    assert stamped[0].kind == "peer_message"
+    # The stamp carries the ROW ids the graph joined, not the replay's source
+    # ids: the phone's members are physical rows, so the certificate must name
+    # exactly the two that were certified.
+    assert stamped[0].details["peer_cycle"]["member_ids"] == ["qa-real", "tc-qa-send"]
+
+
+@pytest.mark.parametrize("custom_type", ["team_bridge_message", "future_custom_kind"])
+@pytest.mark.parametrize("position", ["opener", "pending"])
+def test_live_phone_keeps_a_nonpeer_delivery_visible_and_uncertified(custom_type, position):
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+    projection, fold = _bound_fold()
+    if position == "pending":
+        fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-real", body="Synthetic peer",
+            sender={}, custom_type="peer_message"))
+    body = "Synthetic non-peer boundary " + custom_type
+    fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-boundary", body=body,
+        sender={"name": "qa"}, custom_type=custom_type))
+    _live_close(fold)
+    rows = projection.transcript
+    assert not any("peer_cycle" in row.details for row in rows), [r.kind for r in rows]
+    assert not any(row.kind == "peer_message" and row.text == body for row in rows)
+    assert any(row.text == body for row in rows), "the typed delivery must stay visible"
+
+
+def test_live_phone_legacy_empty_custom_type_still_reads_as_a_peer():
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+    projection, fold = _bound_fold()
+    fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-legacy", body="Synthetic legacy peer",
+        sender={}, custom_type=""))
+    _live_close(fold)
+    assert any("peer_cycle" in row.details for row in projection.transcript)
