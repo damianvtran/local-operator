@@ -3130,6 +3130,18 @@ class MobileDaemon:
     async def _repaint_stopped_screen(self, session_id: str) -> None:
         """Re-fold one watched stopped screen and push the frame to its subscribers."""
         try:
+            # A RETAINED PAYLOAD PREDATES THE CHANGE THAT ASKED FOR THIS REPAINT, and
+            # the generation fence serves it straight back: for a session whose death
+            # this daemon already captured, ``capture_subagent_details`` answers
+            # ``state.terminal and not terminal`` with the retained frame rather than
+            # a fold — correct for a repaint that is only a re-send, wrong for one
+            # that follows a write, where that frame is the frame from BEFORE the
+            # write. The visibility follower drops the payload for the same reason
+            # before it schedules this repaint; doing it here makes the repaint mean
+            # what its name says for every caller. The generation LEDGER stays (it is
+            # what republishes the fresh fold at the retained epoch, and what a live
+            # owner's next frame advances).
+            self.session_projections.pop(session_id, None)
             # The SSE route's own rule for the ended receipt (U7): a stopped
             # screen is ended iff an ended entry for it exists.
             ended = any(
