@@ -49,6 +49,7 @@ from local_operator.network.handshake import (
     Credential,
     Handshake,
     pair_abort_frame,
+    pair_ready_frame,
     pair_timeout_seconds,
     sas_matches,
 )
@@ -645,3 +646,167 @@ def test_a_local_disk_fault_is_not_relabelled_a_peer_side_stop(
         f"status={row.status!r} code={row.error_code!r}"
     )
     assert row.error_code == ""
+
+
+class _BrokenReadySock:
+    """A socket whose ready-frame write fails the way a peer close does."""
+
+    def sendall(self, payload: bytes) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class _StubSock:
+    """A socket that swallows the ready frame, for a finish that should succeed.
+
+    These three stubs are LOCAL rather than imported from ``test_pair_offer`` (which
+    has its own copies) because ``test_pair_offer`` imports from THIS module — an
+    import here would be a circular import. Kept identical in shape so the two cannot
+    drift in behaviour.
+    """
+
+    def sendall(self, payload: bytes) -> None:
+        return None
+
+
+class _StubCodec:
+    """A codec that opens the frames the test queues, in order."""
+
+    def __init__(self, frames: list[dict[str, Any]]) -> None:
+        self.frames = list(frames)
+
+    def open(self, payload: Any) -> dict[str, Any]:
+        return self.frames.pop(0)
+
+    def seal(self, frame: dict[str, Any]) -> bytes:
+        return b"sealed"
+
+
+class _StubReader:
+    """A reader that yields the payloads the test queues, in order."""
+
+    def __init__(self, payloads: list[Any]) -> None:
+        self.payloads = list(payloads)
+
+    def read_record_payload(self, deadline: float) -> Any:
+        return self.payloads.pop(0)
+
+
+def test_a_ready_frame_send_death_publishes_too(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1: a WIRE death while SENDING the ready frame is a peer-side stop, and publishes.
+
+    Driven through the REAL ``_finish_pairing`` (no stub), so the stage the gate reads is
+    the one the real code sets: ``_finish_pairing`` marks ``ready_send``, then writes the
+    ready frame — a wire operation — *before* it can reach ``result_read``. A gate that
+    accepted only ``result_read`` silently dropped this ordering (review round 2, M1),
+    leaving the non-terminal row this PR exists to remove. It now publishes, and the same
+    cell doubles as the M2 real-progression assertion: the recorded stage must be
+    ``ready_send``, set by the real code rather than pinned by the test.
+    """
+    server_a, server_b, host, port = devices
+    _record, minted = _minted(server_a)
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+    monkeypatch.setattr(
+        net_cli,
+        "_await_join_answer",
+        lambda invite_id, _window, _store: types.JoinAnswer(
+            invite_id=invite_id, decision="admit", code="123456", answered_by="harness"
+        ),
+    )
+
+    with pytest.raises(BrokenPipeError):
+        net_cli._park_join(  # noqa: SLF001 — the CLI's own parker
+            args=_park_args(name=server_b.identity.name),
+            store=store,
+            envelope=minted.envelope,
+            result=Namespace(sas="123456"),
+            fingerprint="synthetic-fingerprint",
+            sock=_BrokenReadySock(),
+            codec=_StubCodec([]),
+            reader=_StubReader([]),
+            host=f"{host}:{port}",
+            identity=server_b.identity,
+            advertised=[],
+            handshake=None,
+            offer_view={"state": "absent", "items": []},
+            attempt=attempt,
+            helpers={
+                "invite_mod": invite_mod,
+                "pair_timeout_seconds": pair_timeout_seconds,
+                "pair_abort_frame": pair_abort_frame,
+                "pair_ready_frame": pair_ready_frame,
+            },
+        )
+
+    # M2: the stage is the REAL code's, not a pin — this is the precondition the gate
+    # rests on, and the fact a mis-placed gate hides.
+    assert attempt.stage == "ready_send"
+    row = store.pending_join(minted.envelope.invite_id)
+    assert row is not None
+    assert row.status == "refused", (
+        "a wire death while sending the ready frame left the row non-terminal: "
+        f"status={row.status!r}"
+    )
+    assert row.error_code == "pairing_stopped"
+    assert row.pid == 0
+
+
+def test_a_real_finish_advances_the_stage_past_the_wire(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2: the REAL ``_finish_pairing`` advances ``result_read`` -> ``persist``.
+
+    The gate's whole precondition is that ``persist`` is set only AFTER the admission
+    frame is read, so a wire failure stays a wire stage while a local write failure does
+    not. Both round-2 guard tests hand-pin the stage, so that transition was never
+    asserted; this cell drives a real successful finish (real codec open of a real admit
+    frame, real persistence into the isolated store) and reads the recorded stage.
+    """
+    server_a, server_b, host, port = devices
+    record, minted = _minted(server_a)
+    record = store.load(record.network_id, server_a.root)
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+
+    from local_operator.network.handshake import pair_result_frame
+
+    admit = pair_result_frame(
+        req=1,
+        admit=True,
+        network={
+            "network_id": record.network_id,
+            "name": record.name,
+            "epoch": record.epoch,
+        },
+        member={"device_id": server_b.identity.device_id, "name": server_b.identity.name},
+        members=[],
+        material=store.load_secrets(record.network_id, server_a.root).secret,
+        shares=[],
+    )
+    net_cli._finish_pairing(  # noqa: SLF001 — the joining half of the ceremony
+        typed="123456",
+        sock=_StubSock(),
+        codec=_StubCodec([admit]),
+        reader=_StubReader([b"admit"]),
+        envelope=minted.envelope,
+        host=f"{host}:{port}",
+        identity=server_b.identity,
+        store=store,
+        handshake=Namespace(peer_endpoints=[]),
+        advertised=[],
+        fingerprint="AAAA-BBBB-CCCC-DDDD",
+        offer_view={"state": "absent", "items": []},
+        attempt=attempt,
+        helpers={
+            "invite_mod": invite_mod,
+            "pair_timeout_seconds": pair_timeout_seconds,
+            "pair_ready_frame": pair_ready_frame,
+        },
+    )
+
+    assert attempt.stage == "persist", (
+        "the real finish did not advance the stage past the wire read, so the gate's "
+        f"precondition is untested: stage={attempt.stage!r}"
+    )

@@ -3461,6 +3461,15 @@ _JOIN_BLOCK_KEYS = (
     "local_only",
 )
 
+#: The ``_JoinAttempt.stage`` values at which a failure is a WIRE failure — the steps
+#: whose death is a genuine peer-side stop, so the parked writer may publish
+#: ``pairing_stopped`` for it. ``ready_send`` (writing the ready frame) and
+#: ``result_read`` (reading the admission) are both wire operations; ``persist`` is the
+#: LOCAL write after the admission is read, whose failure must keep its I/O class
+#: instead of being relabelled a peer-side stop. Spelled positively, so a stage inserted
+#: between the wire ones cannot silently fall outside a negated check.
+_JOIN_WIRE_STAGES = frozenset({"ready_send", "result_read"})
+
 
 @dataclass
 class _JoinAttempt:
@@ -4471,13 +4480,13 @@ _JOIN_UNANSWERED_SENTENCE = (
 )
 
 #: What a parked ceremony says when it STOPPED without reporting — a transport death
-#: inside the finish, not an unanswered window and not a refusal the inviter sent.
-#: ONE OWNER because two sites have to say it: the parker that catches its own
-#: transport failure during the finish (``_park_join``), and the answering side that
-#: observes a parker which died WITHOUT leaving a row at all (``_await_join_result``,
-#: the SIGKILL case the parker cannot cover for itself). The sentence is the honest
-#: one either way: the ceremony is gone, nothing was sent that could be a pairing, and
-#: the invite was not spent.
+#: during the finish (on the WIRE stages, not a local write), not an unanswered window
+#: and not a refusal the inviter sent. ONE OWNER because two sites have to say it: the
+#: parker that catches its own transport failure during the finish (``_park_join``), and
+#: the answering side that observes a parker which died with its row still
+#: ``awaiting_confirmation`` (``_await_join_result`` — the SIGKILL case the parker cannot
+#: cover for itself). The sentence is the honest one either way: the ceremony is gone,
+#: nothing was sent that could be a pairing, and the invite was not spent.
 _JOIN_STOPPED_SENTENCE = (
     "the parked ceremony stopped before it reported back, so nothing was joined and "
     "the invite is untouched. Start again with `lop network join @<token-file> "
@@ -4763,10 +4772,17 @@ def _park_join(
         # which also does the LOCAL ``_persist_join`` write. A local ``OSError`` from that
         # write must NOT be reported as a peer-side stop ("the parked ceremony stopped …
         # the invite is untouched") — it is an I/O fault, and it keeps its own class in
-        # the attempt record via the outer handler (review round 1, F2). ``_finish_pairing``
-        # advances the stage to ``persist`` once the admission is read, so
-        # ``result_read`` is true only for a failure in the wire read itself.
-        if attempt is not None and attempt.stage == "result_read":
+        # the attempt record via the outer handler (review round 1, F2).
+        #
+        # THE SET IS THE WIRE STAGES, spelled OUT rather than as "not persist":
+        # ``_finish_pairing`` sends the ready frame at ``ready_send`` and reads the
+        # admission at ``result_read`` — BOTH are wire operations whose death is a genuine
+        # peer-side stop — and advances to ``persist`` only after the admission is read
+        # (review round 2, M1: gating on ``result_read`` alone silently dropped the
+        # ready-send death). Naming the wire stages positively means a future stage
+        # inserted between them cannot silently re-open the hole by falling outside a
+        # negated check; it would have to be added here deliberately.
+        if attempt is not None and attempt.stage in _JOIN_WIRE_STAGES:
             store.clear_join_answer(envelope.invite_id)
             _parked_outcome(
                 pending,
