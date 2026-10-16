@@ -22,5 +22,15 @@
   "tui.small.copy_picker.title": "Copy to clipboard",
   "tui.small.copy_picker.from_line": " · from line {line}",
   "tui.small.copy_picker.more_lines": "{count, plural, one {… {shown} more line} other {… {shown} more lines}}",
-  "tui.small.link_picker.title": "Open a link"
+  "tui.small.link_picker.title": "Open a link",
+  "tui.small.info_panel.last_heartbeat_ago": "last heartbeat {age} ago",
+  "tui.small.info_panel.needs_pending": "needs {pending}",
+  "tui.small.info_panel.busy_word": "busy",
+  "tui.small.info_panel.deeper_below_depth": "  +{deeper} deeper (below depth {depth})",
+  "tui.small.subagent_view.row_name": "Subagent",
+  "tui.small.subagent_view.no_longer_on_ledger": "no longer on the ledger",
+  "tui.small.wake_panel.wakes_title": "Wakes",
+  "tui.small.wake_panel.monitors_title": "Monitors",
+  "tui.small.wake_panel.monitors_need_attention": "{count, plural, one {{shown} of {total} needs attention} other {{shown} of {total} need attention}}",
+  "tui.small.wake_panel.monitors_armed": "{count, plural, one {{shown} monitor armed} other {{shown} monitors armed}}"
 }
