@@ -106,7 +106,7 @@ def test_a_finished_deliverable_is_named_and_never_denied(queued: str) -> None:
     assert "Deliverables surface themselves" in queued
     assert "A file the turn wrote or named surfaces under your answer as a file callout" in queued
     assert "name each deliverable and its path" in queued
-    assert "never say you cannot attach or send one" in queued
+    assert "never say you cannot attach, send or share one" in queued
 
 
 def test_written_html_and_charts_are_never_denied(queued: str) -> None:
