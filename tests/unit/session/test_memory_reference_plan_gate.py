@@ -45,7 +45,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.loop import _plan_guard_inputs
+from local_operator.harness.loop import _decode_plan_guard_raw, _plan_guard_inputs
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -657,3 +657,54 @@ def test_the_plan_gate_changes_its_verdict_for_admitted_references_only() -> Non
             assert guarded is False, (name, args)
         else:
             assert guarded is retained, (name, args, "unchanged rows must not move")
+
+
+def test_the_raw_masking_is_used_only_where_it_is_provably_lossless() -> None:
+    """What makes the raw masking legitimate, and what happens where it is not.
+
+    ``_decode_plan_guard_raw`` is the detector the raw path decides on. Both branches are
+    pinned here; the duplicate-key rows above reach the same branch through a real
+    session, and these are the spellings no corpus row built with ``json.dumps`` can hold:
+
+    * ``4111111111111111.0`` — the review's SECOND spelling for the lossy round trip. It
+      does NOT reproduce: the literal parses to a float whose ``repr()`` is that same
+      spelling, so ``json.dumps`` re-emits it byte-identically, the 16-digit run survives
+      the round trip, and the card arm still refuses the call (last assertion here). That
+      negative result is why no test in this file asserts an evasion for it — the evasion
+      is not reachable.
+    * ``1E5`` / ``1e5`` — literals ``json.dumps`` DOES re-spell (``100000.0``), because it
+      writes ``repr()`` of the parsed value. The round trip is then not provably lossless,
+      so the ORIGINAL raw reaches the guard: with an admitted reference beside it the call
+      is refused rather than masked — the conservative direction this fix is required to
+      take ("if you cannot prove losslessness, hand the guard the original"), pinned so the
+      trade-off stays visible.
+    """
+    for raw, proved in (
+        ('{"a": 1}', True),
+        ('{"a": 1, "a": 2}', False),
+        (json.dumps({"path": f"memory://global?q={DEVICE_ID}"}), True),
+        ('{"path": "memory://global?q=%s", "i": 4111111111111111.0}' % DEVICE_ID, True),
+        ('{"path": "memory://global?q=%s", "i": 1E5}' % DEVICE_ID, False),
+        ('{"path": "memory://global?q=%s", "i": 1e5}' % DEVICE_ID, False),
+    ):
+        assert _decode_plan_guard_raw(raw)[1] is proved, raw
+
+    card_float = '{"path": "memory://global?q=%s", "raw": 4111111111111111.0}' % DEVICE_ID
+    assert (
+        retained_arguments(
+            "read",
+            *_plan_guard_inputs("read", {"path": f"memory://global?q={DEVICE_ID}"}, card_float),
+        )[2]
+        is True
+    ), "the card as a float literal keeps its digits: the guard still refuses it"
+
+    respelled = '{"path": "memory://global?q=%s", "raw": "true", "limit": 1E5}' % DEVICE_ID
+    assert (
+        retained_arguments(
+            "read",
+            *_plan_guard_inputs(
+                "read", {"path": f"memory://global?q={DEVICE_ID}", "raw": "true"}, respelled
+            ),
+        )[2]
+        is True
+    ), "not provably lossless: the ORIGINAL raw is guarded, so its reference is not masked"
