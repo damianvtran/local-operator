@@ -61,7 +61,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationInfo,
+    field_validator,
+    model_serializer,
+)
 
 # Shared identity with ``local_operator.types`` (see its docstring): the CLI
 # catches this at zero startup cost while ``teams`` raises it where the lock
@@ -75,6 +82,7 @@ from local_operator.display_labels import LABEL_MAX_CHARS, bounded_form
 from local_operator.display_labels import default_label as _default_label
 from local_operator.display_labels import normalize_label as _normalize_label
 from local_operator.display_labels import validate_label
+from local_operator.model.effort import CANONICAL_EFFORT_TIERS, TIER_EFFORTS
 from local_operator.model.suggestion import ModelNotice, resolve_model_suggestion
 from local_operator.procstate import O_BINARY
 from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryError
@@ -205,6 +213,43 @@ class TeamMember(BaseModel):
         default="agent",
         description="'agent' (a role/specialist) or 'team' (a nested sub-team).",
     )
+    # The MODEL tier this slot runs on when THIS roster launches it, overriding
+    # the row's own ``effort:`` tag. Same three words as the row tag, because
+    # they name the same thing: a key of ``values.subagents.models``. ``None``
+    # falls through to the row tag, then to the launching session's model.
+    #
+    # On a ``kind='team'`` slot the override belongs to the sub-team's MANAGER
+    # -- the role this roster actually launches when it names ``team:pod``.
+    # Pod's own members keep reading pod's ``team.yml``; the override is a
+    # property of the roster that names the member, never of the member.
+    tier: Literal["lo", "med", "hi"] | None = Field(
+        default=None,
+        description="Model tier for this slot (lo/med/hi); absent inherits the row tag.",
+    )
+    # The REASONING effort this slot asks for: a level of ``TIER_EFFORTS``, or
+    # the word ``auto`` for "whatever this model does by default". Typed ``str``
+    # rather than a Literal because the accepted set is a tuple the effort module
+    # owns and a second copy here would be a second vocabulary to drift; the
+    # validator below enforces membership strictly at every write.
+    #
+    # ``tier`` keeps its Literal for the same reason it is written out there:
+    # the three words ARE the schema's enum, and a test pins the Literal's args
+    # equal to ``CANONICAL_EFFORT_TIERS`` so widening the constant cannot leave
+    # a stale annotation behind. ``effort`` has no such option -- a Literal
+    # cannot be built from a tuple -- so its validator is the only gate, which
+    # is why the two fields spell their normalisation in one shared validator.
+    #
+    # ``auto`` and ``None`` mean DIFFERENT things, and that is the point: an
+    # absent effort falls through to the tier's map effort, while ``auto``
+    # OVERRIDES it -- a team can take tier ``hi`` without inheriting that tier's
+    # ``xhigh``.
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Reasoning effort for this slot (optional, extends the launcher); "
+            f"one of {'|'.join(TIER_EFFORTS)}."
+        ),
+    )
 
     @field_validator("role")
     @classmethod
@@ -213,6 +258,124 @@ class TeamMember(BaseModel):
         if not name:
             raise ValueError("member role is required")
         return name
+
+    @field_validator("tier", "effort", mode="before")
+    @classmethod
+    def _override_words(cls, value: object, info: ValidationInfo) -> object:
+        """Normalise one override word; strict at WRITE, lenient at LOAD.
+
+        Both vocabularies are read here rather than declared as Literals so a
+        single validator owns the strip/lowercase rule and the refusal text.
+
+        The lenient arm is not a convenience. ``_load`` skips any row whose
+        ``Team.model_validate`` raises, so a hand-edited ``team.yml`` with
+        ``tier: high`` would delete the whole team from every listing -- a
+        silently vanished roster is a far worse cost than an ignored override.
+        ``{"team_load": True}`` in the validation context says which caller
+        this is; only the two load sites pass it.
+        """
+        field = str(info.field_name or "")
+        allowed = CANONICAL_EFFORT_TIERS if field == "tier" else TIER_EFFORTS
+        if value is None:
+            return None
+        if isinstance(value, str):
+            word = value.strip().lower()
+            if word in allowed:
+                return word
+            detail = f"{word!r} is not one of {'|'.join(allowed)}"
+        else:
+            detail = f"{value!r} is not one of {'|'.join(allowed)}"
+        if (info.context or {}).get("team_load"):
+            logger.warning(
+                "team member %s: %s; ignoring the override rather than dropping the team",
+                field,
+                detail,
+            )
+            return None
+        raise ValueError(f"member {field} {detail}")
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_overrides(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Drop an unset ``tier``/``effort`` from every dump.
+
+        Without this, ``_save_team_locked`` (``model_dump(mode="json")``) writes
+        ``tier: null, effort: null`` into EVERY member of EVERY team the next
+        time that team is saved. ``members`` is hashed into
+        ``definition_revision`` (``hub_sync.definition``), so that rewrite would
+        move every team's revision and turn the next save from every already-open
+        editor into a spurious 409 -- a write-only cosmetic change that costs the
+        operator their work. The SCHEMA keeps both keys: this is a dump rule, not
+        a hidden field.
+        """
+        data = handler(self)
+        for name in ("tier", "effort"):
+            if data.get(name) is None:
+                data.pop(name, None)
+        return data
+
+    def is_default(self) -> bool:
+        """Whether this slot carries no override -- the byte-identical case."""
+        return self.tier is None and self.effort is None
+
+
+def find_member(
+    members: Iterable["TeamMember"] | None, role: str, *, kind: str = "agent"
+) -> "TeamMember | None":
+    """The first slot of ``kind`` whose role matches ``role`` case-insensitively.
+
+    Casefolded, and FIRST match wins, because that is how a launch resolves the
+    slot it names (``local_operator.harness.subagent.resolve_member_model``) and
+    how the writers that carry overrides forward look a slot up
+    (``tools.team_tool``, ``hub_sync.service``). One lookup, so display and
+    launch cannot read two different slots of the same name; the exact-match
+    tier ``_team_slot_kinds`` uses for a nested-team name stays as it is.
+    """
+    wanted = (role or "").strip().casefold()
+    if not wanted:
+        return None
+    for member in members or ():
+        if str(getattr(member, "kind", "agent")) != kind:
+            continue
+        if str(getattr(member, "role", "")).strip().casefold() == wanted:
+            return member
+    return None
+
+
+def refuse_conflicting_overrides(members: Iterable["TeamMember"]) -> None:
+    """Refuse a roster whose duplicate slots carry DIFFERENT overrides.
+
+    ``parse_members`` collapses every ``(kind, role)`` into one slot, so a tool
+    or CLI roster cannot collide -- but the desktop route takes a raw
+    ``list[TeamMember]``, and a launch resolves a slot by FIRST match
+    (:func:`find_member`). Two slots under one name with different overrides
+    therefore leave one of them silently INERT: the operator edits ``coder`` in
+    the editor and the launch reads the other row, with nothing anywhere saying
+    so. Accepted when they carry the SAME override, because no reader can tell
+    those two slots apart.
+
+    Structural, so it is checked at the save choke point rather than per field:
+    the individual words are already validated by ``TeamMember`` itself.
+    """
+    seen: dict[tuple[str, str], TeamMember] = {}
+    for member in members:
+        key = (str(member.kind), str(member.role).strip().casefold())
+        first = seen.get(key)
+        if first is None:
+            seen[key] = member
+            continue
+        if (first.tier, first.effort) != (member.tier, member.effort):
+            raise ValueError(
+                f"two {member.kind} slots are named {member.role!r} with different "
+                f"overrides ({_override_word(first)} vs {_override_word(member)}); "
+                "a launch reads the first match, so make them agree or drop one"
+            )
+
+
+def _override_word(member: "TeamMember") -> str:
+    """One slot's overrides, spelled for a refusal message."""
+    if member.is_default():
+        return "none"
+    return f"tier={member.tier or '-'} effort={member.effort or '-'}"
 
 
 class ModelSuggestion(BaseModel):
@@ -1311,7 +1474,11 @@ class TeamRegistry:
                     data = yaml.safe_load(handle) or {}
                 if not isinstance(data, dict):
                     continue
-                team = Team.model_validate(data)
+                # Lenient on the member overrides: a hand-edited ``tier``/
+                # ``effort`` word degrades to "unset" with a warning instead of
+                # raising, because a raising row is SKIPPED below and the whole
+                # team would disappear from every listing.
+                team = Team.model_validate(data, context={"team_load": True})
                 if team.id != child.name:
                     logger.warning(
                         "ignoring team directory %s: metadata id %s does not match",
@@ -2021,6 +2188,11 @@ class TeamRegistry:
         # Defense in depth for ``model_construct`` and validation-bypassing
         # transports: reject before mkdir, temp creation, rename, or cleanup.
         team_id = validate_team_id(team.id)
+        # Same reason, for the roster: every write path (create, update, save,
+        # the hub import) passes here, and the desktop route is the one caller
+        # that can hand in a raw list of slots (``parse_members`` collapses
+        # duplicates for the tool and the CLI).
+        refuse_conflicting_overrides(team.members)
         name_key = team.name.casefold()
         occupant = next(
             (
@@ -2444,7 +2616,10 @@ def _parse_metadata_text(text: str | None) -> Team | None:
     if not isinstance(data, dict):
         return None
     try:
-        return Team.model_validate(data)
+        # Same leniency as ``_load``: this parses a captured revision of a row
+        # that is already on disk, so an invalid override word must not turn a
+        # readable row into an "unavailable snapshot".
+        return Team.model_validate(data, context={"team_load": True})
     except Exception:  # noqa: BLE001 - invalid metadata is an unavailable snapshot
         return None
 

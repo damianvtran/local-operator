@@ -744,3 +744,154 @@ async def test_the_editors_defaults_on_a_specialist_save_are_not_refused(api):
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["kind"] == "specialist" and result["description"] == "Surveys far"
+
+
+def _write_tiers(root: Path, **tiers: Any) -> None:
+    """``values.subagents.models`` verbatim, through the real config writer."""
+    ConfigManager(root).set_config_value("subagents", {"models": tiers})
+
+
+def _effective(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    members = result["result"]["members"]
+    return {row["role"]: row for row in members}
+
+
+async def test_team_members_carry_tier_and_effort_over_the_wire(api):
+    """The frozen member keys survive POST → GET, and an omitted key stays absent.
+
+    The editor sends ``members`` WHOLE (it replaces the roster), so the wire has
+    to echo ``tier``/``effort`` back or the next save from an open editor would
+    erase them -- and "absent" has to stay absent, because a ``null`` in the
+    dump would move every team's ``definition_revision`` and 409 every open
+    editor for no user-visible change (``teams.TeamMember``'s dump rule).
+    """
+    client, root = api
+    created = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="teamwork",
+            manager="manager",
+            members=[
+                {"role": "coder", "kind": "agent", "count": 1, "tier": "HI", "effort": "xhigh"},
+                {"role": "reviewer", "kind": "agent", "count": 1},
+            ],
+        ),
+    )
+    assert created.status_code == 200, created.text
+    row = (await client.get("/v1/desktop/teams/teamwork")).json()["result"]
+    members = {m["role"]: m for m in row["members"]}
+    # Stripped and lowercased on the way in: the data layer owns the vocabulary.
+    assert members["coder"]["tier"] == "hi" and members["coder"]["effort"] == "xhigh"
+    assert "tier" not in members["reviewer"] and "effort" not in members["reviewer"]
+
+    # A roster edit that echoes the override back keeps it.
+    kept = await client.patch(
+        "/v1/desktop/teams/teamwork",
+        json=mutation(
+            description="Audit contracts",
+            members=[
+                {"role": "coder", "kind": "agent", "count": 1, "tier": "hi", "effort": "xhigh"},
+                {"role": "reviewer", "kind": "agent", "count": 1},
+            ],
+        ),
+    )
+    assert kept.status_code == 200, kept.text
+    row = (await client.get("/v1/desktop/teams/teamwork")).json()["result"]
+    assert {m["role"]: m for m in row["members"]}["coder"]["tier"] == "hi"
+
+    # A bad word is the route's ordinary validation refusal, and a roster whose
+    # duplicate slots disagree is refused with the save-choke-point ValueError.
+    bad = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(name="bad", manager="m", members=[{"role": "coder", "tier": "high"}]),
+    )
+    assert bad.status_code == 422, bad.text
+    clash = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="clash",
+            manager="m",
+            members=[
+                {"role": "coder", "kind": "agent", "count": 1, "tier": "hi"},
+                {"role": "Coder", "kind": "agent", "count": 1, "tier": "lo"},
+            ],
+        ),
+    )
+    assert clash.status_code == 409, clash.text
+    assert "a launch reads the first match" in clash.json()["detail"]
+
+
+async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
+    """Plan A.10: one row per slot, each field with the layer that decided it.
+
+    The four layers the design note names, plus the two "nothing was chosen"
+    shapes: no tier anywhere (the child inherits the SESSION's model, which a
+    server cannot name, so ``null`` is the honest value) and a tier that is not
+    configured (``available: false`` with the launch's own reason text, so the
+    editor can say "tier lo is not configured" before a launch fails on it).
+    """
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    client, root = api
+    # hi's ladder stops at ``high``, so the member's ``xhigh`` must CLAMP; med
+    # carries its effort in the mapping form, so tier-only effort is visible.
+    _write_tiers(
+        root,
+        hi={"model": "anthropic/claude-opus-4-5", "effort": "max"},
+        med={"model": "anthropic/claude-sonnet-5-5", "effort": "low"},
+    )
+    write_profile(
+        AgentRegistry(root),
+        AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="med",
+        ),
+        creating=True,
+    )
+    created = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="teamwork",
+            manager="manager",
+            members=[
+                {"role": "coder", "kind": "agent", "count": 1, "tier": "hi", "effort": "xhigh"},
+                {"role": "reviewer", "kind": "agent", "count": 1},
+                {"role": "greeter", "kind": "agent", "count": 1},
+                {"role": "scout", "kind": "agent", "count": 1, "tier": "lo"},
+            ],
+        ),
+    )
+    assert created.status_code == 200, created.text
+
+    report = await client.get("/v1/desktop/teams/teamwork/effective")
+    assert report.status_code == 200, report.text
+    assert report.json()["result"]["team"] == "teamwork"
+    rows = _effective(report.json())
+
+    assert rows["coder"]["tier"] == {"value": "hi", "source": "team"}
+    assert rows["coder"]["model"] == {"value": "anthropic/claude-opus-4-5", "source": "tier"}
+    # requested is what the member asked for; value is what the model will run.
+    assert rows["coder"]["effort"] == {"value": "high", "requested": "xhigh", "source": "team"}
+    assert rows["coder"]["available"] is True and rows["coder"]["reason"] == ""
+
+    assert rows["reviewer"]["tier"] == {"value": "med", "source": "row"}
+    assert rows["reviewer"]["model"] == {"value": "anthropic/claude-sonnet-5-5", "source": "tier"}
+    assert rows["reviewer"]["effort"] == {"value": "low", "requested": "low", "source": "tier"}
+
+    assert rows["greeter"]["tier"] == {"value": None, "source": "none"}
+    assert rows["greeter"]["model"] == {"value": None, "source": "session"}
+    assert rows["greeter"]["effort"] == {
+        "value": None,
+        "requested": None,
+        "source": "model_default",
+    }
+
+    assert rows["scout"]["tier"] == {"value": "lo", "source": "team"}
+    assert rows["scout"]["available"] is False
+    assert rows["scout"]["reason"] == "no model configured at subagents.models.lo"
+
+    missing = await client.get("/v1/desktop/teams/nope/effective")
+    assert missing.status_code == 404, missing.text

@@ -431,6 +431,49 @@ def test_team_roster_merge_honors_a_local_slot_removal_and_takes_a_remote_additi
     )  # a warning, not a failure
 
 
+def test_a_roster_merge_keeps_the_local_overrides_on_surviving_slots(env) -> None:
+    """A hub merge touches the ROSTER; the overrides are local and must ride along.
+
+    The merged members the merge produces are the HUB's shape -- ``{role, kind,
+    count}``, because the hub wire carries nothing else -- so a merge that
+    rebuilt the roster from them would silently drop every ``tier``/``effort``
+    the operator had pinned. A dropped override is not cosmetic: it puts that
+    child back on the model the operator moved it off, and nothing in the
+    receipt would say so.
+    """
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    # The operator pins the slot locally, on a slot the remote merge KEEPS.
+    teams.update_team(
+        team.id,
+        TeamEditFields(
+            members=[
+                TeamMember(role="coder", count=1, tier="hi", effort="xhigh"),
+                TeamMember(role="reviewer", count=2),
+            ]
+        ),
+    )
+    hub.teams["ht1"] = {
+        **hub.teams["ht1"],
+        "members": [
+            *hub.teams["ht1"]["members"],
+            {"role": "qa", "kind": "agent", "count": 1},
+        ],
+    }
+
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+
+    assert report.reports[0].applied
+    after = teams.get_team(team.id)
+    assert [m.role for m in after.members] == ["coder", "reviewer", "qa"]
+    coder = next(m for m in after.members if m.role == "coder")
+    assert (coder.tier, coder.effort) == ("hi", "xhigh")
+    # The slots the merge added carry none: an override is per-slot, never
+    # copied onto a neighbour.
+    assert next(m for m in after.members if m.role == "qa").is_default()
+    assert next(m for m in after.members if m.role == "reviewer").is_default()
+
+
 def test_team_name_is_never_touched_and_a_remote_rename_is_only_a_note(env) -> None:
     ctx, hub, _a, teams, root = env
     team = _pull_team(teams, hub, root)
