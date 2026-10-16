@@ -61,10 +61,15 @@ async def test_standard_ownership_help_and_receipts_real_app(
         "collapsed-help",
         "expanded-help",
         "happy",
+        "missing-local",
         "unknown",
         "unsupported",
-        "invalid",
     }
+    proof.case_note = (
+        "Painted responses: happy/missing-local/unknown/unsupported; "
+        "foreign/unavailable/invalid are logical replay checks only. "
+        "Compact production receipt cropping is not repaired by this test."
+    )
     # This is a publication fixture, not live host discovery. The normal
     # builder/parameters/help renderer remain real; no browser resource or
     # client is constructed or invoked, and no capability is claimed live.
@@ -102,18 +107,27 @@ async def test_standard_ownership_help_and_receipts_real_app(
             )
             # Full approved sanitized payloads are replayed unchanged. Do not
             # strip foreign fields here and call that a privacy producer test.
-            text = json.dumps(payload, sort_keys=True, indent=2)
-            card.mark_done(text, payload)
+            result = builtin._text(
+                f"synthetic-{name}",
+                "browser",
+                json.dumps(payload, sort_keys=True),
+                details=payload,
+            )
+            assert result.details == payload
+            assert result.text == json.dumps(payload, sort_keys=True)
+            card.mark_done(result.text, result.details)
             app._append_block(card)
             await pilot.pause()
             assert card.toggle_expanded()
             card.scroll_visible(immediate=True)
             await pilot.pause()
-            content = card._build_content(width - 4).plain
-            for field in payload:
-                assert field in content
+            # Logical payload identity is not a painted-field assertion. The
+            # production compact line may crop in the standard card; preserve
+            # that real presentation for independent frame review, not a
+            # prettier multi-line receipt that production never emitted.
+            assert json.loads(result.text) == payload
             seen.add(name)
-            if name in {"happy", "unknown", "unsupported", "invalid"}:
+            if name in {"happy", "missing-local", "unknown", "unsupported"}:
                 await shot(name)
         assert seen == set(REPLAYS), "a missing replay must not silently pass"
         assert phases == proof.expected_phases

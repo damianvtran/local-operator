@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -30,6 +31,139 @@ def _prepay_session_import_warmup() -> None:
     real owner's provider/MCP warmup defeats that boundary; its ordering remains
     covered by the dedicated startup tests. No production default is changed.
     """
+
+
+def _metadata_text(path: Path, root: Path, limit: int = 16384) -> str:
+    """Read a bounded Git metadata file, never a ref escaping its authority."""
+    resolved = path.resolve()
+    assert resolved.is_relative_to(root.resolve()), "Git metadata escaped its root"
+    with resolved.open("rb") as stream:
+        data = stream.read(limit + 1)
+    assert len(data) <= limit, "Git metadata exceeded the bounded read"
+    return data.decode("ascii").strip()
+
+
+def checkout_revision(checkout: Path) -> str:
+    """Resolve real detached/branch/worktree HEAD without spawning git.
+
+    Actions checkout may leave main symbolic; worktrees use a gitfile and a
+    separate common ref store. GITHUB_SHA can describe a different event ref,
+    so it is not a substitute for the actual checkout's identity.
+    """
+    marker = checkout / ".git"
+    if marker.is_file():
+        pointer = _metadata_text(marker, checkout)
+        assert pointer.startswith("gitdir: ") and "\n" not in pointer
+        location = Path(pointer.removeprefix("gitdir: "))
+        gitdir = (checkout / location).resolve()
+    else:
+        assert marker.is_dir(), "checkout has no Git metadata directory"
+        gitdir = marker.resolve()
+    common = gitdir
+    if (gitdir / "commondir").exists():
+        location = _metadata_text(gitdir / "commondir", gitdir)
+        assert location and "\n" not in location
+        common = (gitdir / location).resolve()
+    assert gitdir.is_dir() and (common / "objects").is_dir()
+    value = _metadata_text(gitdir / "HEAD", gitdir)
+    seen = set()
+    for _ in range(8):
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+            return value
+        assert value.startswith("ref: "), "invalid checkout revision"
+        ref = value.removeprefix("ref: ")
+        assert re.fullmatch(r"refs/[A-Za-z0-9._/-]+", ref)
+        assert all(part not in ("", ".", "..") for part in ref.split("/"))
+        assert ref not in seen, "cyclic symbolic ref"
+        seen.add(ref)
+        for authority in dict.fromkeys((gitdir, common)):
+            path = authority / ref
+            if path.exists():
+                value = _metadata_text(path, authority)
+                break
+        else:
+            matches = set()
+            packed = common / "packed-refs"
+            if packed.exists():
+                for line in _metadata_text(packed, common, 1024 * 1024).splitlines():
+                    if not line or line.startswith(("#", "^")):
+                        continue
+                    fields = line.split()
+                    if len(fields) == 2 and fields[1] == ref:
+                        matches.add(fields[0])
+            assert len(matches) == 1, "missing or ambiguous checkout ref"
+            value = matches.pop()
+    raise AssertionError("symbolic checkout ref exceeded bounded hops")
+
+
+@pytest.mark.parametrize(
+    "shape", ["detached", "loose-main", "packed-main", "worktree-loose", "worktree-packed"]
+)
+def test_checkout_revision_reads_actual_ref_shape(tmp_path: Path, shape: str) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    if shape.startswith("worktree"):
+        common = tmp_path / "metadata"
+        gitdir = common / "worktrees" / "proof"
+        gitdir.mkdir(parents=True)
+        (checkout / ".git").write_text("gitdir: ../metadata/worktrees/proof\n")
+        (gitdir / "commondir").write_text("../..\n")
+    else:
+        common = gitdir = checkout / ".git"
+        gitdir.mkdir()
+    (common / "objects").mkdir()
+    expected = "1" * 40
+    if shape == "detached":
+        (gitdir / "HEAD").write_text(expected + "\n")
+    else:
+        (gitdir / "HEAD").write_text("ref: refs/heads/main\n")
+        if "packed" in shape:
+            (common / "packed-refs").write_text(
+                "# pack-refs with: peeled\n" + expected + " refs/heads/main\n"
+            )
+        else:
+            loose = common / "refs" / "heads" / "main"
+            loose.parent.mkdir(parents=True)
+            loose.write_text(expected + "\n")
+    assert checkout_revision(checkout) == expected
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "cycle", "traversal", "escaping-symlink", "oversized"]
+)
+def test_checkout_revision_rejects_bad_metadata(tmp_path: Path, fault: str) -> None:
+    gitdir = tmp_path / ".git"
+    (gitdir / "objects").mkdir(parents=True)
+    head = gitdir / "HEAD"
+    head.write_text("ref: refs/heads/main\n")
+    if fault == "traversal":
+        head.write_text("ref: refs/heads/../../outside\n")
+    elif fault == "oversized":
+        head.write_text("0" * 16385)
+    elif fault in ("cycle", "escaping-symlink"):
+        loose = gitdir / "refs" / "heads" / "main"
+        loose.parent.mkdir(parents=True)
+        if fault == "cycle":
+            loose.write_text("ref: refs/heads/main\n")
+        else:
+            outside = tmp_path / "outside"
+            outside.write_text("1" * 40)
+            loose.symlink_to(outside)
+    with pytest.raises(AssertionError):
+        checkout_revision(tmp_path)
+
+
+def refuse_external(violations: list[str], *_args, **_kwargs):
+    violations.append("external-effect-or-provider")
+    raise AssertionError("UI proof attempted an external effect or provider")
+
+
+def test_refusal_counter_is_recorded_before_raising() -> None:
+    """Pure primitive control, not a runtime/provider-hook sensitivity proof."""
+    violations: list[str] = []
+    with pytest.raises(AssertionError, match="external effect"):
+        refuse_external(violations)
+    assert violations == ["external-effect-or-provider"]
 
 
 @pytest.fixture
@@ -54,8 +188,7 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     violations: list[str] = []
 
     def refuse(*_args, **_kwargs):
-        violations.append("external-effect-or-provider")
-        raise AssertionError("UI proof attempted an external effect or provider")
+        return refuse_external(violations, *_args, **_kwargs)
 
     for name in ("Popen", "run", "call", "check_call", "check_output"):
         monkeypatch.setattr(subprocess, name, refuse)
@@ -160,7 +293,7 @@ async def capture_pair(proof, pilot, case: str, phase: str) -> set[str]:
     proof.output.mkdir(exist_ok=True)
     generated: set[str] = set()
     previous = None
-    for frame in ("immediate", "settled"):
+    for frame in ("post-pause-1", "post-pause-2"):
         await pilot.pause()
         stem = f"{case}-{phase}-{frame}"
         target = proof.output / f"{stem}.svg"
@@ -199,8 +332,7 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
         manifest = (
             json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
         )
-        head = (SOURCE_ROOT / ".git" / "HEAD").read_text().strip()
-        assert len(head) == 40 and all(c in "0123456789abcdef" for c in head)
+        head = checkout_revision(SOURCE_ROOT)
         assert phase in proof.expected_phases
         incoming = {}
         for name in names:
@@ -219,6 +351,9 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
             "local_operator/tui/widgets/settings_view.py",
             "local_operator/tui/widgets/tool_card.py",
             "local_operator/tools/tool_docs.py",
+            "scripts/visual_capture.py",
+            "tests/unit/tui/conftest.py",
+            "tests/unit/tui/test_app_pilot.py",
             "tests/unit/tui/test_host_speed_settings_rendered.py",
             "tests/unit/tui/test_ownership_inspection_rendered.py",
         )
@@ -229,6 +364,14 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
             node=None,
             node_note="Python/Textual capture; Node not used or measured",
             font_note="unmeasured here; independent rasterization/view still required",
+            validation_note=(
+                "Capture presence/counters are not final fixture/test PASS. "
+                "Authenticate final JUnit, including teardown, independently."
+            ),
+            sampling_note=(
+                "Post-pause geometry samples only; not initial-paint observation "
+                "or pixel equality/reflow exclusion. Independent image view required."
+            ),
             source_sha256={
                 name: hashlib.sha256((SOURCE_ROOT / name).read_bytes()).hexdigest()
                 for name in sources
@@ -244,6 +387,7 @@ def publish_proof(proof, case: str, phase: str, names: set[str]) -> None:
                 for name in sorted(names)
             },
             "external_attempts_at_capture": len(proof.violations),
+            "coverage_note": proof.case_note,
         }
         manifest_bytes = json.dumps(manifest, sort_keys=True, indent=2).encode()
         projected = (
@@ -281,6 +425,10 @@ async def test_retirement_float_row_real_app(ui_proof, width: int) -> None:
     case = f"host-speed-{width}x30"
     phases: set[str] = set()
     proof.expected_phases = {"default", "editor", "saved", "reset", "invalid", "closed"}
+    proof.case_note = (
+        "Only not-a-number validation is painted; negative/max-range cases "
+        "assert behavior and config bytes, not separate error frames."
+    )
     setting = settings_io.resolve_key(SETTING_KEY)
     assert setting is not None
     assert setting.kind is settings_io.Kind.FLOAT
