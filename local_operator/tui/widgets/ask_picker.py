@@ -3039,10 +3039,9 @@ class AskPickerScreen(Container):
         span = f"{window[0] + 1}–{window[-1] + 1}"
         total = str(self.row_count)
         row = Text(no_wrap=True, overflow="ellipsis")
-        counter = (
-            f"{_t(_x.picker_showing_prefix())}{span}"
-            f"{_t(_x.picker_of_separator())}{total}"
-        )
+        prefix = _t(_x.picker_showing_prefix())
+        separator = _t(_x.picker_of_separator())
+        counter = f"{prefix}{span}{separator}{total}"
         if cell_len(counter) <= width:
             row.append(_t(_x.picker_showing_prefix()), style=dim)
         row.append(span, style=muted)
