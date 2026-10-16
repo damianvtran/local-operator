@@ -26,6 +26,26 @@ def aside_title() -> Msg:
     return Msg("tui.small.aside.title", {})
 
 
+def ask_queue_question_timed_out(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.ask_queue.question_timed_out", {"count": count, "shown": shown})
+
+
+def ask_queue_question_waiting(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.ask_queue.question_waiting", {"count": count, "shown": shown})
+
+
+def ask_queue_timed_out_clause(*, shown: str) -> Msg:
+    return Msg("tui.small.ask_queue.timed_out_clause", {"shown": shown})
+
+
+def ask_queue_urgent_clause(*, shown: str) -> Msg:
+    return Msg("tui.small.ask_queue.urgent_clause", {"shown": shown})
+
+
+def ask_queue_waiting_clause(*, shown: str) -> Msg:
+    return Msg("tui.small.ask_queue.waiting_clause", {"shown": shown})
+
+
 def copy_code_count(*, shown: str) -> Msg:
     return Msg("tui.small.copy.code_count", {"shown": shown})
 
@@ -34,8 +54,24 @@ def copy_quote_count(*, shown: str) -> Msg:
     return Msg("tui.small.copy.quote_count", {"shown": shown})
 
 
+def copy_picker_from_line(*, line: str) -> Msg:
+    return Msg("tui.small.copy_picker.from_line", {"line": line})
+
+
+def copy_picker_more_lines(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.copy_picker.more_lines", {"count": count, "shown": shown})
+
+
+def copy_picker_title() -> Msg:
+    return Msg("tui.small.copy_picker.title", {})
+
+
 def draft_attachment_count(*, images: int | float, shown: str) -> Msg:
     return Msg("tui.small.draft.attachment_count", {"images": images, "shown": shown})
+
+
+def link_picker_title() -> Msg:
+    return Msg("tui.small.link_picker.title", {})
 
 
 def model_picker_window_position(*, shown: str, total: str) -> Msg:

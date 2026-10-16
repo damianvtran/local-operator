@@ -29,10 +29,17 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+# i18n: the card's title, its preview position marker and its overflow marker
+# are user-facing copy, extracted so a locale can carry them; `_t` is bound
+# BELOW the whole import block so no later import reads as not-at-top (E402).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.copy_targets import CopyTarget, FlatNode, flatten_targets
 from local_operator.tui.markdown_theme import IslandSyntaxTheme
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 #: Rows the tree is guaranteed even on a short terminal. It floors the ROW
 #: BUDGET the tree and preview divide, not the tree's own share — porting the
@@ -1273,7 +1280,7 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         below = max(0, len(self._flat) - start - tree_rows)
 
         out = Text(no_wrap=True, overflow="ellipsis")
-        out.append("Copy to clipboard", style=label_style)
+        out.append(_t(_x.copy_picker_title()), style=label_style)
         out.append("\n")
         # The two cues ride the rules that already exist, so a tree that
         # overflows costs no row to say so — which matters because the row
@@ -1703,7 +1710,7 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # has no way to tell there is anything above. Free — the header row
         # already exists and carries only the total.
         if offset > 0:
-            header.append(f" · from line {offset + 1}", style=dim)
+            header.append(_t(_x.copy_picker_from_line(line=str(offset + 1))), style=dim)
 
         for row in range(content_rows):
             if row < shown:
@@ -1712,8 +1719,15 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
                 # tree above stays the brighter surface.
                 lines.append(line if target.language else Text(line.plain, style=muted))
             elif row == shown and has_more and remaining > 0:
-                plural = "line" if remaining == 1 else "lines"
-                lines.append(Text(f"… {remaining} more {plural}", style=dim))
+                # The singular/plural word choice moves into the key's own ICU
+                # plural; `count` selects the branch while `shown` stays a RAW
+                # digit string, so the marker's bytes are unchanged.
+                lines.append(
+                    Text(
+                        _t(_x.copy_picker_more_lines(count=remaining, shown=str(remaining))),
+                        style=dim,
+                    )
+                )
             else:
                 lines.append(Text())
         return lines

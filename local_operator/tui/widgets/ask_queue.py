@@ -63,8 +63,16 @@ from textual.message import Message
 from textual.widget import Widget
 
 from local_operator.asks import store
+
+# i18n: the ask bar's and list header's counts are user-facing copy, extracted
+# so a locale can carry them. `_t` is bound BELOW the whole import block (a
+# binding between imports makes every later import read as not-at-top, E402).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
+
+_t = tr("tui.small")
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
 #: composer chip vocabulary already leaves free (``!`` is the sidebar's
@@ -492,9 +500,9 @@ def compact_headline(open_count: int, timed_out_count: int) -> str:
     """
     parts: list[str] = []
     if open_count:
-        parts.append(f"{open_count} waiting")
+        parts.append(_t(_x.ask_queue_waiting_clause(shown=str(open_count))))
     if timed_out_count:
-        parts.append(f"{timed_out_count} timed out")
+        parts.append(_t(_x.ask_queue_timed_out_clause(shown=str(timed_out_count))))
     return " · ".join(parts)
 
 
@@ -514,8 +522,11 @@ def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0)
     """
     parts: list[str] = []
     if open_count:
-        noun = "question" if open_count == 1 else "questions"
-        parts.append(f"{open_count} {noun} waiting")
+        # The noun's number agreement moves into the message's own ICU plural
+        # (`one `{shown} question waiting``/`other `{shown} questions waiting``),
+        # with `count` selecting the branch and `shown` staying a RAW digit
+        # string so the rendered bytes are unchanged (no grouping, no re-format).
+        parts.append(_t(_x.ask_queue_question_waiting(count=open_count, shown=str(open_count))))
     if urgent_count:
         # URGENCY IN WORDS, because the bar's amber glyph is a hue and a hue is
         # not a channel a reader without colour has: D8's own principle, which
@@ -523,12 +534,14 @@ def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0)
         # also removes the mismatch D13 found — the glyph is painted from
         # `any(row.urgent)`, so with no word for it the amber annotated the ONE
         # question the bar happened to name, which need not be the urgent one.
-        parts.append(f"{urgent_count} urgent")
+        parts.append(_t(_x.ask_queue_urgent_clause(shown=str(urgent_count))))
     if timed_out_count:
         # "question", the noun the waiting clause uses and the phone and desktop
-        # use for the same state, so one bar never counts in two nouns (D5).
-        noun = "question" if timed_out_count == 1 else "questions"
-        parts.append(f"{timed_out_count} {noun} timed out")
+        # use for the same state, so one bar never counts in two nouns (D5) —
+        # now carried by the key's own plural branches.
+        parts.append(
+            _t(_x.ask_queue_question_timed_out(count=timed_out_count, shown=str(timed_out_count)))
+        )
     return " · ".join(parts)
 
 
