@@ -5385,7 +5385,7 @@ async def _click_pair(
     base = editor.region.offset + Offset(
         editor.gutter.left + base_column, editor.gutter.top + base_row
     )
-    for offset in (base, base + Offset(drift, vertical)):
+    for index, offset in enumerate((base, base + Offset(drift, vertical))):
         for kind in (events.MouseDown, events.MouseUp):
             app.post_message(
                 kind(
@@ -5404,6 +5404,22 @@ async def _click_pair(
                 )
             )
         await pilot.pause()
+        if index == 0:
+            # Wait on the FACT the second click will be compared against,
+            # not on a count of pauses: `pilot.pause()` drains UI messages,
+            # and under runner load the editor's `_on_click` can still be
+            # queued behind them, so the near-miss window (1.0 s) started
+            # whenever the scheduler got round to it — sometimes after the
+            # second click was already posted, sometimes so late the claim's
+            # own 1.5 s life was half spent before Ctrl+C. The stamp is the
+            # window's opening; nothing proceeds until it exists. The guard
+            # is a deadlock backstop only, never evidence of the stamp.
+            deadline = time.monotonic() + 10.0
+            while editor._single_click_at is None and time.monotonic() < deadline:
+                await pilot.pause(0.01)
+            assert (
+                editor._single_click_at is not None
+            ), "the first click was never stamped, so the pair has no window to land in"
     await pilot.pause()
 
 
@@ -5475,6 +5491,18 @@ async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft() ->
 
             await _click_pair(app, pilot, editor, drift)
             assert not editor.selected_text, "a near miss must not invent a range"
+
+            # Wait on the arming FACT before the press, for the same reason
+            # `_click_pair` waits on the first stamp: a residual failure here
+            # must name the ARMING phase (the claim never landed inside its
+            # windows) rather than surface one press later as a lost draft.
+            deadline = time.monotonic() + 10.0
+            while not editor.barren_multi_click and time.monotonic() < deadline:
+                await pilot.pause(0.01)
+            assert editor.barren_multi_click, (
+                f"the {drift}-cell near-miss pair never armed the barren claim "
+                "(arming phase: inter-click window or claim dispatch)"
+            )
 
             await pilot.press("ctrl+c")
             await pilot.pause()

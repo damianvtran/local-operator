@@ -843,9 +843,15 @@ async def test_a_read_never_queues_behind_a_control_attach(
     The reported 17-20 s: a first-keystroke ``/warm`` (or a send) dials an owner
     whose loop does not answer, and every read of that conversation issued in the
     meantime queued on the bridge lock behind it, then paid its own read budget.
-    The mute owner is the SIGSTOPped shape. The bound asserted is the operator's
-    300 ms, with the control call demonstrably still in flight when the reads
-    answer.
+    The mute owner is the SIGSTOPped shape. The discriminator asserted is
+    STRUCTURAL — the control call demonstrably still in flight when the reads
+    answer, plus a bound at the control-attach budget itself — not a flat
+    300 ms elapsed ceiling: elapsed also measures runner starvation (CI read
+    0.64 s on a read that returned 200 while the control was still dialling),
+    the exact conversion D-F2 below already made for the same reason. A read
+    that truly queued behind the attach waits out DESKTOP_CONTROL_ATTACH_S
+    plus its own budget, so the structural assert and the attach-budget bound
+    keep that regression — and the reported 17-20 s — red.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     async with _Harness(tmp_path) as harness:
@@ -868,8 +874,13 @@ async def test_a_read_never_queues_behind_a_control_attach(
         for url in (base, f"{base}/history"):
             status, elapsed, body = await _get(harness.client, url)
             assert status == 200, body
-            assert elapsed < 0.3, f"{url} queued behind the control attach: {elapsed:.2f}s"
-        assert not control.done(), "the reads were not measured during the control attach"
+            # Task state BEFORE elapsed, inside the loop (D-F2's precedent):
+            # if the read had queued behind the control attach, the control
+            # would be done — or the elapsed would carry its 3 s budget.
+            assert not control.done(), "the reads were not measured during the control attach"
+            assert (
+                elapsed < DESKTOP_CONTROL_ATTACH_S
+            ), f"{url} queued behind the control attach: {elapsed:.2f}s"
 
         response = await asyncio.wait_for(control, timeout=DEADLOCK_GUARD_S)
         assert response.status_code == 503

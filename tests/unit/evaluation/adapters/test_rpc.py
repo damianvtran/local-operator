@@ -900,17 +900,25 @@ async def test_a_cancel_that_cannot_be_delivered_still_names_the_timeout() -> No
 
     peer = asyncio.create_task(dying_peer())
     try:
+        # 5 s, the sibling death tests' standard in this file — NOT a tighter
+        # number: nothing waits on the peer having read the request before
+        # the deadline, so a short budget lets a loaded runner fire the
+        # deadline while the pipe is still open (cancel then delivers, and
+        # the raise is a plain timeout, not this EPIPE shape). RpcClient.call
+        # offers no wait-on-fact seam for the peer's read, so the budget is
+        # the minimal honest margin — the peer gets the same establishment
+        # time every sibling death test gets.
         with pytest.raises(BrokenPipeError) as excinfo:
-            await client.call("close", CloseParams(operation_id="close-1"), timeout=0.25)
+            await client.call("close", CloseParams(operation_id="close-1"), timeout=5)
         error = excinfo.value
         assert type(error) is BrokenPipeError
         message = str(error)
-        assert "close exceeded its 0.25s budget after" in message
+        assert "close exceeded its 5s budget after" in message
         assert "(request 1; operation_id close-1)" in message
         assert "the cancel was not delivered" in message
         # The timeout detail leads for the same truncation reason as the
         # timeout-only message it replaces on this path.
-        assert message.index("exceeded its 0.25s budget") < message.index("the cancel")
+        assert message.index("exceeded its 5s budget") < message.index("the cancel")
         assert terminated.is_set()
         await peer
         # The poison is still the timeout: the call was never answered, so a
@@ -945,8 +953,14 @@ async def test_a_funded_call_whose_cancel_cannot_be_delivered_names_its_own_budg
     with either.
     """
 
-    monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 0.45)
-    declared_s, headroom_s, configured_s = 0.05, 0.45, 0.01
+    # Headroom 4.95 (funded budget 5.0 s) for the same reason the close-shaped
+    # sibling above carries 5 s: the peer must read the request and close
+    # before the funded deadline, and nothing waits on that fact, so a 0.5 s
+    # funded budget carried the same latent scheduler race at one-tenth the
+    # margin. The funded number stays distinct from the caller's 0.01 s
+    # constant, which is the discrimination this test exists to make.
+    monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 4.95)
+    declared_s, headroom_s, configured_s = 0.05, 4.95, 0.01
     requests_read, requests_write = os.pipe()
     responses_read, responses_write = os.pipe()
     terminated = asyncio.Event()
