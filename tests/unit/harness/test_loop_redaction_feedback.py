@@ -32,7 +32,7 @@ import ast
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1797,7 +1797,7 @@ class TestQ3BoundedDiffProjection:
 
         rows = _q3_diff("", "alpha\nbeta\n")["diff"]
 
-        def callback(text):
+        def callback(text: str) -> str:
             if kind == "crossing":
                 return "\n".join(reversed(text.split("\n")))
             if kind == "insertion":
@@ -1805,7 +1805,12 @@ class TestQ3BoundedDiffProjection:
             if kind == "duplicates":
                 return text + "\n" + text
             if kind == "type":
-                return None
+                # A DELIBERATE type lie, under test: the runtime guard must
+                # withhold the field when a callback returns a non-str, so this
+                # branch really returns None while the annotation keeps the
+                # contract the caller declares. ``cast`` states the intent
+                # rather than silencing the checker on the call site.
+                return cast(str, None)
             if kind == "exception":
                 raise RuntimeError("fixed synthetic error")
             if kind == "output-bytes":
