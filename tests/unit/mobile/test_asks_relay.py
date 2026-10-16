@@ -827,8 +827,12 @@ def test_a_cold_dismiss_republishes_the_conversation_s_own_asks(monkeypatch) -> 
     assert daemon.table.entries == {}
 
 
-def test_a_cold_dismiss_keeps_the_ended_receipt_the_stopped_screen_had(monkeypatch) -> None:
-    """Agent review round 2, M-3: the repaint must carry the ENDED receipt too.
+@pytest.mark.parametrize(
+    "evict_payload", [True, False], ids=["payload-evicted", "payload-retained"]
+)
+def test_a_cold_dismiss_repaints_with_the_current_fold(monkeypatch, evict_payload) -> None:
+    """Agent review round 2, M-3: the repaint carries the ended receipt — and the
+    CURRENT fold.
 
     ``_repaint_stopped_screen`` and the SSE route both fold with the daemon's own
     ended rule ("a stopped screen is ended iff an ended entry for it exists"),
@@ -838,11 +842,13 @@ def test_a_cold_dismiss_keeps_the_ended_receipt_the_stopped_screen_had(monkeypat
     the subscriber received NEXT said ``ended=False`` over a screen whose last
     frame said ``True`` — until some later frame corrected it.
 
-    The state that exposes it is the ordinary one: the scan proved the pid dead
-    and pushed its terminal frame (``ended=True``), then the retained payload was
-    evicted under payload-cache pressure while the generation ledger survived —
-    which is exactly the ``durable_rematerialize`` branch this capture exists for,
-    and the branch that rebuilds the frame from the flags the CALLER passed.
+    The two payload states are the fence's own two branches, and a dismissal must
+    be honest in both: the payload EVICTED under cache pressure (the ledger turns a
+    fresh fold into the retained epoch — the state this capture exists for), and the
+    payload RETAINED (``state.terminal and not terminal`` serves that frame back
+    verbatim, which for a repaint that follows a write is the FRAME FROM BEFORE THE
+    WRITE — the dock and the chip would keep showing the ask the user just
+    dismissed, which is the U1 symptom itself).
     """
     from local_operator.mobile.daemon import _projection_frame
 
@@ -859,13 +865,15 @@ def test_a_cold_dismiss_keeps_the_ended_receipt_the_stopped_screen_had(monkeypat
     async def seed() -> None:
         # The frame the watching phone received when the death was proved — the
         # scan's capture, pushed to this same subscriber set (daemon.py's dead-pid
-        # branch) — and then the eviction that keeps the ledger without the payload.
+        # branch). That frame is what the dock and the chip are drawn from, and the
+        # ask below is the one the phone is about to dismiss.
         dead = await daemon._capture_durable_projection(
             SESSION_A, record=record, terminal=True, ended=True
         )
-        assert dead is not None
+        assert dead is not None and [row.ask_id for row in dead.asks or ()] == ["ask-lapsed"]
         subscriber.put_nowait(_projection_frame(dead))
-        daemon.session_projections.pop(SESSION_A, None)
+        if evict_payload:
+            daemon.session_projections.pop(SESSION_A, None)
         assert daemon._projection_generations[SESSION_A].terminal is True
 
     asyncio.run(seed())
@@ -878,8 +886,9 @@ def test_a_cold_dismiss_keeps_the_ended_receipt_the_stopped_screen_had(monkeypat
     assert reply.status_code == 200, reply.text
 
     frame = subscriber.get_nowait()
+    # The rows the dismissal just settled are gone from the frame that repaints the
+    # screen; the receipt the screen already had is kept.
     assert frame["asks"] == []
-    # The receipt the screen already had, on the frame that repaints it.
     assert frame["ended"] is True
 
 
