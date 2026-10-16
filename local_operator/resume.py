@@ -1139,6 +1139,17 @@ def backfill_session_origins(
         opening = session_name(directory, max_chars=NAME_MAX_CHARS, condense=False)
         if not opening:
             continue
+        # KNOWN SHARING, not an oversight: this fallback is read as a user ROW
+        # (``session_name`` collapses a ``$skill`` payload and strips an
+        # appended reference block). A preamble survives that — it is at the
+        # head of the message — but a brief whose BODY embeds a skill payload
+        # collapses to that payload's typed line and its ``[role: x]``
+        # preamble is no longer the text matched below, so the directory would
+        # not be stamped as a subagent. No brief embeds one today (a delegated
+        # brief is prose plus ``[role: x]``), and the stamp is idempotent and
+        # re-derived on a later sweep, so this is recorded rather than
+        # special-cased: reading the RAW opener here instead would give this
+        # one reader a second definition of "the opener".
         if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1

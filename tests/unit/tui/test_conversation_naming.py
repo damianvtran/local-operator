@@ -1640,6 +1640,49 @@ def test_build_theme_context_is_empty_when_there_is_nothing_to_title() -> None:
     assert naming.build_theme_context([], "", current_title="T") == ""
 
 
+def test_the_theme_sampler_reads_a_skill_turn_as_the_line_that_was_typed() -> None:
+    """D8, one surface further out: the sampler's per-turn budget.
+
+    A ``$skill`` turn's text is the EXPANDED payload, and each sampled turn is
+    cut at ``THEME_TURN_CHARS`` — so the budget went on the invocation header
+    and, with the body behind it, the typed request never reached the model
+    that titles the conversation. Both callers sample through here (the
+    automatic retitle and ``/title --refresh``), and the newest message arrives
+    as the payload too, because the retitle fires at SUBMIT.
+    """
+    payload = _skill_payload("$research the widget market")
+    turns = [_turn("user", payload), _turn("assistant", "Done.")]
+
+    context = naming.build_theme_context(turns, payload, current_title="T")
+
+    assert "$research the widget market" in context
+    assert "The user invoked" not in context
+    assert "SKILL_BODY_MARKER" not in context
+    # The newest message is a user turn too, and rides the tail on the same rule.
+    assert context.rstrip().endswith("$research the widget market\n</user>\n</chat>")
+
+
+def _skill_payload(typed: str) -> str:
+    """A ``$skill`` invocation in its PERSISTED form — the real renderer's output.
+
+    The real ``Skill`` and the real ``render_invocation``, so the sampler is
+    handed the payload the product stores rather than a hand-spelled tag.
+    """
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import parse_invocation, render_invocation
+
+    skill = Skill(
+        name="research",
+        description="research things",
+        file_path=Path("/skills/research/SKILL.md"),
+        base_dir=Path("/skills/research"),
+        source="user",
+    )
+    invocation = parse_invocation(typed, {"research": skill})
+    assert invocation is not None
+    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+
+
 def test_should_refresh_theme_follows_the_geometric_schedule() -> None:
     """Titled at turn 1, then eligible at >=6, >=16, >=36, capped at five."""
     # Never titled (baseline 0): the gate reduces to the four-turn floor.
