@@ -1676,6 +1676,86 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     return message.model_copy(update={"tool_calls": calls})
 
 
+def _plan_guard_arguments(name: str, arguments: Any) -> Any:
+    """``arguments`` with the two ADMITTED reference positions left out of the guard.
+
+    Each position mirrors, on the same classifier, what the TOOL layer exempts — the
+    plan gate must ask its question about the same copy the tools ask theirs of, or the
+    call is refused one level above the exemption that was meant to admit it:
+
+    * a ``memory`` call with ``op=recall`` whose ``text`` IS a minted reference
+      (``tools/memory_tools._guarded_fact_args``, #2524 — spelled here because that
+      helper is not on main yet; the masking is identical: the ``text`` VALUE is
+      emptied, the parameter and every sibling argument are kept);
+    * a ``read`` call whose ``path`` carries an admitted ``q`` VALUE, built from
+      ``memory_tools``' own ``_recall_reference``/``_guarded_path`` (#2511) so the two
+      layers cannot drift on which character of the call is removed.
+
+    Both are decided by ``memory.structural_reference``, so a secret-shaped value in
+    either position is left in place and still trips the guard. A call with no admitted
+    position — every other op, name and shape — is returned BY IDENTITY, which is what
+    lets the caller keep today's inputs, and today's verdict, exactly.
+    """
+    from local_operator.memory import structural_reference
+    from local_operator.tools.memory_tools import _guarded_path, _recall_reference
+
+    if not isinstance(arguments, dict):
+        return arguments
+    if name == "memory" and arguments.get("op") == "recall":
+        if structural_reference(arguments.get("text")):
+            return {**arguments, "text": ""}
+        return arguments
+    if _recall_reference(name, arguments.get("path")) is not None:
+        return {**arguments, "path": _guarded_path(arguments["path"])}
+    return arguments
+
+
+def _plan_guard_raw(name: str, raw: str) -> str:
+    """``raw`` with the same two positions blanked, or ``raw`` itself unchanged.
+
+    The streamed wire JSON is a SEPARATE carrier: ``retained_arguments`` decodes it
+    and guards its text as well, so masking the argument dict alone would leave a
+    live (streamed) call refused on its raw spelling. Only a parseable ``raw`` is
+    re-serialized, and only when masking actually changed something — an unparseable
+    ``raw``, a non-object one or one whose own value is NOT an admitted reference is
+    returned untouched, so the fail-closed refusal it produces today is unchanged.
+    """
+    try:
+        decoded = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw
+    masked = _plan_guard_arguments(name, decoded)
+    if masked is decoded:
+        return raw
+    return json.dumps(masked, ensure_ascii=False, separators=(",", ":"))
+
+
+def _plan_guard_inputs(name: str, arguments: Any, raw: str | None) -> tuple[Any, str | None]:
+    """The inputs the plan-time sensitivity guard is asked about, and NOTHING else.
+
+    ``_plan_call`` asks ``retained_arguments`` whether one call carries a recognised
+    sensitive memory value, and refuses the call before any schema validator or tool
+    sees it. That question is asked of the WHOLE argument dict and of the whole wire
+    JSON, so the exemption PR #2511 gave a read's ``q`` and PR #2524 gave a recall's
+    ``text`` — both applied at the TOOL layer — never got to run: the call was
+    refused one level ABOVE them, and every live path (native dispatch, the eval
+    bridge's ``dispatch_tool``, the monitor runner) funnels through this seam.
+
+    So the guard is handed a MASKED COPY that blanks exactly those two value
+    positions, each classified by the same ``structural_reference`` the tool layer
+    uses. It is for the DECISION alone: ``_plan_call`` still dispatches the caller's
+    original arguments, and ``retained_arguments`` keeps computing its own redacted
+    copies for history/events from those originals. A masked copy that still trips
+    the guard — a secret in a sibling parameter, a secret-shaped value in either of
+    the two positions, an unparseable raw — refuses through the very same branch,
+    byte-identically to today.
+    """
+    masked_arguments = _plan_guard_arguments(name, arguments)
+    if masked_arguments is arguments:
+        return arguments, raw
+    return masked_arguments, _plan_guard_raw(name, raw) if raw else raw
+
+
 #: User-facing copy for the input-refusal recovery tokens the failover walk
 #: records on the end event (``provider_payload["input_refusal_recovery"]``).
 #: A token this map does not know degrades to its underscores read as spaces:
@@ -4446,9 +4526,16 @@ class AgentLoop:
         # Refuse recognised sensitive memory values BEFORE a schema validator
         # can quote an invalid value in its diagnostic. Keep the original call
         # for this guard/executor; history/events alone receive redacted copies.
+        # The guard is asked about a MASKED COPY so the two reference positions
+        # the tools exempt (a read's ``q``, a recall's ``text``) are decided here
+        # too — see _plan_guard_inputs; the executor below still gets the
+        # caller's own arguments.
         from local_operator.memory_privacy import retained_arguments
 
-        _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
+        guard_arguments, guard_raw = _plan_guard_inputs(
+            call.name, call.arguments, call.raw_arguments
+        )
+        _, _, sensitive_memory = retained_arguments(call.name, guard_arguments, guard_raw)
         if sensitive_memory:
             from local_operator.memory import (
                 MEMORY_TOOL_CONTRACT_ERROR,
