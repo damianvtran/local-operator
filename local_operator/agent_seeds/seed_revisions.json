@@ -348,6 +348,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "b49801b2a8f987bad23b2f2c356dbb28bf559713",
+        "version": "1.2.2",
+        "instructions_sha256": "c389653b5ce03a1fee80cf037acaeb064a8175801cf47370595ded3499f2c767",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -701,6 +711,27 @@
         "sha": "458e29e81814ae84bd39cd24957eb7bce90606dd",
         "version": "1.6.1",
         "instructions_sha256": "2bf5116a37a49ce11e7a3967e239d5621dd97b2dd29e1c2f6c3a18eb82bfefa2",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
+      },
+      {
+        "sha": "b49801b2a8f987bad23b2f2c356dbb28bf559713",
+        "version": "1.6.2",
+        "instructions_sha256": "f8ca644b7a5d76f54d151b012e0300dc55381925081955d9ad40c0757a9d6d51",
         "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
         "tools": [
           "read",
