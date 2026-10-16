@@ -102,6 +102,12 @@ from textual.timer import Timer
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.peer_cycles import current_peer_communication_succeeded
 from local_operator.harness.types import INTERRUPTED_FAULTS
+
+# i18n: this card's search/fetch row copy is user-facing, extracted so a
+# locale can carry it; `_t` is bound BELOW the whole import block so no
+# later import reads as not-at-top (E402, the earlier slice's CI failure).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
@@ -127,6 +133,8 @@ from local_operator.web_fetch.failure import (
     attempt_summary,
     block_lead,
 )
+
+_t = tr("tui.small")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
 #: headless renderer needs the identical behaviour and must not import a
@@ -1137,7 +1145,7 @@ def _search_result_output(details: dict[str, Any] | None) -> list[str]:
             if len(snippet) > SEARCH_EXPANDED_SNIPPET_CHARS:
                 snippet = snippet[: SEARCH_EXPANDED_SNIPPET_CHARS - 1].rstrip() + "…"
             lines.append(f"   {snippet}")
-    lines.append("Ask Operator to web_fetch result N (or `read <url>`) for the full page.")
+    lines.append(_t(_x.tool_card_search_fetch_hint()))
     return lines
 
 
@@ -1232,9 +1240,11 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         vendor = details.get("block_vendor")
         if details.get("failure_kind") == "blocked" and vendor:
             clause = block_lead(str(vendor))
-            rows.append(f"⚠ HTTP {status} {reason} — {clause}.")
+            rows.append(
+                _t(_x.tool_card_http_blocked(status=str(status), reason=reason, clause=clause))
+            )
         else:
-            rows.append(f"⚠ HTTP {status} {reason} — error/block page, not page content.")
+            rows.append(_t(_x.tool_card_http_error_page(status=str(status), reason=reason)))
     rows.append(fetched)
 
     # D1/D7: ``Rendered: markdownify · 2 attempts (default, browser-profile) ·
@@ -1296,9 +1306,9 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         if part
     )
     if render_bits:
-        rows.append(f"Rendered: {render_bits}")
+        rows.append(_t(_x.tool_card_rendered_row(bits=render_bits)))
     if details.get("low_quality"):
-        rows.append("sparse/JS-gated — try `browser` for the full page.")
+        rows.append(_t(_x.tool_card_low_quality_hint()))
     return rows
 
 
