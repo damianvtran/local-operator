@@ -171,16 +171,17 @@ def _fold(text: str) -> str:
 # ordinary prose (`next step is to fold in the flour`, `a HOLD on the cheque`). A locator
 # alone is therefore NOT a marker: it must sit next to a work word.
 #
-# Code review round 1 (M-1): `mrs?` under re.I also matched the honorific Mr/Mrs
-# (`Mr Okafor lives at #12`), so the merge-request abbreviation is case-sensitive: only
-# an uppercase `MR`/`MRS` is a tracker word, never the title.
+# Code review rounds 1/3 (M-1/F-3): `mrs?` under re.I matched the honorific Mr/Mrs
+# (`Mr Okafor lives at #12`, `mr smith lives at #12`). The merge-request abbreviation
+# is therefore UPPERCASE-ONLY here (`MR`, `MRs`); the lowercase form is never a tracker
+# word. GitLab work uses `!N`, which is matched absolutely.
 #
 # KNOWN BOUNDARY (documented, not debt): this is a bounded SHAPE rule, so prose work
 # text with no locator (`Fleet scratchpad purge 2026-10-15/16: …`) and hyphenated keys
 # (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
 # deliberately rejects; the guide states this bound rather than overclaiming.
 _WORK_WORD = (
-    r"pr|pull request|merge request|(?-i:MRs?|mrs?)|issue|ticket|ci|pipeline|build|checks|commit|"
+    r"pr|pull request|merge request|(?-i:MRs?)|issue|ticket|ci|pipeline|build|commit|"
     r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
     r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
 )
@@ -190,8 +191,8 @@ _WORK_REF = re.compile(
     r"|(?<![\w!])!\d{1,6}\b",
     re.I,
 )
-# A named commit needs BOTH a letter and a digit in the hash: `commit 5000000` is
-# ordinary prose (code review round 1, minor), a real abbreviated SHA is not all digits.
+# A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
+# all-letter abbreviation (`cafebabe`) is not.
 _WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
 _WORK_SHA = re.compile(
     r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I
@@ -200,7 +201,8 @@ _WORK_STATUS = re.compile(
     r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
     r"\b"
     r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
-    r"\b(?:pr|(?-i:MR)|#\d|into main)\b"
+    r"\b(?:pr|(?-i:MRs?)|#\d|(?:in)?to main)\b"
+    r"|\b(?:pr|(?-i:MRs?))\b[^.\n]{0,20}\b(?:merged|rebase[sd]?|squash(?:ed)?)\b"
     r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
     r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
     r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
