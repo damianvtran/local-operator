@@ -907,9 +907,18 @@ def _server_cost_usd(payload: Mapping[str, Any]) -> tuple[float | None, str | No
     ``estimated`` inside it, which is what keeps a quote from being presented as
     a charge.
 
-    TWO GUARDS THE ADAPTER'S RAW FIELDS STILL NEED
-    ----------------------------------------------
-    * The amount goes through :func:`_reported_cost`, the same guard the
+    THREE GUARDS THE ADAPTER'S RAW FIELDS STILL NEED
+    -----------------------------------------------
+    * The amount is RANGE-CHECKED before it is divided, against the same bound
+      :func:`~local_operator.classification.accounting.answered_record` applies
+      to the ledger row. A wire ``amount_usd`` of 401 nines parses to a
+      408-digit integer micro-USD, and ``int / 1_000_000`` on it raises
+      ``OverflowError: integer division result too large for a float`` — an
+      escape out of :func:`_parse_response` that the ``usage.cost`` arm never
+      had. An amount outside SQLite's signed INTEGER range is not a usable
+      receipt either, so it reads as unknown here: never a crash, never a
+      fabricated figure (same bound, same reason as the ledger's).
+    * The amount then goes through :func:`_reported_cost`, the same guard the
       ``usage.cost`` arm applies: a negative or non-finite ``amount_usd`` is a
       malformed receipt, not a credit and not a figure, so it reads as unknown
       (``None``) instead of putting ``$-2.500000`` on the operator's cost line.
@@ -923,6 +932,11 @@ def _server_cost_usd(payload: Mapping[str, Any]) -> tuple[float | None, str | No
     """
     parsed = cost_from_payload(payload)
     if parsed is None or parsed.amount_micro is None:
+        return None, None
+    if not 0 <= parsed.amount_micro <= (1 << 63) - 1:
+        # Outside the storable range, so not a usable receipt — and the only
+        # guard that can run before the division below, which would otherwise
+        # raise on a huge integer rather than read as unknown.
         return None, None
     # micro-USD -> USD: the adapter's integer micros divided by 1e6 (the mirror
     # of ``micro_from_amount``'s multiply), NOT a per-token conversion.
