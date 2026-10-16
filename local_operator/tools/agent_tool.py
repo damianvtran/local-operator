@@ -157,7 +157,10 @@ class AgentParams(BaseModel):
     )
     tools: list[str] | None = Field(
         default=None,
-        description="create/update: restrict the profile to these tools. Omit for all.",
+        description=(
+            "create/update on a ROLE: restrict the profile to these tools. "
+            "Omit for all. A specialist carries no tool allow-list."
+        ),
     )
     # A free string rather than a Literal for the same reason as the ``task``
     # tool's field: a role can only be pinned to a tier the operator has
@@ -166,7 +169,10 @@ class AgentParams(BaseModel):
     # plus the configured tiers; ``_effort_is_configured`` refuses the rest.
     effort: str | None = Field(
         default=None,
-        description="create/update: default model tier. 'inherit' clears it.",
+        description=(
+            "create/update on a ROLE: default model tier. 'inherit' clears it. "
+            "A specialist carries no tier pin; pin one on a team member entry."
+        ),
     )
 
     @field_validator("effort", mode="before")
@@ -210,8 +216,8 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update: may this profile launch subagents? Default no; "
-            "only coordinating roles should."
+            "create/update on a ROLE: may this profile launch subagents? "
+            "Default no; only coordinating roles should. A specialist cannot delegate."
         ),
     )
     action_class: Literal["reactive", "proactive"] | None = Field(
@@ -1220,6 +1226,46 @@ def write_profile(
             # the role tag exists to stop.
             raise ValueError(_name_taken_message(name))
 
+    # A SPECIALIST ROW CARRIES NO ROLE FIELDS, and until now the tool accepted
+    # them anyway: ``tools``/``effort``/``delegate`` were merged and built into
+    # the profile below, then dropped at the ``seed_tags`` gate
+    # (``tags = list(seed_tags(profile)) if kind == "role" else []``) while the
+    # receipt reported a successful write — so an operator pinning tiers across
+    # a roster believed the pins existed (#2509). Refusing is the only honest
+    # answer while nothing can read them: ``resolve_profile`` honours an
+    # ``effort:`` tag only for a role, so a specialist has no reader for any of
+    # the three, and per-team control belongs on the member entry instead.
+    #
+    # ONLY A FIELD THAT ASKS FOR SOMETHING IS REFUSED, which is what keeps an
+    # ordinary specialist save working. The desktop editor sends these keys only
+    # when the operator changed the control, but the values it starts them at
+    # are legal payloads a caller may still send: ``tools: []`` is the wire's
+    # "every tool" and a specialist's surface is unrestricted anyway,
+    # ``'inherit'`` is the no-pin sentinel, and ``delegate: false`` asks for the
+    # state a specialist is already in. Each is a no-op, not a request to store
+    # a role field, so each is accepted.
+    if kind != "role":
+        asked_for = [
+            field
+            for field, requested in (
+                ("effort", params.effort is not None and params.effort != INHERIT_EFFORT),
+                ("tools", bool(params.tools)),
+                ("delegate", params.delegate is True),
+            )
+            if requested
+        ]
+        if asked_for:
+            quoted = [repr(field) for field in asked_for]
+            listed = quoted[0]
+            if len(quoted) > 1:
+                listed = ", ".join(quoted[:-1]) + " and " + quoted[-1]
+            raise ValueError(
+                f"specialists carry no role fields, so {listed} cannot be set on one; "
+                "a launch honours only a role's tier pin, and per-team control comes "
+                "from the member entry on a team roster. Update a role instead, or "
+                "drop the field."
+            )
+
     instructions = (params.instructions or "").strip()
     if creating and not instructions:
         raise ValueError("create needs 'instructions' — the profile's guidance.")
@@ -1522,17 +1568,17 @@ def _effort_pin_description(model_choice: bool, session_model_label: str | None 
         # is the spelling the `/settings` page shows and `lop config edit`
         # takes, so a reader can act on it without translating.
         return (
-            "create/update: no effort tiers are yours to choose "
+            "create/update on a ROLE: no effort tiers are yours to choose "
             "(subagents.model_choice=operator); 'inherit' clears a pin."
         )
     tiers = configured_effort_tiers()
     if not tiers:
         return (
-            "create/update: no model tiers are configured (subagents.models); "
+            "create/update on a ROLE: no model tiers are configured (subagents.models); "
             "'inherit' clears a pin and every role inherits the launching session's model."
         )
     return (
-        "create/update: default model tier ("
+        "create/update on a ROLE: default model tier ("
         f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}). "
         "'inherit' clears it."
     )

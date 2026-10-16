@@ -679,3 +679,68 @@ async def test_profile_detail_exposes_definition_revision_and_stale_write_is_409
     )
     assert stale.status_code == 409, stale.text
     assert stale.json()["detail"]["code"] == "local-concurrent-edit"
+
+
+async def test_a_specialist_save_refuses_role_fields_instead_of_dropping_them(api):
+    """#2509 through the route the desktop editor writes to.
+
+    ``write_profile`` raises ``ValueError`` for a specialist that is handed a
+    role field; the control plane's failure ladder turns that into a 409 whose
+    ``detail`` is the sentence itself, which a client reads as the refusal's
+    message (``desktopResult`` takes a string ``detail`` as ``message``). So the
+    operator is told what is wrong instead of being shown a write that reported
+    success and stored nothing.
+    """
+    client, root = api
+    # A tier a launch WOULD honour, so the refusal under test is the specialist
+    # gate rather than the tier validator's own "unavailable tier" (which the
+    # issue notes already fires on the specialist path and is not the defect).
+    ConfigManager(root).set_config_value(
+        "subagents",
+        {"model_choice": "model", "models": {"hi": "anthropic/claude-opus-5"}},
+    )
+    created = await client.post(
+        "/v1/desktop/profiles",
+        json=mutation(
+            name="solution-architect",
+            kind="specialist",
+            description="Designs systems",
+            instructions="Design systems.",
+        ),
+    )
+    assert created.status_code == 200, created.text
+
+    for fields in ({"effort": "hi"}, {"tools": ["read"]}, {"delegate": True}):
+        refused = await client.patch(
+            "/v1/desktop/profiles/solution-architect", json=mutation(**fields)
+        )
+        assert refused.status_code == 409, refused.text
+        assert "specialists carry no role fields" in str(refused.json()["detail"])
+
+    kept = (await client.get("/v1/desktop/profiles/solution-architect")).json()["result"]
+    assert kept["kind"] == "specialist"
+    assert kept["effort"] is None and kept["tools"] is None and kept["delegate"] is False
+
+
+async def test_the_editors_defaults_on_a_specialist_save_are_not_refused(api):
+    """The values those controls START at are legal payloads, so a routine
+    specialist save must stay a 200: ``tools: []`` is the wire's "every tool",
+    ``'inherit'`` is the no-pin sentinel, and ``delegate: false`` asks for the
+    state a specialist is already in."""
+    client, _ = api
+    created = await client.post(
+        "/v1/desktop/profiles",
+        json=mutation(
+            name="scout", kind="specialist", description="Surveys far", instructions="Survey."
+        ),
+    )
+    assert created.status_code == 200, created.text
+
+    saved = await client.patch(
+        "/v1/desktop/profiles/scout",
+        json=mutation(effort="inherit", tools=[], delegate=False),
+    )
+
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["kind"] == "specialist" and result["description"] == "Surveys far"
