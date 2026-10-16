@@ -1695,6 +1695,15 @@ def _plan_guard_arguments(name: str, arguments: Any) -> Any:
     either position is left in place and still trips the guard. A call with no admitted
     position — every other op, name and shape — is returned BY IDENTITY, which is what
     lets the caller keep today's inputs, and today's verdict, exactly.
+
+    A masked copy is handed over only if the guard can WALK it, which is what
+    ``_plan_guard_copy_encodable`` decides: ``guard()`` encodes every string the walk
+    reaches (its byte-cap arm is ``len(value.encode("utf-8"))``), and a document carrying
+    a lone-surrogate escape decodes to a character the re-serialization writes back
+    unwrapped, so the walk can raise ``UnicodeEncodeError`` — a ``ValueError``, which
+    ``retained_arguments``' ``except MemoryError`` does NOT cover — instead of answering.
+    A copy that cannot be walked is not used, and the caller's ORIGINALS go to the guard
+    instead: that is the copy, and therefore the verdict, of the tree before this change.
     """
     if not isinstance(arguments, dict):
         return arguments
@@ -1702,7 +1711,8 @@ def _plan_guard_arguments(name: str, arguments: Any) -> Any:
         from local_operator.memory import structural_reference
 
         if structural_reference(arguments.get("text")):
-            return {**arguments, "text": ""}
+            masked = {**arguments, "text": ""}
+            return masked if _plan_guard_copy_encodable(masked) else arguments
         return arguments
     # ``memory_tools`` (sqlite3, urllib) is imported only where it can be used: every
     # planned call in every session reaches this helper, and only a read's ``path`` can
@@ -1713,8 +1723,37 @@ def _plan_guard_arguments(name: str, arguments: Any) -> Any:
     from local_operator.tools.memory_tools import _guarded_path, _recall_reference
 
     if _recall_reference(name, arguments.get("path")) is not None:
-        return {**arguments, "path": _guarded_path(arguments["path"])}
+        masked = {**arguments, "path": _guarded_path(arguments["path"])}
+        return masked if _plan_guard_copy_encodable(masked) else arguments
     return arguments
+
+
+def _plan_guard_copy_encodable(value: Any) -> bool:
+    """Whether ``guard()`` can walk ``value`` at all, rather than raising out of it.
+
+    ``guard()``'s byte-cap arm is ``len(value.encode("utf-8"))``, so every string it
+    reaches is ENCODED, and ``guard_encoded`` re-serializes a dict with
+    ``ensure_ascii=False`` for the same reason. A wire document carrying a lone-surrogate
+    escape (``"\\ud800"``) decodes to a bare surrogate character, and that spelling is
+    written back UNWRAPPED, so encoding it raises ``UnicodeEncodeError``. Nothing on the
+    path catches it — it is a ``ValueError``, and ``retained_arguments`` catches
+    ``MemoryError`` — so it would leave the planning loop and abort the rest of the
+    batch's planning rather than produce a verdict.
+
+    Only a DECODED copy can acquire such a character (the wire spelling of it is plain
+    ASCII escapes, which encode fine), which is why the question is asked of the copy
+    about to be handed to the guard. ``json.dumps`` cannot raise on it — the encoder
+    emits the character bare — so the check is the ENCODE of the dump, which covers every
+    string the walk will reach, keys included.
+    """
+    try:
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        # UnicodeEncodeError (a ValueError) = a string the guard cannot encode; TypeError
+        # = a value with no JSON spelling at all (unreachable from a decoded wire
+        # document, but the conservative answer is the same one).
+        return False
+    return True
 
 
 def _decode_plan_guard_raw(raw: str) -> tuple[Any, bool]:
@@ -1769,6 +1808,14 @@ def _decode_plan_guard_raw(raw: str) -> tuple[Any, bool]:
         respelled |= repr(value) != text
         return value
 
+    # ``NaN`` / ``Infinity`` / ``-Infinity`` are deliberately NOT hooked: ``parse_constant``
+    # is not passed. They are tokens this round trip re-emits IDENTICALLY — ``json.dumps``
+    # writes the same three words back (measured: ``{"a": NaN}`` -> ``{"a":NaN}``) — so the
+    # guard's copy holds exactly what the wire held and no value is dropped. Flagging them
+    # as respelled would close no hole and would fail closed on calls that work today
+    # (``repr(float("nan"))`` is ``'nan'``, not ``'NaN'``, so hooking them would mark every
+    # such document lossy): over-refusal, not safety. QA round 2's gap 3 — recorded here so
+    # a later reader does not "fix" this into refusing calls that work.
     decoded = json.loads(raw, object_pairs_hook=_object, parse_int=_int, parse_float=_float)
     return decoded, not (duplicated or respelled)
 
