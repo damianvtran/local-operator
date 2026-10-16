@@ -45,7 +45,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.loop import _decode_plan_guard_raw, _plan_guard_inputs
+from local_operator.harness.loop import (
+    _decode_plan_guard_raw,
+    _plan_guard_copy_encodable,
+    _plan_guard_inputs,
+)
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -372,6 +376,63 @@ async def test_a_raw_carrier_the_round_trip_cannot_carry_is_still_refused(tmp_pa
     assert len(run.starts) == 0, run.result_text
     assert run.synthetic, run.result_text
     assert run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    assert run.row["tool_name"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_a_value_the_guard_cannot_encode_is_refused_rather_than_raising(
+    tmp_path, monkeypatch
+):
+    """A copy the guard cannot WALK is not handed over: the caller's originals are.
+
+    ``guard()``'s byte-cap arm is ``len(value.encode("utf-8"))``, so every string the walk
+    reaches is ENCODED. A wire document carrying a lone-surrogate escape (``"\\ud800"``)
+    decodes to a bare surrogate character, and ``json.dumps`` with ``ensure_ascii=False``
+    — the re-serialization this seam performs for the raw carrier, and the one
+    ``guard_encoded`` performs over an argument dict — writes that character back
+    UNWRAPPED. Encoding the result raises ``UnicodeEncodeError``, which is a ``ValueError``
+    and NOT the ``MemoryError`` ``retained_arguments`` catches, so it left the seam and
+    the planning loop rather than becoming either verdict.
+
+    Blanking the reference position is what lets the walk reach the sibling (``s`` sits
+    after the ``path`` VALUE, and before this change the walk refused at that value), so
+    this case is reachable only through the two positions this file is about. The rule the
+    detector already follows applies unchanged: a document that cannot be CARRIED is not
+    one the guard can be asked about, so the caller's originals go to the guard — the copy,
+    and therefore the refusal, of the tree before this change.
+
+    RED, measured at the previous head over this same case, at the seam::
+
+        _plan_guard_inputs("read", args, raw) -> ({'path': 'memory://global?q=', 's':
+            '\\ud800'}, '{"path":"memory://global?q=","s":"\\ud800"}')
+        retained_arguments(...) -> UnicodeEncodeError:
+            'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed
+
+    and at session level the exception left ``session.prompt`` for the whole turn. This
+    head answers both with the plan gate's own refusal, ``0`` starts and
+    ``__synthetic``/``__fault=invalid_arguments`` — the base tree's shape for the same
+    call. The unwalkable SPELLING is what changed hands here, never the verdict.
+    """
+    raw = '{"path":"memory://global?q=' + DEVICE_ID + '","s":"\\ud800"}'
+    args = {"path": f"memory://global?q={DEVICE_ID}", "s": "\ud800"}
+    assert json.loads(raw) == args, "the wire spelling decodes to a bare lone surrogate"
+    assert _plan_guard_copy_encodable({"s": "\ud800"}) is False
+    assert _plan_guard_copy_encodable({"s": "\\ud800"}) is True
+
+    guarded = _plan_guard_inputs("read", args, raw)
+    assert guarded[0] is args and guarded[1] is raw, (
+        "an unwalkable masked copy must fall back to the caller's own inputs",
+        guarded,
+    )
+    assert (
+        retained_arguments("read", *guarded)[2] is True
+    ), "and the guard must answer, not raise: the reference is not masked away here"
+
+    run = await _run_one_call(tmp_path, monkeypatch, "read", args, raw=raw)
+    assert len(run.starts) == 0, run.result_text
+    assert run.synthetic and run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    details = (run.row.get("provider_payload") or {}).get("details") or {}
+    assert details == {"__fault": "invalid_arguments", "__synthetic": True}, details
     assert run.row["tool_name"] == "read"
 
 
