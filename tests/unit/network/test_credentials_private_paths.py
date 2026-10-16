@@ -30,11 +30,14 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import pytest
+from local_operator.network.types import MemberRecord, MeshRefusal, NetworkRecord
 
 from local_operator.network import approvals, identity, store
 from local_operator.network.credentials import consent, inheritance, placement
-from local_operator.network.types import MemberRecord, MeshRefusal, NetworkRecord
-from tests.unit.network.test_credential_inherit import software_signer, with_owner_transport
+from tests.unit.network.test_credential_inherit import (
+    software_signer,
+    with_owner_transport,
+)
 from tests.unit.network.test_credentials_consent import N, P
 
 
@@ -52,9 +55,9 @@ def _guard_fixture_writes(monkeypatch: pytest.MonkeyPatch, envelope: Path) -> No
         if isinstance(value, int):
             assert value in opened, "untracked file descriptor mutation refused"
             path, observed = opened[value]
-            assert fd_identity(original_fstat(value)) == fd_identity(observed), (
-                "tracked file descriptor identity changed"
-            )
+            assert fd_identity(original_fstat(value)) == fd_identity(
+                observed
+            ), "tracked file descriptor identity changed"
         else:
             path = relative_path(value, dir_fd)
         assert path.resolve().is_relative_to(envelope), "write outside disposable envelope refused"
@@ -95,9 +98,17 @@ def _guard_fixture_writes(monkeypatch: pytest.MonkeyPatch, envelope: Path) -> No
     monkeypatch.setattr(os, "open", os_open)
     monkeypatch.setattr(os, "close", close)
     for name, positions in {
-        "mkdir": (0,), "chmod": (0,), "unlink": (0,), "remove": (0,),
-        "rmdir": (0,), "replace": (0, 1), "rename": (0, 1), "utime": (0,),
-        "symlink": (1,), "link": (0, 1), "truncate": (0,),
+        "mkdir": (0,),
+        "chmod": (0,),
+        "unlink": (0,),
+        "remove": (0,),
+        "rmdir": (0,),
+        "replace": (0, 1),
+        "rename": (0, 1),
+        "utime": (0,),
+        "symlink": (1,),
+        "link": (0, 1),
+        "truncate": (0,),
     }.items():
         original = getattr(os, name)
 
@@ -188,6 +199,7 @@ def guarded_rig(write_envelope: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     from local_operator.operator import trust
     from local_operator.providers import registry
     from local_operator.providers.auth_store import AuthStore
+
     from tests.unit.network.test_approvals_store import _make_key
 
     root = write_envelope / "isolated-owner"

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from local_operator.network.types import MeshRefusal
 
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials import store as mesh_store
@@ -31,7 +32,6 @@ from local_operator.network.credentials.types import (
     Grant,
     synthetic_credential_id,
 )
-from local_operator.network.types import MeshRefusal
 from tests.unit.network import test_credentials_private_paths as private_path_fixtures
 
 OWNER = "d_00000000000000000000000000000001"
@@ -524,8 +524,9 @@ def test_build_auth_store_returns_the_mesh_store_when_borrowing(
 
 def _bridge_before_placement(root: Path, device: str) -> None:
     """Model a securely admitted peer before its first provider login arrives."""
-    from local_operator.network import store
     from local_operator.network.types import MemberRecord, NetworkRecord
+
+    from local_operator.network import store
 
     record = NetworkRecord(network_id=NETWORK, name="synthetic-bridge", self_device_id=device)
     record.members.append(MemberRecord(device_id=OWNER, name="synthetic-owner"))
@@ -800,10 +801,11 @@ def test_sharing_something_this_device_does_not_hold_is_refused(
     document whose owner refuses, and the sentence the borrower reads would then tell
     the operator to sign in somewhere they already are.
     """
-    from local_operator.network import cli as network_cli
-    from local_operator.network import store as network_store
     from local_operator.network.identity import mint
     from local_operator.network.types import NetworkRecord, SecretState
+
+    from local_operator.network import cli as network_cli
+    from local_operator.network import store as network_store
 
     root = tmp_path / "owner"
     root.mkdir()
@@ -913,9 +915,10 @@ def test_a_merge_that_makes_this_device_a_holder_clears_a_standing_refusal(
     here, two PROCESSES in production — so the clearing has to travel through
     ``placement.state.json``, which is what the session's re-read of it is for.
     """
+    from local_operator.network.identity import mint
+
     from local_operator.network.credentials import client as client_mod
     from local_operator.network.credentials.state import PlacementState
-    from local_operator.network.identity import mint
 
     root = tmp_path / "borrower"
     root.mkdir()
@@ -1012,8 +1015,9 @@ def test_a_report_carries_the_lent_rows_id_and_the_peer_frame_keeps_it(
     ``serve_report`` carries it onto the peer frame. Without a grant to attribute,
     the field is ``0`` and the owner falls back exactly as it did for older peers.
     """
-    from local_operator.network.credentials import client as client_mod
     from local_operator.network.identity import mint
+
+    from local_operator.network.credentials import client as client_mod
 
     root = tmp_path / "borrower"
     root.mkdir()
@@ -1465,9 +1469,10 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     would otherwise print "nothing is shared" — the one state this listing exists to
     make visible.
     """
+    from local_operator.network.identity import mint
+
     from local_operator.network import cli as network_cli
     from local_operator.network.credentials.state import PlacementState
-    from local_operator.network.identity import mint
 
     root = tmp_path / "borrower"
     root.mkdir()
@@ -1865,8 +1870,9 @@ def test_the_listing_names_the_restart_remedy_for_a_share_that_just_landed(
     predicate; a pull that changed nothing borrowable prints nothing, so the
     ordinary listing is byte-identical to before this change.
     """
-    from local_operator.network import cli as network_cli
     from local_operator.network.identity import mint
+
+    from local_operator.network import cli as network_cli
 
     root = tmp_path / "borrower"
     root.mkdir()
@@ -1996,7 +2002,8 @@ def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: 
 
 
 def test_configured_root_none_is_selected_per_public_call(
-    write_envelope: Path, monkeypatch: pytest.MonkeyPatch,
+    write_envelope: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first, second = write_envelope / "profile-a", write_envelope / "profile-b"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(first))
@@ -2009,7 +2016,8 @@ def test_configured_root_none_is_selected_per_public_call(
 
 
 def test_relative_alias_root_is_retained_by_stateful_document(
-    write_envelope: Path, monkeypatch: pytest.MonkeyPatch,
+    write_envelope: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cwd = write_envelope / "cwd"
     cwd.mkdir()
