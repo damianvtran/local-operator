@@ -1031,7 +1031,9 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         assert target.read_bytes() == content.encode(), "the write itself stays byte-exact"
 
     @pytest.mark.asyncio
-    async def test_a_mixed_sequence_masks_only_its_strings(self, tmp_path: Path) -> None:
+    async def test_a_mixed_sequence_is_withheld_without_touching_nonstrings(
+        self, tmp_path: Path
+    ) -> None:
         """A non-``str`` item rides back untouched — and must not shift the mask.
 
         Review round 1, R-2: the rebuild indexed ``masked`` by the item's position
@@ -1052,15 +1054,23 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         )
         assert out is not None, "a details mapping in, a details mapping back"
         assert out["diff"][1] == 7
-        assert out["diff"][0] == f"a {REDACTION_MARKER}"
-        assert out["diff"][2] == f"b {REDACTION_MARKER}"
+        from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
+
+        # An arbitrary mixed sequence is not a complete diff hunk. It must not
+        # become a contextual proof across the barrier, or leak an unparsed tail.
+        assert out["diff"][0] == _DIFF_DETAIL_WITHHELD
+        assert out["diff"][2] == ""
         out = await AgentLoop._redact_details(
             {"diff": (f"a {DETAILS_KEY}", None, f"b {DETAILS_KEY}")}, redact, "write", None
         )
         assert out is not None, "a details mapping in, a details mapping back"
         assert out["diff"][1] is None
-        assert out["diff"][0] == f"a {REDACTION_MARKER}"
-        assert out["diff"][2] == f"b {REDACTION_MARKER}"
+        from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
+
+        # An arbitrary mixed sequence is not a complete diff hunk. It must not
+        # become a contextual proof across the barrier, or leak an unparsed tail.
+        assert out["diff"][0] == _DIFF_DETAIL_WITHHELD
+        assert out["diff"][2] == ""
 
 
 # --- RAW ARGUMENTS: the JSON string is judged with the same line boundaries ----------------
@@ -1458,3 +1468,324 @@ class TestRawArgumentsEscapedBoundaries:
         stored = _scrub_history_arguments(_assistant("bash", arguments, None), scrub_secrets)
         assert stored.tool_calls[0].raw_arguments is None
         assert not _leaks(json.dumps(stored.tool_calls[0].arguments))
+
+
+# --- Q3: multiline context belongs to each side of a COMPLETE diff hunk -------
+
+
+def _q3_pem(body: str | None = None) -> tuple[str, str]:
+    # Same synthetic construction width as independent Q3 QA; no real key or
+    # body/prefix is printed. Repeated body rows test ambiguous-anchor handling.
+    line = body or (("Qw7Z" + "pN3x" + "8VaL" + "t5Yk") * 4)
+    return (
+        "-----BEGIN "
+        + "PRIVATE KEY-----\n"
+        + line
+        + "\n"
+        + line
+        + "\n-----END "
+        + "PRIVATE KEY-----\n",
+        line,
+    )
+
+
+def _q3_diff(before: str, after: str) -> dict[str, Any]:
+    from local_operator.tools.builtin import _diff_details
+
+    return _diff_details("synthetic-q3.md", before, after)
+
+
+@pytest.mark.asyncio
+async def test_q3_actual_write_durable_provider_and_fork_no_longer_publish_body_rows(tmp_path):
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.builtin import build_read_tool, build_write_tool
+    from local_operator.variables import VariableStore
+
+    pem, prefix = _q3_pem()
+    body = "Public reference ${PUBLIC_FIXTURE_REF}; literal [redacted].\n" + pem
+    target = tmp_path / "synthetic-q3.md"
+    raw_results: list[Any] = []
+    requests: list[Any] = []
+    original = build_write_tool()
+
+    async def capture(*args, **kwargs):
+        result = await original.execute(*args, **kwargs)
+        raw_results.append(result)
+        return result
+
+    write = original.model_copy(update={"execute": capture})
+    calls = [("write", {"path": str(target), "content": body}), ("read", {"path": str(target)})]
+
+    def provider(request, signal=None):
+        index = len(requests)
+        requests.append(request)
+
+        async def generate():
+            if index < len(calls):
+                name, args = calls[index]
+                yield StreamToolCallDelta(
+                    index=0, id=f"q3-{index}", name=name, argument_delta=json.dumps(args)
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return generate()
+
+    directory = tmp_path / "sessions" / "q3synthetic0001"
+    session = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=100000),
+        stream_fn=provider,
+        tools=[write, build_read_tool()],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda *_: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    await session.prompt("Run the synthetic write and read")
+    assert len(requests) == 3 and len(raw_results) == 1
+    assert target.read_bytes() == body.encode()
+    # The executor/live-event object remains ground truth. Only publication
+    # copies, provider history, durable rows and actual in-process fork change.
+    assert prefix in "\n".join(raw_results[0].details["diff"])
+    history = list(session.transcript.build_llm_history())
+    tools = [m for m in history if m.role == "tool"]
+    assert len(tools) == 2
+    # Collect every channel BEFORE asserting containment, so a failing baseline
+    # still exercises durable storage and the real in-process fork, not just a
+    # helper or the first result. Only booleans can appear in failure output.
+    observed = {
+        "published": prefix not in repr([m.model_dump() for m in tools]),
+        "durable": prefix not in session.transcript.path.read_text(),
+        "provider": prefix not in repr(requests[-1]),
+    }
+    fork_id, omitted, _ = await session.transcript.fork_snapshot()
+    assert not omitted
+    fork = Transcript(tmp_path / "sessions" / fork_id)
+    observed["fork"] = prefix not in fork.path.read_text()
+    assert [m.model_dump() for m in fork.build_llm_history()] == [m.model_dump() for m in history]
+    assert all(observed.values()), observed
+    payload = tools[0].provider_payload
+    assert isinstance(payload, dict)
+    details = payload.get("details")
+    assert isinstance(details, dict)
+    diff = details.get("diff")
+    assert isinstance(diff, list)
+    assert any("Public reference" in line for line in diff)
+    from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
+
+    assert _DIFF_DETAIL_WITHHELD not in repr(diff), "the valid hunk must be processed, not refused"
+
+
+class TestQ3BoundedDiffProjection:
+    @pytest.mark.asyncio
+    async def test_multiple_spans_preserve_unique_benign_middle_and_metadata(self, tmp_path):
+        from local_operator.variables import VariableStore
+
+        first, body_a = _q3_pem()
+        second, body_b = _q3_pem(("Ab8C" + "dF2g") * 8)
+        middle = "The same public reference ${PUBLIC_FIXTURE_REF} and literal [redacted] remain."
+        details = _q3_diff("", first + middle + "\n" + second)
+        original = list(details["diff"])
+        out = await AgentLoop._redact_details(
+            details, VariableStore(cwd=str(tmp_path)).redact, "write", None
+        )
+        assert out is not None
+        published = "\n".join(out["diff"])
+        assert body_a not in published and body_b not in published
+        assert middle in published
+        assert len(out["diff"]) == len(original)
+        assert details["diff"] == original
+        assert {k: v for k, v in out.items() if k != "diff"} == {
+            k: v for k, v in details.items() if k != "diff"
+        }
+
+    @pytest.mark.asyncio
+    async def test_shared_benign_context_between_changed_credentials_stays_readable(self):
+        from local_operator.variables import VariableStore
+
+        old_a, _ = _q3_pem(("Aa7B" + "cD2e") * 8)
+        old_b, _ = _q3_pem(("Bb8C" + "dE3f") * 8)
+        new_a, body_a = _q3_pem(("Cc9D" + "eF4g") * 8)
+        new_b, body_b = _q3_pem(("Dd2E" + "fG5h") * 8)
+        middle = "Identical public reference ${PUBLIC_FIXTURE_REF}, literal [redacted].\n"
+        details = _q3_diff(old_a + middle + old_b, new_a + middle + new_b)
+        out = await AgentLoop._redact_details(details, VariableStore(cwd=".").redact, "edit", None)
+        assert out is not None
+        assert " " + middle.rstrip("\n") in out["diff"]
+        assert body_a not in repr(out) and body_b not in repr(out)
+        assert all(out[key] == value for key, value in details.items() if key != "diff")
+
+    @pytest.mark.asyncio
+    async def test_benign_valid_reference_literal_diff_is_byte_identical(self, tmp_path):
+        from local_operator.variables import VariableStore
+
+        text = "Public usage ${PUBLIC_FIXTURE_REF}; literal [redacted].\n"
+        details = _q3_diff("", text)
+        assert (
+            await AgentLoop._redact_details(
+                details, VariableStore(cwd=str(tmp_path)).redact, "write", None
+            )
+            == details
+        )
+
+    @pytest.mark.asyncio
+    async def test_opposite_sides_do_not_manufacture_a_pem(self, tmp_path):
+        from local_operator.variables import VariableStore
+
+        before = "-----BEGIN " + "PRIVATE KEY-----\nKeep public guidance readable.\n"
+        after = "Only public documentation changed.\n-----END " + "PRIVATE KEY-----\n"
+        details = _q3_diff(before, after)
+        store = VariableStore(cwd=str(tmp_path))
+        assert "Keep public guidance" not in store.redact(
+            "\n".join(details["diff"])
+        ), "negative control: naive joining is unsafe"
+        out = await AgentLoop._redact_details(
+            details, VariableStore(cwd=str(tmp_path)).redact, "edit", None
+        )
+        assert out == details
+
+    @pytest.mark.asyncio
+    async def test_separate_hunks_never_join_credential_framing(self, tmp_path):
+        from local_operator.variables import VariableStore
+
+        rows = [
+            "--- ",
+            "+++ ",
+            "@@ -0,0 +1,2 @@",
+            "+-----BEGIN " + "PRIVATE KEY-----",
+            "+Keep public guidance readable.",
+            "@@ -10,0 +12,2 @@",
+            "+Only public documentation changed.",
+            "+-----END " + "PRIVATE KEY-----",
+        ]
+        out = await AgentLoop._redact_details(
+            {"diff": rows}, VariableStore(cwd=str(tmp_path)).redact, "write", None
+        )
+        assert out == {"diff": rows}
+
+    @pytest.mark.asyncio
+    async def test_known_value_spanning_rows_and_framing_remains_authoritative(self, tmp_path):
+        from local_operator.variables import VariableStore
+
+        value = "SyntheticRow7" + "\n" + "SyntheticRow9"
+        store = VariableStore(cwd=str(tmp_path))
+        store.register_redaction(value)
+        details = _q3_diff("", value + "\n")
+        out = await AgentLoop._redact_details(details, store.redact, "write", None)
+        assert out is not None
+        assert "SyntheticRow7" not in repr(out) and "SyntheticRow9" not in repr(out)
+        framing = _q3_diff("", "Public document.\n")
+        framing["diff"][0] += "SECRET_HEADER7"
+        store.register_redaction("SECRET_HEADER7")
+        out = await AgentLoop._redact_details(framing, store.redact, "write", None)
+        assert out is not None and "SECRET_HEADER7" not in repr(out)
+        assert value in store.redaction_values()
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["crossing", "insertion", "duplicates", "type", "exception", "output-bytes", "output-rows"],
+    )
+    def test_unexpected_callback_output_withholds_all_content(self, kind):
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_BYTES,
+            _DIFF_DETAIL_ROWS,
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
+
+        rows = _q3_diff("", "alpha\nbeta\n")["diff"]
+
+        def callback(text):
+            if kind == "crossing":
+                return "\n".join(reversed(text.split("\n")))
+            if kind == "insertion":
+                return "new output\n" + text
+            if kind == "duplicates":
+                return text + "\n" + text
+            if kind == "type":
+                return None
+            if kind == "exception":
+                raise RuntimeError("fixed synthetic error")
+            if kind == "output-bytes":
+                return "x" * (3 * _DIFF_DETAIL_BYTES + 1)
+            return "\n" * (3 * _DIFF_DETAIL_ROWS)
+
+        out = _redact_diff_detail(rows, callback)
+        assert out[0] == _DIFF_DETAIL_WITHHELD
+        assert all(row == "" for row in out[1:])
+
+    @pytest.mark.parametrize(
+        "case",
+        ["count", "partial", "ellipsis", "huge-count", "late", "nonstring", "embedded-separator"],
+    )
+    def test_malformed_truncated_or_barrier_withholds_every_string(self, case):
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
+
+        rows = list(_q3_diff("", "public\n")["diff"])
+        marker = object()
+        if case == "count":
+            rows[2] = "@@ -0,0 +1,2 @@"
+        if case == "partial":
+            rows.pop()
+        if case == "ellipsis":
+            rows.append("…")
+        if case == "huge-count":
+            rows[2] = "@@ -0,0 +1,999999999 @@"
+        if case == "late":
+            rows.extend(["@@ -9,0 +12,2 @@", "+unprocessed"])
+        if case == "nonstring":
+            rows.insert(3, marker)
+        if case == "embedded-separator":
+            rows[-1] += "\u2028unprocessed"
+        original = list(rows)
+        calls = []
+        out = _redact_diff_detail(tuple(rows), lambda text: calls.append(text) or text)
+        assert isinstance(out, tuple) and len(out) == len(rows)
+        assert rows == original and not calls
+        assert out[0] == _DIFF_DETAIL_WITHHELD
+        for index, row in enumerate(rows):
+            if isinstance(row, str):
+                assert out[index] == (_DIFF_DETAIL_WITHHELD if index == 0 else "")
+            else:
+                assert out[index] is row
+
+    def test_exact_row_byte_caps_and_one_over_with_bounded_callback_work(self):
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_BYTES,
+            _DIFF_DETAIL_ROWS,
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
+
+        assert (
+            _redact_diff_detail("x" * _DIFF_DETAIL_BYTES, lambda text: text)
+            == "x" * _DIFF_DETAIL_BYTES
+        )
+        assert (
+            _redact_diff_detail("x" * (_DIFF_DETAIL_BYTES + 1), lambda text: text)
+            == _DIFF_DETAIL_WITHHELD
+        )
+        rows = ["--- ", "+++ ", f"@@ -0,0 +1,{_DIFF_DETAIL_ROWS - 3} @@"] + ["+public"] * (
+            _DIFF_DETAIL_ROWS - 3
+        )
+        calls = []
+        assert _redact_diff_detail(rows, lambda text: calls.append(text) or text) == rows
+        assert len(calls) <= 2 * _DIFF_DETAIL_ROWS
+        assert sum(len(text.encode()) for text in calls) <= 3 * _DIFF_DETAIL_BYTES
+        assert sum(text.count("\n") + 1 for text in calls) <= 3 * _DIFF_DETAIL_ROWS
+        oversized = rows + [object()]
+        out = _redact_diff_detail(oversized, lambda text: text)
+        assert out[0] == _DIFF_DETAIL_WITHHELD and out[-1] is oversized[-1]
+        assert len(out) == len(oversized)
