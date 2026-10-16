@@ -2291,7 +2291,10 @@ def _flag_value_guard(match: Match[str]) -> bool:
     :func:`_value_is_a_reference_to_a_credential` for the judgement that replaces it,
     for the value-side cases it keeps masked, and for the residual it accepts.
     """
-    value = match.group(2)
+    # Group 3 is the VALUE. Group 2 is the optional opening quote the quoted
+    # carrier added, so the guard judges the inner value and never the quote
+    # bytes (both the placeholder clause and the NAME clause read this value).
+    value = match.group(3)
     if _is_structural_placeholder_reference(value):
         return False
     if any(char in value for char in _EXPRESSION_CHARS):
@@ -3871,9 +3874,13 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # flag is the NAME of a stored secret rather than a value. See
         # ``_flag_value_guard`` and ``_value_is_a_reference_to_a_credential`` for the
         # production incident that measured it.
-        re.compile(r"(?i)(--" + _CREDENTIAL_FLAG_WORDS + r"(?:=|\s+))([^\s\"']{3,})"),
+        re.compile(
+            r"(?i)(--"
+            + _CREDENTIAL_FLAG_WORDS
+            + r"(?:=|\s+)(?P<q>\"|')?)(?P<v>(?(q)[^\"'\n]{3,}|[^\s\"']{3,}))(?(q)(?P=q))"
+        ),
         None,
-        2,
+        3,
         guard=_flag_value_guard,
     ),
     # ``mysql``/``psql`` with an inline password on ``-p``. Anchored on the client binary
