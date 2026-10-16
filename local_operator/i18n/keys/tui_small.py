@@ -94,6 +94,26 @@ def model_picker_window_position(*, shown: str, total: str) -> Msg:
     return Msg("tui.small.model_picker.window_position", {"shown": shown, "total": total})
 
 
+def org_chart_view_chart_suffix() -> Msg:
+    return Msg("tui.small.org_chart_view.chart_suffix", {})
+
+
+def org_chart_view_expanded_suffix() -> Msg:
+    return Msg("tui.small.org_chart_view.expanded_suffix", {})
+
+
+def org_chart_view_manager_legend() -> Msg:
+    return Msg("tui.small.org_chart_view.manager_legend", {})
+
+
+def org_chart_view_team_heading(*, charted: str) -> Msg:
+    return Msg("tui.small.org_chart_view.team_heading", {"charted": charted})
+
+
+def org_chart_view_zoom_clause(*, tier: str) -> Msg:
+    return Msg("tui.small.org_chart_view.zoom_clause", {"tier": tier})
+
+
 def picker_of_separator() -> Msg:
     return Msg("tui.small.picker.of_separator", {})
 
@@ -104,6 +124,30 @@ def picker_showing_prefix() -> Msg:
 
 def session_resume_hint(*, hint: str) -> Msg:
     return Msg("tui.small.session.resume_hint", {"hint": hint})
+
+
+def session_picker_all_archived(*, total: str) -> Msg:
+    return Msg("tui.small.session_picker.all_archived", {"total": total})
+
+
+def session_picker_no_match_filter() -> Msg:
+    return Msg("tui.small.session_picker.no_match_filter", {})
+
+
+def session_picker_no_session() -> Msg:
+    return Msg("tui.small.session_picker.no_session", {})
+
+
+def session_picker_preview_mode_key() -> Msg:
+    return Msg("tui.small.session_picker.preview_mode_key", {})
+
+
+def session_picker_showing_prefix() -> Msg:
+    return Msg("tui.small.session_picker.showing_prefix", {})
+
+
+def session_picker_type_to_filter() -> Msg:
+    return Msg("tui.small.session_picker.type_to_filter", {})
 
 
 def spend_channel_not_itemised() -> Msg:
@@ -128,6 +172,29 @@ def subagents_title() -> Msg:
 
 def timing_no_samples() -> Msg:
     return Msg("tui.small.timing.no_samples", {})
+
+
+def tool_card_http_blocked(*, status: str, reason: str, clause: str) -> Msg:
+    return Msg(
+        "tui.small.tool_card.http_blocked",
+        {"status": status, "reason": reason, "clause": clause},
+    )
+
+
+def tool_card_http_error_page(*, status: str, reason: str) -> Msg:
+    return Msg("tui.small.tool_card.http_error_page", {"status": status, "reason": reason})
+
+
+def tool_card_low_quality_hint() -> Msg:
+    return Msg("tui.small.tool_card.low_quality_hint", {})
+
+
+def tool_card_rendered_row(*, bits: str) -> Msg:
+    return Msg("tui.small.tool_card.rendered_row", {"bits": bits})
+
+
+def tool_card_search_fetch_hint() -> Msg:
+    return Msg("tui.small.tool_card.search_fetch_hint", {})
 
 
 def wake_panel_monitors_armed(*, count: int | float, shown: str) -> Msg:
