@@ -37,8 +37,6 @@ from textual.widgets import Static
 from local_operator.i18n.keys import tui_projects as _x
 from local_operator.i18n.text import tr
 from local_operator.logger import get_logger
-
-_t = tr("tui.projects")
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.projects_render import (
     UPDATE_BODY_LINES,
@@ -59,6 +57,8 @@ from local_operator.tui.projects_render import (
     update_stamp_text,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+
+_t = tr("tui.projects")
 
 logger = get_logger(__name__)
 

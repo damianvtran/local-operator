@@ -43,9 +43,9 @@ from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.move_targets import MoveTarget, filter_targets, looks_like_path
+from local_operator.tui.widgets.tool_card import truncate_cells
 
 _t = tr("tui.small")
-from local_operator.tui.widgets.tool_card import truncate_cells
 
 #: Width the card takes when the terminal allows it, and the floor it will not
 #: go below. Both are CELL counts of the card's content, inside its padding.
