@@ -420,8 +420,9 @@ export function AskCard({
 					    lapsed row is always `timed_out` (`isLapsed`; the index readers
 					    re-derive a stale `open` past its deadline), so the Dismiss gate and
 					    the queue's own rule are the same statement. It stays apart from any
-					    Decline: declining ANSWERS the agent, dismissing answers nobody and
-					    buys no turn. */}
+					    Decline: declining ANSWERS the agent, dismissing answers nobody. A
+					    dismissal buys no turn of its own; the one turn a cold dismissal can
+					    start is the owed deadline notice's, stated below. */}
 					{questions.map((question, index) => (
 						<span
 							key={String(question.id ?? index)}
@@ -455,10 +456,22 @@ export function AskCard({
 
 							    NO BUDGET HERE (UX round 2, U8): the sheet's strip one element
 							    up already states `this can take up to ~30 s` for this row, and a
-							    second copy of the number buys nothing the first line did not. */}
+							    second copy of the number buys nothing the first line did not.
+
+							    THE TURN IS STATED WHERE IT HAPPENS (report 3, 2026-10-16). Bringing
+							    the conversation up runs its boot reconcile BEFORE the dismissal
+							    lands, and a timed-out ask whose deadline notice never reached the
+							    transcript (`delivered: false`, the wire's own fact) still owes it:
+							    the notice is delivered and the idle conversation runs one turn on
+							    it. Owed by design — a dismissal must not erase what the agent was
+							    never told — so the copy says so rather than promising a silence
+							    the relay cannot keep. With the notice delivered, nothing is owed
+							    and no turn runs. */}
 							{cold ? (
 								<p className="text-meta text-ink-dim">
-									the conversation is brought up to record it.
+									{row.delivered
+										? "the conversation is brought up to record it."
+										: "the conversation is brought up to record it, and the agent runs a turn to read the deadline notice it has not seen yet."}
 								</p>
 							) : null}
 							{/* The cold dismissal's clock (design round 1, D1 = UX U1): an
