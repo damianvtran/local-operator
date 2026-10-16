@@ -3,6 +3,21 @@
  * namespaces only — never an implicit wire/bootstrap bundle.
  * Regenerate with generate.py; --check rejects drift in CI. */
 export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "relay.account_policy": {
+    "relay.account_policy.back": "Back",
+    "relay.account_policy.entry": "settings",
+    "relay.account_policy.error": "The change could not be confirmed. Check the connection and reload to read the current policy.",
+    "relay.account_policy.load_error": "Could not load account routing. Check the connection and try again.",
+    "relay.account_policy.loading": "Loading account routing\u2026",
+    "relay.account_policy.rejected": "The change was not saved. Check the value or this computer\u2019s settings and try again.",
+    "relay.account_policy.retry": "Try again",
+    "relay.account_policy.save": "Save policy",
+    "relay.account_policy.saved": "Saved on this computer.",
+    "relay.account_policy.saving": "Saving\u2026",
+    "relay.account_policy.scope": "Changes apply only to this computer.",
+    "relay.account_policy.title": "Computer settings",
+    "relay.account_policy.unavailable": "Account routing settings are unavailable on this relay. Update Local Operator on this computer.",
+  },
   "relay.session": {
     "relay.session.directory.path_placeholder": "or type another path\u2026",
     "relay.session.directory.sheet_title": "working directory",

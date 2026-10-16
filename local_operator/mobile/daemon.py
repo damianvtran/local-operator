@@ -4997,6 +4997,47 @@ def build_app(daemon: MobileDaemon):
             },
         )
 
+    async def api_account_routing(request: Request) -> Response:
+        """The authenticated phone may edit ONE non-security routing setting.
+
+        Keep this projection narrow: adding a settings key later requires an
+        explicit server change, never a caller-supplied arbitrary config path.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile.account_routing import (
+            AccountRoutingError,
+            policy_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                from local_operator.i18n.keys import wire_settings_account_policy as _ap
+
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope()["text"],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
     async def api_config_events(request: Request) -> Response:
         """SSE for the RESOLVED language: a settings change reaches the phone live.
 
@@ -7604,6 +7645,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/models", api_models),
         Route("/api/usage", api_usage),
         Route("/api/config/events", api_config_events),
+        Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),

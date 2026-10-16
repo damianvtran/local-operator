@@ -72,6 +72,20 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # Dedicated credential-root cache, never a transcript path: path_for hashes
+    # the opaque session id under account-affinity/<auth-db namespace>/*.json.
+    # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
+    # that mkstemp file. Neither operation accepts a session directory/name.
+    (
+        "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
+        "os.replace",
+        "Atomic local cache JSON only; credential-root namespace + hashed id, not sessions/ paths.",
+    ),
+    (
+        "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
+        "os.unlink",
+        "Only the failed sibling mkstemp regular file; never a session or transcript.",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None

@@ -29,6 +29,34 @@ differences:
 3. **Model/effort/slash commands are in the control vocabulary from day one**,
    along with subagent drill-down and resume.
 
+## Computer account-routing settings
+
+The web session list opens **settings → Computer settings** for the relay's
+computer. `GET /api/settings/account-routing` returns capability
+`account-routing-v1` plus the canonical `retry.accountSelectionPolicy` row,
+its effective value, default, labels/help and enum choices from the shared
+settings registry. `PATCH` on the same endpoint accepts **only**
+`{"value":"reset-soonest"}`, `{"value":"headroom"}` or `{"value":"fair"}`.
+This is not an arbitrary configuration editor: caller-supplied key/path fields
+and other settings are rejected. Both phone clients use this same projection;
+the policy is never stored as a phone-local preference.
+
+The existing relay authentication and origin gate applies before config reads
+or writes. Invalid requests return `422` without saving; unreadable config
+returns `409` without quarantining or replacing its bytes. Responses are
+`Cache-Control: no-store`. A missing endpoint or unknown capability means the
+relay cannot edit this setting: clients show unavailable instead of pretending
+a save succeeded. Native clients must bind responses to the selected computer,
+ignore stale reads/saves after switching computers, and disable edits while
+disconnected or saving. Real backend persistence/routing proof is separate from
+a native UI test running against a mock relay.
+
+All three policies preserve an eligible, compatible, unexpired success-derived
+local account lease before ranking. Changing policy does not reset provider,
+model or effort pins. See the [failover guide](../local_operator/guides/failover/GUIDE.md)
+for reset freshness/tolerance, legacy boolean compatibility and bounded cache
+lifetime heuristics; no future cache hit is guaranteed.
+
 ## Security invariants
 
 - **Every listener binds `127.0.0.1` only.** Radient supplies a tunnel and
