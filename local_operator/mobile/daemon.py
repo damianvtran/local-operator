@@ -2424,16 +2424,19 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     return data
 
 
-#: The ops that ANSWER a queued ask (design §2.4). They are answered by id and
-#: OUTLIVE the runtime that queued them — durability is the feature — so a relay
-#: with no live entry must ENGAGE rather than refuse: `ask_respond`/`ask_revise`/
-#: `ask_decline`/`ask_dismiss` all settle a durable question whose reader is the
-#: model, and "session not connected" (the pre-engage answer) left the phone
-#: accepting an answer nobody would ever read.
+#: The ops that settle a queued ask on a session with NO live runtime (design
+#: §2.4). They are answered by id and OUTLIVE the runtime that queued them —
+#: durability is the feature — so a relay with no live entry takes the COLD ARM for
+#: them rather than refusing: `ask_respond`/`ask_revise`/`ask_decline` all settle a
+#: durable question whose reader is the model, and "session not connected" (the
+#: pre-engage answer) left the phone accepting an answer nobody would ever read.
 #:
-#: `ask_dismiss` is deliberately in the set: it injects nothing, but it is still
-#: a view change against the durable log, and a session that cannot be engaged
-#: to record it must say so rather than paint a settled row that never landed.
+#: The COLD ARM is not one behaviour, though, and `ask_dismiss` is why (fork A,
+#: §14). It is in this set because it is still a settle op on the durable log, and it
+#: takes the same arm — the same gates, the same `ask_session_gone` refusal — but
+#: inside it, a dismissal goes to `asks/dismiss.py` and BOOTS NOTHING: it has no
+#: reader, so engaging for it started a session (a boot reconcile, the deadline
+#: notice and a paid turn) behind a button labelled "send no reply".
 _ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
 
 
@@ -6243,9 +6246,10 @@ def build_app(daemon: MobileDaemon):
                 # after its runtime exited must ENGAGE that session rather than
                 # refuse: the pre-engage "session not connected" was a queue with
                 # no reader — the phone accepted the answer and no model ever saw
-                # it. `ask_respond`/`ask_revise`/`ask_decline`/`ask_dismiss` all
-                # take this arm; a decline and a dismiss settle the ask just as an
-                # answer does, so they engage too.
+                # it. `ask_respond`/`ask_revise`/`ask_decline` take the DIAL below;
+                # `ask_dismiss` takes the arm and then the no-boot door inside it
+                # (fork A, §14) — it settles the ask without a runtime because it
+                # tells the runtime nothing.
                 #
                 # THE CONDITION IS ``_session_is_live``, THE SAME PREDICATE THE
                 # CARD READS. `entry is None` was too narrow: an entry whose dial
@@ -6272,6 +6276,31 @@ def build_app(daemon: MobileDaemon):
                         {"error": _ask_gone_copy(op), "code": "ask_session_gone"},
                         status_code=409,
                     )
+                if op == "ask_dismiss":
+                    # THE NO-BOOT DISMISSAL (fork A, §14). A dismissal has no reader:
+                    # it is one append plus an index rewrite, decided by the fold.
+                    # The engage arm below would BOOT the conversation for it — and
+                    # that boot's own reconcile would deliver the deadline notice the
+                    # dismissal had not cancelled yet, running a paid turn the card
+                    # promised would not happen ("dismiss — send no reply").
+                    from local_operator.asks.dismiss import dismiss_cold
+
+                    outcome = await dismiss_cold(
+                        config_dir(),
+                        session_id,
+                        str(body.get("ask_id") or ""),
+                        by=str(body.get("by") or ""),
+                    )
+                    if outcome.get("ok"):
+                        # The same detail the live op answers with, because it IS the
+                        # same op: only the door differs.
+                        return JSONResponse({"ok": True, "detail": "dismissed"})
+                    # ONLY a live owner falls back to the dial, and only because that
+                    # owner settles the ask itself. Every other refusal is the ANSWER
+                    # (an unknown ask, an ask that is not lapsed), and engaging to ask
+                    # a runtime the same question would spend a boot to be told it.
+                    if outcome.get("code") != "ask_owner_present":
+                        raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
                 if not daemon.dial_registrants:
                     raise RuntimeError("observer daemon cannot wake sessions")
                 from local_operator.mobile.attach_client import engage_session_client

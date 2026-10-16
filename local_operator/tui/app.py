@@ -27885,13 +27885,16 @@ class OperatorApp(App[None]):
     def _run_fleet_ask_op(
         self, row: AskRow, op: str, *, answers: dict[str, list[str]] | None = None
     ) -> None:
-        """Send ``op`` for ``row`` through the engage seam, in a worker (A7).
+        """Send ``op`` for ``row``, in a worker (A7).
 
         The chain is the phone daemon's cold arm exactly — engage with an
-        ``AskErrand``, send the op, close in a ``finally`` — and it runs in a
-        Textual worker because the window it must live with is the phone's own
-        (engage 30 s + ack 15 s). The row is marked IN FLIGHT for that window so
-        a second gesture cannot send the same answer twice.
+        ``AskErrand``, send the op, close in a ``finally`` — for the three ops that
+        must REACH a runtime, and for a DISMISSAL it is that same arm's no-boot door
+        (``dismiss_cold``, fork A §14): the row is settled against the log with
+        nothing dialled, so the worker returns in the time one append takes. It runs
+        in a Textual worker because the dial's window is the phone's own (engage 30 s
+        + ack 15 s); the IN FLIGHT mark covers whatever this op takes, so a second
+        gesture cannot send the same thing twice.
 
         A SECOND GESTURE IS DROPPED, NEVER RE-RUN (round 2: F2). The worker's
         group is ``exclusive=True``, so starting it again would CANCEL the
@@ -27931,35 +27934,58 @@ class OperatorApp(App[None]):
     async def _fleet_ask_worker(
         self, row: AskRow, op: str, answers: dict[str, list[str]] | None
     ) -> None:
-        """The engage-and-dial, off the UI thread's critical path (A7)."""
+        """The engage-and-dial, off the UI thread's critical path (A7).
+
+        A DISMISSAL DOES NOT ENGAGE (fork A, §14). This list's rows belong to
+        conversations that are not running — that is why they are in the FLEET — so
+        the chain below would BOOT one of them to record a view action the user made
+        on a row whose own button says "send no reply". ``dismiss_cold`` settles it
+        against the log instead, and only a live owner (one the engage seam can see
+        but this list's snapshot could not) falls back to the dial, because that
+        owner is the thing that settles the ask.
+        """
+        from local_operator.asks.dismiss import dismiss_cold
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
         from local_operator.session.runtime.launch import AskErrand
 
         failed = ""
+        settled_cold = False
         try:
-            client, _detail = await engage_session_client(
-                config_dir(), row.session_id, AskErrand(ask_id=row.ask_id)
-            )
-            try:
-                if op == "respond":
-                    target = bridge_decision_target(row, answers or {})
-                    if target is not None:
-                        # An agent-messages request: the card's answer IS a
-                        # decision and rides the verified door (`bridge_decide`
-                        # — authority-admitted, grant-bearing). The plain ask
-                        # door refuses these asks by construction, so sending it
-                        # here would leave the human with a card that cannot
-                        # answer (TB-02 wiring, PR #2378).
-                        await client.bridge_decide(*target)
+            if op == "dismiss":
+                outcome = await dismiss_cold(
+                    config_dir(), row.session_id, row.ask_id, by="terminal"
+                )
+                if outcome.get("ok"):
+                    settled_cold = True
+                elif outcome.get("code") != "ask_owner_present":
+                    # A refusal IS the message — in the queue's own words, the same
+                    # sentence the live op raises — and it must not turn into a boot
+                    # (``_ask_gesture_refusal`` renders it below, like any refusal).
+                    raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
+            if not settled_cold:
+                client, _detail = await engage_session_client(
+                    config_dir(), row.session_id, AskErrand(ask_id=row.ask_id)
+                )
+                try:
+                    if op == "respond":
+                        target = bridge_decision_target(row, answers or {})
+                        if target is not None:
+                            # An agent-messages request: the card's answer IS a
+                            # decision and rides the verified door (`bridge_decide`
+                            # — authority-admitted, grant-bearing). The plain ask
+                            # door refuses these asks by construction, so sending it
+                            # here would leave the human with a card that cannot
+                            # answer (TB-02 wiring, PR #2378).
+                            await client.bridge_decide(*target)
+                        else:
+                            await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                    elif op == "decline":
+                        await client.ask_decline(row.ask_id, by="terminal")
                     else:
-                        await client.ask_respond(row.ask_id, answers or {}, by="terminal")
-                elif op == "decline":
-                    await client.ask_decline(row.ask_id, by="terminal")
-                else:
-                    await client.ask_dismiss(row.ask_id, by="terminal")
-            finally:
-                client.close()
+                        await client.ask_dismiss(row.ask_id, by="terminal")
+                finally:
+                    client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message
             # `AttachClient` raises with `asks/render.refusal_copy`'s own
             # sentence, so the ask says why in its own words rather than in a

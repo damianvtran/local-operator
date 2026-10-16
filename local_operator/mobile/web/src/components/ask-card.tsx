@@ -445,29 +445,17 @@ export function AskCard({
 							>
 								{busy === "dismiss" ? "…" : "dismiss — send no reply"}
 							</button>
-							{/* ITS OWN STATE LINE, because on a cold conversation the promise
-							    it makes ("send no reply") is no longer the whole truth: the
-							    relay brings the conversation up to RECORD the dismissal, so the
-							    conversation surfaces as active (UX round 1, U3). Only that new
-							    fact — the button above already says "send no reply" (design
-							    round 1, D4). Stated before
-							    the tap, in the same quiet register as the deadline lines.
-
-							    NO BUDGET HERE (UX round 2, U8): the sheet's strip one element
-							    up already states `this can take up to ~30 s` for this row, and a
-							    second copy of the number buys nothing the first line did not. */}
-							{cold ? (
-								<p className="text-meta text-ink-dim">
-									the conversation is brought up to record it.
-								</p>
-							) : null}
-							{/* The cold dismissal's clock (design round 1, D1 = UX U1): an
-							    engage plus a dial plus an ack, ~30 s against a warm 1–3 s. */}
-							{busy === "dismiss" && cold ? (
-								<p className="text-body-sm text-ink-muted">
-									bringing the session up to record the dismissal — this can take up to ~30 s
-								</p>
-							) : null}
+							{/* NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16). A dismissal
+							    on a conversation with no runtime used to ENGAGE it to record the
+							    dismissal, so the card owed the reader that fact before the tap (UX
+							    round 1, U3) and stated its ~30 s while it ran (design round 1, D1 =
+							    UX U1). A dismissal now takes the no-boot door on both surfaces — one
+							    append against the log, no boot, no turn — so "dismiss — send no
+							    reply" above is the WHOLE truth, warm or cold, and there is nothing
+							    left to promise or to wait out. Left as a comment rather than an
+							    absence, because the next reader came here looking for the engage
+							    copy the other ops still genuinely carry: the cold ANSWER's clock at
+							    the bottom of this card, and the sheet's strip above it. */}
 							{error && errorOp === "dismiss" ? (
 								<p className="text-body-sm text-danger">{error}</p>
 							) : null}
