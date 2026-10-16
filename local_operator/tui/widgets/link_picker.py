@@ -42,9 +42,16 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+# i18n: the card's title and its window counter's grammar words are user-facing
+# copy, extracted so a locale can carry them; `_t` is bound BELOW the whole
+# import block so no later import reads as not-at-top (E402).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.link_targets import LinkTarget
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 #: Rows the card spends on anything but a link: the title, the rule under it,
 #: the blank row above the footer, and the footer itself. Counted from what
@@ -200,7 +207,7 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         """
         room = max(1, min(self._content_size()[0], CARD_MAX_WIDTH) - CARD_PADDING_CELLS)
         natural = max(
-            [cell_len("Open a link"), _hint_cells(list(_FOOTER_HINTS))]
+            [cell_len(_t(_x.link_picker_title())), _hint_cells(list(_FOOTER_HINTS))]
             + [
                 CURSOR_CELLS + cell_len(target.url) + 2 + cell_len(target.sender)
                 for target in self._targets[: self._row_budget()]
@@ -475,7 +482,7 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         rows = self._targets
 
         out = Text()
-        out.append("Open a link", style=fg)
+        out.append(_t(_x.link_picker_title()), style=fg)
         out.append("\n")
         out.append("─" * width, style=faint)
         out.append("\n")
@@ -509,9 +516,12 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         out.append("\n\n")
         if len(rows) > len(window):
             last = self._offset + len(window)
-            out.append("showing ", style=dim)
+            # The counter's grammar words are separate Rich Text fragments (the
+            # numerals carry their own ink), so they ride the keys the ask and
+            # move pickers already use — one vocabulary for one shape of counter.
+            out.append(_t(_x.picker_showing_prefix()), style=dim)
             out.append(f"{self._offset + 1}–{last}", style=dim)
-            out.append(" of ", style=dim)
+            out.append(_t(_x.picker_of_separator()), style=dim)
             out.append(f"{len(rows)}", style=dim)
             out.append("\n")
         for index, (key, what) in enumerate(_footer_hints(width)):
