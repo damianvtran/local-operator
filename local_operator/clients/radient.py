@@ -635,6 +635,20 @@ class RadientClient:
             headers["Content-Type"] = content_type
         return headers
 
+    def bearer_headers(self) -> Dict[str, str]:
+        """The default JSON headers this client authenticates with, or raises.
+
+        PUBLIC for the one caller outside this module that must speak the hub's
+        write routes through ITS OWN dispatcher (hub_sync's abortable push
+        transport, which cannot use this client's blocking ``requests`` calls):
+        reusing this method keeps the credential and the client-identity headers
+        in ONE place instead of a second spelling that could drift from every
+        other request this client sends. Raises ``RuntimeError`` for an
+        un-authorized client (there is nothing to publish with).
+        """
+
+        return self._get_headers(content_type="application/json", require_api_key=True)
+
     def _credential_values(self) -> List[str]:
         """This client's credential values, for removal from anything surfaced.
 
@@ -1446,6 +1460,50 @@ class RadientClient:
             ) from e
         return self._publication_result(response, action="pull the team")
 
+    def get_skill(
+        self,
+        skill_id: str,
+        *,
+        timeout: Optional[float] = None,
+        with_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Pull one skill manifest by id (``GET /v1/skills/:skillid``).
+
+        The skill sibling of :meth:`get_team`: no tenant in the URL so a client
+        can pull by the id it holds, and the full strict manifest -- every
+        reference/script/asset file -- for a readable row. Optional-auth and
+        scope-resolved from the ROW: a public skill is served to anyone, an org
+        skill only to an entitled member; everyone else is answered 404 so
+        existence is not disclosed. ``with_credential=False`` is the anonymous
+        public arm.
+
+        Returns:
+            The skill document: ``id``, ``tenant_id``, ``name``,
+            ``description``, ``files`` (path/content pairs), ``version`` and the
+            moderation record.
+
+        Raises:
+            APIError: When the hub refuses (404 for a missing skill or a caller
+                who may not read it).
+        """
+
+        url = f"{self.base_url}/skills/{skill_id}"
+        headers = self._get_headers(
+            content_type="application/json", require_api_key=with_credential
+        )
+        try:
+            extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            response = requests.get(url, headers=headers, allow_redirects=False, **extra)
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not pull the skill from the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="pull the skill")
+
     def publish_team_document(
         self,
         document: Mapping[str, Any],
@@ -1938,6 +1996,58 @@ class RadientClient:
             error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to delete agent from Radient Agent Hub: {str(e)}, "
+                f"Response Body: {error_body}"
+            ) from e
+
+    def delete_tenant_agent(self, tenant_id: str, agent_id: str) -> None:
+        """
+        Delete an organization agent through the documented tenant route.
+
+        The public surface (``delete_agent_from_marketplace``) answers 404 for
+        an org-scoped row -- it does not know it. The server's org-sharing API
+        documents ``DELETE /v1/tenants/:tenantid/agents/:agentid`` (admin+),
+        which is the only working path for those rows. Both ids land in the URL
+        path, so they are validated BEFORE the request is built, and the rule is
+        a CANONICAL UUID: literal separators are not enough because requests
+        normalizes "." / ".." / percent-encoded components before sending, so a
+        "safe-looking" id could still address a different resource (review R3:
+        `--id ..` prepared a DELETE for the tenant root).
+
+        Args:
+            tenant_id (str): The organization owning the agent.
+            agent_id (str): The agent ID to delete.
+
+        Raises:
+            ValueError: If either id is empty or path-unsafe.
+            RuntimeError: If the API key is not set or the delete fails.
+        """
+        tenant = str(tenant_id or "").strip()
+        agent = str(agent_id or "").strip()
+        # UUID parsing refuses dots, percent-encoded traversal, slashes,
+        # control characters and empty strings in one rule; the canonical-form
+        # comparison additionally refuses braced/urn/compact spellings.
+        for label, value in (("tenant_id", tenant), ("agent_id", agent)):
+            try:
+                canonical = str(uuid.UUID(value))
+            except (ValueError, TypeError, AttributeError):
+                canonical = ""
+            if not value or value.lower() != canonical:
+                raise ValueError(f"invalid {label}: a canonical UUID is required")
+        url = f"{self.base_url}/tenants/{tenant}/agents/{agent}"
+        headers = self._get_headers(content_type=None, require_api_key=True)
+        try:
+            response = requests.delete(url, headers=headers)
+            if response.status_code == 204:
+                return
+            error_body = self._surfaceable_body(scrubbed_response_body(response))
+            raise RuntimeError(
+                f"Failed to delete organization agent from Radient: HTTP "
+                f"{response.status_code}, Response Body: {error_body}"
+            )
+        except requests.exceptions.RequestException as e:
+            error_body = self._surfaceable_body(response_body(e))
+            raise RuntimeError(
+                f"Failed to delete organization agent from Radient: {str(e)}, "
                 f"Response Body: {error_body}"
             ) from e
 

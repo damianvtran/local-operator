@@ -431,36 +431,105 @@ async def test_a_peer_only_turn_is_ineligible(tmp_path: Path) -> None:
         await session.dispose()
 
 
-@pytest.mark.asyncio
-async def test_a_queued_ask_answer_is_ineligible(tmp_path: Path) -> None:
-    """§2.2: an ``ask_response`` delivered as a turn of its own is ``internal``.
+async def _deliver_ask_row(session: Session, custom_type: str, attribution: str, **details: Any):
+    """Deliver one ask row as a turn of its own, as the queue does after a reply."""
+    from local_operator.harness.types import CustomMessage
 
-    The answer text is the operator's, but the turn's final message responds to a
-    question the AGENT raised, and that is the memo's disposition (row 6; open question
-    Q4 owns any opt-in). Keyed where it belongs: ``custom_type`` is set, so the delivery
-    never reaches the typed-user arm.
+    await session.deliver_ask_messages(
+        [
+            CustomMessage(
+                custom_type=custom_type,
+                attribution=attribution,  # type: ignore[arg-type]
+                details=details,
+            )
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_answered_ask_opens_an_eligible_turn_carrying_the_last_typed_request(
+    tmp_path: Path,
+) -> None:
+    """Q4 resolved: a PERSON answering an ask is a real user turn.
+
+    The discriminating incident: the turn that resumed after an approved ask did the work and
+    wrote the deliverables, and was refused as ``no-typed-user-row`` so nothing was
+    highlighted. The decision's request text must still make sense, so it carries the
+    session's last typed request (kept across runs) plus the answer.
     """
-    stream = _stream()
-    session = _make_session(tmp_path, stream)
+    session = _make_session(
+        tmp_path,
+        ScriptedStream([[StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")]] * 2),
+    )
     runner = _wire(session)
     try:
-        from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
-        from local_operator.harness.types import CustomMessage
-
-        await session.deliver_ask_messages(
-            [
-                CustomMessage(
-                    custom_type=ASK_RESPONSE_MESSAGE_TYPE,
-                    attribution="user",
-                    details={"ask_id": "a1", "status": "answered", "text": "use the blue one"},
-                )
-            ]
+        await session.prompt("close the rationale gap")
+        await wait_for(lambda: runner.reasons == [""])
+        await _deliver_ask_row(
+            session,
+            "ask_response",
+            "user",
+            ask_id="a1",
+            status="answered",
+            questions=[{"id": "q1", "question": "Post them?"}],
+            answers={"q1": ["Yes, with the supplementary header"]},
         )
+        await wait_for(lambda: len(runner.reasons) == 2)
+        assert runner.reasons == ["", ""], runner.reasons
+        record = session.last_run_provenance
+        assert record is not None and record.typed_user and record.last_trigger == TRIGGER_TYPED
+        assert "Yes, with the supplementary header" in record.user_text
+        assert "close the rationale gap" in record.user_text
+        assert record.started_at > 0, "the sweep needs the turn start"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("custom_type", "attribution", "details"),
+    [
+        ("ask_response", "user", {"status": "declined"}),
+        ("ask_response", "user", {"status": "late"}),
+        ("ask_response", "system", {"status": "answered"}),
+        ("ask_response", "agent", {"status": "answered"}),
+        ("ask_response", "user", {}),
+        ("ask_timeout", "user", {"status": "timed_out"}),
+        ("ask_timeout", "system", {"status": "answered"}),
+    ],
+)
+async def test_an_ask_row_that_is_not_a_persons_answer_stays_ineligible(
+    tmp_path: Path, custom_type: str, attribution: str, details: dict[str, Any]
+) -> None:
+    session = _make_session(tmp_path, _stream())
+    runner = _wire(session)
+    try:
+        await _deliver_ask_row(session, custom_type, attribution, ask_id="a1", **details)
         await wait_for(lambda: session._last_run_provenance is not None)
         await wait_for(lambda: runner.reasons != [])
         assert runner.reasons == ["no-typed-user-row"], runner.reasons
     finally:
         await session.dispose()
+
+
+def test_a_secret_question_answer_never_enters_the_decision_text() -> None:
+    from local_operator.supplements.trigger import ask_answer_text
+
+    text = ask_answer_text(
+        "deploy it",
+        {
+            "questions": [{"id": "k", "secret": True}, {"id": "ok", "secret": False}],
+            "answers": {"k": ["hunter2-api-key"], "ok": ["yes"]},
+        },
+    )
+    assert "hunter2" not in text and "ok: yes" in text and "deploy it" in text
+
+
+def test_the_ask_answer_text_is_bounded_and_leads_with_the_answer() -> None:
+    from local_operator.supplements.trigger import USER_TEXT_MAX_CHARS, ask_answer_text
+
+    text = ask_answer_text("r" * 50_000, {"answers": {"q": ["a" * 5_000]}})
+    assert len(text) <= USER_TEXT_MAX_CHARS and text.startswith("[answer to the assistant's")
 
 
 @pytest.mark.asyncio

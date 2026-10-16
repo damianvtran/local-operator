@@ -38,6 +38,7 @@ from local_operator.tui.widgets.session_panel import (
     build_session_report,
 )
 from tests.unit.analytics.test_store import _snap
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _boot, _submit
 
@@ -145,6 +146,7 @@ async def test_assembled_slash_snapshot_scroll_and_focus(tmp_path, monkeypatch, 
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=size) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         history = list(session.history())
         await _submit(pilot, app, "/session")
@@ -212,6 +214,7 @@ async def test_disk_worker_is_off_loop_and_drops_stale_session(monkeypatch, repl
     session = EpochSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test() as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         session.frontend_state = FrontendSessionState(session_id="sess", epoch="before")
         app._cmd_session("", lambda body, kind="info": None)
@@ -250,6 +253,7 @@ async def test_invalid_arguments_never_request_model():
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test() as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(pilot, app, "/session another-id")
         await app.workers.wait_for_complete()
@@ -330,6 +334,7 @@ async def test_copy_flag_before_the_session_exists_copies_nothing(missing):
 async def test_scroll_hint_tracks_actual_overflow_after_resize():
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 60)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         screen = SessionScreen(SessionReport("sess"), runtime())
         app.push_screen(screen)
@@ -362,6 +367,7 @@ async def test_real_locked_read_can_be_cancelled_without_interrupting_draft(
     app = OperatorApp(lambda: _factory(session))
     try:
         async with app.run_test(size=(50, 24)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             await _submit(pilot, app, "/session")
             try:
@@ -392,6 +398,7 @@ async def test_real_locked_read_can_be_cancelled_without_interrupting_draft(
 async def test_fast_result_during_mount_replaces_loading_text():
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test() as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         screen = SessionScreen(None, runtime())
         app.push_screen(screen)
@@ -410,6 +417,7 @@ async def test_invalidating_buried_pending_view_never_pops_newer_modal():
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test() as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         pending = SessionScreen(None, runtime())
         app.push_screen(pending)
@@ -559,6 +567,7 @@ async def test_the_header_is_named_before_the_disk_read_lands(monkeypatch):
     app = OperatorApp(lambda: _factory(FakeSession()))
     try:
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             app._show_provisional_name("fix the session header naming gap")
             app._cmd_session("", lambda body, kind="info": None)
@@ -588,6 +597,7 @@ async def test_a_session_without_a_stored_title_is_named_from_disk(tmp_path, mon
     await _session_store(tmp_path, "sess", "the sidebar names this conversation")
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
@@ -618,6 +628,7 @@ async def test_a_stored_title_still_wins_on_a_resumed_conversation(tmp_path, mon
     await _session_store(tmp_path, "sess", "some forgettable opening line", title="Retention Fix")
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
@@ -642,6 +653,7 @@ async def test_the_provisional_stand_in_outranks_a_different_disk_label(tmp_path
     await _session_store(tmp_path, "sess", "a disk label only the transcript knows")
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._show_provisional_name("the stand-in the band wears")
         await _submit(pilot, app, "/session")
@@ -670,6 +682,7 @@ async def test_a_failing_label_read_still_publishes_the_report(monkeypatch):
     monkeypatch.setattr(resume_module, "session_name", unreadable)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
@@ -1135,6 +1148,7 @@ async def test_metric_toggle_and_resize_repaint_through_the_real_screen():
     """`t` flips the bars in place and a resize re-does the column arithmetic."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         screen = SessionScreen(_populated(), runtime())
         app.push_screen(screen)
@@ -1170,6 +1184,7 @@ async def test_toggle_is_not_advertised_when_there_is_nothing_to_plot():
     """Promising a key that does nothing is a dead control."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         screen = SessionScreen(SessionReport("sess"), runtime())
         app.push_screen(screen)

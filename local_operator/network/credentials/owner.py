@@ -242,7 +242,7 @@ class MeshCredentialBroker:
         self._github_minter = github_minter
         self._github_lender: github_app.GithubLender | None = None
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
-        self._inflight: dict[tuple[str, str, bool, str, str, str], asyncio.Future[Any]] = {}
+        self._inflight: dict[tuple[Any, ...], asyncio.Future[Any]] = {}
         self._report_refreshed: dict[int, float] = {}
         self._report_blocked: dict[tuple[str, int], float] = {}
         #: ONE lock around each report arm's read-then-stamp (review round 4, R4-n2):
@@ -267,6 +267,7 @@ class MeshCredentialBroker:
         behaviour is unchanged. The broker (and its one event loop) is built the first
         time the answer is yes, and kept.
         """
+        from local_operator.network.credentials import reconcile as reconcile_mod
         from local_operator.network.relay import not_implemented_peer_op
 
         refuse = not_implemented_peer_op("net_broker")
@@ -287,6 +288,32 @@ class MeshCredentialBroker:
                     from local_operator.network.credentials import sync as sync_mod
 
                     return sync_mod.member_announce(server, link, frame)
+                # THE LIFECYCLE HALF IS THE SAME CASE: ``lifecycle_announce`` is
+                # addressed to a RECIPIENT, and a recipient that holds no credential
+                # (the borrower-only device) is exactly who receives one. Behind the
+                # refusal it could never apply a withdrawal. Authorisation is
+                # unchanged: ``authorizer`` already gated this ``net_broker`` frame on
+                # the SENDER's ``broker_credential`` capability in THIS device's member
+                # row for it (types.OP_CAPABILITY), whatever its kind.
+                if str((frame or {}).get("kind") or "") == "lifecycle_announce":
+                    from local_operator.network.credentials.lifecycle import (
+                        member_lifecycle_announce,
+                    )
+
+                    return member_lifecycle_announce(server, link, frame)
+                # THE CONSENT RECONCILER'S PUSH is addressed to a RECIPIENT too, and the
+                # recipient that needs it most owns nothing (no broker yet). Only a frame
+                # carrying the reconciler's origin marker is routed; a bare pull
+                # (``want: pull``) or any other placement frame keeps the by-name refusal.
+                if (
+                    str((frame or {}).get("kind") or "") == "placement"
+                    and (frame or {}).get("origin") == reconcile_mod.PUSH_ORIGIN
+                ):
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": reconcile_mod.member_placement_push(server, link, frame),
+                    }
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -351,7 +378,12 @@ class MeshCredentialBroker:
                 "nothing was refreshed or lent",
             )
         kind = str(frame.get("kind") or "")
-        if kind in ("announce", "copy", "ack"):
+        from local_operator.network.credentials import reconcile as reconcile_mod
+        from local_operator.network.credentials.lifecycle import negotiated
+
+        if kind.startswith("lifecycle_") and not negotiated(link):
+            detail = _lifecycle_unsupported(kind)
+        elif kind in ("announce", "copy", "ack"):
             # THE SYNC KINDS (S3). One import for the three branches; the module
             # is stdlib-only at import, the package's stated rule.
             from local_operator.network.credentials import sync as sync_mod
@@ -366,8 +398,25 @@ class MeshCredentialBroker:
             detail = self.grant(link, frame)
         elif kind == "report":
             detail = self.report(link, frame)
+        elif kind == "placement" and frame.get("origin") == reconcile_mod.PUSH_ORIGIN:
+            detail = reconcile_mod.member_placement_push(self._server, link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
+        elif kind == "lifecycle_read":
+            detail = self.lifecycle_read(link, frame)
+        elif kind == "lifecycle_ack":
+            detail = self.lifecycle_ack(link, frame)
+        elif kind == "lifecycle_announce":
+            # Owner -> recipient: this device is the RECIPIENT of the metadata. A
+            # device that owns nothing reaches the same function through
+            # ``relay_handler``'s pre-broker branch.
+            from local_operator.network.credentials import lifecycle as lifecycle_mod
+
+            detail = lifecycle_mod.member_lifecycle_announce(self._server, link, frame)
+        elif str(kind).startswith("lifecycle_"):
+            # An unknown lifecycle kind is a peer newer than this build, not a fault
+            # here: by name, and never through the ``internal`` else-branch below.
+            detail = _lifecycle_unsupported(kind)
         else:
             detail = BrokerError(
                 code="internal",
@@ -428,6 +477,7 @@ class MeshCredentialBroker:
         # peer-merged holder projection stale. Provider-wide refusal precedes
         # native resolution; caller-supplied account metadata is never consulted.
         from local_operator.network.credentials import consent
+        from local_operator.network.credentials import reconcile as reconcile_mod
         from local_operator.network.types import MeshRefusal
 
         try:
@@ -481,6 +531,28 @@ class MeshCredentialBroker:
                 "this device lends GitHub to the DEVICE, not to a session; nothing was lent",
             )
 
+        # 2c. A holder DERIVED from a signed approval (``reconcile``) is account-scoped,
+        #     while a holder row is per key. Decide which native rows the approval
+        #     covers BEFORE any refresh, from metadata alone, so an account the
+        #     approval does not cover is never refreshed (zero IdP POSTs) and never
+        #     served. An explicit share (``granted_by`` = the owner) skips this
+        #     entirely and behaves exactly as before.
+        excluded_ids: tuple[int, ...] = ()
+        if reconcile_mod.is_derived(holder):
+            allowed_ids, excluded_ids, scope_code = reconcile_mod.serve_gate(
+                self.network_id, self.self_device, by, key, self.root
+            )
+            if not allowed_ids:
+                return self._refuse(
+                    link,
+                    key,
+                    provider,
+                    by,
+                    scope_code or reconcile_mod.CODE_UNKNOWN,
+                    "the approval for this device does not cover a login that is signed in "
+                    f"on {self.self_device_name or self.self_device}; nothing was lent",
+                )
+
         # 3-5. Coalesce, resolve, audit. All on the owner's ONE loop.
         try:
             outcome = self._loop.submit(
@@ -492,6 +564,7 @@ class MeshCredentialBroker:
                     force=force,
                     holder_scope=holder.scope if holder is not None else "session",
                     by=by,
+                    excluded_ids=excluded_ids,
                 ),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
@@ -563,6 +636,9 @@ class MeshCredentialBroker:
             fields.get("by", ""),
             fields.get("model_id", ""),
             fields.get("holder_scope", ""),
+            # A derived holder's exclusion set is part of WHAT is being asked: two askers
+            # with different permitted rows must never share one resolve.
+            tuple(fields.get("excluded_ids", ())),
         )
         loop = asyncio.get_running_loop()
         slot = self._inflight.get(ckey)
@@ -600,6 +676,7 @@ class MeshCredentialBroker:
         force: bool,
         holder_scope: str,
         by: str,
+        excluded_ids: tuple[int, ...] = (),
     ) -> Any:
         """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal."""
         if github_app.is_github_key(key):
@@ -635,6 +712,10 @@ class MeshCredentialBroker:
                 # would throw away a single-use refresh token.
                 read_only=True,
                 model_id=model_id,
+                # Rows a derived holder's approval does not cover are hidden from THIS
+                # resolve only (nothing is blocked or repointed): they are neither
+                # picked nor refreshed on a peer's behalf.
+                exclude_credential_ids=excluded_ids or None,
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
@@ -754,6 +835,22 @@ class MeshCredentialBroker:
             )
         store = self._auth_store_instance()
         storage = McpTokenStorage(url, store)
+        unavailable = BrokerError(
+            code="unavailable",
+            key=key,
+            owner_device=self.self_device,
+            owner_device_name=self.self_device_name,
+            message=(
+                "the owner's MCP grant state could not be verified; "
+                "check its credential store and retry"
+            ),
+        )
+        # A known-rejected family must cost no refresh/discovery request, even
+        # when its old access token quotes a future expiry. An unreadable marker
+        # is not proof that the family is alive (grant_is_dead alone is lossy).
+        marker = storage.grant_marker()
+        if marker is None:
+            return unavailable
         # The ROW's integer id. ``storage.credential_id`` is NOT one: it is the logical
         # string ``mcp_oauth:<url>``, and ``int()`` of it made every MCP grant answer
         # ``internal ValueError`` (review round 1, F4).
@@ -774,12 +871,19 @@ class MeshCredentialBroker:
         #
         # The same read the provider path makes, read before the refresh runs.
         before = self._row_stamps(MCP_OAUTH_PROVIDER)
-        try:
-            await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
-        except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
-            return self._classify_refresh_failure(exc, key)
+        if not marker.is_dead:
+            try:
+                await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
+            except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
+                return self._classify_refresh_failure(exc, key)
 
         refreshed = self._row_stamps(MCP_OAUTH_PROVIDER).get(row_id, 0) > before.get(row_id, 0)
+        # Refresh may have tombstoned this family or a new login may have
+        # replaced it while we awaited. Bind the access read to the CURRENT
+        # existing chain, not the marker cached before that await.
+        selected_marker = storage.grant_marker()
+        if selected_marker is None:
+            return unavailable
         try:
             tokens = await storage.get_tokens()
         except Exception as exc:  # noqa: BLE001
@@ -792,7 +896,10 @@ class MeshCredentialBroker:
             )
         token = str(getattr(tokens, "access_token", "") or "")
         expiry = storage.stored_token_expiry()
-        if not token or _already_expired(expiry):
+        current_marker = storage.grant_marker()
+        if current_marker is None or current_marker.stamp != selected_marker.stamp:
+            return unavailable
+        if current_marker.is_dead or not token or _already_expired(expiry):
             # The row exists but holds no USABLE access token: either it has none, or
             # the token it has died and the refresh above could not replace it (no
             # reachable authorization server, a grant the server already rejected).
@@ -880,6 +987,23 @@ class MeshCredentialBroker:
                     or not entry.is_holder(by)
                 ):
                     raise MeshRefusal("not_a_holder", "holder authority changed before mint")
+                from local_operator.network.credentials import (
+                    reconcile as reconcile_mod,
+                )
+
+                if reconcile_mod.is_derived(entry.holder(by)):
+                    # Account-scoped derived grant: re-verify the signed scope against the
+                    # row the resolve actually used, under the same lock a revoke takes.
+                    reconcile_mod.derived_mint_check(
+                        self.network_id,
+                        self.self_device,
+                        by,
+                        str(fields["key"]),
+                        fields["identity"],
+                        self.root,
+                        credential_id=int(fields["credential_id"]),
+                        kind=str(fields["kind"]),
+                    )
                 return self._mint_grant(**fields)
 
         except MeshRefusal as exc:
@@ -1477,6 +1601,220 @@ class MeshCredentialBroker:
             return {"kind": "ack", "key": ""}
         return {"kind": "placement", "document": self._document().to_json()}
 
+    # -- lifecycle (metadata only) -------------------------------------------
+
+    def _lifecycle_gate(
+        self, link: Any, frame: dict[str, Any], required: tuple[str, ...]
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None]:
+        """``(caller, entries, refusal)`` shared by ``lifecycle_read`` and ``lifecycle_ack``.
+
+        WHO is asking is the link's authenticated device (``_caller``), never the
+        frame; a frame naming a different ``recipient_device`` is refused rather than
+        served, because a recipient may read only its OWN snapshot. The frame is
+        re-validated here (``wire`` already did on decode) so a broker driven
+        directly, or by a future transport, cannot skip the metadata-only bounds.
+        Every key must be one this device OWNS, exactly as ``grant`` decides it.
+        """
+        from local_operator.network.credentials import lifecycle as lifecycle_mod
+        from local_operator.network.credentials.types import validate_lifecycle_frame
+
+        by, refused = self._caller(link, frame, "", "lifecycle metadata")
+        if refused is not None:
+            return by, [], refused
+        try:
+            validate_lifecycle_frame(frame)
+            entries = lifecycle_mod.parse_entries(frame, required=required)
+        except ValueError as exc:
+            return by, [], BrokerError(code="malformed_frame", message=str(exc)).to_detail()
+        named = frame.get("recipient_device")
+        if named not in (None, "", by):
+            return (
+                by,
+                [],
+                self._refuse(
+                    link,
+                    "",
+                    "lifecycle metadata",
+                    by,
+                    "identity_mismatch",
+                    "a recipient may read and acknowledge only its own lifecycle metadata",
+                ),
+            )
+        for item in entries:
+            key = item["credential_key"]
+            if key in DEVICE_BOUND_PROVIDERS:
+                # Like ``grant``: the device-bound answer does not depend on placement
+                # (and placement refuses to declare such a key at all).
+                continue
+            entry = self._entry(key)
+            if entry is None or entry.owner_device != self.self_device:
+                return (
+                    by,
+                    [],
+                    self._refuse(
+                        link,
+                        key,
+                        key,
+                        by,
+                        "not_owner",
+                        f"{self.self_device_name or self.self_device} does not hold {key!r}; "
+                        "ask the device that signed in to it",
+                    ),
+                )
+        return by, entries, None
+
+    def lifecycle_read(self, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer the caller's OWN per-key lifecycle snapshot. Reads, never mutates.
+
+        ORDER IS THE POINT: ``consent.check_borrow`` runs FIRST for each key, so the
+        finite-journal fence and a sticky deny are inherited from the one place that
+        decides them and answer ``withdrawn`` before any counter, candidate list or
+        provider state is read. This handler re-decides nothing about consent. A
+        state is never a grant: ``available`` says the owner natively holds the login
+        and this recipient is covered; the material still comes only through
+        ``grant``. Keys the caller is not covered for read as ``absent`` — the same
+        answer as a key that does not exist, so existence is not disclosed.
+        """
+        from local_operator.network.credentials import consent
+        from local_operator.network.credentials import lifecycle as lifecycle_mod
+        from local_operator.network.credentials.types import validate_lifecycle_frame
+        from local_operator.network.types import MeshRefusal
+
+        by, entries, refusal = self._lifecycle_gate(link, frame, ())
+        if refusal is not None:
+            return refusal
+        store_ = lifecycle_mod.LifecycleStore(self.network_id, self.root)
+        out: list[dict[str, Any]] = []
+        candidates: set[str] | None = None
+        for item in entries:
+            key, scope = item["credential_key"], item["account_scope_ref"]
+            row: dict[str, Any] = {"credential_key": key, "account_scope_ref": scope}
+            try:
+                consent.check_borrow(self.network_id, self.self_device, by, key, root=self.root)
+            except MeshRefusal:
+                # Any refusal here (deny, fence, unreadable consent) fails CLOSED.
+                row["state"] = lifecycle_mod.STATE_WITHDRAWN
+                out.append(row)
+                continue
+            entry = self._entry(key)
+            if key in DEVICE_BOUND_PROVIDERS or (
+                entry is not None and entry.provider in DEVICE_BOUND_PROVIDERS
+            ):
+                row["state"] = lifecycle_mod.STATE_NON_PORTABLE
+                out.append(row)
+                continue
+            if candidates is None:
+                candidates = self._lifecycle_candidates()
+                if candidates is None:
+                    return BrokerError(
+                        code="unavailable",
+                        message="the owner's credential store could not be read; "
+                        "nothing was reported",
+                    ).to_detail()
+            covered, state = self._lifecycle_covered(entry, by, key)
+            if state is not None:
+                row["state"] = state
+            elif not covered or key not in candidates:
+                row["state"] = lifecycle_mod.STATE_ABSENT
+            else:
+                try:
+                    known = store_.scopes_for(key)
+                    counters = store_.snapshot(key, scope)
+                except MeshRefusal as exc:
+                    return BrokerError(code=exc.code, message=str(exc)).to_detail()
+                if counters is None:
+                    # Counters exist for this key under OTHER scopes only: the
+                    # requested scope is unresolved, which refuses to infer.
+                    row["state"] = (
+                        lifecycle_mod.STATE_SCOPE_UNKNOWN if known else lifecycle_mod.STATE_ABSENT
+                    )
+                else:
+                    row["state"] = counters.state
+                    row["material_generation"] = counters.material_generation
+                    row["login_chain_revision"] = counters.login_chain_revision
+            out.append(row)
+        reply = {
+            "kind": "lifecycle_snapshot",
+            "owner_device": self.self_device,
+            "recipient_device": by,
+            "entries": out,
+        }
+        try:
+            validate_lifecycle_frame(reply)
+        except ValueError as exc:  # pragma: no cover — a construction bug, never a peer's
+            return BrokerError(code="internal", message=str(exc)).to_detail()
+        return reply
+
+    def lifecycle_ack(self, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        """Receive a recipient's "metadata applied" ack. It proves NOTHING about auth.
+
+        Audited keyless and answered; no state is derived from it (an ack neither
+        grants, clears a deny nor raises a counter) and nothing is persisted yet —
+        the owner-side ack ledger is a later slice. ``check_borrow`` still runs
+        first so a withdrawn recipient is told so, not thanked.
+        """
+        from local_operator.network.credentials import consent
+        from local_operator.network.types import MeshRefusal
+
+        by, entries, refusal = self._lifecycle_gate(
+            link, frame, ("material_generation", "login_chain_revision")
+        )
+        if refusal is not None:
+            return refusal
+        for item in entries:
+            key = item["credential_key"]
+            try:
+                consent.check_borrow(self.network_id, self.self_device, by, key, root=self.root)
+            except MeshRefusal as exc:
+                return self._refuse(link, key, key, by, exc.code, str(exc))
+        for item in entries:
+            self._audit(
+                "credential.lifecycle_acked",
+                actor=by,
+                subject=self.self_device,
+                detail={
+                    "credential_key": item["credential_key"],
+                    "material_generation": item["material_generation"],
+                    "login_chain_revision": item["login_chain_revision"],
+                },
+            )
+        return {"kind": "ack", "entries": len(entries)}
+
+    def _lifecycle_candidates(self) -> set[str] | None:
+        """Keys this device natively holds, or ``None`` when the store cannot be read."""
+        from local_operator.network.credentials import offers
+        from local_operator.paths import config_dir
+
+        try:
+            rows = offers.enumerate_candidates(
+                self.root if self.root is not None else config_dir(), network_id=self.network_id
+            )
+        except offers.OfferEnumerationError:
+            return None
+        return {str(row["key"]) for row in rows}
+
+    def _lifecycle_covered(
+        self, entry: CredentialPlacementEntry | None, by: str, key: str
+    ) -> tuple[bool, str | None]:
+        """``(covered, state)``: a placement holder OR a verified permission covers ``key``.
+
+        ``state`` is set only for ``scope_unknown`` — a permission whose required
+        account scope the owner cannot confirm. That is reported, never granted.
+        """
+        from local_operator.network.credentials import consent
+        from local_operator.network.credentials import lifecycle as lifecycle_mod
+        from local_operator.network.types import MeshRefusal
+
+        if entry is not None and entry.is_holder(by):
+            return True, None
+        try:
+            consent.verified_permission(self.network_id, self.self_device, by, key, {}, self.root)
+        except MeshRefusal as exc:
+            if exc.code == "scope_unknown":
+                return False, lifecycle_mod.STATE_SCOPE_UNKNOWN
+            return False, None
+        return True, None
+
     # -- helpers ------------------------------------------------------------
 
     def _caller(
@@ -1759,6 +2097,17 @@ class MeshCredentialBroker:
 #: first build on two different threads.
 _BROKER_ATTR = "_mesh_credential_broker"
 _BROKER_LOCK = threading.Lock()
+
+
+def _lifecycle_unsupported(kind: Any) -> dict[str, Any]:
+    """An unserved ``lifecycle_*`` kind, answered BY NAME and never as ``internal``.
+
+    ``internal`` reads as an owner build fault; a newer peer's kind is not one.
+    """
+    return BrokerError(
+        code="unsupported",
+        message=f"this build does not serve {kind!r}; nothing was read or changed",
+    ).to_detail()
 
 
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:

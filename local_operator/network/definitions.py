@@ -2175,7 +2175,28 @@ class DefinitionsSyncer(threading.Thread):
         """
         moment = time.time() if now is None else now
         outcomes: list[tuple[str, str]] = []
-        for device_id in self._targets():
+        targets = self._targets()
+        independent = getattr(self, "_independent_attempts", {})
+        independent = {
+            ident: moment for ident, moment in independent.items() if ident[1] in targets
+        }
+        self._independent_attempts = independent
+        for device_id in targets:
+            # Independent protocols must not inherit definitions' admin gate or
+            # its refusal parking. Legacy siblings retain their existing floors.
+            independent = getattr(self, "_independent_attempts", {})
+            for step in _tick_steps():
+                if not getattr(step, "independent_cadence", False):
+                    continue
+                ident = (step, device_id)
+                if moment - independent.get(ident, float("-inf")) < self._tick_s:
+                    continue
+                independent[ident] = moment
+                try:
+                    step(self._server, device_id)
+                except Exception:  # noqa: BLE001 — one protocol cannot stop siblings
+                    logger.debug("definitions: independent step failed", exc_info=True)
+            self._independent_attempts = independent
             blocked = unholdable_capability(self._server, device_id, "net_definitions")
             if blocked:
                 # A MEMBER THAT CANNOT HOLD THE OP IS NOT ASKED ON A TIMER (Q-R1-3).
@@ -2228,6 +2249,8 @@ class DefinitionsSyncer(threading.Thread):
             # tests and surfaces already read, and a step's outcome is evidence
             # for the step's own on-demand verb — the tick only parks and logs.
             for step in _tick_steps():
+                if getattr(step, "independent_cadence", False):
+                    continue
                 try:
                     code = step(self._server, device_id)
                 except Exception:  # noqa: BLE001 — one step must not kill the cadence

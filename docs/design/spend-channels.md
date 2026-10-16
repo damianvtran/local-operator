@@ -328,6 +328,12 @@ be charged.
 - **TTS / STT** — the tolerant Radient `cost`-object adapter exists
   (`clients/radient_cost.py`, marked PENDING CONTRACT); route-level wiring and
   the owner hand-off are the PR-3 slice, per design §4.2/§6.
+- **classification** — `classification.service._metered_decide`, one record per
+  cascade leg attempt, with `units` counting HTTP POST attempts including credential
+  re-sends. The factory binds the session ingest late. `usage.cost` is billed when
+  reported; absence stays unknown. Interrupted/lost-response requests are cancelled
+  and unknown rather than presumed free. Cache hits and disabled/no-credential paths
+  emit nothing. See `classification-layer.md` → Channel accounting for semantics.
 - **backfill** — a pre-feature journal recovers `search_cost`/`read_cost` and
   image rows that carry a figure; rows without a figure are NOT invented.
 

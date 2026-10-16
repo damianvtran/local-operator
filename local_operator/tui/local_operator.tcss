@@ -419,7 +419,7 @@ ToolCard, WakeBlock, PeerMessageBlock, QuietGroupBlock {
  * rows beside it in the container, not rows of its own, so it stays pinned at
  * one line in both states. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded,
-MonitorDeltaBlock.monitor-expanded {
+MonitorDeltaBlock.monitor-expanded, TeamBridgeBlock.bridge-expanded {
     height: auto;
 }
 
@@ -500,7 +500,8 @@ MonitorDeltaBlock.monitor-expanded {
 
 .comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
 .comfortable-rows PeerMessageBlock.peer-expanded,
-.comfortable-rows MonitorDeltaBlock.monitor-expanded {
+.comfortable-rows MonitorDeltaBlock.monitor-expanded,
+.comfortable-rows TeamBridgeBlock.bridge-expanded {
     height: auto;
     /* Left value restated for the same reason as the collapsed rule above. */
     padding: 1 0 1 0;
@@ -1139,6 +1140,28 @@ GoalPanel.-squeezed {
     layer: toast;
     width: auto;
     height: auto;
+}
+
+/* ---- the /hub links overlay ------------------------------------------- *
+ *
+ * Same layer, same host rule, same reason as `#usage-host` above: `width:
+ * auto` so the host hugs the card, because a stretched host on an overlay
+ * layer blanks every cell of every row it covers. Placement is a Python-set
+ * offset (`widgets/overlay.recentre`), which is why there is no `align` here.
+ * It holds focus while open (the policy keys are the point), so it dismisses on
+ * Esc/q and is sized by the widget against the measured screen. */
+#hub-links-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+HubLinksPanel {
+    width: auto;
+    height: auto;
+    padding: 1 2;
+    background: $lo-overlay;
+    color: $lo-fg;
 }
 
 KeysLegend {

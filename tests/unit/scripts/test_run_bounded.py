@@ -307,3 +307,275 @@ def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers
 
     assert returncode == 128 + signal.SIGKILL, f"rc={returncode}, stderr={stderr!r}"
     assert "killed by signal 9" in stderr
+
+
+@pytest.fixture
+def memory_wrapper(monkeypatch):
+    """Load this tree's wrapper without running a command or probing a host."""
+    import importlib.util
+
+    # The standalone script bootstraps its own tree; restore ALL path changes
+    # at teardown so importing it cannot become another global-state leak.
+    monkeypatch.syspath_prepend(str(REPO))
+    spec = importlib.util.spec_from_file_location("bounded_memory_fixture", WRAPPER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.delenv(module.memory_guard.RESOLVED_MEMORY_MB_ENV, raising=False)
+    return module
+
+
+def _test_budget(ceiling):
+    from local_operator.memory_guard import Budget
+
+    return Budget(
+        ceiling,
+        int(ceiling * 0.8),
+        None,
+        None,
+        None,
+        "override" if ceiling else "disabled",
+        "unit fixture",
+    )
+
+
+@pytest.mark.parametrize(
+    "inherited,requested,expected",
+    [
+        ("48", None, 48),
+        ("48", 32, 32),
+        ("48", 48, 48),
+        (None, 32, 32),
+        (None, 0, 0),
+        ("0", None, 0),
+        ("0", 32, 32),
+        (None, None, 300),
+    ],
+)
+def test_child_memory_resolution_uses_canonical_budget(
+    memory_wrapper, monkeypatch, inherited, requested, expected
+):
+    wrapper = memory_wrapper
+    calls = []
+
+    def computed(**kwargs):
+        calls.append(kwargs)
+        return _test_budget(kwargs.get("override_mb", 300))
+
+    monkeypatch.setattr(wrapper.memory_guard, "compute_budget", computed)
+    if inherited is not None:
+        monkeypatch.setenv(wrapper.memory_guard.RESOLVED_MEMORY_MB_ENV, inherited)
+    budget, source = wrapper._memory_budget(requested)
+    assert budget.ceiling_mb == expected
+    assert calls == (
+        [{}] if inherited is None and requested is None else [{"override_mb": expected}]
+    )
+    assert source and (source == "auto") == (inherited is None and requested is None)
+
+
+@pytest.mark.parametrize("requested", [0, 96])
+def test_child_memory_cannot_widen_inherited_positive_before_spawn(
+    memory_wrapper, monkeypatch, requested
+):
+    import io
+    from types import SimpleNamespace
+
+    monkeypatch.setenv(memory_wrapper.memory_guard.RESOLVED_MEMORY_MB_ENV, "48")
+    monkeypatch.setattr(
+        memory_wrapper,
+        "subprocess",
+        SimpleNamespace(Popen=lambda *a, **k: pytest.fail("refused budget reached spawn")),
+    )
+    output = io.StringIO()
+    assert (
+        memory_wrapper.run(["never-spawn"], timeout=1, grace=0, memory_mb=requested, stream=output)
+        == 125
+    )
+    assert "refused before spawn" in output.getvalue()
+    assert "inherited 48 MiB" in output.getvalue()
+    assert "memory_mb on the outer bash tool call" in output.getvalue()
+
+
+@pytest.mark.parametrize("raw", ["", "-1", "text", "nan", "1.5", "inf"])
+def test_child_memory_invalid_inherited_never_disables(memory_wrapper, monkeypatch, raw):
+    monkeypatch.setenv(memory_wrapper.memory_guard.RESOLVED_MEMORY_MB_ENV, raw)
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        memory_wrapper._memory_budget(None)
+
+
+@pytest.mark.parametrize("requested", [-1, 1.5, float("inf")])
+def test_child_memory_invalid_override_never_disables(memory_wrapper, requested):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        memory_wrapper._memory_budget(requested)
+
+
+def test_child_memory_unavailable_auto_requires_explicit_choice(memory_wrapper, monkeypatch):
+    monkeypatch.setattr(memory_wrapper.memory_guard, "compute_budget", lambda: _test_budget(0))
+    with pytest.raises(ValueError, match="auto memory budget unavailable"):
+        memory_wrapper._memory_budget(None)
+
+
+def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, monkeypatch):
+    import io
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(memory_wrapper, "_memory_budget", lambda value: (_test_budget(48), "unit"))
+    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace())
+    monkeypatch.setattr(
+        memory_wrapper,
+        "subprocess",
+        SimpleNamespace(Popen=lambda *a, **k: pytest.fail("unsupported guard reached spawn")),
+    )
+    output = io.StringIO()
+    assert memory_wrapper.run(["never-spawn"], timeout=1, grace=0, stream=output) == 125
+    assert "requires POSIX" in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("hard", 137),
+        ("soft", 0),
+        ("unknown", 0),
+        ("timeout", 124),
+        ("interrupt", 130),
+        ("monitor-error", None),
+        ("spawn-error", 125),
+    ],
+)
+def test_child_memory_loop_preserves_owned_cleanup_contract(
+    memory_wrapper, monkeypatch, mode, expected
+):
+    """Exercise real Guard decisions; fake only readings/process/clock/syscalls.
+
+    No fake PID reaches an OS group query or signal. Samples and clocks are
+    module/instance-local, not mutations of the shared stdlib time module.
+    """
+    import io
+    from types import SimpleNamespace
+
+    wrapper = memory_wrapper
+    mg = wrapper.memory_guard
+    budget = _test_budget(48)
+    monkeypatch.setattr(wrapper, "_memory_budget", lambda value: (budget, "inherited"))
+    handlers, signal_calls, group_calls, spawned = {}, [], [], []
+
+    class Clock:
+        value = 0.0
+
+        def monotonic(self):
+            self.value += 0.1
+            return self.value
+
+        def sleep(self, seconds):
+            self.value += seconds
+
+    monkeypatch.setattr(wrapper, "time", Clock())
+
+    def install(signum, handler):
+        signal_calls.append((signum, handler))
+        previous = handlers.get(signum)
+        handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(wrapper, "signal", SimpleNamespace(**{**vars(signal), "signal": install}))
+
+    class Process:
+        pid = 1999999999
+        status = None
+        polls = 0
+        waits = 0
+
+        def poll(self):
+            self.polls += 1
+            if mode == "interrupt" and self.polls == 1:
+                handlers[signal.SIGINT](signal.SIGINT, None)
+            if self.status is None and self.polls >= 12 and mode in ("soft", "unknown"):
+                self.status = 0
+            return self.status
+
+        def wait(self):
+            self.waits += 1
+            return self.status
+
+    process = Process()
+
+    def popen(argv, **kwargs):
+        if mode == "spawn-error":
+            raise OSError("controlled spawn failure")
+        spawned.append(kwargs)
+        return process
+
+    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(Popen=popen))
+
+    def group(pgid, signum):
+        assert pgid == process.pid
+        group_calls.append((pgid, signum))
+        process.status = -int(signum)
+        return True
+
+    monkeypatch.setattr(wrapper, "_signal_group", group)
+    real_guard = mg.Guard
+
+    def guard(pgid, resolved):
+        instance = real_guard(pgid, resolved)
+
+        def reading():
+            if mode == "monitor-error":
+                raise RuntimeError("controlled monitor failure")
+            return mg.Sample(
+                pgid,
+                None if mode == "unknown" else (48 if mode == "hard" else 42) * 1024**2,
+                38 * 1024**2,
+                48 * 1024**2,
+                over_soft=mode in ("hard", "soft"),
+                over_hard=mode == "hard",
+            )
+
+        monkeypatch.setattr(instance, "sample_sync", reading)
+        return instance
+
+    monkeypatch.setattr(mg, "Guard", guard)
+    output = io.StringIO()
+    if mode == "monitor-error":
+        with pytest.raises(RuntimeError, match="controlled monitor failure"):
+            wrapper.run(["synthetic"], timeout=None, grace=0, stream=output)
+        assert "owned-child monitor failed" in output.getvalue()
+    else:
+        assert (
+            wrapper.run(
+                ["synthetic"], timeout=0.05 if mode == "timeout" else None, grace=0, stream=output
+            )
+            == expected
+        )
+    assert len(signal_calls) == 2 * len(wrapper.FORWARDED_SIGNALS)
+    if mode == "spawn-error":
+        assert not group_calls and not spawned
+    else:
+        assert process.waits >= 1
+        assert (process.pid, signal.SIGKILL) in group_calls
+        assert spawned[0]["env"][mg.RESOLVED_MEMORY_MB_ENV] == "48"
+    if mode == "hard":
+        assert "MEMORY LIMIT EXCEEDED" in output.getvalue()
+        assert "BOUND" not in output.getvalue()
+    if mode == "soft":
+        assert output.getvalue().count("advisory only") == 1
+    if mode == "unknown":
+        assert "no measured cap proof" in output.getvalue()
+
+
+def test_help_describes_memory_exit_status_and_budget_defaults(memory_wrapper, capsys):
+    """Users read argparse output, not the source-only module contract.
+
+    The old help exited successfully while hiding the reason needed to tell a
+    measured memory breach from an external SIGKILL with the same status 137.
+    """
+    with pytest.raises(SystemExit) as stopped:
+        memory_wrapper.main(["--help"])
+    assert stopped.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "default: bash tool's resolved budget, otherwise auto" in help_text
+    assert "child process-group ceiling in MiB" in help_text
+    assert "137 with MEMORY LIMIT EXCEEDED" in help_text
+    assert "137 alone can also mean external SIGKILL" in help_text
+    assert "124 on timeout" in help_text and "125 on start or budget refusal" in help_text

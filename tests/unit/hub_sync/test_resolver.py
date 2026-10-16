@@ -198,12 +198,16 @@ class _CM:
 
 
 @pytest.mark.parametrize("bad", ["justonepart", "/model", "provider/"])
-def test_a_malformed_override_is_a_named_refusal_not_a_silent_fallthrough(bad: str) -> None:
-    with pytest.raises(ResolverError) as info:
-        rs.resolve_merge_model(
-            _CM({"hub": {"merge_model": bad}, "hosting": "openai", "model_name": "x"})
-        )
-    assert info.value.cls == "model-unavailable" and "lacks provider/model" in str(info.value)
+def test_a_hub_merge_model_override_is_ignored_not_honoured(bad: str) -> None:
+    """No ``hub.merge_model`` pin exists: a merge uses the operator's own default.
+
+    The key is deliberately unread now (the addendum removed the hub-specific model
+    preference), so a malformed value in it cannot silently reroute a merge; the
+    default resolved from ``hosting``/``model_name`` is what is used.
+    """
+
+    cm = _CM({"hub": {"merge_model": bad}, "hosting": "openai", "model_name": "x"})
+    assert rs.resolve_merge_model(cm).label == "openai/x"
 
 
 def test_the_default_model_is_the_users_own_via_bootstrap(monkeypatch) -> None:
@@ -219,8 +223,11 @@ def test_the_default_model_is_the_users_own_via_bootstrap(monkeypatch) -> None:
     cm = _CM({"hosting": "openai", "model_name": "gpt-x"})
     assert bootstrap.resolve_hosting_model(cast(Any, cm), None, None, None) == ("openai", "gpt-x")
     assert rs.resolve_merge_model(cm).label == "openai/gpt-x" and seen == [("openai", "gpt-x")]
-    override = rs.resolve_merge_model(_CM({"hub": {"merge_model": "anthropic/claude-x"}}))
-    assert override.label == "anthropic/claude-x" and seen[-1] == ("anthropic", "claude-x")
+    # A hub.merge_model pin is IGNORED and cannot supply a model on its own: with no
+    # real default configured the resolver refuses rather than using the pin.
+    with pytest.raises(ResolverError) as info:
+        rs.resolve_merge_model(_CM({"hub": {"merge_model": "anthropic/claude-x"}}))
+    assert info.value.cls == "model-unavailable"
 
 
 def test_no_configured_default_is_model_unavailable() -> None:

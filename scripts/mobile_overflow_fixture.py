@@ -33,7 +33,7 @@ Three sessions, each one shaped to isolate one surface:
   why the dim's cost to that glyph went unmeasured until round 2.
 * ``asks`` — the QUEUED-ASK surface (design
   ``docs/design/ask-nonblocking.md`` §5.3): five queued asks covering open (one
-  multi-question head), addressed, and TIMED-OUT-and-still-answerable, plus two
+  multi-question head), addressed, and TIMED-OUT (shown lapsed, read-only), plus two
   settled ones; the transcript carries an ``ask_response`` and an
   ``ask_timeout`` row; and the legacy single-slot mirror is published beside
   them so a client drawing the ask twice would show it here. The asks are also
@@ -521,8 +521,8 @@ def _queued_ask_projection() -> SessionProjection:
       card's multi-question form are both visible;
     * ``qa-second`` — a newer open ask, so the count and the list have more than
       one row;
-    * ``qa-deadline`` — TIMED OUT and still answerable, which is the state the
-      fixed copy exists for ("the agent moved on; you can still answer");
+    * ``qa-deadline`` — TIMED OUT: the phone shows it LAPSED ("the agent took its
+      default and moved on"), question read-only, dismiss and no options;
     * ``qa-settled`` / ``qa-declined`` — terminal, so the card's receipt shape
       and the honest "no reply was sent" line are in the same frame.
 
@@ -857,7 +857,9 @@ class QueuedAskHarness:
     #: settled it first, the phone's screen is one repaint behind, and the copy
     #: the loser reads is the queue's rather than the client's. It is the one
     #: refusal a capture can reach deterministically.
-    already_answered_elsewhere = "qa-deadline"
+    #: ``qa-second`` rather than the timed-out row, because a lapsed card offers no
+    #: answer to race with.
+    already_answered_elsewhere = "qa-second"
 
     async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
         if str(ask_id) == self.already_answered_elsewhere:
@@ -948,14 +950,13 @@ def _empty_index_requested() -> bool:
 
 
 def _foreign_ask_projection() -> SessionProjection:
-    """A session with ONE ask of its own, so the asks sheet opened from here
-    shows its own row beside rows belonging to other conversations.
+    """A session with ONE ask of its own, while the aggregate index carries every
+    other fixture session's asks too.
 
-    WHY THIS SESSION EXISTS (design round 1, D6). The sheet's reason for existing
-    is the ask you are NOT looking at, and no frame showed it: every row in the
-    shipped set belonged to the conversation on screen, so the foreign-row
-    treatment (conversation name + "this conversation has ended…") appeared
-    nowhere. Opening the sheet needs a bar, and a bar needs an outstanding ask —
+    WHY THIS SESSION EXISTS. The sheet opened from here must list ONLY ``fa-mine``
+    (Ben's report, 2026-10-15: it used to list every conversation's asks), and a
+    frame of that needs a conversation whose aggregate neighbours are not its
+    own. Opening the sheet needs a bar, and a bar needs an outstanding ask —
     hence one of its own rather than none.
     """
     projection = SessionProjection(
@@ -988,12 +989,17 @@ def _foreign_ask_projection() -> SessionProjection:
 def _ended_ask_projection() -> SessionProjection:
     """A conversation whose runtime is GONE, with an ask still outstanding.
 
-    WHY IT IS ITS OWN SESSION (QA round 3, Q-1). The ended state needs a session
-    the frames do not otherwise OPEN — the `-foreign` frame photographs the sheet
-    as seen FROM a conversation, so making that conversation ended turned its own
-    route into a durable row with no asks and the frame stopped showing a sheet
-    at all. A dedicated session keeps both frames true: this one exists only to be
-    somebody else's foreign row.
+    WHY IT IS ITS OWN SESSION (QA round 3, Q-1). Making `asks-foreign` ended
+    turned its own route into a durable row with no asks and its frame stopped
+    showing a sheet at all. A dedicated session keeps both frames true; the
+    `-ended` frame opens this conversation's OWN sheet, since the sheet no longer
+    lists another conversation's rows.
+
+    WHY ITS ASK IS TIMED OUT (decision D4, 2026-10-15). It is the shape of Ben's
+    report: a conversation stopped, its ask past the deadline. The screen of a
+    stopped conversation is the relay's durable projection, which now carries the
+    session's asks from the index — so this frame shows the dock, the sheet
+    opened from it, and the lapsed card with Dismiss and no options.
     """
     projection = SessionProjection(
         session_id="asks-ended",
@@ -1007,13 +1013,51 @@ def _ended_ask_projection() -> SessionProjection:
     projection.asks = [
         _ask(
             "en-mine",
-            created_s=-45,
-            expires_in_s=855,
+            created_s=-900,
+            expires_in_s=-300,
+            status="timed_out",
             questions=[
                 _question(
                     "em1",
                     "Answer this one for a conversation that has ended?",
                     options=[("yes", "the runtime is gone; answering may need it back")],
+                )
+            ],
+        )
+    ]
+    projection.asks_open = 1
+    return projection
+
+
+def _stale_open_ask_projection() -> SessionProjection:
+    """A STOPPED conversation whose index row still says ``open`` past its deadline.
+
+    The shape of the D0 repro (review round 1, R1; QA Q1): the runtime stopped
+    before the deadline, so it never wrote the fold again and the index keeps the
+    stale ``open``. The relay's index readers now re-derive it to ``timed_out``
+    against their own clock, so this conversation's screen carries a lapsed ask
+    with Dismiss (``-stale``), under the quiet lapsed entry (``-stale-bar``), and
+    no legacy mirror card.
+    """
+    projection = SessionProjection(
+        session_id="asks-stale",
+        pid=900016,
+        kind="tui",
+        conversation_name="Stale elsewhere",
+        streaming=False,
+        transcript=[TranscriptEntry(id="sa-1", kind="user", text="Ask me before you stop.")],
+        version=3,
+    )
+    projection.asks = [
+        _ask(
+            "sa-open",
+            created_s=-600,
+            expires_in_s=-240,
+            questions=[
+                _question(
+                    "sa1",
+                    "Stopped before the deadline — does this still need an answer?",
+                    options=[("yes", "the index still says open"), ("no", "let it lapse")],
                 )
             ],
         )
@@ -1364,7 +1408,14 @@ def _asks_stacked_projection() -> SessionProjection:
 #: it carries ``transcript.jsonl``. Marking the entry ended WITHOUT the transcript
 #: removes the row altogether (measured: 13 rows -> 12), so the sentence D8 asked
 #: for cannot be framed with the flag alone.
-ENDED_SESSIONS = {"asks-ended"}
+ENDED_SESSIONS = {"asks-ended", "asks-stale"}
+
+#: Sessions seeded with a durable transcript. The ended ones need it (above), and
+#: so does ``asks-foreign``: the aggregate marks a row ``durable`` only when its
+#: session directory carries ``transcript.jsonl``, and a row neither durable nor
+#: live is shown as a conversation that no longer exists — which is what the
+#: ``-scoped`` frame showed for the one row it exists to show.
+DURABLE_SESSIONS = ENDED_SESSIONS | {"asks-foreign"}
 
 
 def _write_opening_turn(session_dir: Path, text: str) -> None:
@@ -1409,7 +1460,7 @@ def seed_ask_index(projections: list[SessionProjection]) -> None:
     for projection in projections:
         directory = sessions / projection.session_id
         directory.mkdir(parents=True, exist_ok=True)
-        if projection.session_id in ENDED_SESSIONS:
+        if projection.session_id in DURABLE_SESSIONS:
             _write_opening_turn(directory, "Ask me the second one too.")
         rows = [row.to_json() for row in (projection.asks or [])]
         write_entry(root, projection.session_id, cwd="/synthetic", asks=rows)
@@ -1470,14 +1521,16 @@ async def main() -> None:
         # THE ZERO-ASKS STATE of the same surface (the bar must be absent, and
         # the settling rows are still in the transcript).
         _settled_ask_projection(),
-        # The two frames design round 1 (D6) asked for: a sheet whose rows are
-        # FOREIGN (the sheet's reason for existing) and the busiest stack, where
-        # the chip shares its slot with todos, a roster and an approval card.
+        # A conversation whose sheet must list only its own row while the index
+        # carries others' (the `-scoped` frame), and the busiest stack, where the
+        # chip shares its slot with todos, a roster and an approval card.
         _foreign_ask_projection(),
         _asks_stacked_projection(),
-        # The ENDED conversation (D6/D8): a session nobody opens, so the frames
-        # that show the sheet FROM a conversation keep working (Q-1, round 3).
+        # The ENDED conversation (D6/D8): its own sheet carries the ended strip.
         _ended_ask_projection(),
+        # A stopped conversation whose index row is a stale `open` past its
+        # deadline (review round 1, R1 / QA Q1): the relay re-derives it.
+        _stale_open_ask_projection(),
         # PR-2's session-status spend states: the published object populated,
         # an untracked conversation, and an unknown total — the three readings
         # the phone's second line and its marks exist for — plus the states

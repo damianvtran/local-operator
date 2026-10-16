@@ -80,6 +80,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
+    # The hub-links CLI is a HUB surface, not a mesh one, and these tokens come
+    # from the LOCAL hub_sync service's own vocabulary (``unsafe-publication``,
+    # ``baseline-unknown``, ``mixed-lineage``, ...). They are authored on this
+    # device by ``hub_sync.service._eligibility`` -- the same vocabulary the
+    # `/hub` card and the desktop PATCH render for the identical field -- so
+    # this is this device's own status token, never a peer's prose in need of
+    # the mesh glosses. ``hub_links_command`` prints it in its table as the
+    # machine token (the sibling of the policy state it sits beside), and
+    # ``hub_link_set_command`` threads it into ``update_policy``'s
+    # public-consent carve-out, which COMPARES it (the refusal that reaches a
+    # person is ``LinkError``'s prose, humanized by the CLI's own error line).
+    ("local_operator/cli.py", "hub_links_command", "reason"): (
+        2,
+        "the local hub_sync eligibility token, this device's own status vocabulary",
+    ),
+    ("local_operator/cli.py", "hub_link_set_command", "reason"): (
+        1,
+        "the local hub_sync eligibility token, compared by update_policy's consent carve-out",
+    ),
     # ``lop update``'s prune notices read the plan's OWN reasons — the same sweep
     # vocabulary ``_cleanup_row`` above declares (``superseded, unreferenced`` /
     # ``the pointer's target`` / the removal-failed sentence), authored in
@@ -424,6 +443,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a mesh reason",
     ),
     ("local_operator/tui/app.py", "_loop_status_line", "reason"): (1, "not a mesh reason"),
+    # Hub links, again this device's own vocabulary: the toggle handler reads
+    # the service's eligibility token to thread it into ``update_policy``'s
+    # carve-out (COMPARED, never painted -- the notice that reaches the user is
+    # ``LinkError``'s prose, per round-3 D19).
+    (
+        "local_operator/tui/app.py",
+        "OperatorApp.on_hub_links_panel_policy_toggle_requested",
+        "reason",
+    ): (
+        1,
+        "the local hub_sync eligibility token, compared by update_policy's consent carve-out",
+    ),
     # ``session.py`` joins this scan set only because slice B's account-change
     # notice import spells ``local_operator.network`` (the credential binding).
     # The read below is the session's OWN attention marker's field, re-published

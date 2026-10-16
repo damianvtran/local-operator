@@ -53,11 +53,14 @@ def creation_policy(values: Mapping[str, Any], kind: str) -> LinkPolicy:
     defaults = _mapping(_hub(values).get("auto_update", {}))
     if kind not in ("agent", "team", "skill"):
         raise LinkError("invalid-link-policy", "hub link kind is unsupported")
-    default = (
-        True if kind == "skill" else defaults.get("agents" if kind == "agent" else "teams", True)
-    )
+    # One switch per kind: skills have NO kind-wide shared settings key (adding one
+    # is a settings/i18n catalogue change owned by that lane), so a skill's
+    # creation default follows the SAME ``hub.auto_update.agents`` switch the
+    # runner's ``settings.auto_for('skill')`` ceiling reads. The two cannot
+    # disagree, which is what round-1 QA flagged.
+    default = defaults.get("agents" if kind in ("agent", "skill") else "teams", True)
     # Preserve an explicitly stored BOOL OFF, not truthiness of arbitrary YAML.
-    # Skills have no new shared settings key; missing means the canonical ON.
+    # Missing (or a non-bool spelling) means the ON default.
     return LinkPolicy(subscribe=default if type(default) is bool else True, auto_push=False)
 
 
@@ -102,6 +105,32 @@ def materialize_policy(
         return current
 
 
+def link_policy_for(values: Mapping[str, Any], link_id: str, kind: str) -> LinkPolicy:
+    """The stored per-link policy for a link id, else its kind's creation default.
+
+    Used by the runner, which has a link id (from a baseline identity) but may not
+    have a full :class:`LinkIdentity` at enumeration time.
+    """
+    policies = _mapping(_hub(values).get("links", {}))
+    if link_id in policies:
+        return LinkPolicy.from_json(policies[link_id])
+    return creation_policy(values, kind)
+
+
+def stored_link_policy(values: Mapping[str, Any], link_id: str) -> LinkPolicy | None:
+    """The EXPLICIT stored entry for ``link_id``, or ``None`` when none exists.
+
+    :func:`read_policy` cannot answer this: it substitutes the kind's creation
+    default for an absent entry. The initial-install path must distinguish a
+    leftover entry -- a failed or crashed earlier attempt's orphan, which would
+    otherwise block the transaction's materialization and silently carry the
+    dead request's values into a later install -- from "no entry yet".
+    """
+
+    policies = _mapping(_hub(values).get("links", {}))
+    return LinkPolicy.from_json(policies[link_id]) if link_id in policies else None
+
+
 def update_policy(
     manager: "ConfigManager",
     identity: LinkIdentity,
@@ -117,8 +146,14 @@ def update_policy(
 
     ``can_enable_auto_push`` is a service attestation, not a request field. It
     must never be derived from preview pin existence or user-supplied scope.
-    Existing ON may remain paused when eligibility changes; turning it OFF or
-    changing Subscribe does not require a working hub/model connection.
+    ``ineligible_reason`` MUST be the SERVICE-computed eligibility reason read
+    from the inventory (``row["eligibility"]["reason"]``), never a caller's free
+    string: the public-consent carve-out below keys on
+    ``ineligible_reason == "unsafe-publication"``, and a caller that could name
+    its own reason could bypass an earlier gate. Treat both as typed attestations
+    from :func:`hub_sync.service._eligibility`. Existing ON may remain paused when
+    eligibility changes; turning it OFF or changing Subscribe does not require a
+    working hub/model connection.
     """
     from local_operator import settings_io
 
@@ -144,7 +179,22 @@ def update_policy(
         )
         grant = current.public_egress_grant
         if auto_push is True:
-            if not can_enable_auto_push:
+            # THE PUBLIC-CONSENT CARVE-OUT (round-4 cross-surface fix). A public
+            # origin with no grant yet reports ``unsafe-publication`` — that is
+            # not an ineligibility to refuse, it is the absence of the very grant
+            # ``confirm_public_egress`` MINTS below. Without this carve-out the
+            # CLI and the desktop PATCH (which pass can_enable_auto_push=False for
+            # such an origin) could never create the FIRST public grant, and the
+            # TUI carried a divergent special case to work around it. ONE rule
+            # here fixes all three surfaces. Every EARLIER gate
+            # (unsupported-precondition / baseline-unknown / mixed-lineage) still
+            # refuses: ``unsafe-publication`` is the LAST reason ``_eligibility``
+            # returns, only after capability, known baseline and clean lineage
+            # all pass.
+            consent_mints_grant = (
+                ineligible_reason == "unsafe-publication" and identity.visibility == "public"
+            )
+            if not can_enable_auto_push and not consent_mints_grant:
                 raise LinkError(
                     ineligible_reason, "automatic publication is not eligible for this origin"
                 )
@@ -170,3 +220,45 @@ def update_policy(
             hub["public_egress_grants"] = grants
         manager.set_config_value("hub", hub)
         return PolicySnapshot(chosen, chosen.revision(identity, grant), grant)
+
+
+def revert_policy_if_unchanged(
+    manager: "ConfigManager", identity: LinkIdentity, *, expected_revision: str
+) -> bool:
+    """Remove one staged policy entry -- but ONLY while it is still ours.
+
+    The initial install stages an ``auto_push: true`` entry (with its grant)
+    through this module before the content transaction, because the consent
+    carve-out is the one writer that can mint a first public grant and the
+    storage transaction CASes the entry's revision through its commit. When
+    that transaction then REFUSES, the entry must not survive as an orphan
+    policy for a link that was never installed -- but a newer writer's value
+    must not be rolled back either. The CAS on ``expected_revision`` is the
+    boundary: an unchanged revision means nobody has written since the
+    staging, so removal restores the pre-install state exactly. Returns
+    whether the entry was removed.
+    """
+    from local_operator import settings_io
+
+    if not isinstance(expected_revision, str) or not expected_revision:
+        raise LinkError("invalid-link-policy", "an expected policy revision is required")
+    with config_write_lock(manager.config_dir):
+        settings_io._reload_before_write(manager)
+        current = read_policy(manager.get_config().values, identity)
+        if current.revision != expected_revision:
+            return False
+        hub = dict(_hub(manager.get_config().values))
+        links = dict(_mapping(hub.get("links", {})))
+        if identity.link_id not in links:
+            return False
+        del links[identity.link_id]
+        hub["links"] = links
+        grants = dict(_mapping(hub.get("public_egress_grants", {})))
+        if identity.link_id in grants:
+            del grants[identity.link_id]
+        if grants:
+            hub["public_egress_grants"] = grants
+        else:
+            hub.pop("public_egress_grants", None)
+        manager.set_config_value("hub", hub)
+        return True

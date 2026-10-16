@@ -118,6 +118,54 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             }
         if path == "teams/missing":
             return JSONResponse({"error": "team not found"}, status_code=404)
+        if path == "tenants/org-alpha/skills":
+            return {
+                "status": 200,
+                "result": {
+                    "skills": [
+                        {
+                            "id": "sk-1",
+                            "name": "fixture-skill",
+                            "description": "Org skill fixture",
+                            "document_version": 1,
+                            "visibility": "org",
+                            "tenant_id": "org-alpha",
+                            "content_revision": 3,
+                            "revision": '"hub-skill-rev-1"',
+                            "sync_contract": {"revision_cas": 1, "skills": 1},
+                        }
+                    ],
+                    "sync_contract": {"revision_cas": 1, "skills": 1},
+                },
+            }
+        if path == "tenants/org-alpha/skills/sk-1":
+            return {
+                "status": 200,
+                "result": {
+                    "id": "sk-1",
+                    "tenant_id": "org-alpha",
+                    "name": "fixture-skill",
+                    "description": "Org skill fixture",
+                    "document_version": 1,
+                    "files": [
+                        {
+                            "path": "SKILL.md",
+                            "content": (
+                                "---\n"
+                                "name: fixture-skill\n"
+                                "description: Org skill fixture\n"
+                                "---\n# Fixture\n"
+                            ),
+                        }
+                    ],
+                    "content_revision": 3,
+                    "revision": '"hub-skill-rev-1"',
+                    "sync_contract": {"revision_cas": 1, "skills": 1},
+                },
+            }
+        if path == "tenants/org-alpha/skills/missing":
+            # The hub's ONE nondisclosing absence for a missing/foreign row.
+            return JSONResponse({"error": "skill not found"}, status_code=404)
         if path == "agents/redirect":
             return JSONResponse({}, status_code=302, headers={"Location": "https://example.org"})
         return {
@@ -186,6 +234,10 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                 },
                 {"operation": "org_teams.list", "tenant_id": "org-alpha"},
                 {"operation": "org_team.get", "team_id": "team-fixture"},
+                # The skills lane's two org reads ride the same plane and the
+                # same stored credential.
+                {"operation": "org_skills.list", "tenant_id": "org-alpha"},
+                {"operation": "org_skill.get", "tenant_id": "org-alpha", "skill_id": "sk-1"},
                 *[
                     {
                         "operation": "agents." + operation,
@@ -270,6 +322,27 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                 route, json={"operation": "org_team.get", "team_id": "missing"}
             )
             assert missing_team.status_code == 404 and access not in missing_team.text
+            missing_skill = await client.post(
+                route,
+                json={
+                    "operation": "org_skill.get",
+                    "tenant_id": "org-alpha",
+                    "skill_id": "missing",
+                },
+            )
+            assert missing_skill.status_code == 404 and access not in missing_skill.text
+            skill_list = await client.post(
+                route, json={"operation": "org_skills.list", "tenant_id": "org-alpha"}
+            )
+            assert skill_list.status_code == 200
+            relayed_skills = skill_list.json()["result"]["data"]["result"]
+            assert relayed_skills["skills"][0]["id"] == "sk-1"
+            assert relayed_skills["skills"][0]["tenant_id"] == "org-alpha"
+            assert relayed_skills["skills"][0]["sync_contract"] == {
+                "revision_cas": 1,
+                "skills": 1,
+            }
+            assert any(call[1] == "tenants/org-alpha/skills/sk-1" for call in calls)
             omitted_plan = await client.post(
                 route, json={"operation": "org_agents.list", "tenant_id": "org-denied"}
             )
@@ -299,6 +372,8 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                 # Org operations name their subject or are refused at once.
                 {"operation": "org_agents.list"},
                 {"operation": "org_team.get"},
+                {"operation": "org_skills.list"},
+                {"operation": "org_skill.get", "tenant_id": "org-alpha"},
             ):
                 assert (await client.post(route, json=body)).status_code == 422
             assert len(calls) == before

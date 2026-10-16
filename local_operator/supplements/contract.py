@@ -93,6 +93,9 @@ class SupplementFile(TypedDict):
     size_bytes: int
     mtime: float
     why: str
+    #: The answer's own prose links this path. Additive and optional: a reader that does not
+    #: know it paints the callout as before (older builds read rows by key).
+    linked_in_answer: NotRequired[bool]
 
 
 class SupplementComponent(TypedDict):

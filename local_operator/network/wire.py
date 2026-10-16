@@ -111,13 +111,29 @@ LOCAL_PREFIX_LEN = 4  # uint32_be length prefix on every record
 #: Link feature strings. A feature is used only when BOTH sides advertise it;
 #: absent means "old peer" and unknown is ignored, which is what lets a new
 #: capability ship without moving either protocol version.
+#: Advertised together with its receiver and sender: an old peer negotiates
+#: neither and receives no lifecycle kinds; its finite-grant path is unchanged.
+CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
+#: The consent reconciler's placement PUSH (``credentials/reconcile.py``). A DISTINCT
+#: feature from the lifecycle one on purpose: ``credential-lifecycle-v1`` shipped in
+#: v0.71.3 with no handler for ``net_broker kind=placement origin=consent_reconcile``,
+#: so a peer that negotiated only the lifecycle string answers the push with a
+#: not-implemented refusal (brokerless) or merges it through the legacy, unvalidated
+#: pull path (broker present). The owner therefore sends the push only when BOTH ends
+#: advertised THIS string, and it is advertised only by builds that ship the handler
+#: (``reconcile.member_placement_push``). Never reuse a shipped capability string for
+#: a new frame kind.
+CREDENTIAL_PLACEMENT_PUSH_V1 = "credential-placement-push-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
     "credential-broker-v1",
+    CREDENTIAL_LIFECYCLE_V1,
+    CREDENTIAL_PLACEMENT_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
+    "memory-sync-v1",
     "pair-offer-v1",
     "mesh-update-v1",
     "zlib-records-v1",
@@ -149,6 +165,7 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+MEMORY_SYNC_V1 = "memory-sync-v1"
 #: The mesh rolling-updates capability (``meshupdate.py``; mesh-rolling-
 #: updates.md §5). Advertised by every build that ships ``net_update``; the
 #: origin checks it BEFORE its first request, so a member that predates this
@@ -552,6 +569,40 @@ class UncompressedFrame(dict[str, Any]):
     """
 
 
+class _AmbiguousJSONFrame(dict[str, Any]):
+    """Last-wins legacy values, with parse provenance for opt-in protocols only."""
+
+    duplicate_json_keys = True
+
+
+def _decode_lifecycle_json(text: str) -> Any:
+    duplicate = False
+    lifecycle_objects: list[dict[str, Any]] = []
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicate
+        result: dict[str, Any] = {}
+        lifecycle = False
+        for key, value in items:
+            if key in result:
+                duplicate = True
+            if key == "kind" and isinstance(value, str) and value.startswith("lifecycle_"):
+                lifecycle = True
+            result[key] = value
+        if lifecycle:
+            lifecycle_objects.append(result)
+        return result
+
+    frame = json.loads(text, object_pairs_hook=pairs)
+    if duplicate and isinstance(frame, dict):
+        # Do not globally tighten the legacy parser. Requests opt in here; replies
+        # opt in at checked_reply_detail, where their request protocol is known.
+        if frame.get("op") == "net_broker" and any(frame is obj for obj in lifecycle_objects):
+            raise ValueError("duplicate keys in credential lifecycle JSON")
+        return _AmbiguousJSONFrame(frame)
+    return frame
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -724,7 +775,7 @@ class LinkCrypto:
         if plaintext.startswith(COMPRESSED_MARKER):
             plaintext = self._decompress(plaintext)
         try:
-            frame = json.loads(plaintext.decode("utf-8"))
+            frame = _decode_lifecycle_json(plaintext.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise LinkCryptoError(
                 "a record decrypted to something that is not a JSON frame; the link is closed",
@@ -734,6 +785,25 @@ class LinkCrypto:
             raise LinkCryptoError(
                 "a record decrypted to a JSON value that is not an object", kind="parse"
             )
+        # Lifecycle frames are metadata-only and strictly bounded, so the strict
+        # validator runs HERE, on receipt, before the frame reaches any handler. It is
+        # scoped to net_broker lifecycle kinds so no other frame's legacy-tolerant
+        # decoding changes; the import is lazy because wire.py must stay stdlib-light
+        # and must not pull the credentials package in at module import time.
+        if frame.get("op") == "net_broker" and str(frame.get("kind") or "").startswith(
+            "lifecycle_"
+        ):
+            from local_operator.network.credentials.types import (
+                validate_lifecycle_frame,
+            )
+
+            try:
+                validate_lifecycle_frame(frame)
+            except ValueError as exc:
+                raise LinkCryptoError(
+                    f"a lifecycle frame failed validation: {exc}; the link is closed",
+                    kind="parse",
+                ) from exc
         return frame
 
     @staticmethod

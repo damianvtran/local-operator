@@ -1349,11 +1349,14 @@ async def execute_network(
         # one rather than reported.
         argv = ["network", "join", token_arg, "--park", "--json"]
 
-    # Readiness must answer for the session's actual selection, not only the
-    # peer's default. Host context is refreshed per turn, so /model switches
-    # reach this read without adding a model override or changing tool defaults.
+    # Readiness must answer for the caller's actual model, not the peer's
+    # default. The caller's local session id is NOT a remote ownership claim:
+    # --session explicitly targets a session the peer owns, so inferring it here
+    # makes the peer correctly refuse the entire facts request. This also holds
+    # without --peer, when readiness checks every remote member. Keep selection
+    # context only; explicit CLI session targeting retains its ownership guard.
     if params.action == "ready" and context is not None and context.session_model_label:
-        argv.extend(["--model", context.session_model_label, "--session", context.session_id])
+        argv.extend(["--model", context.session_model_label])
     timeout = _timeout_for(params)
     try:
         if parked:

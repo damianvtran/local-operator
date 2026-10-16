@@ -41,6 +41,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "i18n",
         "image-generation",
         "mcp",
+        "memory",
         "mobile",
         "monitor",
         "network",
@@ -93,6 +94,9 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set the default provider and model configuration", "configuration"),
         ("create a Local Operator skill or executable plugin", "extensions"),
         ("list available agents or spawn a subagent", "agents"),
+        ("save goals and decisions in scoped memory before compaction", "memory"),
+        ("recall saved files links and contacts from memory", "memory"),
+        ("inspect correct or forget a fact with lop memory", "memory"),
         (
             "allocate bounded engineering delivery and preflight costly evidence "
             "before converging code review and QA",
@@ -369,6 +373,10 @@ def test_agent_hint_rows_are_never_rendered(tmp_path: Path) -> None:
         ["mcp", "add", "demo", "--command", "demo-mcp", "--arg", "serve"],
         ["agents", "list", "--page", "2", "--perpage", "10"],
         ["exec", "review this", "--agent", "research"],
+        # The hub-links policy surface the agents/teams/extensions guides document.
+        ["hub", "links", "--kind", "skill"],
+        ["hub", "link", "set", "L1", "--subscribe", "false"],
+        ["hub", "link", "set", "L1", "--auto-push", "true", "--confirm-public-egress"],
     ],
 )
 def test_documented_cli_shapes_parse(argv: list[str]) -> None:

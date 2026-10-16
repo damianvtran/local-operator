@@ -69,7 +69,12 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
 )
 from local_operator.tui.widgets.welcome import WelcomeView
-from tests.unit.tui.conftest import caret_cells, chevron_colour, composer_cells
+from tests.unit.tui.conftest import (
+    await_session_boot,
+    caret_cells,
+    chevron_colour,
+    composer_cells,
+)
 
 
 def _set_editor_line(editor, text: str) -> None:
@@ -817,6 +822,7 @@ async def test_boot_typing_sends_prompt() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -1386,6 +1392,7 @@ async def test_a_notice_after_the_conversation_starts_is_a_transcript_row() -> N
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._append_block(UserBlock("hello"))
         await pilot.pause()
@@ -1971,6 +1978,7 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
     session = StatefulSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         scheduled: list[tuple[Callable[..., Any], tuple[Any, ...]]] = []
         applied: list[FrontendSessionState] = []
@@ -2449,6 +2457,7 @@ async def test_live_resume_atomically_gates_submission_then_recovers_success_and
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         app._resume_session("sess-transition", lambda *a, **k: None)
@@ -3052,6 +3061,7 @@ async def test_clear_resets_transcript_and_bookkeeping() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
@@ -3232,6 +3242,7 @@ async def test_ctrl_c_interrupts_and_app_stays_alive() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
@@ -3781,6 +3792,7 @@ async def test_a_replayed_bang_card_says_who_ran_it() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
         assert len(cards) == 2
@@ -3944,6 +3956,7 @@ async def test_a_replayed_aborted_bang_card_stays_shut_and_dim() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
         assert len(cards) == 1
@@ -5873,6 +5886,7 @@ async def test_the_background_warmer_only_fetches_when_the_row_is_stale() -> Non
     ctrl.usage_reports = _usage_reports()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         # No cached row yet (the fake's `usage_cache_age_ms` returns None), so
         # the warmer must fire a background fetch for the active provider.
@@ -6853,6 +6867,7 @@ async def test_a_loop_turn_is_stamped_as_harness_chrome() -> None:
     session = GoalSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         # A person's own turn, typed plainly (not through `_type_command`, which
         # opens the slash picker): this is the row the marker must never hide.
@@ -7127,6 +7142,7 @@ async def test_the_band_counts_connected_servers_and_the_toast_reports_startup()
     session = McpSession(manager=manager, startup=startup)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         assert "⊙ 2 MCP" in _band(app)
@@ -7144,6 +7160,7 @@ async def test_a_server_dropping_updates_the_count_live() -> None:
     session = McpSession(manager=manager, startup=McpStartupOutcome())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         assert "⊙ 2 MCP" in _band(app)
@@ -7188,6 +7205,7 @@ async def test_a_failure_survives_the_toast_dismissing() -> None:
     session = McpSession(manager=manager, startup=startup)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         toast = app.query_one(Toast)
@@ -7220,6 +7238,7 @@ async def test_mcp_command_reports_per_server_state_not_just_the_config() -> Non
     session = McpSession(manager=manager, startup=startup)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         app.query_one(Toast).dismiss_toast()
@@ -7252,6 +7271,7 @@ async def test_mcp_command_puts_the_status_in_a_column() -> None:
     session = McpSession(manager=manager, startup=startup)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         app.query_one(Toast).dismiss_toast()
@@ -8483,6 +8503,7 @@ async def test_a_discovery_failure_keeps_an_alarm_in_the_band() -> None:
     session = McpSession(manager=None, startup=startup)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         band = _band(app)
@@ -8510,6 +8531,7 @@ async def test_the_band_refreshes_even_when_the_incumbent_callback_raises() -> N
     session = McpSession(manager=manager, startup=McpStartupOutcome())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         assert "⊙ 2 MCP" in _band(app)
@@ -9218,6 +9240,7 @@ async def test_a_hidden_model_is_still_reachable_by_typing_its_selector() -> Non
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(90, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -9382,6 +9405,7 @@ async def test_a_failing_turn_shows_the_providers_own_error() -> None:
     session.prompt = prompt  # type: ignore[assignment]
     app = OperatorApp(lambda: _factory(session), provider_controller=_AccessController())
     async with app.run_test(size=(90, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.press("h", "i", "enter")
@@ -9643,12 +9667,13 @@ async def test_choosing_in_the_picker_resumes_that_session(tmp_path, monkeypatch
         resume_factory=_resume_factory(boots),
     )
     async with app.run_test(size=(90, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
         await pilot.pause()
         await pilot.press("enter")
-        await pilot.pause()
+        await await_session_boot(app)
         await pilot.pause()
     assert boots == ["aabbcc"], boots
 
@@ -9689,13 +9714,14 @@ async def test_resume_id_rebinds_and_reloads(tmp_path, monkeypatch) -> None:
         resume_factory=_resume_factory(boots),
     )
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.press(
             "/", "r", "e", "s", "u", "m", "e", " ", "c", "a", "f", "e", "0", "1", "enter"
         )
-        await pilot.pause()
+        await await_session_boot(app)
         await pilot.pause()
         assert boots == ["cafe01"], boots
 
@@ -9725,6 +9751,7 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
         resume_factory=_resume_factory(boots, "history from the resumed session"),
     )
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -9732,6 +9759,7 @@ async def test_resume_replaces_the_visible_transcript(tmp_path, monkeypatch) -> 
             "/", "r", "e", "s", "u", "m", "e", " ", "c", "a", "f", "e", "0", "1", "enter"
         )
         await pilot.pause()
+        await await_session_boot(app)
         await pilot.pause()
 
         text = _transcript_text(app)
@@ -9794,6 +9822,7 @@ async def test_a_session_swap_never_shows_the_splash(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(type(app), "post_display_hook", hook)
 
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         assert app.query_one(TranscriptView).blocks(), "the session being left never rendered"
         assert app.query_one(WelcomeView).display is False
@@ -9884,6 +9913,7 @@ async def test_a_swap_leaves_the_ledger_matching_the_new_sessions_history() -> N
 
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         assert len(app.query_one(TranscriptView).blocks()) == 2
 
@@ -9936,14 +9966,16 @@ async def test_resume_long_history_opens_at_the_latest_turn(tmp_path, monkeypatc
         resume_factory=resume_factory,
     )
     async with app.run_test(size=(60, 12)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
         for key in "/resume long01":
             await pilot.press(key if key != " " else "space")
         await pilot.press("enter")
-        for _ in range(3):
-            await pilot.pause()
+        await pilot.pause()
+        await await_session_boot(app)
+        await pilot.pause()
 
         transcript = app.query_one(TranscriptView)
         assert len(transcript.blocks()) == 30
@@ -9967,6 +9999,7 @@ async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypat
         resume_factory=_resume_factory(boots),
     )
     async with app.run_test(size=(80, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -9974,7 +10007,7 @@ async def test_resume_at_latest_passes_the_sentinel_verbatim(tmp_path, monkeypat
         for key in "/resume @latest":
             await pilot.press(key if key != " " else "space")
         await pilot.press("enter")
-        await pilot.pause()
+        await await_session_boot(app)
         await pilot.pause()
         assert boots == ["@latest"], boots
 
@@ -10083,6 +10116,7 @@ async def test_an_entered_rejected_model_command_keeps_the_boot_composition() ->
     ctrl = _AccessController()
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         _set_editor_line(editor, "/model missing-slash")
@@ -12236,6 +12270,7 @@ async def test_new_replaces_the_visible_ledger() -> None:
     boots: list[str | None] = []
     app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory(boots))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._append_block(NoticeBlock("from the old conversation", "info"))
         assert any(
@@ -12612,6 +12647,7 @@ async def test_context_command_renders_wire_schema_breakdown() -> None:
     )
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         block = app._context_block()
         assert block is not None
@@ -12657,6 +12693,7 @@ async def test_effective_model_change_repaints_the_band() -> None:
     session = _Effective()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         session._eff = SimpleNamespace(
             provider="zai",
@@ -13678,6 +13715,7 @@ async def test_a_boot_that_removed_sessions_says_so_once(
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         notices: list[str] = []
         for _ in range(10):
             await pilot.pause()
@@ -13692,6 +13730,7 @@ async def test_a_boot_that_removed_sessions_says_so_once(
         # D11: the block's region is exactly its content — no dead rows that
         # would scroll the wordmark off at 80x24 on the timer path.
         block = next(b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or ""))
+
         content = block.get_content_height(block.size, block.container_size, block.size.width)
         assert block.region.height == content, (block.region.height, content)
 
@@ -13804,6 +13843,7 @@ async def test_the_band_counts_an_auth_blocked_server_as_failed() -> None:
     session = McpSession(manager=manager, startup=McpStartupOutcome())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         assert app._mcp_status().failed is False
@@ -13837,6 +13877,7 @@ async def test_the_band_stays_calm_while_a_slow_server_is_still_connecting() -> 
     session = McpSession(manager=manager, startup=McpStartupOutcome())
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         for _ in range(6):
             await pilot.pause()
         assert manager.get_connection_status("slow") == "connecting"
@@ -13945,6 +13986,7 @@ async def test_picker_enter_boots_the_row_under_the_cursor(tmp_path, monkeypatch
     boots: list[str | None] = []
     app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory(boots))
     async with app.run_test(size=(120, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
@@ -13961,6 +14003,7 @@ async def test_picker_enter_boots_the_row_under_the_cursor(tmp_path, monkeypatch
 
         await pilot.press("enter")
         await pilot.pause()
+        await await_session_boot(app)
         await pilot.pause()
 
     assert boots == ["bbbb22"], f"enter booted {boots!r}, expected ['bbbb22']"
@@ -14030,6 +14073,7 @@ async def test_the_durable_notice_carries_one_dash_and_no_orphaned_pointer() -> 
         session = McpSession(manager=manager, startup=startup)
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(width, 24)) as pilot:
+            await await_session_boot(app)
             for _ in range(6):
                 await pilot.pause()
             app.query_one(Toast).dismiss_toast()
@@ -14092,6 +14136,7 @@ async def test_the_mid_session_auth_toast_leads_with_the_command() -> None:
         session = McpSession(manager=manager)
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(width, 24)) as pilot:
+            await await_session_boot(app)
             for _ in range(6):
                 await pilot.pause()
             manager.on_auth_required("notion", "/mcp reauth notion — refresh unconfirmed")
@@ -14896,6 +14941,7 @@ async def test_a_login_rehomes_the_session_it_stranded(
         lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
     )
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         receipt = app._apply_login_defaults("deepseek")
         rehome = app._rehome_stranded_session("deepseek")
@@ -14936,6 +14982,7 @@ async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
         lambda: _factory(signed_in), provider_controller=_credentialed_controller("deepseek")
     )
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         assert app._rehome_stranded_session("deepseek") is None
     assert signed_in.switched == []
@@ -14946,6 +14993,7 @@ async def test_a_login_leaves_an_accessible_session_and_a_busy_one_alone(
         lambda: _factory(busy), provider_controller=_credentialed_controller("deepseek")
     )
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         # The refusal is SPOKEN (U1) and the repair is armed for the turn end
         # rather than evaporating: the session keeps its model for now.
@@ -15003,6 +15051,7 @@ async def test_the_deferred_rehome_closes_out_when_it_can_no_longer_land(
     session.streaming = True
     app = OperatorApp(lambda: _factory(session), provider_controller=controller)
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._apply_login_defaults("deepseek")
         assert app._rehome_stranded_session("deepseek") == (
@@ -15066,6 +15115,7 @@ async def test_the_gate_is_re_applied_when_the_tui_retry_runs(
     session.streaming = True
     app = OperatorApp(lambda: _factory(session), provider_controller=controller)
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._apply_login_defaults("deepseek")
         assert app._rehome_stranded_session("deepseek") == (
@@ -15200,6 +15250,7 @@ async def test_the_login_paints_one_statement_of_the_move(
         lambda: _factory(session), provider_controller=_credentialed_controller("deepseek")
     )
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await app._login_flow("deepseek")
         for _ in range(8):

@@ -387,6 +387,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        "net_memory",
         # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
         # §8.2). Slow by registration below: the handler may run a real install
         # inside its own bounded deadline.
@@ -430,6 +431,7 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    "local_operator.network.memory",
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
     "local_operator.network.meshupdate",
@@ -3691,6 +3693,9 @@ class PeerLink:
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
+        # Preserve local transcript advertisements separately: capabilities is
+        # historically the raw peer set, not a bilateral feature intersection.
+        self.local_capabilities = frozenset(result.local_capabilities)
         # The PEER'S build stamp, kept beside its capabilities because the two
         # travel together in the handshake (hello/challenge, inside the
         # transcript the auth MAC covers) and are read together by

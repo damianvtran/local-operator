@@ -838,7 +838,7 @@ def _generated_result(
     the result is an error naming the sources, because a caption claiming an
     attachment that does not exist is worse than an honest failure.
     """
-    from local_operator.session.attachments import cache_media
+    from local_operator.session.attachments import artifact_details, cache_media
 
     blocks: list[Any] = []
     failed: list[str] = []
@@ -878,6 +878,11 @@ def _generated_result(
         "cost_provenance": outcome.cost_provenance,
         "attempts": _attempt_list(outcome.attempts),
     }
+    if blocks:
+        # Durable identity of what was generated. The caption's "digest …" lives in content,
+        # which pruning/compaction blank; details survive both, so the per-session file index
+        # can still list the image from a pruned row (see ``artifact_details``).
+        details["artifacts"] = artifact_details(blocks)
     if outcome.usage_record_id:
         # Absent-safe: present only when the winning rung's settled payload
         # carried one (Radient's does once settled). The cost-channels lane

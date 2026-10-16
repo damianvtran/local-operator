@@ -172,7 +172,9 @@ def request(rig: Any, *, signed: bool = True, change: Any = None) -> tuple[str, 
     moment = time.time()
     signature = _sign_decision(rig.root, record, "approve", moment)
     A.approve(aid, signature_hex=signature, decided_at=moment, root=rig.root)
-    run = onboard_approvals.begin_run(aid, root=rig.root)
+    # ``operation`` is what the generic-runner guard keys on: only the authoring flow (and so
+    # this stand-in for it) may open a run on a ``credential_inheritance`` record.
+    run = onboard_approvals.begin_run(aid, root=rig.root, operation=consent.STEP)
     return aid, run.run_id
 
 

@@ -4406,6 +4406,25 @@ async def stream_with_failover(
             buffered: list[StreamEvent] | None = [] if current_request.replayable else None
             try:
                 async for event in client.stream(current_request, key, oauth_access=access):
+                    if spec.provider == "meta-muse" and isinstance(event, StreamEndEvent):
+                        # Muse's quota arrives passively on the serving stream.
+                        # Keep it on this store/account, never a default-home
+                        # store or the account a concurrent request selected.
+                        record_usage = getattr(auth, "record_muse_usage", None)
+                        meta = (event.provider_payload or {}).get("meta_muse")
+                        if access is not None and callable(record_usage) and isinstance(meta, dict):
+                            try:
+                                # AuthStore serializes its cross-thread SQLite
+                                # handle. A contended metadata writer must not
+                                # block delivery of every other async stream.
+                                await asyncio.to_thread(
+                                    record_usage, access, meta.get("subscription_usage")
+                                )
+                            except Exception:
+                                # A quota-cache write must never replay a served
+                                # inference. No exception text: it can carry SQL
+                                # metadata or credential material.
+                                logger.warning("Muse allowance receipt could not be retained")
                     stamped = _stamp_serving_spec(event, spec)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
                     stamped = _stamp_attempted_selector(stamped, spec)

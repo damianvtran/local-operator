@@ -28,7 +28,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1227,19 +1227,27 @@ class _EnvChild:
 _ENV_WAIT_S = 10.0
 
 
-def _await_child_environ(child: _EnvChild, *, timeout: float = _ENV_WAIT_S) -> str:
-    """``/proc/<pid>/environ``, once the kernel has the child's exec'd snapshot.
+def _await_child_probe(
+    child: _EnvChild,
+    read: Callable[[], str],
+    *,
+    where: str,
+    timeout: float = _ENV_WAIT_S,
+) -> str:
+    """The first ``read()`` that carries the probe variable, i.e. once the child has exec'd.
 
     The wait is on the event rather than a sleep, because the two reads that
     answer ``''`` are indistinguishable at the call site: a child still inside
     ``execve`` and a child that has already exited both read empty. A child that
     exited first is named with its return code rather than waited out; the
-    healthy case returns on the first read.
+    healthy case returns on the first read. ``read`` is whichever reader the cell is
+    about (``/proc`` text, the platform's ``process_env``, the batch): every one of
+    them sees the same empty pre-exec state, so they share this one wait.
     """
     deadline = time.monotonic() + timeout
     text = ""
     while time.monotonic() < deadline:
-        text = reclaim.proc_environ_text(child.pid)
+        text = read()
         if _ENV_PROBE_NAME in text:
             return text
         if child.process.poll() is not None:
@@ -1249,8 +1257,59 @@ def _await_child_environ(child: _EnvChild, *, timeout: float = _ENV_WAIT_S) -> s
             )
         time.sleep(0.02)
     raise AssertionError(
-        f"no {_ENV_PROBE_NAME} in /proc/<pid>/environ for pid {child.pid} within "
-        f"{timeout}s; last read {text!r}"
+        f"no {_ENV_PROBE_NAME} in {where} for pid {child.pid} within {timeout}s; "
+        f"last read {text!r}"
+    )
+
+
+def test_the_environment_wait_handles_the_pre_exec_empty_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No runtime or native process is needed to force the kernel's pre-exec
+    # window; the real-reader cell below covers the platform boundary.
+    child = _EnvChild.__new__(_EnvChild)
+    monkeypatch.setattr(
+        child, "process", SimpleNamespace(pid=424242, poll=lambda: None), raising=False
+    )
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    replies = iter(["", "", f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}"])
+    assert _await_child_probe(child, lambda: next(replies), where="test reader") == (
+        f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}"
+    )
+
+
+def test_the_environment_wait_names_a_child_that_exited_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = _EnvChild.__new__(_EnvChild)
+    monkeypatch.setattr(
+        child,
+        "process",
+        SimpleNamespace(pid=424242, poll=lambda: 7, returncode=7),
+        raising=False,
+    )
+    with pytest.raises(AssertionError, match=r"exited \(rc=7\)"):
+        _await_child_probe(child, lambda: "", where="test reader")
+
+
+def test_the_environment_wait_bounds_a_child_that_never_publishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = _EnvChild.__new__(_EnvChild)
+    monkeypatch.setattr(
+        child, "process", SimpleNamespace(pid=424242, poll=lambda: None), raising=False
+    )
+    with pytest.raises(AssertionError, match="test reader.*within 0"):
+        _await_child_probe(child, lambda: "", where="test reader", timeout=0)
+
+
+def _await_child_environ(child: _EnvChild, *, timeout: float = _ENV_WAIT_S) -> str:
+    """``/proc/<pid>/environ``, once the kernel has the child's exec'd snapshot."""
+    return _await_child_probe(
+        child,
+        lambda: reclaim.proc_environ_text(child.pid),
+        where="/proc/<pid>/environ",
+        timeout=timeout,
     )
 
 
@@ -1287,17 +1346,27 @@ def test_a_real_childs_environment_is_read_by_the_real_reader(env_child: _EnvChi
     invalid option, ``_run_command`` answered ``""``, and both readers below
     returned nothing while every injected test in this file stayed green.
     """
-    # Same exec race as the Linux-only /proc cell below: on Linux this reader AND the
-    # ``process_envs()`` batch below are that same /proc file, and on macOS a ``ps``
-    # fork per poll would be the wait. Deferred rather than widened here: no CI run
-    # has failed these reads (R1-F3).
-    env = reclaim.process_env(env_child.pid)
+    # THE EXEC RACE the Linux-only /proc cell below waits out applies here too: on Linux
+    # this reader AND the ``process_envs()`` batch are that same /proc file, so a read
+    # taken the instant ``Popen`` returns lands in the child's ``execve`` window and
+    # answers ``''``. This cell carried a "deferred, no CI run has failed these reads"
+    # note until it did: 3 CI failures on main (runs 38148488876, 38158276995,
+    # 38250602187), all ``'LO_RECLAIM_ENV_PROBE=...' in ''``. Each reader waits on the
+    # probe variable APPEARING, which is the event; a healthy child answers the first
+    # read, so macOS pays no extra ``ps`` fork.
+    env = _await_child_probe(
+        env_child, lambda: reclaim.process_env(env_child.pid), where="process_env()"
+    )
     assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in env
     assert config_root_of(env) == str(env_child.root)
 
-    batch = reclaim.process_envs()
-    assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in batch.get(env_child.pid, "")
-    assert config_root_of(batch[env_child.pid]) == str(env_child.root)
+    batch_env = _await_child_probe(
+        env_child,
+        lambda: reclaim.process_envs().get(env_child.pid, ""),
+        where="process_envs()",
+    )
+    assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in batch_env
+    assert config_root_of(batch_env) == str(env_child.root)
 
 
 def test_the_signal_time_row_reader_reads_a_real_child_and_its_root(

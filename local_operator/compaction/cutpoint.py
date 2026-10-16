@@ -22,17 +22,23 @@ the moment the context was growing fastest. See :func:`_snap_to_valid_cut`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Container, Sequence
 
 from local_operator.harness.rows import is_harness_injection, is_harness_notice_text
-from local_operator.harness.types import AgentMessage, CustomMessage, Message
+from local_operator.harness.types import (
+    AgentMessage,
+    CustomMessage,
+    ImageContent,
+    Message,
+)
 
 from .tokens import _encode_len, estimate_tokens
 
 __all__ = [
     "find_cut_point",
+    "advance_cut_to_wire_band",
     "prepare_partitions",
     "extract_preserved_user_turns",
     "task_boundary_floor",
@@ -409,6 +415,112 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     if len(summarizable) == 1 and _message_tokens(summarizable[0]) < keep_recent_tokens:
         return None
     return index
+
+
+def _has_image(message: AgentMessage) -> bool:
+    return isinstance(message, Message) and any(
+        isinstance(block, ImageContent) for block in message.content
+    )
+
+
+def advance_cut_to_wire_band(
+    messages: Sequence[AgentMessage],
+    cut: int,
+    *,
+    kept_bytes: Callable[[int], int],
+    band_bytes: int,
+    replayable: Callable[[int], bool] | None = None,
+) -> int:
+    """Move ``cut`` later until the kept side fits ``band_bytes``; else to the
+    furthest cut the protections below allow.
+
+    WHY. :func:`find_cut_point` is ruled in TOKENS and the byte trigger is
+    ruled in BYTES, and for images the two rulers are unrelated: every image
+    is a flat ``IMAGE_TOKEN_ESTIMATE`` while a 1280x720 PNG is ~0.94 MB on the
+    wire. ``keep_recent_tokens`` (20k) therefore keeps ~16.7 frames, i.e.
+    ~15.6 MB, against a 16 MB trigger: a pass fired by the byte arm landed
+    with ~0.4 frame of headroom and fired again one or two tool groups later
+    (measured bursts of consecutive passes, each rewriting the prompt prefix,
+    so the request after a pass read 27.5% cache-read against ~80% in steady
+    state). The auto-continue gate already defines "real headroom" as
+    ``WIRE_RECOVERY_BAND`` x trigger; this applies that same definition to the
+    cut itself, so a byte-fired pass lands inside the band, not beside the
+    trigger.
+
+    ``kept_bytes(i)`` is the CALLER's ruler for what the request would weigh
+    if the cut were ``i``. It is a callable, not a ruler imported here,
+    because the caller knows two things this walk cannot: what the pass puts
+    in FRONT of the kept window (the carried-forward marker and preserved
+    turns), and which image bytes capture elision will reclaim from the kept
+    window anyway. Superseded captures are the narrower, text-preserving way
+    to shed bytes and stay the first resort; advancing the cut summarizes
+    text too, so the caller counts elidable bytes as already gone and the cut
+    only moves for the shortfall elision cannot cover.
+
+    Only ever moves LATER (more history summarized, never less), so what
+    :func:`find_cut_point` established -- at least two real messages before the
+    cut -- still holds; every candidate is re-checked with the same
+    :func:`_is_valid_cut` pairing predicate and, when given, ``replayable``
+    (the session's "kept[0] is a transcript entry" guard, which must hold for
+    the cut finally used).
+
+    Protections, because a byte target must never be bought with the content
+    the model is mid-way through using. The cut never passes:
+
+    - the NEWEST image-bearing message (the current observation); and
+    - an image the USER attached (an image in a ``user`` message) at or after
+      the original cut: a screenshot a person pasted is not re-obtainable by
+      re-observing, and its bytes are what the user chose to send.
+
+    If those stop the walk short of the band the furthest allowed cut is
+    still returned -- strictly more headroom than the original, and the pass
+    was going to run regardless -- rather than refusing it, because a refusal
+    the automatic gate has nobody to tell is the failure this package avoids.
+
+    Inert when ``band_bytes <= 0`` (byte trigger disabled) or when the kept
+    side already fits, so a history without byte pressure gets ``cut`` back
+    unchanged.
+    """
+    total = len(messages)
+    if band_bytes <= 0 or not 0 < cut < total:
+        return cut
+    if kept_bytes(cut) <= band_bytes:
+        return cut
+
+    limit = total - 1
+    for index in range(total - 1, cut - 1, -1):
+        if _has_image(messages[index]):
+            limit = min(limit, index)
+            break
+    for index in range(cut, total):
+        message = messages[index]
+        if isinstance(message, Message) and message.role == "user" and _has_image(message):
+            limit = min(limit, index)
+            break
+
+    result_at = _result_indices(messages)
+    legal = [
+        index
+        for index in range(cut + 1, limit + 1)
+        if _is_valid_cut(messages, index, result_at) and (replayable is None or replayable(index))
+    ]
+    if not legal:
+        return cut
+    # ``kept_bytes`` only falls as the cut moves later (fewer kept messages,
+    # and fewer reclaimable captures among them), so the first legal cut that
+    # fits is found by bisection. A linear walk would re-run the caller's
+    # ruler -- which may project capture elision over the whole kept window --
+    # once per candidate, quadratic on the long tool runs this exists for.
+    low, high = 0, len(legal) - 1
+    if kept_bytes(legal[high]) > band_bytes:
+        return legal[high]  # nothing fits; the furthest allowed cut is the best on offer
+    while low < high:
+        middle = (low + high) // 2
+        if kept_bytes(legal[middle]) <= band_bytes:
+            high = middle
+        else:
+            low = middle + 1
+    return legal[low]
 
 
 def task_boundary_floor(

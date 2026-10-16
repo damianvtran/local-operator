@@ -37,6 +37,7 @@ Section "Timing, flakes".
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -341,57 +342,59 @@ def test_one_raising_source_does_not_starve_the_healthy_ones_behind_it(app_with_
 
 
 def test_the_runtime_retire_offer_is_bounded(monkeypatch):
-    """A wedged runtime must not hold the closing socket for `ACK_TIMEOUT_S`.
+    """Require the exact timeout and actual abandonment, not a scheduling bet.
 
-    The offer crosses the socket and `dispose()` closes that socket, so the
-    caller cannot proceed until it answers. Unbounded, a sidebar close would
-    wait 15 s per source against a runtime that never replies. A timeout is
-    just another "kept": the runtime's residency drain collects it.
-
-    Deliberately NOT on the `app_with_clock` fixture: that fixture freezes
-    `time.monotonic`, which is the clock the asyncio event loop schedules
-    timeouts on, so a real `wait_for` inside it can never fire. This one needs
-    a real loop, so it takes a bare instance instead of the injected clock.
+    Main CI returned correctly through the compressed timeout but took1.14s,
+    failing the old <1s elapsed assertion. Drive the timeout event after the
+    offer starts: this catches the15s default/bypass without changing limits
+    or booting Textual. The outer2s wait is only a deadlock failure backstop.
     """
     import asyncio
 
-    # PRECONDITION: 3 s is the number, matching `mobile/daemon.py`'s bound on
-    # the identical call. Compressed below only so the test costs milliseconds
-    # instead of the production bound.
     assert app_module.RETIRE_OFFER_TIMEOUT_S == 3.0
-    monkeypatch.setattr(app_module, "RETIRE_OFFER_TIMEOUT_S", 0.05)
+    real_wait_for = asyncio.wait_for
+    requested_timeouts = []
+    started = []
+    cancelled = []
+    entered = asyncio.Event()
 
-    # No Textual app is booted: the method touches nothing but its argument,
-    # and booting one would drag the whole harness into a timing assertion.
-    app = OperatorApp.__new__(OperatorApp)
-    started: list[bool] = []
-
-    async def _wedged() -> str:
+    async def wedged():
         started.append(True)
-        await asyncio.sleep(300)  # a runtime that never answers
-        raise AssertionError("unreachable: the bound must fire first")
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
 
+    async def deadline_event(awaitable, *, timeout):
+        requested_timeouts.append(timeout)
+        offered = asyncio.create_task(awaitable)
+        # Wait on the actual offer entry, never an elapsed clock or delay.
+        await entered.wait()
+        offered.cancel()
+        try:
+            await offered
+        except asyncio.CancelledError:
+            pass
+        raise TimeoutError("synthetic deadline event")
+
+    # Patch this consumer's binding, never the shared stdlib asyncio module:
+    # pytest/watchdogs and the functional backstop must retain the real wait.
+    monkeypatch.setattr(app_module, "asyncio", SimpleNamespace(wait_for=deadline_event))
+    assert asyncio.wait_for is real_wait_for
     session = Mock()
-    session.retire_if_unused = _wedged
+    session.retire_if_unused = wedged
 
-    async def _drive() -> float:
-        loop = asyncio.get_running_loop()
-        begin = loop.time()
-        # The OUTER bound is the test's own failure mode, not the assertion:
-        # without the bound under test this await never returns, and a hang is
-        # a far worse test failure than a raise. `CancelledError` is a
-        # `BaseException`, so the method's `except Exception` cannot eat it.
-        await asyncio.wait_for(OperatorApp._retire_unused_runtime(app, session), timeout=2.0)
-        return loop.time() - begin
+    async def drive():
+        app = OperatorApp.__new__(OperatorApp)
+        await real_wait_for(OperatorApp._retire_unused_runtime(app, session), timeout=2.0)
+        assert len(asyncio.all_tasks()) == 1, "retire offer survived abandonment"
 
-    # Must RETURN (a timeout is a "kept"), never raise into teardown.
-    elapsed = asyncio.run(_drive())
-
-    assert started, "the offer must actually have been made"
-    assert elapsed < 1.0, (
-        "an unanswered offer must be abandoned on the bound, not held for the "
-        f"AttachClient default of 15 s (took {elapsed:.2f}s)"
-    )
+    asyncio.run(drive())
+    # Outside the method's best-effort exception handler: a wrong argument
+    # must fail this test, not get swallowed as though it were a timeout.
+    assert requested_timeouts == [3.0]
+    assert started == cancelled == [True]
 
 
 def test_the_sweep_re_reads_the_window_constant_every_tick(app_with_clock, monkeypatch):

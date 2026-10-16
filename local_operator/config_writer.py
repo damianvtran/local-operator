@@ -167,6 +167,37 @@ def config_write_lock(
             gate.release()
 
 
+@contextmanager
+def nonblocking_file_claim(path: Path) -> Iterator[bool]:
+    """One nonreentrant kernel claim for a journal preparation/recovery operation.
+
+    Unlike the config transaction itself, a second descriptor on the owning
+    thread must NOT count as ownership: a nested reader must skip its writer's
+    still-active preparation. Reuse the same platform primitive and fork-fd
+    discipline, rather than PID heuristics that cannot prove process liveness.
+    """
+    path = Path(path)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ConfigWriteLockError("transaction lease must not be a symlink")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with _registry_guard:
+        fd = os.open(path, flags, 0o600)
+        _lock_fds.add(fd)
+    acquired = False
+    try:
+        acquired = _try_lock(fd)
+        yield acquired
+    finally:
+        try:
+            if acquired:
+                _unlock(fd)
+        finally:
+            with _registry_guard:
+                _lock_fds.discard(fd)
+                os.close(fd)
+
+
 def serialized_config_write(function: Callable[P, T]) -> Callable[P, T]:
     """Protect existing manager-first primitives without changing their signature."""
 

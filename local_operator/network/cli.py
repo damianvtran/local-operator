@@ -864,6 +864,52 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_revoke.add_argument("--json", action="store_true")
+    # ``inherit`` AUTHORS the standing "may borrow my future native logins of THIS account"
+    # permission as a signed approval (credentials/inheritance.py). Same three-step shape as
+    # the finite-share recovery on ``share``: request -> ``approvals approve`` (the operator's
+    # own signature) -> ``--approval``. ``--status`` is read-only. The three actions are
+    # mutually exclusive and exactly one is required, so a bare ``inherit`` never does
+    # anything -- there is no default act, as ``_guard_credential_subcommand`` demands.
+    cred_inherit = credential_actions.add_parser(
+        "inherit",
+        help=(
+            "Let another device borrow this device's FUTURE sign-ins of one provider account, "
+            "until you revoke it (signed approval; never copies the login)"
+        ),
+    )
+    cred_inherit.add_argument("provider", help="A native OAuth provider name, e.g. openai")
+    cred_inherit.add_argument(
+        "--to",
+        required=True,
+        dest="device",
+        help="The device that may borrow it (name or device id)",
+    )
+    cred_inherit.add_argument(
+        "--account",
+        default="",
+        help="The provider account id (required when several are signed in here)",
+    )
+    cred_inherit.add_argument("--org", default="", help="Optionally constrain to one org id")
+    cred_inherit.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
+    inherit_action = cred_inherit.add_mutually_exclusive_group(required=True)
+    inherit_action.add_argument(
+        "--request-approval",
+        action="store_true",
+        help="File the request for your signature; grants nothing",
+    )
+    inherit_action.add_argument(
+        "--approval",
+        default="",
+        help="Apply an approved request: records the permission (one-shot)",
+    )
+    inherit_action.add_argument(
+        "--status",
+        action="store_true",
+        help="Read-only: the permission's state on this device's disk (not delivery)",
+    )
+    cred_inherit.add_argument("--json", action="store_true")
     cred_mark = credential_actions.add_parser(
         "mark",
         # §4.2's selection marks (S4): these are the operator's standing words
@@ -2083,6 +2129,83 @@ def _github_shareable_row(self_device: str) -> dict[str, Any]:
             f"lop network credential share {github_mod.GITHUB_KEY} --with <device> --scope device"
         ),
     }
+
+
+def _cmd_credential_inherit(args: argparse.Namespace) -> int:
+    """``credential inherit <provider> --to <dev> --request-approval|--approval|--status``.
+
+    The operator-authoring half of the future-login permission. It resolves the SAME network
+    and device the sibling verbs do (``_resolve``/``_resolve_device``), then hands the
+    decision to ``credentials.inheritance``; nothing here reads a credential. A refusal
+    surfaces as the module's own typed sentence (every one says nothing was changed).
+    """
+    from local_operator.network.credentials import inheritance
+    from local_operator.network.identity import load as load_identity
+    from local_operator.network.types import MeshRefusal
+
+    record = _resolve(args.network)
+    identity = load_identity()
+    if identity is None:
+        raise MeshRefusal("no_identity", "this device has no key yet; join a network first")
+    device = _resolve_device(record, args.device)
+    if device is None:
+        raise MeshRefusal(
+            "not_a_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' for "
+            "the member list",
+        )
+    if device == identity.device_id:
+        raise MeshRefusal(
+            "inherit_self",
+            "this device already uses its own login; a permission is for ANOTHER device",
+        )
+    provider = str(args.provider)
+    account = str(getattr(args, "account", "") or "")
+    org = str(getattr(args, "org", "") or "")
+    if getattr(args, "status", False):
+        report = inheritance.status(record.network_id, identity.device_id, device, provider)
+        return _emit(args, {"ok": True, **report}, [*report["lines"], report["scope"]])
+    if getattr(args, "request_approval", False):
+        requested = inheritance.request(
+            record.network_id, identity.device_id, device, provider, account=account, org=org
+        )
+        return _emit(
+            args,
+            {
+                "ok": True,
+                "approval_id": requested["approval_id"],
+                "state": requested["state"],
+                "summary": inheritance.summary(requested),
+                "expires_at": requested["expires_at"],
+            },
+            [
+                *inheritance.details(requested),
+                "Request only; nothing is permitted yet.",
+                f"Approve: lop network approvals approve {requested['approval_id']}",
+            ],
+        )
+    result = inheritance.apply(
+        str(args.approval),
+        {
+            "owner_device": identity.device_id,
+            "network_id": record.network_id,
+            "recipient_device": device,
+            "account": account,
+            "org": org,
+            "provider": provider.strip().lower(),
+        },
+    )
+    return _emit(
+        args,
+        {"ok": True, **result},
+        [
+            f"Permission recorded for {provider.strip().lower()} (account {result['account']}) "
+            f"to {device}, until you revoke it.",
+            "This is permission, not delivery: the owner relay hands out short-lived access on "
+            "its next tick. Check: lop network credential inherit "
+            f"{args.provider} --to {device} --status",
+        ],
+    )
 
 
 def _cmd_credential(args: argparse.Namespace) -> int:
@@ -4767,6 +4890,14 @@ def _await_join_result(pending: Any, store: Any) -> Any:
         if row.status != "awaiting_confirmation":
             return row
         if not _process_alive(row.pid):
+            # The parker publishes its outcome BEFORE exiting. It can finish
+            # between our awaiting-confirmation read and this liveness probe,
+            # so death alone cannot distinguish abandonment from a completed
+            # ceremony. Re-read once after observing death; an absent or still
+            # awaiting row remains abandoned, never an invented success.
+            final = store.pending_join(pending.invite_id)
+            if final is not None and final.status != "awaiting_confirmation":
+                return final
             return None
         time.sleep(0.2)
     return None
@@ -8044,11 +8175,15 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
     names them, which is the same rule ``member`` states.
     """
     verb = getattr(args, "credential_command", None)
+    if verb == "inherit":
+        return _cmd_credential_inherit(args)
     if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
         "usage: lop network credential share  <provider|mcp:<url>> --with <device> "
         "[--scope session|device]\n"
+        "       lop network credential inherit <provider> --to <device> [--account A] [--org O] "
+        "--request-approval|--approval <id>|--status\n"
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
@@ -8136,6 +8271,24 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             *finite_share.details(dict(record)),
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
             "This operation restores only the signed finite share; nothing is installed or joined.",
+        ]
+    from local_operator.network.credentials import inheritance
+    from local_operator.network.types import MeshRefusal
+
+    if inheritance.intent(dict(record)) is not None:
+        # Never fall through to the onboarding card: it would call this "install anchor" and
+        # list "definitions, MCP servers, git identity and logins" as what approval does.
+        try:
+            described = inheritance.details(dict(record))
+        except MeshRefusal:
+            described = [
+                "A credential-permission request this build cannot describe; do not approve it."
+            ]
+        return [
+            *described,
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            "This records a credential permission only; nothing is installed, joined or "
+            "connected.",
         ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
@@ -8377,6 +8530,15 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
         # Presign intent is stderr; JSON stdout remains one complete object.
         for disclosure_line in finite_share.details(record):
             print(disclosure_line, file=sys.stderr)
+    from local_operator.network.credentials import inheritance
+
+    # A credential PERMISSION is described from its own signed record, in full, BEFORE the
+    # signer runs. ``details`` raises for a record this build cannot state, so what cannot
+    # be disclosed is never signed; the generic "onboard/anchor install" card text is not
+    # what a person is approving here.
+    if inheritance.intent(record) is not None:
+        for disclosure_line in inheritance.details(record):
+            print(disclosure_line, file=sys.stderr)
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -8451,10 +8613,17 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         # last row read as one block. The JSON half above is what a script
         # parses; this is what a person scans.
         lines: list[str] = []
+        from local_operator.network.credentials import inheritance
+
         for row in rows:
             if lines:
                 lines.append("")
-            lines.extend(_approval_lines(row))
+            # A credential permission is one summary line here; its full disclosure is `show`.
+            lines.extend(
+                inheritance.list_lines(row)
+                if inheritance.intent(row) is not None
+                else _approval_lines(row)
+            )
         return _emit(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)
@@ -8485,6 +8654,15 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
             "finite_apply_required",
             "This is finite-share recovery, not onboarding. Use the exact "
             "credential share --approval command shown on its request; no setup ran.",
+        )
+    from local_operator.network.credentials import inheritance
+
+    if inheritance.intent(record) is not None:
+        raise MeshRefusal(
+            "inherit_apply_required",
+            "This is a credential permission, not onboarding: it requires "
+            "`lop network credential inherit ... --approval <id>` (the exact command is on its "
+            "request); no connection, install or SSH ran.",
         )
     state = str(record.get("state") or "")
     if state not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):

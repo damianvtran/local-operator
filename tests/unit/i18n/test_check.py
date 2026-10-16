@@ -64,6 +64,12 @@ setting = Setting(key="k", path=("k",), section="s", label="label prose", help="
 cmd = SlashCommand("name", "slash description prose")
 choice = Choice("v", "choice label prose", "choice detail prose")
 text = Text("constructed prose")
+static = Static("static constructor prose")
+label = Label("label constructor prose")
+input = Input("input initial prose", placeholder="input placeholder prose")
+custom = Custom(placeholder="custom placeholder prose")
+raise SessionSpecError("invalid session spec prose")
+raise sdk.SessionIsolationError("unsafe session isolation prose")
 """
 
     def test_every_sink_kind_counts(self, i18n_check) -> None:
@@ -81,10 +87,24 @@ text = Text("constructed prose")
             "SlashCommand copy",
             "Choice copy",
             "Text",
+            "textual.Static",
+            "textual.Label",
+            "textual.Input",
+            "placeholder=",
+            "SDK session error",
         } <= kinds
         # `Setting(help=...)` is both the `help=` rule and the registry-copy
         # rule; it must be counted ONCE (per literal, not per rule).
         assert len([v for v in found if v.text == "h prose"]) == 1
+
+    def test_sdk_error_sink_is_narrow(self, i18n_check) -> None:
+        source = """\
+raise SessionSpecError(copy.invalid_spec())
+raise sdk.SessionIsolationError(copy.isolation_error(reason=reason))
+raise SessionSpecError("{}")
+raise ValueError("developer only exception prose")
+"""
+        assert i18n_check.scan_source("local_operator/sdk.py", source) == []
 
     def test_f_strings_count_and_tokens_do_not(self, i18n_check) -> None:
         source = 'print(f"Session {name} failed")\nprint(f"{a}-{b}")\n'
@@ -103,6 +123,35 @@ text = Text("constructed prose")
 
 
 class TestRatchet:
+    @pytest.mark.parametrize("constructor", ["SessionSpecError", "sdk.SessionIsolationError"])
+    def test_sdk_error_ratchet(self, tree, i18n_check, monkeypatch, constructor):
+        path = "local_operator/sdk.py"
+        clean = f"raise {constructor}(copy.invalid_spec())\n"
+        _write(tree, {path: clean})
+        monkeypatch.setattr(i18n_check, "check_catalogues", lambda: [])
+        assert i18n_check.main(["--init"]) == 0
+        _activate(tree, [path])
+        _write(tree, {path: f'raise {constructor}("planted SDK error prose")\n'})
+        assert i18n_check.main([]) == 1
+        _write(tree, {path: clean})
+        assert i18n_check.main([]) == 0
+
+    @pytest.mark.parametrize(
+        "literal",
+        ['Static("planted picker prose")', 'Input(placeholder="planted picker prose")'],
+    )
+    def test_projects_picker_constructor_ratchet(self, tree, i18n_check, monkeypatch, literal):
+        """Activate only the picker; constructor/placeholder copy cannot bypass it."""
+        path = "local_operator/tui/widgets/projects_send.py"
+        _write(tree, {path: "Static(copy.send_title())\n"})
+        monkeypatch.setattr(i18n_check, "check_catalogues", lambda: [])
+        assert i18n_check.main(["--init"]) == 0
+        _activate(tree, [path])
+        _write(tree, {path: literal + "\n"})
+        assert i18n_check.main([]) == 1
+        _write(tree, {path: "Static(copy.send_title())\n"})
+        assert i18n_check.main([]) == 0
+
     def test_new_file_outside_the_enforced_scope_is_advisory(
         self, tree, i18n_check, capsys
     ) -> None:

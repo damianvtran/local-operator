@@ -417,7 +417,8 @@ alone is not an inference credential.
   `{"command": str, "url": str}` or `null`: the command that clears the
   condition, with the console URL that belongs beside it. The remedy is a
   terminal command, so the UI shows it rather than running it, and this route has
-  no write half. It is an OBJECT rather than a bare string for that reason — the
+  no poll-side write half. Explicit setup is separately gated below. It is an
+  OBJECT rather than a bare string for that reason — the
   URL travels with the command.
   **`connector.detail` names no command.** It is one surface-neutral sentence
   that this route, `lop tunnel status` and the park file all print verbatim, and
@@ -431,6 +432,76 @@ alone is not an inference credential.
 There is no SSE frame for this. It changes when a person signs in or edits the
 console, so the app polls it on open and refetches when a sign-in it started
 settles; a new frame kind would carry minutes-old news.
+
+### Explicit phone setup (`tunnel_setup: 1`)
+
+This additive capability does not change `tunnel: 1` or its health GET. Clients
+must not expose/call setup when the key is absent. It grants the same bounded
+setup authority as `lop tunnel setup apply`, not arbitrary browser-side shell
+execution. The existing desktop bearer, Origin allowlist and Sec-Fetch-Site
+checks apply unchanged; authentication/terms remain the existing human OAuth
+flow. There is no credit purchase, package/bundle build, new grant, bind change,
+revocation/re-creation of a healthy route or silent owning-account repoint.
+
+| Route | Request | Authority |
+|---|---|---|
+| GET `/v1/desktop/tunnel/setup` | optional positive `credential_id` query | Local metadata/probe only: read-only auth store, no upstream read/token refresh/store creation. `quote:null`, `verified:false`, `url:null`; cached active never means verified. |
+| POST same | `{\"action\":\"plan\",\"credential_id\":17}` | Explicit fresh account/quote/preparation observation, no setup mutation. Owner optional here for account choice, never for run. |
+| POST same | `{\"action\":\"run\",\"credential_id\":17,\"accept_monthly_price\":\"0.05\"}` | Shared forward-only runner; explicit positive integer owner required. Price optional only when activation is not required; exact fresh amount/owner are rechecked. |
+
+Bodies are strict (`extra=forbid`): IDs are not coerced from strings/bools, and
+prices are finite nonnegative decimal **strings** (max64 characters). Plan
+rejects price acceptance; run without an owner is422. Wrong/stale amount is an
+expected200 blocker (`step:quote_changed`), never a charge/setup operation.
+Do not parse human sentences to select a client action.
+
+Responses use the normal `{status,message,result}` envelope. `result` contains:
+- `step`, `blocked_on`, `configured`, `ready`, `verified`, `url`;
+- selected `credential_id`, safely masked `identity_label`,
+  `credential_choices:[{id,identity_label}]` (no token/payload);
+- `quote:null|{monthly_price_usd,positive_balance,eligible,account_valid}`;
+- `receipts:[{step,ok,text}]`, `done:[step]` and optional
+  `billing_outcome`, `reservation_outcome`, `failure_stage`, `accepted_price_usd`;
+- `remedy:null|{kind,text,command,url}`; `command` is an optional **report**, not
+  authorization for a client to execute a shell command. `kind` drives the
+  existing sign-in/account-choice/quote/prerequisite affordance;
+- `source:local|fresh`, `request_timeout_ms`, `in_progress`, `progress:[text]`,
+  `active_credential_id`. Polling exposes only fixed-copy ephemeral progress,
+  not raw provider responses or another persisted setup journal.
+
+`blocked_on` vocabulary: `none`, `login`, `choose_account`, `owner_missing`,
+`quote`, `quote_unread`, `account`, `cloudflared`, `mobile_bundle`, `supervisor`,
+`balance`, `stopped`, `verification`, `failed`, `in_progress`. Prerequisite
+remedies direct an approved normal installation/preparation step; the route
+never installs cloudflared or builds the interface silently. Only fresh active
+cloud route + actual connected producer + gateway + healthy/protected mobile
+origin gives `verified:true` and the exact URL. This is not phone-side login
+or reachability proof.
+
+One POST owns the backend slot across accounts; another POST returns409
+`setup_in_progress` while it is active. Mutation additionally uses the shared
+CLI/TUI/API in-process guard and existing nonblocking kernel claim over the
+same journal. Healthy/no-op and default observation do not create that claim.
+Interrupted creation retains its original key/payload. Request cancellation,
+including repeated cancellation, and server shutdown **drain** owned work before
+releasing the mutation lease, rather than orphaning blocking installation.
+
+Request budgets are120000ms for observation/plan and900000ms for run. These
+are conservative client budgets around existing bounded network/probe/bundle/
+supervisor calls, not a promise of native-install latency. On expiry, response
+is504 `setup_deadline` **after safe drain**; drain can exceed the nominal budget.
+Never retry speculatively as a second owner—poll local state and retry the saved
+journal after work settles. HTTP401/403/503 admission and strict422 validation
+remain unchanged. Expected business blockers are200. A safe503
+`setup_unavailable` does not imply rollback. With no completed configuration,
+invalid saved `create.json` shape/required fields return503
+`setup_intent_corrupt`: preserve the original file and recover its original
+request explicitly; never overwrite/repair it or choose another account as a
+fallback. An unused old intent is ignored when configuration already exists,
+so corrupt leftovers cannot block a healthy existing no-op.
+
+The backend contract is additive; desktop renderer consumption/design/real-device
+acceptance is a separate slice, not established merely by advertising this key.
 
 ## Settings
 
@@ -693,6 +764,8 @@ readings.
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
 | GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1`, `open_frame=1` | snapshot frame below (**read envelope**); both flags also apply to the page embedded in `payload.history` (`open_frame=1` = §"The open frame") |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
+| GET `.../{id}/files` | optional `scope=family\|self`, `kind`, `origin`, `highlighted=0\|1`, `q`, `sort=recent\|name\|kind\|modified\|created\|size`, `order=asc\|desc`, `limit` 1..200 (default 100), `cursor` | `{state,revision,scope,sort,order,total,counts,rows,next_cursor,cursor_reset,stat_complete,scan}` — the per-session file index (`session_files`); see §"The per-session file index" |
+| POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
@@ -2202,6 +2275,77 @@ recorded file callout (`row["files"][i]`, suffix-allowlisted `Content-Type` — 
 `text/html`, SVG or `+xml` — a 10 MB cap, and the §4.3 denylist re-applied per
 request).
 
+### The per-session file index (`session_files: 1`)
+
+`GET /v1/desktop/sessions/{id}/files` answers *which files did this conversation, and the
+subagents it launched, produce?* It exists because a transcript scan cannot answer it: a
+generated image or video is a content-addressed DIGEST in the tool result and has no
+filesystem path anywhere, subagent files are invisible from the parent's journal, and a scan
+that stops after N messages or reads pruned content misses the rest. The index is derived from
+the journal (`local_operator/session_files/`), cached outside the session directory
+(`<config>/cache/session_files/<id>.json`, schema-versioned, safe to delete) and resumable.
+
+**Authority and scope.** A backend advertising `session_files: 1` is authoritative: display
+ONLY its index rows (writes/edits, command outputs, artifacts, screenshots/downloads,
+Highlights and proven subagents). Do not merge client-scan prose/`read` mentions. The legacy
+client scan is capability-absent fallback only.
+
+**Query** (all optional): `scope=family|self` (default `family`: the conversation plus the
+subagents its own roster names, depth <= 3, <= 64); `kind` and `origin` (comma lists; `origin`
+is closed to `generated|written|screenshot|download|edited|command|highlight`, an unknown
+value is `422 session_files_bad_filter`; `kind` is the backend vocabulary of
+`supplements/candidates.kind_of`); `highlighted=0|1`; `q` (<= 256 chars, case-folded substring
+over name and display path); `sort=recent|name|kind|modified|created|size` and
+`order=asc|desc` (defaults: `recent`, and per-sort newest/biggest/A-Z first); `limit` 1..200
+(100); `cursor`. A cursor is opaque and bound to the query that minted it: a cursor from a
+DIFFERENT query or garbage is `422 session_files_bad_cursor`; a cursor from an older
+`revision` (a turn settled between pages) restarts at the top with `cursor_reset: true`.
+
+**Answer**: `state` is `ready`, `building` (a cold scan of a very large journal is still
+running in the background: partial rows are real, poll again; `scan.covered_bytes` of
+`scan.total_bytes` shows progress) or `unsupported` (a peer's conversation: its journal is not
+on this disk; no backend rows are available). `revision` is monotone per session while the
+journal only grows and changes whenever the index changes. `total` counts rows matching every
+filter; `counts` is the per-kind census BEFORE the `kind` filter so chips can show every
+count. A draft id answers an empty `ready` page (not a 404); an unknown id is the shared 404; a
+silent peer that might hold the id is the shared `409 session_unresolved`.
+
+**Rows** carry `ref` (`{type:"path",path}` with an ABSOLUTE path, or `{type:"artifact",digest,
+content_type}` with no path), `name`, `kind`, `size_bytes`, `created_at`, `modified_at`,
+`width`/`height`/`duration_s`, `origin`, `tool`, `tool_call_id`, `intent`, the journal
+`first_seq`/`last_seq`/`first_ts`/`last_ts`/`touches`, `highlighted`/`highlight_why`,
+`session` (`{id,role:self|subagent,child_id,label}`) and `exists`. `id` is stable across
+re-scans. `size_bytes`, `created_at`, `modified_at` and `exists` are a `stat` taken at
+response time for PAGE rows (`created_at` is the filesystem birth time where the platform has
+one); a file that is gone, and every artifact, falls back to the journal's recorded values.
+Sorting by `modified`/`created`/`size` sorts by those displayed values and costs one `stat`
+per candidate row, under a time budget: `stat_complete: false` says some rows sorted by their
+recorded values. The revision does NOT move when a file changes on disk; re-request the page.
+
+**Artifact bytes** stay on `…/attachments/{digest}` (parent) and
+`…/children/{child_id}/attachments/{digest}` (`row.session.child_id` selects the child form).
+`POST …/files/{file_id}/materialise` copies a digest-only artifact to
+`<session scratchpad>/generated/<sanitised name>` (a COPY, never a link: the store is
+content-addressed and shared) and returns its absolute path; idempotent (`created: false` for
+an identical existing copy), never overwrites a different file, and writes only under the URL
+session's scratchpad. Refusals: `404 session_files_file_not_found`, `409
+session_files_not_an_artifact` (the row already has a path), `409
+session_files_unsafe_destination` (hostile symlink/moved parent, or no safe directory
+operations on this platform), `410
+session_files_artifact_missing` (the store entry was pruned), `500 session_files_materialise_failed`.
+
+**Privacy.** The desktop route returns absolute paths because the bearer-gated renderer
+already holds them. The service takes `display=True` for any surface that leaves the machine
+(mesh, phone): cwd-relative or `~/` paths only (memo S-R14). Sensitive paths
+(`supplements/denylist`, with the session's own scratchpad un-denied) are never indexed.
+
+**Durability.** `generate_image`, `generate_video` and `video_status` results now also write
+`details.artifacts[]` (`digest`, `kind`, `name`, `content_type`, `size_bytes`, `width`,
+`height`, `duration_s`) - additive, and `provider_payload.details` survives the prune pass
+that blanks `content`. Older sessions backfill from the `AttachmentContent` blocks in
+`content` while those are unpruned; an old row that was already pruned is the one thing the
+index cannot recover.
+
 ### Verification
 
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
@@ -2786,6 +2930,7 @@ something alive or ready until then.
 | `skill_catalogue` | 1 | `GET /v1/desktop/skills` with `cwd` (home when omitted) — the folder's discoverable skills with NO session, for a composer that needs them before a conversation exists — and `version`, the skill tree's identity, on every answer (sessionless and session form alike) | the composer fires no sessionless skill query and says "update the backend" instead: an older backend REQUIRES `session_id` on that route, so a sessionless call is a 422 the client cannot classify. Nothing else is gated on this key — the session arm and the session-scoped `/skills` panel keep working |
 | `radient_org` | 1 | the four organization reads on `POST /v1/desktop/radient` — `memberships.list`, `org_agents.list`, `org_teams.list`, `org_team.get` — and the frozen membership refusals they carry through under their own codes (`not_a_member`, `insufficient_role`, `team_plan_required`) | the org selector is not offered: a backend without these operations answers them with a masked 422 ("The request has invalid fields."), indistinguishable from a malformed call, so the app must not attempt them |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
+| `tunnel_setup` | 1 | local-only setup GET; explicit fresh plan/run POST with owner/quote binding | no phone-setup block and no setup calls; existing health/sign-in behavior remains |
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
 | `session_draft_warm` | 1 | `POST /v1/desktop/sessions/draft`, the `draft_id` field on `POST /v1/desktop/sessions`, and the five-door resolution of a registered draft id (`snapshot`, `history`, `watch`, `warm`, `events`) | the app never mints a draft and sends every create exactly as today (`draft_id` omitted), paying the cold engage on a new chat's first send; it must NOT gate any existing surface on this key — the warm is an optimisation on a send path that already works |
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
@@ -2793,6 +2938,7 @@ something alive or ready until then.
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
 | `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
 | `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
+| `session_files` | 1 | `GET /v1/desktop/sessions/{id}/files` and `POST …/files/{file_id}/materialise` — the authoritative per-session file inventory (written, edited, command outputs, screenshots, downloads, generated images/videos, subagent files, Highlights callouts), and the `details.artifacts` list the image/video tools now write | the Files view builds from its own transcript scan exactly as today, and the renderer MUST NOT call the route (an older backend answers 404). A 404 from a backend that DID advertise the key is a broken backend: treat it as definitive "unsupported" for the session |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

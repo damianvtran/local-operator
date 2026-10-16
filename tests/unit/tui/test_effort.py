@@ -26,6 +26,7 @@ from local_operator.paths import DEFAULT_CONFIG_DIRNAME
 from local_operator.tui.app import EFFORT_SET_RECEIPT, OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import (
     FakeProviderController,
     FakeSession,
@@ -103,10 +104,8 @@ class EffortProviderController(FakeProviderController):
 
 
 async def _boot(pilot, app: OperatorApp) -> None:
-    for _ in range(40):
-        await pilot.pause()
-        if app._session is not None:
-            return
+    await await_session_boot(app)
+    await pilot.pause()
 
 
 async def _submit(pilot, app: OperatorApp, text: str) -> None:

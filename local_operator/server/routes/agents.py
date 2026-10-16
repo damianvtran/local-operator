@@ -431,9 +431,33 @@ async def update_agent(
     """
     Update an existing agent.
     """
+    from local_operator.hub_sync.definition import (
+        DefinitionRevisionMismatch,
+        definition_revision,
+    )
+
     try:
-        agent_edit_data = AgentEditFields.model_validate(agent_data.model_dump(exclude_unset=True))
-        updated_agent = agent_registry.update_agent(agent_id, agent_edit_data)
+        payload = agent_data.model_dump(exclude_unset=True)
+        expected = payload.pop("expected_definition_revision", None)
+        agent_edit_data = AgentEditFields.model_validate(payload)
+        precondition = None
+        if expected is not None:
+
+            def _stale_check(current: Any) -> None:
+                if expected != definition_revision(
+                    "agent",
+                    str(current.id),
+                    agent_registry.definition_revision_fields(str(current.id)),
+                ):
+                    raise DefinitionRevisionMismatch("the definition changed since it was read")
+
+            precondition = _stale_check
+
+        updated_agent = agent_registry.update_agent(
+            agent_id, agent_edit_data, precondition=precondition
+        )
+    except DefinitionRevisionMismatch as e:
+        raise HTTPException(status_code=409, detail={"code": e.code, "message": str(e)})
     except KeyError as e:
         logger.exception("Agent not found")
         raise HTTPException(
@@ -1152,6 +1176,29 @@ async def publish_agent_to_radient(
             )
             raise _publication_http_error(exc)
 
+        # SEED THE OUTBOUND RECEIPT (parent ruling (A)b): an ACCEPTED publication
+        # is a known-agreed point -- the server returned the canonical document
+        # and its opaque ETag -- so a later unattended push starts from what the
+        # publish itself proved instead of staying dormant for want of a receipt.
+        # Best-effort by design: a seeding failure must never fail the publish
+        # (the link simply stays `no-receipt` and says so).
+        try:
+            from local_operator.hub_sync.service import seed_receipt_after_publish
+
+            seed_receipt_after_publish(
+                config_manager.config_dir,
+                "agent",
+                str(agent_id),
+                accepted=result.get("accepted_document") or {},
+                local_fields={
+                    "instructions": str(document.get("instructions") or ""),
+                    "description": str(document.get("description") or ""),
+                },
+                revision=str(result.get("revision") or "") or None,
+            )
+        except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
+            logger.debug("could not seed the outbound receipt after a publish", exc_info=True)
+
         result = public_data(result, secrets)
         return CRUDResponse(
             status=200,
@@ -1280,6 +1327,29 @@ async def republish_agent_to_radient(
                 exc.status_code,
             )
             raise _publication_http_error(exc)
+
+        # SEED THE OUTBOUND RECEIPT (parent ruling (A)b): an ACCEPTED publication
+        # is a known-agreed point -- the server returned the canonical document
+        # and its opaque ETag -- so a later unattended push starts from what the
+        # publish itself proved instead of staying dormant for want of a receipt.
+        # Best-effort by design: a seeding failure must never fail the publish
+        # (the link simply stays `no-receipt` and says so).
+        try:
+            from local_operator.hub_sync.service import seed_receipt_after_publish
+
+            seed_receipt_after_publish(
+                config_manager.config_dir,
+                "agent",
+                str(agent_id),
+                accepted=result.get("accepted_document") or {},
+                local_fields={
+                    "instructions": str(document.get("instructions") or ""),
+                    "description": str(document.get("description") or ""),
+                },
+                revision=str(result.get("revision") or "") or None,
+            )
+        except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
+            logger.debug("could not seed the outbound receipt after a publish", exc_info=True)
 
         result = public_data(result, secrets)
         return CRUDResponse(
@@ -1540,6 +1610,30 @@ async def publish_team_to_radient(
                 exc.status_code,
             )
             raise _publication_http_error(exc)
+
+        # SEED THE OUTBOUND RECEIPT (parent ruling (A)b): the accepted team
+        # publication returns the canonical document + its ETag; the local row's
+        # canonical fields are the A side. Best-effort: never fails the publish.
+        try:
+            from local_operator.hub_sync import provenance as _prov
+            from local_operator.hub_sync.service import seed_receipt_after_publish
+
+            seed_receipt_after_publish(
+                config_manager.config_dir,
+                "team",
+                str(getattr(team, "id", "") or ""),
+                accepted=result.get("accepted_document") or {},
+                local_fields=_prov.team_fields(
+                    description=str(getattr(team, "description", "") or ""),
+                    manager=str(getattr(team, "manager", "") or ""),
+                    members=getattr(team, "members", None),
+                    instructions=str(getattr(team, "instructions", "") or ""),
+                    project=str(getattr(team, "project", "") or ""),
+                ),
+                revision=str(result.get("revision") or "") or None,
+            )
+        except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
+            logger.debug("could not seed the outbound receipt after a team publish", exc_info=True)
 
         result = public_data(result, secrets)
         return CRUDResponse(

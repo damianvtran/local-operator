@@ -57,9 +57,11 @@ from local_operator.server.routes import (
     desktop_quota,
     desktop_radient,
     desktop_runtimes,
+    desktop_session_files,
     desktop_sessions,
     desktop_team_bridge,
     desktop_tunnel,
+    desktop_tunnel_setup,
     desktop_wakes,
     health,
     i18n,
@@ -506,6 +508,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             hub_sync_task.cancel()
             await asyncio.gather(hub_sync_task, return_exceptions=True)
         app.state.hub_sync = None
+        # Setup owns blocking service work; join it before closing auth or
+        # allowing event-loop teardown to cancel the worker under its lease.
+        try:
+            await desktop_tunnel_setup.drain(app)
+        except (ValueError, OSError, KeyError, TypeError):
+            logger.warning(
+                "Desktop tunnel setup finished with an unavailable response during shutdown"
+            )
         # Clean up on shutdown
         desktop_auth = getattr(app.state, "desktop_auth", None)
         if desktop_auth is not None:
@@ -844,6 +854,7 @@ app.include_router(desktop_radient.router)
 # whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
 # template that could swallow it.
 app.include_router(desktop_tunnel.router)
+app.include_router(desktop_tunnel_setup.router)
 # Agent messages (Team Bridge, capability `features.team_bridge`):
 # `/v1/desktop/team-bridge/{status,settings,allowlist}`. Registered after the
 # tunnel block for the reason every block here gives -- FastAPI matches in
@@ -904,6 +915,13 @@ app.include_router(desktop_approvals.router)
 # `/code-requests` child of a session, and the two-segment `/refresh` path is declared
 # after its own parent here, so the literal suffix cannot be swallowed.
 app.include_router(desktop_code_requests.router)
+# The SESSION-FILE index (`features.session_files`): the per-session list of files the
+# conversation and its subagents produced, and the materialise child that copies a digest-only
+# artifact out to a real file. Registered after the code-request block for the same
+# declaration-order reason; its templates (`/v1/desktop/sessions/{id}/files` and
+# `/files/{file_id}/materialise`) match no sessions-router route (no `/files` child of a
+# session is declared there) and the POST's literal suffix cannot be swallowed by a parent.
+app.include_router(desktop_session_files.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

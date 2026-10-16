@@ -1,0 +1,4 @@
+{
+  "wire.host_speed.retire_below_tps.label": "retire slow host (tok/s)",
+  "wire.host_speed.retire_below_tps.help": "Experimental, off by default: evidence is from one model/run. A positive floor stops pinning a host after three long replies below this output-token/sec rate, excluding local consumer time. 0 clears speed exclusions on the next request; cache-miss exclusions remain. Moving hosts may start a cold prompt cache."
+}

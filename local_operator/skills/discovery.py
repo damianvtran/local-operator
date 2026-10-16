@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import stat as stat_module
 from collections.abc import Iterator, Sequence
+from contextlib import nullcontext
 from functools import cache
 from pathlib import Path, PureWindowsPath
 from typing import Literal
@@ -93,6 +94,8 @@ class Skill(BaseModel):
     #: one is about these paths" outranks an embedder's guess.
     globs: tuple[str, ...] = ()
     resource_type: Literal["skill", "guide", "agent_hint"] = "skill"
+    #: Internal owned-reader coordination, never transferred in a manifest.
+    managed_config_dir: Path | None = None
 
 
 def parse_frontmatter(text: str) -> dict[str, object]:
@@ -445,10 +448,27 @@ def _within_boundary(real: str, boundary: Path) -> bool:
     return candidate == packaged or candidate.is_relative_to(packaged)
 
 
+def managed_root_context(root: Path, config_dir: Path | None, *, boundary: Path | None = None):
+    """Lock only the caller's explicit active native root, not authored inputs."""
+    if config_dir is None or root.resolve() != (Path(config_dir) / "skills").resolve():
+        return nullcontext()
+    if boundary is not None and not _within_boundary(str(root.resolve()), boundary.resolve()):
+        # Recovery is a write capability. A world-scoped scan cannot reach the
+        # controller's external profile merely to discover that scan clips it.
+        # Uses the SAME containment rule the scanner applies, so a native root
+        # reached only through an external symlink is never locked or recovered
+        # (reviewer R3).
+        return nullcontext()
+    from local_operator.hub_sync.skill_storage import managed_skill_read
+
+    return managed_skill_read(config_dir)
+
+
 def discover_skills(
     roots: Sequence[Path],
     *,
     boundary: Path | None = None,
+    config_dir: Path | None = None,
 ) -> tuple[list[Skill], list[str]]:
     """Discover skills across roots; earlier roots win name collisions.
 
@@ -469,9 +489,16 @@ def discover_skills(
     ordered: list[Skill] = []
     for root in roots:
         root = Path(root).expanduser()
-        if not root.is_dir():
-            continue
-        ordered.extend(scan_skills_dir(root, source=str(root), seen=seen, boundary=boundary_path))
+        with managed_root_context(root, config_dir, boundary=boundary_path):
+            if not root.is_dir():
+                continue
+            discovered = scan_skills_dir(root, source=str(root), seen=seen, boundary=boundary_path)
+            if config_dir is not None and root.resolve() == (Path(config_dir) / "skills").resolve():
+                discovered = [
+                    skill.model_copy(update={"managed_config_dir": Path(config_dir)})
+                    for skill in discovered
+                ]
+            ordered.extend(discovered)
 
     by_name: dict[str, Skill] = {}
     final: list[Skill] = []
@@ -507,7 +534,12 @@ def discover_skills(
     return final, warnings
 
 
-def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
+def roots_fingerprint(
+    roots: Sequence[Path],
+    *,
+    config_dir: Path | None = None,
+    boundary: Path | None = None,
+) -> tuple[object, ...]:
     """Cheap change-detector for the skill tree, used to gate a full rescan.
 
     Walks together with :func:`scan_skills_dir` BY CONSTRUCTION: both consume
@@ -546,16 +578,21 @@ def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
     max_depth = skill_max_depth()
     for raw_root in roots:
         root = Path(raw_root).expanduser()
-        try:
-            root_stat = root.stat()
-        except OSError:
-            # Absent roots are still part of the fingerprint: a root that comes
-            # into existence has to read as a change, not as "same as before".
-            entries.append((str(root), None))
-            continue
-        entries.append((str(root), root_stat.st_mtime_ns))
-        for skill_dir, skill_stat in _walk_skill_dirs(root, max_depth):
-            entries.append((skill_dir, skill_stat.st_mtime_ns, skill_stat.st_size))
+        # The fingerprint must apply the SAME containment rule the scanner uses: a
+        # bounded session reaches native roots only through its world, so a
+        # world-external symlinked profile must not lock/recover merely because the
+        # fingerprint was the caller (reviewer R3).
+        with managed_root_context(root, config_dir, boundary=boundary):
+            try:
+                root_stat = root.stat()
+            except OSError:
+                # Absent roots are still part of the fingerprint: a root that comes
+                # into existence has to read as a change, not as "same as before".
+                entries.append((str(root), None))
+                continue
+            entries.append((str(root), root_stat.st_mtime_ns))
+            for skill_dir, skill_stat in _walk_skill_dirs(root, max_depth):
+                entries.append((skill_dir, skill_stat.st_mtime_ns, skill_stat.st_size))
     return tuple(entries)
 
 

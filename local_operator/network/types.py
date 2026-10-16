@@ -388,6 +388,7 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    "net_memory",
     # MESH ROLLING UPDATES (mesh-update-propagation.md §3; mesh-rolling-
     # updates.md §2). One peer-scope op, apply-or-answer: the origin names ONLY a
     # target identity — the version it just moved to, plus its own build ref as
@@ -676,6 +677,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # conversation. A ``drive`` peer is told, in words, that the row could not
     # be sent and why — never silently dropped.
     "net_mcp_defs": "admin",
+    # Memory changes durable all-scope state, shared only with peers already
+    # authorised by this receiver to rewrite agents/MCP definitions.
+    "net_memory": "admin",
     # ``update`` — the receiver-side grant (mesh-rolling-updates.md §2). NOT
     # ``admin``: the grant is per member and governs THIS device's own install,
     # which is the same class as the two onboarding scopes, not a change to the
@@ -727,6 +731,13 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # happened while these three had no row and fell to the refuse-closed
     # default (review round 1, BLOCKER 1).
     "ask_respond": "prompt",
+    # ``bridge_decide`` is the queued ask's answering verb for a screened org
+    # request (Team Bridge H5c): the human's approve/deny, sent by the surface
+    # that owns the card. Same act as ``ask_respond`` and the same capability —
+    # the relayed viewer that may answer an ask is the one that may answer this
+    # one, and without a row it refused-closed (which is how this table was
+    # found to be missing it: tests/unit/network/test_stream_op_gate.py).
+    "bridge_decide": "prompt",
     # ``ask_revise`` rides the SAME capability as its three siblings: a surface
     # that may answer an ask one way must not be refused the amend window for it.
     # That is the argument that put the other three rows here, and it applies
@@ -1974,4 +1985,6 @@ class HandshakeResult:
     session_protocol: int = PROTOCOL_VERSION
     peer_build: dict[str, Any] = field(default_factory=dict)
     peer_capabilities: list[str] = field(default_factory=list)
+    # Keep the local MAC-covered advertisement without changing raw peer semantics.
+    local_capabilities: list[str] = field(default_factory=list)
     network_name: str = ""

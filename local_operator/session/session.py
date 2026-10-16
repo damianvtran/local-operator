@@ -61,6 +61,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -75,6 +76,7 @@ from local_operator.compaction.cutpoint import (
 from local_operator.compaction.marker import (
     COMPACTION_MARKER_TYPE,
     build_compaction_marker,
+    marker_details,
     render_compaction_marker,
     replayed_user_message,
     with_capture_elision_frontier,
@@ -100,6 +102,8 @@ from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
+    PEER_DELIVERABLE_CUSTOM_TYPES,
+    PEER_FAMILY_INPUT_TYPES,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -110,6 +114,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     SESSION_SEND_NOTICE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
@@ -318,6 +323,8 @@ from local_operator.supplements.trigger import (
     USER_TEXT_MAX_CHARS,
     RunProvenance,
     TurnItem,
+    ask_answer_is_person,
+    ask_answer_text,
     items_text_size,
     snapshot_messages,
 )
@@ -646,16 +653,11 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
     }
 )
 
-#: Inputs that are another SESSION talking, not the operator this session's
-#: notifications belong to: a ``peer_message`` (another local session's agent,
-#: or a person at the other end of ``lop send``) and a ``hub_message`` (a
-#: child reporting to its parent — defensive here: every hub delivery routes
-#: through :meth:`Session.queue_aside`, so it cannot reach ``_note_run_input``
-#: today; the member keeps a future producer correct). §14's trigger record
-#: collapses every non-wake/monitor input into one "internal" class, so the
-#: peer-quiet rule in ``_finalize_attention_notify`` reads the finer
-#: ``_run_input_types`` record instead of widening that class vocabulary.
-PEER_FAMILY_INPUT_TYPES = frozenset({PEER_MESSAGE_MESSAGE_TYPE, HUB_MESSAGE_TYPE})
+#: Inputs that are another SESSION talking (see ``harness/message_types.py``
+#: for the full reasoning and membership): imported rather than re-declared so
+#: the renderer can answer "does this family type reach the model?" from the
+#: same single source — a second declaration site is how the render tuple and
+#: the family silently diverged.
 
 #: Event families a provider stream produces at TOKEN rate. An unobserved
 #: subagent does not fold these into its own frontend store (see ``_emit``):
@@ -949,6 +951,9 @@ class _CompactionPlan:
     #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
     #: summarizer or permanent history.
     advisor_hint: Any | None = None
+    # Ephemeral task carrier, not durable state. Speculation may return data but
+    # never persist it; only append_compaction's committed marker authorizes that.
+    memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1006,6 +1011,22 @@ class _ForkRequest:
     #: it failed. The host owns everything user-visible from there (the receipt,
     #: the spawn, the notice weight); the session's job ends at the clone.
     on_complete: Callable[[str, str], None]
+
+
+def _question_marked_human_required(question: Any) -> bool:
+    """H5a: does this ask question carry the human-required requirement mark?
+
+    Bridge requests (contract §10.3, #125) are human-only: their asks must
+    never be eligible for clearance's divert path. The mark rides both shapes
+    deliberately — bridge asks arrive as the queue's plain mappings (the
+    ``_question_shape`` projection carries ``human_required``), while a future
+    tool path would pass the tool's objects — so the gate's short-circuit
+    cannot be dodged by shape. Everything else reads False, which is the
+    unchanged behaviour for every ask that is not a bridge request.
+    """
+    if isinstance(question, Mapping):
+        return bool(question.get("human_required"))
+    return bool(getattr(question, "human_required", False))
 
 
 def _configured_max_running(values: Mapping[str, Any] | None = None) -> dict[str, int]:
@@ -2817,6 +2838,18 @@ class Session:
         #: Behind the ``project``/``project_delete`` tools and behind
         #: ``/project``. ``None`` means both tools are not advertised.
         project_registry: Any | None = None,
+        #: The Team Bridge runtime (H5d), when the host built one for this
+        #: session. Held here — like the registries above — because
+        #: ``_build_tool_context`` is rebuilt every turn: a runtime set only on
+        #: some construction-time context would reach the createIf check and
+        #: never the executor. ``None`` on every session without one, which is
+        #: how the ``bridge`` tool stays absent (not hidden) until the user is
+        #: signed in AND this session is the designated CoS — the fail-closed
+        #: default that keeps a bridge call impossible from an un-opted-in
+        #: session. Deliberately NOT inherited by subagent children: the
+        #: bridge surface is the designated session's, and H5d carries no
+        #: authority worth fanning out (the decide path is the human's ask).
+        bridge_runtime: Any | None = None,
         conversation_name: ConversationName | None = None,
         #: Where the BOOT model came from: ``"config"`` (the ``hosting`` /
         #: ``model_name`` keys), ``"agent"`` (a profile), ``"flag"``
@@ -3009,6 +3042,16 @@ class Session:
         self._run_typed_user: bool = False
         self._run_last_trigger: str | None = None
         self._run_user_text: str = ""
+        #: Wall-clock start of the current pipeline (the logical turn), frozen onto the
+        #: provenance: the pre-filter's touched-directory sweep only lists files modified
+        #: at or after it.
+        self._run_started_at: float = 0.0
+        #: The session's last REAL typed request, kept across runs (NOT reset at the
+        #: pipeline head, unlike ``_run_user_text``). A turn that resumes after an ANSWERED
+        #: ask carries no typed row of its own -- the ``ask_response`` is the only input --
+        #: so the supplement decision would otherwise be asked "which files?" with no
+        #: request in the state. Bounded at write; see ``supplements.trigger.ask_answer_text``.
+        self._last_typed_user_text: str = ""
         #: The LOGICAL turn's messages across EVERY loop run of the pipeline (first run plus
         #: each ``_drain_continuation`` run), snapshotted as they end. The held end is
         #: replaced per run, so the emitted end alone would carry only the LAST run's
@@ -3232,6 +3275,11 @@ class Session:
         self.agent_registry = agent_registry
         self.team_registry = team_registry
         self.project_registry = project_registry
+        #: The Team Bridge runtime (H5d). A host attribute rather than an
+        #: underscore-private: hosts and tests read it back to confirm the
+        #: wiring (the tool-context parity guard does exactly that), matching
+        #: the three registries above.
+        self.bridge_runtime = bridge_runtime
         #: The team this session is running as manager of, when ``/team``
         #: launched it. Held here so every ``task`` child inherits the group's
         #: collaboration and project briefs without the manager restating them.
@@ -4206,6 +4254,11 @@ class Session:
         from local_operator.paths import config_dir as _resolve_session_root
 
         self._config_dir = _resolve_session_root()
+        #: Memory-capture bookkeeping (local_operator.memory_capture): the last compaction
+        #: marker a recovery pass claimed, and its (marker, 'ok'|'failed') terminal state.
+        #: Instance state, not durable: the durable truth is the capture watermark row.
+        self._memory_recovery_marker: str | None = None
+        self._memory_terminal: tuple[str, str] | None = None
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             # Deliveries route through the indirection hook: at resume the
@@ -5739,6 +5792,14 @@ class Session:
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
+        # Live memory belongs in tail deltas, never block zero. Checking at each
+        # provider boundary harvests late captures without opening another turn.
+        from local_operator.memory_capture import session_tail
+
+        memory_tail = await session_tail(self)
+        if memory_tail and len(desired) >= 4:
+            desired = list(desired)
+            desired[3] += "\n\n" + memory_tail
         if self._output_contract is not None:
             # The contract is announced to the model, because otherwise every
             # first attempt is a coin flip — and announced WHOLE (a partial
@@ -9005,8 +9066,47 @@ class Session:
             self.refresh_frontend_state()
         return found
 
+    # ------------------------------------------------------------------
+    # Untrusted-text helpers for the bridge wrapper (TB-06, PR #2378)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _neutralize_bridge_tag(text: str) -> str:
+        """Escape wrapper-tag lookalikes inside UNTRUSTED text (TB-06).
+
+        A body containing ``</team-bridge-message>`` would close the untrusted
+        region early — anything after it would read OUTSIDE the §11.1
+        "data, not instructions" clause. Every tag-like sequence in untrusted
+        text is neutralised (``<`` -> ``&lt;``); the wrapper's own tags are
+        added only by the builder, after this escaping, so the region cannot
+        be closed from inside.
+        """
+
+        # ONE implementation, shared with the ask question text (TB-05): see
+        # ``local_operator.harness.message_types.neutralize_bridge_tag``.
+        from local_operator.harness.message_types import neutralize_bridge_tag
+
+        return neutralize_bridge_tag(text)
+
+    @staticmethod
+    def _bridge_header_field(value: Any) -> str:
+        """One wrapper-header value, whitespace-collapsed and bounded (TB-06).
+
+        Header fields are display attributes (from_account/source), never
+        identity or authority; collapsing whitespace keeps a hostile value
+        from smuggling structure into the header line.
+        """
+
+        return " ".join(str(value or "").split())[:200]
+
     def _peer_custom_message(
-        self, text: str, sender: dict[str, Any], *, entry_id: str = ""
+        self,
+        text: str,
+        sender: dict[str, Any],
+        *,
+        entry_id: str = "",
+        custom_type: str | None = None,
+        bridge_meta: dict[str, Any] | None = None,
     ) -> CustomMessage:
         """Build the transcript entry for one inbound cross-session message.
 
@@ -9031,24 +9131,136 @@ class Session:
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
         model_label = sender.get("model_label", "")
-        wrapped = (
-            f"<peer-session-message "
-            f"from_pid={pid!r} "
-            f"conversation={conversation!r} "
-            f"model={model_label!r}>\n"
-            f"{text}\n"
-            "</peer-session-message>"
-        )
+        # TRIPWIRE (H4e-render): every hop re-validates, and this is the LAST
+        # one before a row exists — an unknown kind here would be a caller bug
+        # or a bypassed boundary, and stamping it would put an unverifiable
+        # provenance kind on a durable card. Refuse, never coerce.
+        chosen = custom_type or PEER_MESSAGE_MESSAGE_TYPE
+        if chosen not in PEER_DELIVERABLE_CUSTOM_TYPES:
+            raise ValueError(
+                f"unknown peer custom_type {chosen!r}; refusing to stamp an "
+                "unverifiable provenance kind"
+            )
+        if chosen == TEAM_BRIDGE_MESSAGE_TYPE:
+            # A dedicated provenance envelope for bridge wakes (§13.4): the
+            # peer wrap's ``from_pid``/``conversation`` are misleading for an
+            # org member (there is no local pid), and the model should read the
+            # org identity + the source marker instead. ``body`` below stays
+            # the raw text every surface renders.
+            # TB-11 (PR #2378): the DISPLAYED identity comes from the LOCAL
+            # producer-stamped envelope — never from the message-supplied
+            # sender dict, which any local caller can invent. No live runtime,
+            # or no matching local record, means the identity is OMITTED: an
+            # unqualified name is shown as absent rather than trusted.
+            account_display = ""
+            _self_runtime = getattr(self, "bridge_runtime", None)
+            if _self_runtime is not None and isinstance(bridge_meta, Mapping):
+                try:
+                    from local_operator.team_bridge.store import Store as _TBStore
+
+                    _tb_store = _TBStore(_self_runtime.config_dir)
+                    _tb_owner = _tb_store.active_owner()
+                    if _tb_owner is not None:
+                        _tb_dref = str(bridge_meta.get("delivery_ref") or "")
+                        _tb_mid = str(bridge_meta.get("message_id") or "")
+                        _envelope = _tb_store.screened_request_delivery(
+                            _tb_owner,
+                            delivery_ref=_tb_dref,
+                            message_id=_tb_mid,
+                        )
+                        if _envelope is not None:
+                            # TB-11 (PR #2378, S-R3-4): the display identity is
+                            # the REMOTE SENDER's account, and the read above
+                            # bound BOTH locators (ref AND message id) so a
+                            # borrowed/echoed reference cannot show another
+                            # delivery's identity. The local owner's own
+                            # ``account_id`` column is never shown as the
+                            # sender — absent beats wrong.
+                            account_display = str(_envelope.get("sender_account_id") or "")
+                            if not account_display:
+                                import json as _json
+
+                                _raw_scope = str(_envelope.get("scope_json") or "")
+                                if _raw_scope:
+                                    try:
+                                        account_display = str(
+                                            _json.loads(_raw_scope).get("sender_account_id") or ""
+                                        )
+                                    except ValueError:
+                                        account_display = ""
+                except Exception:  # noqa: BLE001 — a display lookup must
+                    # not abort the receive; absent beats guessed.
+                    account_display = ""
+            from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+            wrapped = (
+                f"<team-bridge-message "
+                f"from_account={Session._bridge_header_field(account_display)!r} "
+                f"source={Session._bridge_header_field(sender.get('source'))!r}>\n"
+                # §11.1: the house untrusted-content clause rides INSIDE the
+                # wrap, ahead of the body, so the model reads the content as
+                # data — never as instructions from a colleague's agent.
+                f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
+                f"{Session._neutralize_bridge_tag(text)}\n"
+                "</team-bridge-message>"
+            )
+        else:
+            wrapped = (
+                f"<peer-session-message "
+                f"from_pid={pid!r} "
+                f"conversation={conversation!r} "
+                f"model={model_label!r}>\n"
+                f"{text}\n"
+                "</peer-session-message>"
+            )
         peer_fields: dict[str, Any] = {}
         if entry_id:
             # The SENDER's identity, when it validated -- see the docstring.
             # Spread rather than always passed so a pre-field sender's row is
             # byte-identical to what this function built before the carriage.
             peer_fields["id"] = entry_id
+        details: dict[str, Any] = {"text": wrapped, "body": text, "sender": sender}
+        if bridge_meta is not None:
+            # The internal bridge LOCATOR (H5a/F3) rides the row so the
+            # issuance hook beside the durable append can find THIS machine's
+            # screening receipt, and so a crash between delivery and the hook
+            # is reconcilable. It is a HINT by contract: the receipt + live
+            # fence are the authority (see ``_maybe_raise_bridge_ask``), never
+            # anything carried here. TB-09: the SESSION entry validates the
+            # locator too — nothing unvalidated is ever stamped for the hook
+            # to trust; a malformed one is dropped (the row still delivers as
+            # a plain peer message).
+            from local_operator.harness.message_types import validate_bridge_meta
+
+            try:
+                validated = validate_bridge_meta(bridge_meta)
+            except ValueError:
+                logger.warning("bridge_meta: invalid locator dropped at receive", exc_info=True)
+                validated = None
+            if validated is not None:
+                _stamp_runtime = getattr(self, "bridge_runtime", None)
+                # S-R3-5: the locator is stamped on the LIVE fence, never on
+                # construction-time runtime presence — a runtime that is bound
+                # but no longer authorized must not put a bridge locator on a
+                # delivered row (nothing downstream could then tell that the
+                # authority had lapsed).
+                if _stamp_runtime is not None:
+                    from local_operator.team_bridge.authority import authority_fence
+
+                    if authority_fence(_stamp_runtime) is None:
+                        details["bridge"] = validated
+                else:
+                    # TB-11: with no live bridge binding in THIS session the
+                    # locator is not stamped at all — the receive path consults
+                    # the live feature state instead of accepting the type on
+                    # the sender's say-so.
+                    logger.warning(
+                        "bridge_meta dropped: agent-messages is not active in this session"
+                    )
         return CustomMessage(
-            custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+            custom_type=chosen,
             attribution="user",
-            details={"text": wrapped, "body": text, "sender": sender},
+            details=details,
             **peer_fields,
         )
 
@@ -9159,6 +9371,16 @@ class Session:
                         # an older build wrote, which read as ``""`` and deliver
                         # exactly as before.
                         message_id=getattr(line, "message_id", "") or None,
+                        # The row's OWN provenance kind and bridge locator, as the
+                        # live/wake delivery carries them. Dropping them here
+                        # delivered a spooled team-bridge request as a plain peer
+                        # message: the bridge receive hook keys on
+                        # ``TEAM_BRIDGE_MESSAGE_TYPE`` (see ``_maybe_raise_bridge_ask``),
+                        # so the human ask was never raised. Empty/absent (rows an
+                        # older build wrote) read as ``None`` and deliver exactly
+                        # as before.
+                        custom_type=getattr(line, "custom_type", "") or None,
+                        bridge_meta=getattr(line, "bridge_meta", None) or None,
                     )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
@@ -9217,6 +9439,8 @@ class Session:
         wake: bool = False,
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
+        custom_type: str | None = None,
+        bridge_meta: dict[str, Any] | None = None,
     ) -> PeerReceiveDetail:
         """Deliver a message from ANOTHER local lop session into this one.
 
@@ -9283,7 +9507,13 @@ class Session:
             self._peer_inflight_ids.add(incoming)
         try:
             return await self._deliver_peer_message(
-                text, incoming=incoming, mode=mode, wake=wake, sender=sender
+                text,
+                incoming=incoming,
+                mode=mode,
+                wake=wake,
+                sender=sender,
+                custom_type=custom_type,
+                bridge_meta=bridge_meta,
             )
         finally:
             if incoming is not None:
@@ -9297,6 +9527,8 @@ class Session:
         mode: str,
         wake: bool,
         sender: dict[str, Any] | None,
+        custom_type: str | None = None,
+        bridge_meta: dict[str, Any] | None = None,
     ) -> PeerReceiveDetail:
         # Resolve the sender against the LOCAL registry before anything renders
         # or persists. The identity arrives over the wire as the sender's own
@@ -9322,7 +9554,9 @@ class Session:
         from local_operator.mobile.peer_send import resolve_sender_identity
 
         sender = resolve_sender_identity(sender)
-        message = self._peer_custom_message(text, sender, entry_id=incoming or "")
+        message = self._peer_custom_message(
+            text, sender, entry_id=incoming or "", custom_type=custom_type, bridge_meta=bridge_meta
+        )
 
         def receipt(detail: str, *, queued: bool = False) -> PeerReceiveDetail:
             """This branch's ack: the receipt sentence plus what the receiver owns.
@@ -9407,6 +9641,18 @@ class Session:
         # before the next turn reads context. On the idle path it appends
         # straight through, matching the prior behaviour.
         await self._transcript.append_message(message)
+        # MAJOR R1 (PR #2378): THIS arm persists a bridge row WITHOUT going
+        # through _append_injected_message, so the live hook never ran for it
+        # — and the repair scanner's newest-20 window could lose the oldest
+        # asks of a burst arriving while the CoS is mid-turn. Raise the ask
+        # from here too; the hook is idempotent by issuance identity, so a
+        # re-delivery that ALSO reaches the live arm cannot double-ask.
+        if isinstance(message, CustomMessage) and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
+            try:
+                self._maybe_raise_bridge_ask(message)
+            except Exception:  # noqa: BLE001 — TB-07: the row is already
+                # durable; a degraded store must not abort the receive.
+                logger.warning("bridge ask: hook failed on the record-only append", exc_info=True)
         self._append_or_park_journal(message)
         await self._emit_peer_receipt(message, sender)
         # LAST, deliberately: this wakes a blocking `wait`, and the woken tool
@@ -9435,6 +9681,18 @@ class Session:
                 body=str(message.details.get("body", "")),
                 sender=sender,
                 message_id=message.id,
+                # The row's OWN provenance kind, so the live surface paints the
+                # same card the history replay will (§13.4); empty stays peer.
+                custom_type=message.custom_type,
+                # ...and the row's OWN details, for the same reason and the
+                # reason D1 gives: a bridge card is a view of the VALIDATED
+                # provenance the row carries (``details["bridge"]``), so a live
+                # receipt without it left the live paint with a field the TUI
+                # message did not have — an exception inside the handler and no
+                # card at all, live, for a human card the replay painted fine.
+                # The replay fold reads the same dict, so the two surfaces
+                # cannot drift.
+                details=dict(message.details),
             )
         )
 
@@ -9535,10 +9793,32 @@ class Session:
             or message.custom_type not in (ASK_RESPONSE_MESSAGE_TYPE, ASK_TIMEOUT_MESSAGE_TYPE)
             or not row_id
         ):
+            # H5a (F3): a NEWLY written bridge row is the ONLY place a request
+            # ask may be raised from — one ask per delivered message, with
+            # re-delivery/reconcile resolving through the durable issuance
+            # record instead of minting a second ask. A bridge row is NOT an
+            # ask row, so it always takes THIS arm (the bracketed arm below is
+            # ask-rows-only): a hook placed after that arm was unreachable and
+            # no request ever got its ask or even an issuance record. "New" is
+            # judged BEFORE the write so a re-append of an already-durable row
+            # (reconcile) never re-raises.
+            is_new_bridge_row = (
+                isinstance(message, CustomMessage)
+                and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+                and bool(row_id)
+                and not self._transcript.has_entry(row_id)
+            )
             await self._transcript.append_message(message, producer_command_id=producer_command_id)
+            if is_new_bridge_row:
+                try:
+                    self._maybe_raise_bridge_ask(message)
+                except Exception:  # noqa: BLE001 — TB-07: the row is already
+                    # durable; a degraded store must not abort the whole turn.
+                    logger.warning("bridge ask: hook failed on the live append", exc_info=True)
             return message
         queue.begin_row_commit(row_id)
         durable = False
+        wrote = False
         try:
             if message.custom_type == ASK_RESPONSE_MESSAGE_TYPE:
                 message = queue.refresh_delivery_message(message)
@@ -9546,10 +9826,981 @@ class Session:
                 await self._transcript.append_message(
                     message, producer_command_id=producer_command_id
                 )
+                # S-5: only THIS write is a NEW consumption. A re-append (the
+                # reconcile path re-resolving an already durable row) must
+                # never re-schedule a decide POST.
+                wrote = True
             durable = True
         finally:
             queue.finish_row_commit(row_id, durable=durable)
+        if wrote and durable and getattr(message, "custom_type", "") == ASK_RESPONSE_MESSAGE_TYPE:
+            # H5b: the response row is now DURABLE, and the revision window is
+            # closed at consumption (the row above was re-resolved from the
+            # fold immediately before the write) — THAT is the moment a
+            # trusted human Approve/Deny answer may drive the decide receipt
+            # (contract §10.3, #125). Dispatched from harness code, never a
+            # model action, and a no-op for every non-bridge ask.
+            self._dispatch_bridge_decisions(message)
         return message
+
+    def _dispatch_bridge_decisions(self, message: AgentMessage) -> None:
+        """H5b: drive ``/decide`` from a durable human answer to a bridge ask.
+
+        The contract's load-bearing sentence (§10.3, #125): only an explicit
+        trusted human Approve/Deny answer may call the decide endpoint, and
+        "answered by the human" is CLIENT-ASSERTED — the whole weight rests on
+        this method being reachable ONLY from the answer path's durable append
+        and emitting a call ONLY for the two answer words. Decline, free text,
+        timeout and dismiss are no-call outcomes by contract: they fall through
+        the word check below with nothing sent.
+
+        WHY HERE AND NOT AT ``respond_ask``: the revision window is bounded by
+        CONSUMPTION (design §10) — between the tap and the append a revision
+        may supersede the answer. Dispatching at the tap would post a decision
+        the human then revised; this append IS the fold's final word, so the
+        receipt can only ever describe what the record actually holds.
+
+        FAIL-CLOSED AT EVERY DOOR: no runtime (feature off, or this session is
+        not the designated CoS), no details, no bridge question, a secret
+        question, a non-decision word, a disposed session (``_spawn_background``
+        returns None) — each returns without a call. A failed dispatch is
+        contained and logged: the human's answer stands locally. Dispatch goes
+        through the durable decide-intent ledger (``team_bridge.decide_intents``),
+        whose row is written SYNCHRONOUSLY here — same stack as the durable
+        append above, before any await: a transient failure parks the FROZEN
+        answer and the ONLY replay is an explicit human Retry (§2.5
+        ``card.not-sent``) — never an automatic POST at any boundary; §6.2's
+        identical-replay rule (m8) makes such a replay safe even when a first
+        attempt actually recorded (the server returns the ORIGINAL result, and
+        the ledger never downgrades it). The frozen row carries the ask's
+        ORIGINAL scope block (S-3), validated against the live binding BEFORE
+        the insert — never minted from the current runtime — and only a NEWLY
+        created row is dispatched (S-5: duplicates/reconciles never POST;
+        sent/refused never POST; an existing pending/signin row waits for the
+        explicit human Retry door).
+        """
+        runtime = self.bridge_runtime
+        if runtime is None:
+            return
+        # S-1: the FULL local fence runs BEFORE any local mutation (the intent
+        # insert) — a disabled/revoked/drifted runtime records nothing here.
+        # The durable human answer stays in the ask log; recovery (an explicit
+        # human Retry) is the only door back, and it re-validates there.
+        from local_operator.asks.store import response_row_id as _response_row_id
+        from local_operator.team_bridge.authority import (
+            authority_fence,
+            scope_matches_runtime,
+        )
+
+        if authority_fence(runtime) is not None:
+            return
+        details = getattr(message, "details", None)
+        if not isinstance(details, Mapping):
+            return
+        ask_id = str(details.get("ask_id") or "")
+        answers = details.get("answers")
+        if not ask_id or not isinstance(answers, Mapping):
+            return
+        import json as _json
+
+        from local_operator.team_bridge.decide import NotAHumanDecision, human_decision
+
+        frozen: list[tuple[Any, Mapping[str, Any]]] = []
+        for question in details.get("questions") or ():
+            if not isinstance(question, Mapping):
+                continue
+            if not question.get("human_required") or not question.get("question_id"):
+                continue
+            if question.get("secret"):
+                # A bridge ask is never secret (the credential hop does not
+                # apply to it); skip defensively rather than route anything
+                # through a path built for credentials.
+                continue
+            # S-3: the ORIGINAL scope block persisted with the ask at issuance
+            # IS the provenance gate — ``human_required`` alone is not bridge
+            # authority, and a question without the block must never mint a
+            # decision from the CURRENT runtime (recovery could not tell whose
+            # answer it was, and a rebind would go unnoticed).
+            scope = question.get("bridge")
+            if not isinstance(scope, Mapping):
+                continue
+            picks = [str(value) for value in (answers.get(str(question.get("id") or "")) or ())]
+            word = picks[0].lower() if len(picks) == 1 else ""
+            try:
+                decision = human_decision(
+                    message_id=str(question.get("question_id") or ""),
+                    ask_id=ask_id,
+                    word=word,
+                )
+            except NotAHumanDecision:
+                continue
+            # TB-02 P1 (PR #2378): the fold is a RECORD, not a proof. A
+            # decision proceeds only on the one-shot grant the authority seam
+            # minted when it ADMITTED the human's `bridge_decide` frame — a
+            # forged fold line carries none, so it can neither POST here nor
+            # consume the ask's real decision (the grant is spent exactly once,
+            # for exactly this word).
+            from local_operator.harness.approval import consume_bridge_decide_grant
+
+            if not consume_bridge_decide_grant(
+                session_id=str(getattr(runtime, "session_id", "") or ""),
+                ask_id=ask_id,
+                question_id=decision.message_id,
+                word=decision.word,
+            ):
+                logger.warning(
+                    "bridge decide: ask %s carries no verified decision grant — not sent",
+                    ask_id,
+                )
+                continue
+            frozen.append((decision, scope))
+        if not frozen:
+            return
+
+        from local_operator.team_bridge.decide_intents import (
+            DecideIntents,
+            attempt_decide_intent,
+        )
+
+        # HOISTED, SYNCHRONOUSLY: the intent row is written here in the same
+        # stack as the durable append above and BEFORE any await — a task
+        # switch cannot land between them. A hard kill still can (two stores,
+        # no cross-store transaction exists anywhere), which is why the
+        # recovery door exists: the card derives "Not sent — try again" from
+        # the absent row, and an explicit trusted human Retry may re-record
+        # only what it re-derives from the DURABLE consumed answer. Never an
+        # automatic POST at any boundary.
+        intents = DecideIntents(runtime.config_dir)
+        consumption_row_id = _response_row_id(ask_id)
+        created: list[Any] = []
+        for decision, scope in frozen:
+            if not scope_matches_runtime(scope, runtime):
+                # The record names a DIFFERENT binding than the live one:
+                # inserting under the current key/generation would be a silent
+                # rebind — refuse; only an explicit human re-approval proceeds.
+                logger.warning(
+                    "bridge decide intent skipped for ask %s: original scope "
+                    "mismatch (non-authorizing)",
+                    ask_id,
+                )
+                continue
+            try:
+                intent, was_created = intents.record(
+                    runtime.key(),
+                    ask_id=decision.ask_id,
+                    question_id=decision.message_id,
+                    word=decision.word,
+                    # The ORIGINAL generation/scope — NEVER the current
+                    # runtime's (S-3): the frozen record must describe the
+                    # enrollment the human actually answered under.
+                    generation=str(scope.get("generation") or ""),
+                    scope_json=_json.dumps(dict(scope), sort_keys=True),
+                    consumption_row_id=consumption_row_id,
+                )
+            except Exception:  # noqa: BLE001 — contained: the card derives
+                # not-sent from the ABSENT row; never raise into the append path.
+                logger.warning(
+                    "bridge decide intent record failed for ask %s", ask_id, exc_info=True
+                )
+                continue
+            if was_created:
+                # S-5: ONLY the newly created intent for THIS consumption may
+                # be dispatched automatically. An existing pending/signin row
+                # waits for an explicit human Retry; sent/refused never POST;
+                # a duplicate/reconcile consumption schedules nothing.
+                created.append(intent)
+        if not created:
+            return
+
+        async def _deliver() -> None:
+            for intent in created:
+                try:
+                    await attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
+                except Exception:  # noqa: BLE001 — contained: logged, never
+                    # raised into the append path; a recorded intent keeps its
+                    # state and only an explicit human Retry replays it.
+                    logger.warning(
+                        "bridge decide dispatch failed for ask %s", ask_id, exc_info=True
+                    )
+
+        self._spawn_background(_deliver())
+
+    def _maybe_raise_bridge_ask(self, message: AgentMessage) -> None:
+        """H5 F3: raise the human ask for ONE producer-stamped screened request.
+
+        Only a session HOLDING a bridge runtime — the designated CoS — can reach
+        here, and every arm is fail-closed:
+        - the row must carry a bridge LOCATOR (``details["bridge"]``) with at
+          least a ``delivery_ref``/``message_id``;
+        - the locator is ONLY a selector: the authority is the producer-stamped
+          ENVELOPE (``Store.screened_request_delivery``), written by the
+          trusted connector BEFORE handoff from its authenticated owner
+          snapshot + claim + validated request;
+        - the stored kind/state/thread/expiry decide whether an ask exists at
+          all — the carried ``meta.type``/sender/UI fields never authorize a
+          note→request promotion, and are used as render hints ONLY after the
+          transported ``display_digest`` matches the envelope's stored digest;
+        - the ORIGINAL scope must equal THIS designated session's live binding
+          (full fence + exact scope); legacy/missing/drifted/expired/
+          ambiguous evidence leaves a VISIBLE record and raises NO ask — never
+          a current-scope backfill.
+        """
+
+        runtime = self.bridge_runtime
+        if runtime is None:
+            return
+        details = getattr(message, "details", None)
+        meta = details.get("bridge") if isinstance(details, Mapping) else None
+        if not isinstance(meta, Mapping):
+            return
+        message_id = str(meta.get("message_id") or "")
+        delivery_ref = str(meta.get("delivery_ref") or "")
+        if not message_id and not delivery_ref:
+            return
+        from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.store import Store
+
+        if authority_fence(runtime) is not None:
+            return
+        store = Store(runtime.config_dir)
+        owner = store.active_owner()
+        if owner is None:
+            return
+        self._authorize_bridge_envelope(
+            runtime,
+            store,
+            owner,
+            meta,
+            message_id,
+            delivery_ref,
+            local_row_id=str(getattr(message, "id", "") or ""),
+        )
+
+    def _authorize_bridge_envelope(
+        self,
+        runtime: Any,
+        store: Any,
+        owner: Any,
+        meta: Mapping[str, Any],
+        message_id: str,
+        delivery_ref: str,
+        local_row_id: str,
+    ) -> None:
+        """The ONE validator shared by the live hook and the reconcile repair.
+
+        Loads the envelope by its opaque reference (exact by-id read, never a
+        scan), validates the STORED request semantics and the exact ORIGINAL
+        scope against the shared offline fence, bounds the display hints by
+        digest, and only then writes/advances the durable issuance. Every
+        refusal arm leaves a typed, visible ledger row instead of an ask.
+        """
+
+        import time as _time
+
+        from local_operator.team_bridge import ask_issuance as ledger_mod
+        from local_operator.team_bridge.authority import scope_matches_runtime
+
+        ledger = ledger_mod.AskIssuance(runtime.config_dir)
+        if not str(delivery_ref or ""):
+            # A frame with NO reference cannot be bound to an ORIGINAL envelope:
+            # the opaque reference IS the locator, so a legacy/omitting producer's
+            # frame is visible-and-NON-AUTHORIZING rather than read by message id
+            # alone — an id is not a secret, and a bare-id match would let any
+            # frame bind whichever row happens to share its id.
+            ledger.claim(
+                owner,
+                str(message_id or ""),
+                {},
+                delivery_ref="",
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, str(message_id or ""), "no_original_envelope")
+            return
+        envelope = store.screened_request_delivery(
+            owner, delivery_ref=delivery_ref, message_id=message_id
+        )
+        bound = str((envelope or {}).get("message_id") or message_id or delivery_ref)
+        if envelope is None:
+            # Legacy/missing producer stamp: visible and NON-AUTHORIZING — the
+            # receiver never backfills scope from its own current fields.
+            ledger.claim(owner, bound, {}, delivery_ref=delivery_ref, local_row_id=local_row_id)
+            ledger.mark_unrecoverable(owner, bound, "no_original_envelope")
+            return
+        if message_id and str(envelope["message_id"]) != message_id:
+            ledger.claim(owner, bound, {}, delivery_ref=delivery_ref, local_row_id=local_row_id)
+            ledger.mark_unrecoverable(owner, bound, "locator_message_mismatch")
+            return
+        phase = str(envelope.get("phase") or "")
+        if phase not in ("handoff_started", "delivered"):
+            # S-12: an envelope that never reached a CONFIRMED handoff (or was
+            # fenced) is not an authorized source for a human ask — a replayed
+            # opaque reference cannot promote it.
+            ledger.claim(
+                owner,
+                bound,
+                {},
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, bound, "handoff_not_authorized")
+            return
+        if str(envelope["message_kind"]) != "request":
+            # A forged locator cannot promote a screened note: the STORED kind
+            # decides, and a non-request envelope means no ask exists here.
+            ledger.claim(
+                owner,
+                bound,
+                {},
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, bound, "stored_kind_not_request")
+            return
+        if str(envelope["request_state"]) != "pending":
+            ledger.claim(
+                owner,
+                bound,
+                {},
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, bound, "request_not_pending")
+            return
+        expires_raw = str(envelope["request_expires_at"] or "")
+        if expires_raw:
+            try:
+                from datetime import datetime, timezone
+
+                deadline = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                if deadline.timestamp() <= _time.time():
+                    ledger.claim(
+                        owner,
+                        bound,
+                        {},
+                        delivery_ref=str(envelope["delivery_ref"]),
+                        local_row_id=local_row_id,
+                    )
+                    ledger.mark_unrecoverable(owner, bound, "request_expired")
+                    return
+            except ValueError:
+                # S-8: an UNPARSEABLE expiry is absence of evidence in the
+                # wrong direction — it must not authorize a request ask.
+                ledger.claim(
+                    owner,
+                    bound,
+                    {},
+                    delivery_ref=str(envelope["delivery_ref"]),
+                    local_row_id=local_row_id,
+                )
+                ledger.mark_unrecoverable(owner, bound, "request_expiry_invalid")
+                return
+        scope = {
+            "v": 1,
+            "kind": "bridge",
+            "base_url": str(envelope["base_url"]),
+            "account_id": str(envelope["account_id"]),
+            "tenant_id": str(envelope["tenant_id"]),
+            "endpoint_id": str(envelope["endpoint_id"]),
+            "credential_id": int(envelope["credential_id"]),
+            "generation": str(envelope["native_generation"]),
+            "session_id": str(envelope["designated_session_id"]),
+            # The keyed-idempotence identity rides the SAME stored block the
+            # queue persists, so the fingerprint is recomputable from the ask
+            # log alone (S-10): message id + opaque ref + screened body hash.
+            "message_id": bound,
+            "delivery_ref": str(envelope["delivery_ref"]),
+            "body_sha256": str(envelope["body_sha256"]),
+        }
+        if not scope_matches_runtime(scope, runtime):
+            ledger.claim(
+                owner,
+                bound,
+                scope,
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, bound, "original_scope_drift")
+            return
+        # CURRENT-AUTHORITY revalidation of the STORED binding (S-8): consent
+        # identity, designation, live generation, full policy/proof currency
+        # and the reference-claim identity are re-read NOW — a released
+        # original lease is a valid historical handoff, a SUCCESSOR claim is
+        # not our handoff (refused), and drift anywhere means no ask.
+        current_code, _detail = store.verify_original_envelope_current(owner, envelope)
+        if current_code:
+            ledger.claim(
+                owner,
+                bound,
+                scope,
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, bound, current_code)
+            return
+        received = {
+            "sender_name": meta.get("sender_name"),
+            "organization": meta.get("organization"),
+            "sender_label": meta.get("sender_label"),
+            "thread_id": meta.get("thread_id"),
+            "excerpt": meta.get("excerpt"),
+        }
+        from local_operator.harness.message_types import (
+            display_context_digest as canonical_display_digest,
+        )
+
+        if all(isinstance(value, str) for value in received.values()):
+            computed = canonical_display_digest(received)
+        else:
+            computed = None
+        stored_digest = str(envelope.get("display_digest") or "")
+        if computed is None or computed != stored_digest:
+            # S-9: the transported digest STRING is a selector; what authorizes
+            # the hints is RECOMPUTING the canonical digest over the ACTUAL
+            # received fields and matching the stored one. A copied
+            # ref+digest with substituted sender/thread/excerpt lands HERE.
+            ledger.claim(
+                owner,
+                bound,
+                scope,
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, bound, "display_context_mismatch")
+            return
+        use_hints = True
+        # ATOMIC MAPPING: the ACTUAL trusted local row id rides the claim's
+        # INITIAL INSERT inside one transaction (never a pre-read/post-write
+        # pair, so there is no committed-unmapped window and no TOCTOU). The
+        # id is only ever the harness's own stamped entry id passed in by the
+        # receive path or repair scanner — never a server locator or caller
+        # field.
+        # M1 (§13.9.10/§12.1.3): the issuance ledger carries REFERENCES only —
+        # never third-party body text. The human-readable excerpt is derived
+        # from the sanctioned session store at render time (via local_row_id).
+        # D3 (design round 2, PR #2378): the ask's sender line is the member's
+        # DISPLAY identity — the validated name with the organization the
+        # transcript card's identity column also paints
+        # (``Priya Raman (Acme Research)``) — so the human's ONE surviving
+        # question row says whose human is asking. The raw account id is NEVER
+        # that line (it identifies nobody the deciding member can recognise): a
+        # carriage with no validated name sends "" and the ask builder degrades
+        # to its generic sentence. ``summary`` stays below because the ledger
+        # keeps the locator as provenance, but it is no longer composed into the
+        # question text.
+        sender_name = str(meta.get("sender_name") or "") if use_hints else ""
+        organization = str(meta.get("organization") or "") if use_hints else ""
+        record = ledger.claim(
+            owner,
+            bound,
+            scope,
+            sender=(
+                f"{sender_name} ({organization})" if sender_name and organization else sender_name
+            ),
+            summary=str(meta.get("thread_id") or "") if use_hints else str(envelope["thread_id"]),
+            delivery_ref=str(envelope["delivery_ref"]),
+            local_row_id=local_row_id,
+        )
+        self._drive_bridge_issuance(
+            runtime,
+            owner,
+            bound,
+            record,
+        )
+
+    def _drive_bridge_issuance(
+        self,
+        runtime: Any,
+        owner: Any,
+        message_id: str,
+        record: Mapping[str, Any],
+    ) -> None:
+        """Enqueue-or-settle ONE durable issuance row (raise path and retry).
+
+        A row already ``raised`` is done (ask-once across restarts). Otherwise
+        the ask log is consulted for an existing question with this message id
+        — the crash window between ``claim`` and the enqueue resolves to the
+        SAME ask instead of a duplicate — and only then is the ask enqueued
+        with the ORIGINAL scope frozen at issuance (never the current runtime;
+        the queue's unchanged receipt shape is returned either way).
+        """
+
+        import json as _json
+
+        from local_operator.team_bridge.ask_issuance import (
+            STATE_RAISED,
+            STATE_UNRECOVERABLE,
+            AskIssuance,
+        )
+
+        issuance = AskIssuance(runtime.config_dir)
+        if str(record.get("state") or "") in (STATE_RAISED, STATE_UNRECOVERABLE):
+            return
+        try:
+            scope = _json.loads(str(record.get("scope_json") or "{}"))
+        except _json.JSONDecodeError:
+            scope = {}
+        verdict, found_ask_id, detail = self._bridge_ask_lookup(message_id, scope)
+        if verdict == "found":
+            # The crash window between claim and mark_raised resolves to the
+            # SAME ask — exact identity checked — never a duplicate.
+            issuance.mark_raised(owner, message_id, found_ask_id)
+            return
+        if verdict in ("unavailable", "ambiguous"):
+            # S-10: an unreadable log (or a scope-mismatched hit) is a HOLD,
+            # NEVER permission to enqueue; the trusted boundary re-checks.
+            issuance.mark_held(owner, message_id, detail or verdict)
+            return
+        queue = self.ask_queue()
+        if queue is None:
+            issuance.mark_pending(owner, message_id, "no_queue")
+            return
+        from local_operator.team_bridge.asks_bridge import enqueue_bridge_request_ask
+
+        # R1-4 (PR #2378): the scope handed over and the scope the fingerprint
+        # is taken over must be THE SAME value — an empty block is handed as
+        # None, so its fingerprint is empty too (a digest-of-nothing would
+        # make the mint guard refuse with a misleading "scope mismatch").
+        handed_scope = scope if isinstance(scope, Mapping) and scope else None
+        try:
+            result = enqueue_bridge_request_ask(
+                queue,
+                message_id=message_id,
+                sender=str(record.get("sender") or ""),
+                # M1: derived at RENDER time from the sanctioned session store
+                # via the row's own mapping — the ledger keeps no body text.
+                excerpt=self._bridge_display_excerpt(record),
+                scope=handed_scope,
+                # S-10: the KEY is the preallocated issuance identity (minted
+                # internally, never model/UI-chosen); the fingerprint is the
+                # canonical stored original block — the queue returns the SAME
+                # ask id for a retry and refuses a mismatch.
+                issuance_key=str(record.get("issuance_id") or ""),
+                fingerprint=self._scope_fingerprint(handed_scope) if handed_scope else "",
+            )
+        except Exception:  # noqa: BLE001 — a failed enqueue is a durable PENDING
+            logger.warning("bridge ask: enqueue failed", exc_info=True)
+            issuance.mark_pending(owner, message_id, "enqueue_failed")
+            return
+        details = result.get("details") if isinstance(result, Mapping) else None
+        ask_id = str(details.get("ask_id") or "") if isinstance(details, Mapping) else ""
+        if bool(result.get("ok")) and ask_id:
+            issuance.mark_raised(owner, message_id, ask_id)
+        else:
+            # OPEN_ASK_CAP (or any refusal): the ask is NOT lost — the row is
+            # durably PENDING and VISIBLE, and the trusted local boundary
+            # retries it as an ASK only.
+            issuance.mark_pending(
+                owner,
+                message_id,
+                str(result.get("error") or "refused"),
+            )
+
+    def _bridge_ask_lookup(self, message_id: str, scope: Mapping[str, Any]) -> tuple[str, str, str]:
+        """TRI-STATE ask identity (S-10): found-exact / absent / unavailable.
+
+        A hit must match the question id AND the question's stored bridge
+        scope — a question carrying this message id under a DIFFERENT scope is
+        AMBIGUOUS (hold: never terminalized as ours, never duplicated). Any
+        read/fold failure is UNAVAILABLE, which is not "no ask exists".
+        """
+
+        try:
+            from local_operator.asks import store as asks_store
+
+            directory = asks_store.session_dir(self._config_dir, self.session_id)
+            events = asks_store.read_events(directory)
+            records = asks_store.fold(events, asks_store.now_ms(), session_id=self.session_id)
+        except Exception:  # noqa: BLE001 — unavailable is its own answer
+            return ("unavailable", "", "ask_log_unreadable")
+        hits: list[tuple[str, Mapping[str, Any]]] = []
+        for record in records:
+            for question in record.get("questions") or []:
+                if (
+                    isinstance(question, Mapping)
+                    and str(question.get("question_id") or "") == message_id
+                ):
+                    hits.append((str(record.get("ask_id") or ""), question))
+        if not hits:
+            return ("absent", "", "")
+        exact = []
+        wanted = self._scope_fingerprint(scope)
+        for ask_id, question in hits:
+            bridge = question.get("bridge")
+            if isinstance(bridge, Mapping) and self._scope_fingerprint(bridge) == wanted:
+                exact.append(ask_id)
+        if not exact:
+            return ("ambiguous", "", "question_scope_mismatch")
+        if len(exact) > 1:
+            # S-10: MULTIPLE authoritative asks are ambiguous — never a
+            # first-match terminalization.
+            return ("ambiguous", "", "multiple_exact_asks")
+        return ("found", exact[0], "")
+
+    @staticmethod
+    def _scope_fingerprint(scope: Mapping[str, Any]) -> str:
+        """Canonical digest of a bridge scope block (identity comparison only).
+
+        R1-5 (PR #2378): delegates to the ONE shared serializer the keyed
+        queue door and the issuance ledger also use.
+        """
+
+        from local_operator.team_bridge.ask_issuance import bridge_scope_digest
+
+        return bridge_scope_digest(scope)
+
+    async def _refresh_stale_pending_standing(self, owner: Any) -> dict[str, dict[str, Any]]:
+        """S-8: ONE explicit trusted-boundary standing read per stale pending.
+
+        Runs at the reconcile boundary (never a timer, never a passive poll):
+        for each durable pending/held issuance with a live original envelope,
+        ask the server ONCE — through the runtime's ORIGINAL pinned surfaces —
+        whether the request is STILL a pending request. Confirmed pending
+        becomes a POSITIVE per-message GRANT (returned here and held on the
+        instance for the sync retry, which is gated on it): only granted rows
+        may be driven; withdrawn/decided/expired/refused ⇒ held; no usable
+        pinned client (off/signin/uncertain) ⇒ held — an ask is never raised
+        from production-time standing alone, no scope is ever rebound from the
+        fresh read, and a failed read never falls through to the retry. The
+        read is bounded to one message per row and is not a grant for any
+        unrelated work.
+        """
+
+        self._standing_grants: dict[str, dict[str, Any]] = {}
+        runtime = self.bridge_runtime
+        if runtime is None:
+            return self._standing_grants
+        from local_operator.team_bridge import ask_issuance as ledger_mod
+        from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.store import Store
+
+        ledger = ledger_mod.AskIssuance(runtime.config_dir)
+        stale = [
+            record
+            for record in ledger.pending(owner)
+            if str(record.get("state") or "") in ("pending", "held")
+        ]
+        if not stale:
+            return self._standing_grants
+        store = Store(runtime.config_dir)
+        # The pinned ORIGINAL authority comes from the runtime's own CLIENT
+        # (``current_access``) — resolved LAZILY per row, after that row's
+        # local fence, because the call itself can make a REMOTE refresh: off
+        # or revoked must mean ZERO access calls and ZERO traffic.
+        client = getattr(runtime, "client", None)
+        access = None
+        for record in stale:
+            message_id = str(record.get("message_id") or "")
+            if not message_id:
+                continue
+            if authority_fence(runtime) is not None:
+                ledger.mark_held(owner, message_id, "standing_fence")
+                continue
+            envelope = store.screened_request_delivery(
+                owner,
+                delivery_ref=str(record.get("delivery_ref") or ""),
+                message_id=message_id,
+            )
+            if envelope is None:
+                ledger.mark_held(owner, message_id, "standing_no_envelope")
+                continue
+            if access is None:
+                # Lazy pinning AFTER this row's fence (see above): the access
+                # call is a possible remote refresh, so it may only happen
+                # while the local authority still checks out — and the fence
+                # runs AGAIN after the await before any read.
+                if authority_fence(runtime) is not None:
+                    ledger.mark_held(owner, message_id, "standing_fence")
+                    continue
+                if client is None or getattr(runtime, "owner", None) is None:
+                    ledger.mark_held(owner, message_id, "standing_unavailable")
+                    continue
+                try:
+                    access = await client.current_access()
+                except Exception:  # noqa: BLE001 — no pinned authority is a HOLD
+                    access = None
+                if access is None:
+                    ledger.mark_held(owner, message_id, "standing_unavailable")
+                    continue
+                if authority_fence(runtime) is not None:
+                    ledger.mark_held(owner, message_id, "standing_fence")
+                    continue
+            try:
+                from local_operator.team_bridge import pull as _pull
+
+                ref = await _pull.message(
+                    runtime.owner, message_id, config_dir=runtime.config_dir, access=access
+                )
+            except Exception:  # noqa: BLE001 — uncertain transport is a HOLD
+                ledger.mark_held(owner, message_id, "standing_uncertain")
+                continue
+            if authority_fence(runtime) is not None:
+                ledger.mark_held(owner, message_id, "standing_fence")
+                continue
+            if (
+                str(getattr(ref, "message_type", "") or "") != "request"
+                or str(getattr(ref, "request_state", "") or "") != "pending"
+                or str(getattr(ref, "tenant_id", "") or "") != str(envelope["tenant_id"])
+                or str(getattr(ref, "recipient_account_id", "") or "")
+                != str(envelope["recipient_account_id"])
+                or str(getattr(ref, "thread_id", "") or "") != str(envelope["thread_id"])
+                or (
+                    ref.body_hash is not None and str(ref.body_hash) != str(envelope["body_sha256"])
+                )
+            ):
+                # Failed/withdrawn/uncertain rows are held HERE and never reach
+                # the retry: the grant map below is the ONLY path to a POST.
+                ledger.mark_held(owner, message_id, "standing_not_pending")
+                continue
+            # POSITIVE GRANT: an ephemeral, ORIGINAL-SCOPE-BOUND success for
+            # THIS message only, carrying the validated FULL display context
+            # (all five bounded fields) so the retry's digest recompute never
+            # turns a legitimate cap-held request into an unrecoverable one
+            # for lack of fields the boundary already verified.
+            display = {}
+            nested = getattr(ref, "display", None)
+            for field in ("sender_name", "organization", "sender_label", "thread_id", "excerpt"):
+                value = getattr(ref, field, None)
+                if value is None and isinstance(nested, Mapping):
+                    value = nested.get(field)
+                display[field] = str(value or "")
+            # ``pull.message`` returns a MessageRef — ids/hashes only; its
+            # projection DROPS the sender display block, so the five-field
+            # context ALWAYS comes from the sanctioned durable row instead:
+            # resolved by the ORIGINAL entry id, re-validated against the
+            # ORIGINAL envelope (same message/ref/body, complete bounded
+            # fields, canonical digest equal). Missing/invalid context is a
+            # recoverable HOLD — never a grant, never an unrecoverable mark.
+            stored = self._bridge_display_from_session(owner, message_id, envelope)
+            if stored is None:
+                ledger.mark_held(owner, message_id, "standing_no_context")
+                continue
+            display = stored
+            self._standing_grants[message_id] = {
+                "message_id": message_id,
+                "delivery_ref": str(envelope["delivery_ref"]),
+                "display": display,
+            }
+        return self._standing_grants
+
+    def _bridge_display_from_session(
+        self, owner: Any, message_id: str, envelope: Mapping[str, Any]
+    ) -> dict[str, str] | None:
+        """The PREVIOUS validated FULL display projection for ONE bridge message.
+
+        Source of record: this session's sanctioned transcript store, resolved
+        by the ORIGINAL entry id (the sender-minted message id) — never by
+        NEWEST-only, so an OLDER cap-held request still behind a newer bridge
+        row recovers its OWN original display. The five bounded fields are
+        re-validated HERE against the ORIGINAL envelope: the row must be the
+        same message/delivery-ref/body digest, and the canonical digest over
+        the five fields must equal the stored ``display_digest``. Anything
+        unknown/ambiguous/legacy/malformed returns None and the caller HOLDS —
+        no grant, no irreversible mark, no current-scope backfill.
+        """
+
+        runtime = getattr(self, "bridge_runtime", None)
+        config_dir = getattr(runtime, "config_dir", None)
+        directory = getattr(getattr(self, "_transcript", None), "directory", None)
+        if directory is None or config_dir is None:
+            return None
+        # The server message id and the transcript row id are DIFFERENT
+        # domains: the durable row is keyed by the accepted ``peer-<32hex>``
+        # id the receiver stamped. Resolve the write-once binding written at
+        # the receiver hook — a missing/legacy mapping HOLDS, never a
+        # same-id guess.
+        from local_operator.team_bridge.ask_issuance import AskIssuance
+
+        local_id = AskIssuance(config_dir).local_row_id(owner, message_id)
+        if not local_id:
+            return None
+        from local_operator.session.transcript import read_entry_by_id
+
+        entry = read_entry_by_id(directory, local_id)
+        if entry is None:
+            return None
+        payload = getattr(entry, "payload", None)
+        if not isinstance(payload, Mapping):
+            return None
+        if str(payload.get("custom_type") or "") != TEAM_BRIDGE_MESSAGE_TYPE:
+            return None
+        details = payload.get("details")
+        if not isinstance(details, Mapping):
+            return None
+        bridge = details.get("bridge")
+        if not isinstance(bridge, Mapping):
+            return None
+        if str(bridge.get("message_id") or "") != message_id:
+            return None
+        if str(bridge.get("delivery_ref") or "") != str(envelope.get("delivery_ref") or ""):
+            return None
+        if str(bridge.get("body_sha256") or "") != str(envelope.get("body_sha256") or ""):
+            return None
+        raw = {
+            field: bridge.get(field)
+            for field in ("sender_name", "organization", "sender_label", "thread_id", "excerpt")
+        }
+        # Completeness is the CANONICAL serializer's own rule: five keys, each
+        # a true ``str`` within its bound — empty optional organization/label
+        # are legitimate. No stringification and no coalescing: either would
+        # erase a missing or mistyped field into a pass.
+        from local_operator.harness.message_types import (
+            display_context_digest as canonical_display_digest,
+        )
+
+        if not all(isinstance(value, str) for value in raw.values()):
+            return None
+        if canonical_display_digest(raw) != str(envelope.get("display_digest") or ""):
+            return None
+        # ``str`` here is a NO-OP narrowing for the type checker: the guard
+        # above already proved every value is a true ``str``, so nothing is
+        # coerced into a pass and the five keys stay the canonical set.
+        return {str(field): str(value) for field, value in raw.items()}
+
+    def _bridge_display_excerpt(self, record: Mapping[str, Any]) -> str:
+        """The bounded excerpt for a RENDER, from the sanctioned store only.
+
+        M1 (§13.9.10/§12.1.3): no ledger row carries third-party body text, so
+        the ask card's excerpt is derived here, at render time, from the
+        transcript row the local_row_id mapping already names. Absence
+        degrades to "" — the card still raises, just without the preview.
+        """
+
+        local_id = str(record.get("local_row_id") or "")
+        directory = getattr(getattr(self, "_transcript", None), "directory", None)
+        if not local_id or directory is None:
+            return ""
+        from local_operator.session.transcript import read_entry_by_id
+
+        entry = read_entry_by_id(directory, local_id)
+        if entry is None:
+            return ""
+        payload = getattr(entry, "payload", None)
+        details = payload.get("details") if isinstance(payload, Mapping) else None
+        bridge = details.get("bridge") if isinstance(details, Mapping) else None
+        if not isinstance(bridge, Mapping):
+            return ""
+        return str(bridge.get("excerpt") or "")[:1200]
+
+    def _retry_pending_bridge_issuances(self) -> None:
+        """Trusted local boundary: retry durably PENDING request asks (ASK only).
+
+        Runs from ``reconcile_asks`` (boot drain, turn start, deadline tick,
+        answer ops). NO decide is ever POSTed here, no turn/session boundary
+        auto-POSTs a decided request, and a row under a different generation is
+        not this generation's to rebind (it stays visible as unrecoverable,
+        never silently re-issued).
+        """
+
+        runtime = self.bridge_runtime
+        if runtime is None:
+            return
+        from local_operator.team_bridge.ask_issuance import AskIssuance
+        from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.store import Store
+
+        if authority_fence(runtime) is not None:
+            return
+        store = Store(runtime.config_dir)
+        owner = store.active_owner()
+        if owner is None:
+            return
+        # S-8b GRANT-SCOPED RETRY: only rows whose standing read returned a
+        # POSITIVE grant (this boundary, this message) are driven. A held row
+        # whose read failed is NOT re-selected — re-driving it would be the
+        # very bypass the grant closes — and an absent/empty grant map (refresh
+        # never ran, transport down, owner moved) drives NOTHING.
+        grants = getattr(self, "_standing_grants", {}) or {}
+        for record in AskIssuance(runtime.config_dir).pending(owner):
+            message_id = str(record.get("message_id") or "")
+            if not message_id:
+                continue
+            grant = grants.get(message_id)
+            if grant is None:
+                continue
+            # The display context the boundary VALIDATED rides the retry's
+            # meta: the envelope validator recomputes the canonical digest over
+            # these five fields, so a grant without them would make a
+            # legitimate cap-held request look mismatched.
+            meta = {
+                "message_id": message_id,
+                "delivery_ref": str(record.get("delivery_ref") or ""),
+            }
+            meta.update(grant.get("display") or {})
+            # The SAME validator as the live path: pending/held rows are
+            # RE-validated against the ORIGINAL envelope (scope, state,
+            # expiry, digest) before the tri-state lookup is re-run — a
+            # revoked/moved binding leaves the row visibly unrecoverable
+            # instead of being driven or rebound.
+            self._authorize_bridge_envelope(
+                runtime,
+                store,
+                owner,
+                meta,
+                message_id,
+                str(record.get("delivery_ref") or ""),
+                # The retry of an EXISTING prepared record passes ITS OWN
+                # persisted original local row id (never a caller scope
+                # field); a legacy row without one passes empty and the
+                # display path HOLDS — and the claim above only returns the
+                # existing row, never a new unmapped INSERT.
+                local_row_id=str(record.get("local_row_id") or ""),
+            )
+        # H5-F3-4: repair an append-before-claim kill (a durable bridge row
+        # with NO issuance record at all) under the SAME validator; the
+        # dedupe still prevents any second ask. ASK-only, bounded window.
+        self._repair_unclaimed_bridge_rows(runtime, store, owner)
+
+    def _repair_unclaimed_bridge_rows(self, runtime: Any, store: Any, owner: Any) -> None:
+        """H5-F3-4: an append-before-claim kill leaves a durable bridge row
+        with no issuance record, and nothing else would ever ask about it.
+
+        The scan is BOUNDED on purpose (newest 20 TEAM_BRIDGE rows, 24h): the
+        kill window is seconds wide, while an unbounded rescan of ancient rows
+        whose ask logs were since pruned could re-ask a settled message. The
+        SAME envelope validator runs for each hit; the durable claim plus the
+        tri-state lookup still prevent any second ask. ASK-only — never a
+        decision POST (the S5 wrote-guard is a separate door).
+        """
+
+        import time as _time
+
+        from local_operator.asks import store as asks_store
+        from local_operator.session import transcript as transcript_mod
+        from local_operator.team_bridge import ask_issuance as ledger_mod
+
+        directory = asks_store.session_dir(self._config_dir, self.session_id)
+        try:
+            rows = transcript_mod.read_custom_entries(
+                directory, TEAM_BRIDGE_MESSAGE_TYPE, max_rows=20
+            )
+        except Exception:  # noqa: BLE001 — repair is best-effort, never a crash
+            return
+        ledger = ledger_mod.AskIssuance(runtime.config_dir)
+        now = _time.time()
+        for entry in rows:
+            if now - float(getattr(entry, "ts", 0.0) or 0.0) > 86400:
+                continue
+            payload = dict(getattr(entry, "payload", None) or {})
+            details = payload.get("details")
+            meta = details.get("bridge") if isinstance(details, Mapping) else None
+            if not isinstance(meta, Mapping):
+                continue
+            message_id = str(meta.get("message_id") or "")
+            if not message_id or ledger.read(owner, message_id) is not None:
+                continue
+            self._authorize_bridge_envelope(
+                runtime,
+                store,
+                owner,
+                meta,
+                message_id,
+                str(meta.get("delivery_ref") or ""),
+                # The REPAIR scanner's ACTUAL entry id — the harness's own
+                # transcript row id, never the server locator.
+                local_row_id=str(getattr(entry, "id", "") or ""),
+            )
 
     async def reconcile_asks(self, now_ms: int | None = None, *, load_time: bool = False) -> None:
         """Level-triggered: deliver whatever the ask log says is owed.
@@ -9569,6 +10820,19 @@ class Session:
         if queue is None:
             return
         await queue.reconcile(now_ms, load_time=load_time)
+        # H5a: the same boundary also retries durably PENDING bridge request
+        # asks (ASK only — never a decide), so an open-ask-cap refusal is not a
+        # silent loss. S-8: the boundary FIRST refreshes server standing for
+        # stale pending rows (one bounded read per row, through the ORIGINAL
+        # pinned identity) — stale standing alone never raises an ask.
+        bridge_runtime = self.bridge_runtime
+        if bridge_runtime is not None:
+            from local_operator.team_bridge.store import Store as _BridgeStore
+
+            bridge_owner = _BridgeStore(bridge_runtime.config_dir).active_owner()
+            if bridge_owner is not None:
+                await self._refresh_stale_pending_standing(bridge_owner)
+        self._retry_pending_bridge_issuances()
 
     def arm_ask_wake(self, row: Any) -> None:
         """Add or replace one internal ``ask_timeout`` row and re-arm wakes.
@@ -9855,6 +11119,15 @@ class Session:
             return None
         if self.ask_queue() is None:  # pragma: no cover — the tool only calls this when set
             return None
+        if any(_question_marked_human_required(question) for question in questions):
+            # H5a (contract §10.3, #125): a human_required ask — a bridge
+            # request — is NEVER eligible for clearance: the fork is not
+            # called, nothing can suppress it, bypass its enqueue, auto-resolve
+            # it or authorize a decide. Returning None sends it down the
+            # UNCHANGED enqueue path, which is the requirement class's whole
+            # meaning. The check sits FIRST, before the secret/fingerprint
+            # logic, so no path can reorder around it.
+            return None
         if any(bool(getattr(question, "secret", False)) for question in questions):
             # §2.2 step 3, and note the ORDER: this refusal runs before the
             # fingerprint is even computed, so a secret ask is a zero-token,
@@ -9921,6 +11194,245 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
 
+    #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
+    #: request with — it names the door that works (the request's own verified
+    #: decision surface), rather than leaving the human with a dead card.
+    BRIDGE_DECISION_DOOR_REQUIRED = (
+        "this is an agent-messages request: approve or deny it from the request's "
+        "own card — the window that runs this session or a paired device — never "
+        "as a plain ask answer."
+    )
+
+    @staticmethod
+    def _is_bridge_ask_record(record: Mapping[str, Any] | None) -> bool:
+        """Whether a folded ask record is a bridge request (its carriage).
+
+        The SAME predicate ``asks_bridge.bridge_pending_count`` uses: a
+        non-empty ``question_id`` on at least one question, never copy
+        sniffing — so the doors cannot drift on what an agent-messages
+        request is.
+        """
+
+        if not isinstance(record, Mapping):
+            return False
+        return any(
+            str(question.get("question_id") or "")
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        )
+
+    def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
+        """TB-02 P1: the ONLY door a bridge request may be decided through.
+
+        Reached from the runtime's ``bridge_decide`` op after the authority
+        seam admitted it (spawn capability or a verified operator/device
+        signature) and minted the one-shot grant this decision rides; the
+        dispatcher consumes that grant at the point of effect and refuses a
+        decision carrying none. The in-memory grant — never the ask-log fold —
+        is the proof, so a forged fold line can neither decide nor stall a real
+        answer (§1.4: an UNPROVEN recorded answer is superseded through the
+        sanctioned revision window while its response row is still
+        undelivered).
+        """
+
+        runtime = self.bridge_runtime
+        _session_id = str(getattr(runtime, "session_id", "") or "")
+
+        def _refuse(copy: str) -> dict[str, Any]:
+            # S-R3-3: the grant was minted at ADMISSION, before this door could
+            # validate the ask/question/word — a refusal must not leave it live
+            # for a later stale spend.
+            from local_operator.harness.approval import withdraw_bridge_decide_grant
+
+            withdraw_bridge_decide_grant(
+                session_id=_session_id,
+                ask_id=str(ask_id),
+                question_id=str(question_id),
+            )
+            return {"ok": False, "error": copy}
+
+        def _refuse_with_code(code: str, copy: str) -> dict[str, Any]:
+            """``_refuse`` that also names WHY, typed, for the surface (S3-5).
+
+            The copy alone cannot be keyed off: a surface needs a stable code to
+            decide whether to offer "answer again" (an expiry) or to leave the
+            card alone (a genuine refusal).
+            """
+
+            answer = _refuse(copy)
+            answer["code"] = str(code)
+            return answer
+
+        if runtime is None:
+            return _refuse("agent messages are not active in this session.")
+        queue = self.ask_queue()
+        if queue is None:
+            return _refuse("this session's runtime predates queued asks")
+        record = queue.find(ask_id)
+        if record is None:
+            return _refuse(_ask_refusal_copy(None))
+        question = None
+        for candidate in record.get("questions") or ():
+            if isinstance(candidate, Mapping) and str(candidate.get("question_id") or "") == str(
+                question_id
+            ):
+                question = candidate
+                break
+        if question is None:
+            return _refuse("that request's question is not on this ask.")
+        from local_operator.harness.approval import (
+            bridge_decide_grant_drops_for,
+            bridge_decide_grant_seen,
+        )
+
+        if not bridge_decide_grant_seen(
+            session_id=_session_id,
+            ask_id=str(ask_id),
+            question_id=str(question_id),
+            word=str(word),
+        ) and bridge_decide_grant_drops_for(
+            session_id=_session_id, ask_id=str(ask_id), question_id=str(question_id)
+        ):
+            # S3-5: THIS target's admitted decision expired unspent (the TTL
+            # dropped it, and the drop ring names it). Typed and visible, with
+            # the one action that helps: answer again. The generic refusal below
+            # would read like a bug to someone who did tap the card.
+            return _refuse_with_code(
+                "decision_expired",
+                "that answer expired before it could be sent — please answer again",
+            )
+        from local_operator.team_bridge.decide import NotAHumanDecision, human_decision
+
+        try:
+            decision = human_decision(message_id=str(question_id), ask_id=ask_id, word=word)
+        except NotAHumanDecision as failure:
+            # D7 (round 14): the exception's text belongs to the LOG and the
+            # tests ("not a human decision word: 'x' (closed set: approve |
+            # deny)") — a closed set is the door's vocabulary and the human
+            # reading this toast has never seen it. The surface gets the rule in
+            # the user's language; the exception still carries the developer's.
+            logger.debug("bridge decide refused at the word: %s", failure)
+            return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        question_slot = str(question.get("id") or "")
+        existing = record.get("answers") or {}
+        picks = [str(value) for value in (existing.get(question_slot) or ())]
+        existing_word = picks[0].strip().lower() if len(picks) == 1 else ""
+        from local_operator.asks import store as _asks_store
+        from local_operator.harness.approval import (
+            bridge_decide_grant_committed,
+            bridge_decide_grant_seen,
+        )
+
+        status = str(record.get("status") or "")
+        # F5-1 (§1.4/M2): the fold is a same-uid record, so a DECLINED or
+        # DISMISSED carriage is not proof that a human declined anything — and it
+        # carries no answers, so the word-based arm below never matched it: the
+        # genuine, admitted decision fell through to the ordinary door and was
+        # refused ("you already declined this"), withdrawing the grant of an
+        # admitted decision on the way out. A forged line locked the human out.
+        # Such a carriage is therefore ADMITTED as a first answer (below), and
+        # the guard here is what keeps that from being a bypass: the decision
+        # must be the one this environment admitted — the grant is minted only
+        # by the authority seam, for the exact word.
+        # The decision's OWN lateness, not merely "now is past the window": an
+        # ask answered inside its window stays answerable/decidable however long
+        # ago that was, while a carriage whose window closed before any admitted
+        # answer existed can only fold ``expired`` — or still read ``declined``
+        # with no answer at all.
+        expires_at = int(record.get("expires_at") or 0)
+        window_end = expires_at + _asks_store.LATE_WINDOW_S * 1000
+        decision_too_late = queue._is_bridge_ask_record(record) and (
+            status == _asks_store.STATUS_EXPIRED
+            or (
+                status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED)
+                and bool(expires_at)
+                and queue._now() > window_end
+            )
+        )
+        forged_decline = status in (
+            _asks_store.STATUS_DECLINED,
+            _asks_store.STATUS_DISMISSED,
+        ) and queue._is_bridge_ask_record(record)
+        if forged_decline and not bridge_decide_grant_seen(
+            session_id=_session_id,
+            ask_id=ask_id,
+            question_id=str(question_id),
+            word=decision.word,
+        ):
+            # D7 (round 14): "what this session admitted" is the authority
+            # seam's vocabulary for what it VERIFIED, and nothing a human sees
+            # uses it. What they can act on: this is not the decision the
+            # request was verified with, and the card offers the one that was.
+            return _refuse(
+                "that is not the decision this request was verified with — "
+                "answer again from the request's own card."
+            )
+        if decision_too_late:
+            # S7-1: the F5-1 admission carries the ask's own deadline. Past the
+            # late window the carriage folds ``expired`` (or still says
+            # ``declined`` with no answer at all), so admitting the decision
+            # would record an answer nothing may deliver — the fold and the wire
+            # disagreeing by construction — and leave a minted grant
+            # unreachable, with a retry reading "expired" where the first tap
+            # read "declined". Refused HERE, typed, with the grant withdrawn, so
+            # the surface is told the one thing that helps: answer again.
+            #
+            # D5 (round 14): that ONE sentence is only true of the first of the
+            # arm's two causes. The other is the CARRIAGE: its own window closed
+            # before any admitted answer existed, and it folds ``expired`` — or
+            # still reads ``declined``/``dismissed`` with no answer at all
+            # (F5-1 above), which is the state whose chip (``declined``) the
+            # member was looking at, and about which another surface of the same
+            # ask says "you already declined this". Telling them their answer
+            # "expired before it could be sent" contradicts the row they can see
+            # and asks them to answer again for a window that is closed; the
+            # sentence below is true of the carriage however its decline got
+            # there. Same code, deliberately: the refusal is the same class
+            # (nothing was recorded, the window is the cause), and no surface
+            # reads the code yet, so a distinct one would be an affordance
+            # nothing implements.
+            if status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED):
+                return _refuse_with_code(
+                    "decision_expired",
+                    "this request's window has closed — your decision was not sent.",
+                )
+            return _refuse_with_code(
+                "decision_expired",
+                "that answer expired before it could be sent — please answer again",
+            )
+        unproven_answer = (
+            bool(existing_word)
+            and status in (_asks_store.STATUS_ANSWERED, _asks_store.STATUS_LATE)
+            and not bridge_decide_grant_committed(
+                session_id=_session_id,
+                ask_id=ask_id,
+                question_id=str(question_id),
+                word=existing_word,
+            )
+        )
+        if unproven_answer:
+            # §1.4: the recorded answer was never accompanied by an admitted
+            # decision — supersede it through the SANCTIONED revision window
+            # while the response row is still undelivered (once delivered the
+            # ordinary refusal stands, and the dispatcher's grant check has
+            # already kept the unproven answer from POSTing). S-R3-1: the test is
+            # whether the EXISTING answer was proven (a CONSUMED grant for its
+            # word), never whether such a grant exists — the operator's own
+            # minted grant would otherwise make a forged same-word line look
+            # proven and silently drop the operator's decision.
+            if not queue.revision_refusal(ask_id):
+                revised = queue.revise(ask_id, {question_slot: [decision.word]}, by="operator")
+                if revised.get("ok"):
+                    return {"ok": True, "revised": True, "word": decision.word}
+        # A declined/dismissed BRIDGE carriage lands HERE (F5-1), through the
+        # ordinary first-answer door: the queue admits it for exactly this case
+        # and the fold's own ordering puts a genuine ``answered`` event above a
+        # recorded decline, so the human's admitted decision posts exactly once.
+        outcome = queue.respond(ask_id, {question_slot: [decision.word]}, by="operator")
+        if not outcome.get("ok"):
+            return _refuse(str(outcome.get("error") or "the decision was refused."))
+        return {"ok": True, "word": decision.word}
+
     def respond_ask(
         self,
         ask_id: str,
@@ -9957,6 +11469,16 @@ class Session:
         record = queue.find(ask_id)
         if record is None:
             return {"ok": False, "error": _ask_refusal_copy(None)}
+        if Session._is_bridge_ask_record(record):
+            # TB-02 P1 (PR #2378): a bridge request is decided ONLY through the
+            # verified door (`bridge_decide` — authority-admitted, grant-
+            # bearing). This route carries no proof, so it fails BY
+            # CONSTRUCTION: a raw ask_respond/ask_revise (a same-uid socket
+            # caller, a direct queue caller, a follower) cannot approve or
+            # re-word a message from another organization. The refusal names
+            # the door that works. Class-qualified because reduced stand-in
+            # sessions (the ask-wire fixtures) drive the real method.
+            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -10033,6 +11555,12 @@ class Session:
         record = queue.find(ask_id)
         if record is None:
             return {"ok": False, "error": _ask_refusal_copy(None)}
+        if Session._is_bridge_ask_record(record):
+            # TB-02 P1 / S-R3-2 (PR #2378): the same door rule as `respond_ask`
+            # and `answer_ask_question` — a bridge request is re-worded only
+            # through the verified door (`bridge_decide`), never by a raw
+            # revision this route carries no proof for.
+            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
         # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
         # without writing; see the docstring for what doing it in the other order
         # costs. Nothing can interleave between the two — this method is sync and
@@ -10088,6 +11616,16 @@ class Session:
         record = queue.find(ask_id)
         if record is None:
             return {"ok": False, "error": _ask_refusal_copy(None)}
+        if Session._is_bridge_ask_record(record):
+            # TB-02 P1 (PR #2378): a bridge request is decided ONLY through the
+            # verified door (`bridge_decide` — authority-admitted, grant-
+            # bearing). This route carries no proof, so it fails BY
+            # CONSTRUCTION: a raw ask_respond/ask_revise (a same-uid socket
+            # caller, a direct queue caller, a follower) cannot approve or
+            # re-word a message from another organization. The refusal names
+            # the door that works. Class-qualified because reduced stand-in
+            # sessions (the ask-wire fixtures) drive the real method.
+            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -12826,6 +14364,19 @@ class Session:
             # cannot tell a peer message from a job result. ``""`` is the
             # fail-loud sentinel for a custom-type-less internal row.
             self._run_input_types.add(str(custom_type) if custom_type is not None else "")
+            # Turn supplements: a person ANSWERING an ask is a real user turn for the
+            # Highlights decision. The row stays "internal" for the notify/trigger record
+            # above (that classification is load-bearing for attention and untouched); only
+            # the supplement facts are set. The discriminator is the row's own
+            # ``attribution="user"`` AND ``details.status == "answered"``: a timeout notice
+            # (``ask_timeout``), a ``declined`` or ``late`` response, and every
+            # harness-minted row (``attribution`` system/agent) stay refused.
+            if ask_answer_is_person(message):
+                self._run_typed_user = True
+                self._run_last_trigger = TRIGGER_TYPED
+                self._run_user_text = ask_answer_text(
+                    self._last_typed_user_text, getattr(message, "details", None)
+                )
         else:
             self._run_triggers.add("user")
             # Turn supplements (§2.2 rules 1-2): a user-role row is "typed" only if the
@@ -12837,6 +14388,7 @@ class Session:
                 self._run_typed_user = True
                 self._run_last_trigger = TRIGGER_TYPED
                 self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
+                self._last_typed_user_text = self._run_user_text
 
     def _has_awaiting_user(self) -> bool:
         """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
@@ -13989,6 +15541,7 @@ class Session:
                 headless=self._headless_host,
                 settled_mark=self._turns_settled,
                 triggers=frozenset(self._run_triggers),
+                started_at=self._run_started_at,
             )
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
@@ -14478,6 +16031,7 @@ class Session:
         self._run_typed_user = False
         self._run_last_trigger = None
         self._run_user_text = ""
+        self._run_started_at = time.time()
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -15918,7 +17472,12 @@ class Session:
         # must not advertise the tool at all. ``browser`` is the same shape —
         # the surface handle has to survive to the next turn for browsing to
         # work, and for teardown to be able to close the tab.
+        from local_operator.harness.subagent import _session_lineage
+
+        lineage = _session_lineage(self)
         return ToolContext(
+            team_id=lineage[-1] if lineage else "",
+            memory_config_dir=str(self._config_dir),
             cwd=self._cwd,
             # This builder is the real per-turn host boundary, including child
             # sessions. Repeated provider/tool batches share this one context;
@@ -16066,6 +17625,11 @@ class Session:
             patience_sink=self._note_patience_armed,
             team_registry=self.team_registry,
             project_registry=self.project_registry,
+            # The Team Bridge runtime (H5d): the ``bridge`` tool's createIf
+            # gate reads PRESENCE only, and the executor reads the runtime
+            # itself — one value, both roles, so the check and the executor
+            # cannot see different answers. ``None`` keeps the tool absent.
+            bridge_runtime=self.bridge_runtime,
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },
@@ -18960,14 +20524,17 @@ class Session:
         knob do no elision work at all. A ruler failure is ``None`` too -- the
         band check's posture: it may never fail a pass.
         """
+        return self._wire_band_bytes(compaction_api, plan.settings)
+
+    def _wire_trigger_bytes(self, compaction_api: Any, settings: Any) -> int | None:
+        """The resolved soft byte trigger, or ``None`` (disabled / unresolvable)."""
         resolve: Any = getattr(compaction_api, "resolve_wire_bytes_trigger", None)
-        band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
-        if not callable(resolve) or band is None:
+        if not callable(resolve):
             return None
         try:
-            trigger = resolve(plan.settings)
+            trigger = resolve(settings)
         except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
-            logger.debug("wire trigger resolution failed; capture elision skipped", exc_info=True)
+            logger.debug("wire trigger resolution failed; wire band skipped", exc_info=True)
             return None
         # isinstance, not int(): a duck-typed resolver can hand back anything,
         # and the narrowing guard keeps a bad ruler value a clean ``None``
@@ -18976,7 +20543,138 @@ class Session:
         # silent coercion this package avoids).
         if not isinstance(trigger, int) or trigger <= 0:
             return None
+        return trigger
+
+    def _wire_band_bytes(self, compaction_api: Any, settings: Any) -> int | None:
+        """``WIRE_RECOVERY_BAND`` x the resolved wire trigger, or ``None``.
+
+        The ONE definition of "a pass created real byte headroom" for the two
+        places that must land inside it: capture elision (the kept rows) and
+        the byte-aware cut (:meth:`_advance_cut_for_wire_band`). Neither
+        restates the arithmetic, so they cannot drift from each other or from
+        the auto-continue gate's :func:`cleared_wire_headroom`.
+        """
+        band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
+        trigger = self._wire_trigger_bytes(compaction_api, settings)
+        if band is None or trigger is None:
+            return None
         return int(float(band) * trigger)
+
+    def _advance_cut_for_wire_band(
+        self,
+        compaction_api: Any,
+        settings: Any,
+        llm_history: list[Message],
+        cut: int,
+    ) -> int:
+        """Move a pass's cut later when the request is over the BYTE trigger,
+        so the pass lands inside the wire band instead of beside the trigger.
+
+        ``find_cut_point`` keeps ``keep_recent_tokens`` of history, and the
+        token ruler prices every image at a flat 1,200, so on a screenshot
+        history that window is ~16 frames (~15 MB) against a 16 MB trigger: the
+        pass landed with a fraction of a frame of headroom and the very next
+        tool group fired it again. Measured on a 295-request run, 62 passes (a
+        burst of six in a row) cost ~24% of the run, because each one rewrites
+        the prompt prefix (27.5% cache-read on the next request against ~80% in
+        steady state). See
+        :func:`~local_operator.compaction.cutpoint.advance_cut_to_wire_band` for
+        the walk and its protections; this method decides WHETHER it runs and
+        supplies the session-side ruler.
+
+        Keyed on the REQUEST being over the byte trigger, not on which arm
+        fired the pass: an image-free history, or a pass with no byte pressure,
+        gets ``cut`` back untouched, which
+        is what keeps those sessions byte-identical to before this existed.
+
+        ``fixed`` is what the commit seats IN FRONT of the kept window: the
+        previous marker (its archive frames included) and the preserved user
+        turns it carries forward. The first pass of a session has no marker to
+        measure, so it is under-counted by one fresh archive (46-315 KB across
+        the three provider shapes, 0.3-2% of the trigger) -- inside the 20%
+        the band leaves, and a constant to cover it would be a guess dressed as
+        a measurement.
+
+        Capture elision runs on the kept rows at the commit
+        (:meth:`_capture_elision_budget`), so the ruler counts the bytes it will
+        reclaim as already gone. Without that, a session whose superseded
+        captures elision alone brings inside the band would have its cut
+        advanced anyway, summarizing text to make room that was already free.
+
+        Resolved by name off the module, like the other rulers here, so a
+        partial test double without the helper keeps the plain cut.
+        """
+        advance: Any = getattr(compaction_api, "advance_cut_to_wire_band", None)
+        band = self._wire_band_bytes(compaction_api, settings)
+        trigger = self._wire_trigger_bytes(compaction_api, settings)
+        if not callable(advance) or band is None or trigger is None:
+            return cut
+        wire_bytes = self._wire_bytes_of(compaction_api, llm_history)
+        if wire_bytes <= trigger or not any(
+            isinstance(block, ImageContent) for message in llm_history for block in message.content
+        ):
+            # The byte correction is for image pressure only. A very large
+            # text-only transcript must keep the existing token-cut behavior.
+            return cut
+
+        preserved_key = getattr(compaction_api, "PRESERVED_USER_TURN_KEY", None)
+        fixed = self._wire_bytes_of(
+            compaction_api,
+            [
+                message
+                for message in llm_history[:cut]
+                if marker_details(message) is not None
+                or (
+                    preserved_key is not None
+                    and isinstance(message.provider_payload, dict)
+                    and message.provider_payload.get(preserved_key)
+                )
+            ],
+        )
+        # Suffix sums over the candidate region only: a cut never moves before
+        # ``cut``, and sizing the summarized prefix would be work for nothing.
+        sizes = [self._wire_bytes_of(compaction_api, [message]) for message in llm_history[cut:]]
+        suffix = [0] * (len(sizes) + 1)
+        for position in range(len(sizes) - 1, -1, -1):
+            suffix[position] = suffix[position + 1] + sizes[position]
+        has_captures = any(
+            getattr(block, "captured_frame", None) is not None
+            for message in llm_history[cut:]
+            for block in message.content
+        )
+
+        def kept_bytes(index: int) -> int:
+            plain = fixed + suffix[index - cut]
+            if not has_captures or plain <= band:
+                return plain
+            from local_operator.compaction.pruning import (
+                reclaim_captures_to_wire_budget,
+            )
+
+            # Same budget the commit hands elision (``_capture_elision_budget``
+            # is the band on the KEPT rows alone, ``fixed`` excluded), so the
+            # projection is exactly what the commit will do to this window.
+            projected, _elided = reclaim_captures_to_wire_budget(llm_history[index:], budget=band)
+            return fixed + self._wire_bytes_of(compaction_api, projected)
+
+        advanced_value: Any = advance(
+            llm_history,
+            cut,
+            kept_bytes=kept_bytes,
+            band_bytes=band,
+            replayable=lambda index: self._transcript.has_entry(llm_history[index].id),
+        )
+        advanced = int(advanced_value)
+        if advanced != cut:
+            logger.info(
+                "compaction cut advanced %s -> %s to land inside the wire band "
+                "(request %s bytes, trigger %s)",
+                cut,
+                advanced,
+                f"{wire_bytes:,}",
+                f"{trigger:,}",
+            )
+        return advanced
 
     async def compact_now(self) -> CompactionOutcome:
         """Compact the context NOW, on the user's explicit request (``/compact``).
@@ -19353,6 +21051,14 @@ class Session:
                 tokens_after=local_estimate,
             )
 
+        # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
+        # history is over the BYTE trigger long before it is over any token
+        # line, so a byte-fired pass would land beside the trigger and re-fire
+        # on the next tool group. Moves the cut LATER only, and only while the
+        # request is over the byte trigger. Runs before the replayability guard
+        # below so the cut that guard judges is the cut the pass will use.
+        cut = self._advance_cut_for_wire_band(compaction_api, settings, llm_history, cut)
+
         # The kept window must start at an entry the transcript can replay:
         # first_kept_entry_id is persisted and matched on resume, and a cut
         # whose first kept message has no transcript entry (a converter-minted
@@ -19649,6 +21355,24 @@ class Session:
             self._pending_compaction = None
             self._compaction_pass_in_flight = False
 
+    def _begin_memory_capture(self, plan: _CompactionPlan) -> None:
+        if plan.memory_capture:
+            return
+        from local_operator.memory_capture import extract_messages, policy
+
+        if not getattr(self, "_config_dir", None):
+            return
+        enabled = policy(self._config_dir)
+        if not enabled["enabled"] or not enabled["capture"] or not self._session_id:
+            return
+        # The task returns data only. It is not a session background job and
+        # cannot wake/continue a turn; stale speculative plans simply lose it.
+        task = asyncio.create_task(
+            asyncio.to_thread(extract_messages, plan.llm_history[: plan.cut])
+        )
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        plan.memory_capture.append(task)
+
     async def _summarize_for_compaction(
         self, plan: _CompactionPlan
     ) -> tuple[str, dict[str, Any] | None]:
@@ -19661,6 +21385,7 @@ class Session:
         moves on is discardable at zero cost. Every mutation lives in the
         commit half.
         """
+        self._begin_memory_capture(plan)
         return await self._produce_summary(
             plan.compaction_api, plan.llm_history[: plan.cut], plan.strategy
         )
@@ -19684,6 +21409,7 @@ class Session:
         """
         compaction_api = plan.compaction_api
         try:
+            self._begin_memory_capture(plan)
             to_summarize = plan.llm_history[: plan.cut]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
             # ``llm_history`` went through the capability strip (the summary
@@ -19831,7 +21557,7 @@ class Session:
                             ),
                         )
             first_kept_entry_id = kept[0].id
-            await self._transcript.append_compaction(
+            memory_marker = await self._transcript.append_compaction(
                 summary,
                 first_kept_entry_id,
                 plan.context_tokens,
@@ -19846,6 +21572,34 @@ class Session:
                 preserved_turns_dropped=preserved_turns_dropped,
                 preserved_turns_shed=preserved_turns_shed,
             )
+            # Never await speculative capture on the compaction critical path.
+            # Binding it to this *committed* marker prevents cancelled/stale
+            # advisor passes (#413) from ever writing candidates or a watermark.
+            if plan.memory_capture:
+                from local_operator.memory_capture import finish
+                from local_operator.tools.memory_tools import store_for
+
+                self._memory_recovery_marker = memory_marker.id
+
+                async def complete_memory_capture() -> None:
+                    try:
+                        terminal = await finish(
+                            store_for(self._build_tool_context()),
+                            memory_marker.id,
+                            plan.memory_capture[0],
+                            summary if plan.strategy == "context-full" else "",
+                            memory_marker.ts,
+                        )
+                    except asyncio.CancelledError:
+                        # A cancelled capture left no watermark. Re-arm the recovery that
+                        # session_tail runs from the COMMITTED marker on the next boundary,
+                        # instead of waiting for a process restart (QA Q5).
+                        if self._memory_recovery_marker == memory_marker.id:
+                            self._memory_recovery_marker = None
+                        raise
+                    self._memory_terminal = (memory_marker.id, terminal)
+
+                self._spawn_background(complete_memory_capture())
             marker = build_compaction_marker(summary, preserve_data)
             # Rebuild the verbatim user turns as real user messages, reusing
             # each turn's original id so the live context and a resumed

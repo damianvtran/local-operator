@@ -81,10 +81,19 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
     else:
         state = (
             "owner_unavailable"
-            if result.code in {"owner_offline", "owner_unreachable", "refresh_failed"}
+            if result.code
+            in {"owner_offline", "owner_unreachable", "refresh_failed", "consent_unverifiable"}
             else (
                 "withdrawn"
-                if result.code in {"not_a_holder", "grant_invalid", "no_local_credential"}
+                if result.code
+                in {
+                    "not_a_holder",
+                    "grant_invalid",
+                    "no_local_credential",
+                    "scope_mismatch",
+                    "scope_unknown",
+                    "consent_withdrawn",
+                }
                 else "device_bound" if result.code == "non_portable" else "pending"
             )
         )
@@ -102,6 +111,52 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         )
     with _lock:
         _receipts[key] = receipt
+
+
+#: What a lifecycle ANNOUNCEMENT may record. Deliberately closed and with no usable
+#: member: an announcement says that metadata changed, never that a login works.
+_OBSERVED_STATES = {
+    "withdrawn": "withdrawn",
+    "non_portable": "device_bound",
+    "unsupported": "unsupported",
+    # available/absent: the owner's state moved, so any earlier borrowed evidence is
+    # stale and the next request must re-verify with the owner.
+    "available": "pending",
+    "absent": "pending",
+}
+
+
+def note_lifecycle_observation(
+    root: Path | None, provider: str, state: str, *, owner: str = ""
+) -> EffectiveAccess | None:
+    """Record owner-announced lifecycle metadata as evidence, NEVER as usable access.
+
+    Only :func:`note_resolution` given a ``Grant`` may produce a usable state
+    (``effective_borrow``): a lifecycle frame carries no bearer and its ack proves
+    only that metadata was applied. So the result here is always one of
+    ``pending``/``withdrawn``/``device_bound``/``unsupported``, an unrecognised state
+    is ignored (returns ``None``), and the last successful resolve's timestamps are
+    kept only to explain what changed, exactly as a refused resolve keeps them.
+    """
+    mapped = _OBSERVED_STATES.get(state)
+    if mapped is None:
+        return None
+    key = (_root(root), provider)
+    with _lock:
+        previous = _receipts.get(key)
+        same_owner = previous is not None and previous.owner in ("", owner)
+        receipt = EffectiveAccess(
+            mapped,
+            owner=owner or (previous.owner if previous else ""),
+            owner_label=previous.owner_label if previous and same_owner else "",
+            observed_at=time.time(),
+            last_grant_at=previous.last_grant_at if previous and same_owner else None,
+            last_grant_expires_at=(
+                previous.last_grant_expires_at if previous and same_owner else None
+            ),
+        )
+        _receipts[key] = receipt
+    return receipt
 
 
 def effective_access(

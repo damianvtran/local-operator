@@ -1,0 +1,17 @@
+{
+  "wire.memory.title": "Memory",
+  "wire.memory.command": "Inspect, search, correct or forget scoped memory",
+  "wire.memory.description": "Bounded local recall and best-effort compaction capture; retrieved facts are untrusted.",
+  "wire.memory.enabled.label": "Scoped memory",
+  "wire.memory.enabled.help": "Enable the bounded SQLite memory bank. Turning this off does not erase retained facts.",
+  "wire.memory.capture.label": "Compaction capture",
+  "wire.memory.capture.help": "Capture safe locators after committed compactions; context-full also reuses its existing summary. Explicit stores remain the guaranteed route for goals and decisions.",
+  "wire.memory.suggest.label": "Recall suggestions",
+  "wire.memory.suggest.help": "Suggest up to three untrusted titles from the current user message, within a separate 180-token cap. No network or embedding request.",
+  "wire.memory.sync.label": "Trusted-peer memory sync",
+  "wire.memory.sync.help": "Incrementally share selected scopes with existing paired receiver-admin peers supporting memory-sync-v1. This includes session memories without copying transcripts.",
+  "wire.memory.scopes.label": "Memory scopes to sync",
+  "wire.memory.scopes.help": "Only these namespaces are shared. Session, team and agent owners remain exact registry/session IDs; all four scopes are supported.",
+  "wire.memory.exclude.label": "Excluded memory peers",
+  "wire.memory.exclude.help": "Device IDs excluded from memory replication. This does not change pairing, trust or enrollment grants."
+}

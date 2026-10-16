@@ -136,6 +136,9 @@ PREFIXES_TEXT_POLICY = {
     "stop": False,
     "context": False,
     "skills": False,
+    # FALSE, `/usage`'s reason: the PANEL is the receipt and takes no argument
+    # at all, so any trailing sentence after the word stays a message.
+    "hub": False,
     # `/mcp <subcommand> <name>` is validated by the ROUTE against a fixed
     # subcommand list. That is a claim about `argument_shape` (`subcommand`
     # below), NOT about this field: `/mcp logout` IS a command the desktop runs,
@@ -161,6 +164,7 @@ PREFIXES_TEXT_POLICY = {
     # forwards (the reserved vocabulary below), and it is not completable inline
     # here only because the composer does not yet offer the subcommand rows or
     # project names (the TUI argument rows are the projects-view slice).
+    "memory": False,
     "project": False,
     # FALSE, like `/usage` and `/stop`: the argument is a SELECTOR word (`read`)
     # rather than free text, and a sentence after the word must stay a message —
@@ -237,6 +241,10 @@ ARGUMENT_SHAPE_POLICY = {
     # `native_action` has no branch, so `/context x` runs the command and throws
     # `x` away. Same class as `/compact hello`, which is the operator's report.
     "context": ArgumentShape.NONE,
+    # NONE, `/context`'s class exactly: the panel takes no trailing text (the
+    # slice has no argument control), the handler drops it, and the desktop's
+    # path has no branch for this command in this pass.
+    "hub": ArgumentShape.NONE,
     # ONE token naming a provider THIS INSTALL knows — the route's own lookup, so
     # `/login openai` is the command and `/login zzz` is prose.
     "login": ArgumentShape.PROVIDER,
@@ -259,6 +267,7 @@ ARGUMENT_SHAPE_POLICY = {
     # same `command_argument_words`. At most two tokens, the second name-shaped, so
     # `/project delete this thing` stays a message while `/project delete x` is
     # the command on every surface that validates it.
+    "memory": ArgumentShape.SUBCOMMAND,
     "project": ArgumentShape.SUBCOMMAND,
     # ANY text, because everything after the word is either a reserved word
     # (`AIDA_SUBCOMMANDS`) the HANDLER parses or a request she is given.

@@ -1465,10 +1465,13 @@ async def test_a_runtimeerror_from_engage_is_throttled_and_the_wake_is_retried(
     )
 
     attempts = 0
+    retried = asyncio.Event()
 
     async def _always_raises(*_args: object, **_kwargs: object) -> object:
         nonlocal attempts
         attempts += 1
+        if attempts >= 2:
+            retried.set()
         raise RuntimeError("every candidate died: no credential")
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _always_raises)
@@ -1486,7 +1489,13 @@ async def test_a_runtimeerror_from_engage_is_throttled_and_the_wake_is_retried(
 
     with caplog.at_level(logging.WARNING):
         task = asyncio.create_task(mod.serve(tmp_path))
-        await asyncio.sleep(1.2)
+        # Wait for the SECOND attempt (the retry) instead of sleeping 1.2 s and
+        # hoping it happened: on a loaded runner the supervisor's first slice had
+        # not even started by then (CI: ``attempts=0``). The deadline is a
+        # backstop for a supervisor that never retries, not the assertion -- that
+        # case still fails below on ``attempts > 1`` with the real count.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(retried.wait(), timeout=30.0)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task

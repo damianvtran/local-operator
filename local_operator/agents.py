@@ -8,6 +8,7 @@ import os  # Added os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import unicodedata
 import uuid
@@ -19,6 +20,7 @@ from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterator,
     List,
@@ -770,6 +772,12 @@ class AgentRegistry:
 
         self._agents: Dict[str, AgentData] = {}
         self._metadata_complete = True
+        # Serializes a definition write against the read that validates it, so a
+        # stale editor token is judged against the row as it is written. An
+        # in-process RLock: agent writes already run under this registry's own
+        # instance per operation, and the guard only needs to close the window
+        # between the precondition read and the write, not to span processes.
+        self._definition_lock = threading.RLock()
         # Concrete directories whose agent.yml could not be read/parsed/validated.
         # Kept so the strict path can name what to repair: the user-facing error
         # otherwise says "repair unreadable definitions" while naming none of them.
@@ -1087,9 +1095,21 @@ class AgentRegistry:
 
         return agent_metadata
 
-    def update_agent(self, agent_id: str, updated_metadata: AgentEditFields) -> AgentData:
+    def update_agent(
+        self,
+        agent_id: str,
+        updated_metadata: AgentEditFields,
+        *,
+        precondition: Callable[[AgentData], None] | None = None,
+    ) -> AgentData:
         """
         Edit an existing agent's metadata.
+
+        ``precondition`` runs against the row AS RE-READ UNDER the definition lock
+        and before any mutation: whatever it raises aborts the write untouched. It
+        is the definition-CAS guard (``hub_sync.definition``) -- an editor's
+        revision token is only meaningful if the row it was compared against is the
+        same row the write replaces.
 
         Args:
             agent_id (str): The unique identifier of the agent to edit
@@ -1099,6 +1119,18 @@ class AgentRegistry:
             KeyError: If the agent_id does not exist
             Exception: If there is an error saving the updated metadata
         """
+        with self._definition_lock:
+            # Refresh under the lock so the precondition judges the row that will
+            # actually be replaced, then re-check existence against that read.
+            self._refresh_if_needed()
+            if agent_id not in self._agents:
+                raise KeyError(f"Agent with id {agent_id} not found")
+            if precondition is not None:
+                precondition(self._agents[agent_id])
+            return self._update_agent_locked(agent_id, updated_metadata)
+
+    def _update_agent_locked(self, agent_id: str, updated_metadata: AgentEditFields) -> AgentData:
+        """Body of :meth:`update_agent`; the caller holds ``_definition_lock``."""
         if agent_id not in self._agents:
             raise KeyError(f"Agent with id {agent_id} not found")
 
@@ -1469,6 +1501,30 @@ class AgentRegistry:
         self._agents = refreshed_agents
         self._incomplete_agent_dirs = incomplete
         self._metadata_complete = not incomplete
+
+    def definition_revision_fields(self, agent_id: str) -> Dict[str, Any]:
+        """Authored editable fields a definition revision binds for one agent.
+
+        ONE source for both the read token and the write precondition, so a
+        round-tripped token and a re-check cannot disagree. Derived from the
+        same profile projection the write path rebuilds from.
+        """
+        from local_operator.action_class import normalize as _normalize
+        from local_operator.agent_profiles import is_specialist, profile_from_agent
+
+        row = self.get_agent(agent_id)
+        profile = profile_from_agent(self, row)
+        return {
+            "name": row.name,
+            "label": str(getattr(row, "label", "") or ""),
+            "kind": "specialist" if is_specialist(row) else "role",
+            "description": str(row.description or ""),
+            "instructions": self.get_agent_system_prompt(row.id) or "",
+            "tools": list(profile.tools) if profile.tools is not None else None,
+            "effort": profile.effort,
+            "delegate": profile.may_delegate,
+            "action_class": _normalize(profile.action_class),
+        }
 
     def get_agent(self, agent_id: str) -> AgentData:
         """

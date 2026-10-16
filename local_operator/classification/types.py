@@ -68,6 +68,7 @@ class DecisionVendorError(RuntimeError):
         kind: str,
         status: int | None = None,
         attempts: int = 1,
+        outcome_lost: bool = False,
     ) -> None:
         super().__init__(message)
         #: One of ``transport`` | ``auth`` | ``rate-limit`` | ``overloaded`` |
@@ -81,6 +82,12 @@ class DecisionVendorError(RuntimeError):
         #: Carried here so the ONE warning the operator sees can say whether the
         #: failure was a single refusal or a retried-and-still-failing leg.
         self.attempts = attempts
+        #: ``True`` when the request was SENT and its outcome is unknown — a read
+        #: timeout or a connection reset mid-response. The vendor may have processed
+        #: and billed it, so the accounting layer must not presume it free the way it
+        #: does for a request that was refused or never connected
+        #: (``classification.accounting.failed_record``).
+        self.outcome_lost = outcome_lost
 
 
 class DecisionSchemaError(RuntimeError):

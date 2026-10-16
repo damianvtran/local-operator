@@ -1157,9 +1157,19 @@ async def _op_sync(
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str, str]:
+def write_profile(
+    registry: Any,
+    params: AgentParams,
+    *,
+    creating: bool,
+    expected_definition_revision: str | None = None,
+) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
+    ``expected_definition_revision`` is the optional definition-CAS token an
+    editor round-trips. It is enforced by ``AgentRegistry.update_agent``'s
+    precondition under that registry's definition lock, so the check judges the
+    row the write actually replaces rather than a snapshot taken earlier.
     Returning structured identity keeps transport adapters out of tool prose.
     The registry remains the only storage authority.
     """
@@ -1345,6 +1355,23 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         base.update(overrides)
         return AgentEditFields(**base)
 
+    def _definition_precondition(
+        expected: str,
+    ) -> Any:
+        """A precondition that refuses a stale editor token under the lock."""
+        from local_operator.hub_sync.definition import (
+            DefinitionRevisionMismatch,
+            definition_revision,
+        )
+
+        def check(current: Any) -> None:
+            if expected != definition_revision(
+                "agent", str(current.id), registry.definition_revision_fields(str(current.id))
+            ):
+                raise DefinitionRevisionMismatch("the definition changed since it was read")
+
+        return check
+
     if existing is None:
         agent = registry.create_agent(
             _fields(
@@ -1369,7 +1396,15 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         }
         if profile.description:
             overrides["description"] = profile.description
-        registry.update_agent(agent.id, _fields(**overrides))
+        registry.update_agent(
+            agent.id,
+            _fields(**overrides),
+            precondition=(
+                None
+                if expected_definition_revision is None
+                else _definition_precondition(expected_definition_revision)
+            ),
+        )
     if instructions:
         registry.set_agent_system_prompt(agent.id, instructions)
     return name, kind, action_class
