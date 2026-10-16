@@ -641,10 +641,45 @@ class _BannerProcessingWitness:
         self.through: dict[str, tuple[str, int]] = {}
         self.frames: list[dict[str, Any]] = []
         self.changed = asyncio.Event()
+        self.phase: str | None = None
+        self.observations: dict[str, list[dict[str, Any]]] = {}
+        self.tasks: dict[str, asyncio.Task[Any] | None] = {}
         original = DesktopFeed._emit_notifications
 
         async def observe(feed, fresh, states):
-            await original(feed, fresh, states)
+            # Other roots retain the original early-return/argument contract;
+            # diagnostic token reads must not precede the producer's own gates.
+            if feed.root != root:
+                await original(feed, fresh, states)
+                return
+            # Capture call identity before the real await; diagnostics must not
+            # mistake a post-return value for the batch actually delegated.
+            before_root = feed.root
+            before_tokens = tuple(row["token"] for row in fresh)
+            observed: list[dict[str, Any]] = []
+            if before_root == root:
+                for token in before_tokens:
+                    record: dict[str, Any] = {
+                        "stage": "entered",
+                        "root_match_before": True,
+                        "task_is_feed_poller_at_entry": asyncio.current_task() is feed._task,
+                    }
+                    self.observations.setdefault(token, []).append(record)
+                    self.tasks[token] = asyncio.current_task()
+                    observed.append(record)
+            try:
+                await original(feed, fresh, states)
+            except BaseException as error:
+                for record in observed:
+                    record.update(stage="raised", error_type=type(error).__name__)
+                raise
+            else:
+                for record in observed:
+                    record.update(
+                        stage="returned",
+                        root_match_after=feed.root == root,
+                        tokens_unchanged=before_tokens == tuple(row["token"] for row in fresh),
+                    )
             if feed.root == root:
                 # Attention was queued BEFORE this awaited operation. Only its
                 # return means a suppressing verdict is final, and draining the
@@ -664,15 +699,280 @@ class _BannerProcessingWitness:
     async def wait(self, token: str) -> None:
         # Reuse the file's existing bounded frame-wait budget; no elapsed-time
         # retry or longer sleep can make an expired cache appear discriminating.
+        stage = "decision"
+        try:
+            async with asyncio.timeout(5):
+                await self.decisions.setdefault(token, asyncio.Event()).wait()
+                stage = "stream_cursor"
+                epoch, sequence = self.through[token]
+                while not any(
+                    frame.get("epoch") == epoch and frame.get("seq", -1) >= sequence
+                    for frame in self.frames
+                ):
+                    self.changed.clear()
+                    await self.changed.wait()
+        except TimeoutError as error:
+            # Snapshot only THIS token/task at the failed await, not a thread
+            # census or a claim that no upstream work ran. Never signal success
+            # from an error/cancellation path. Preserve the original guard.
+            task = self.tasks.get(token)
+            error.add_note(
+                json.dumps(
+                    {
+                        "banner_wait_stage": stage,
+                        "matrix_cell": self.phase,
+                        "cursor_recorded_at_note": token in self.through,
+                        "received_frame_count_at_note": len(self.frames),
+                        "token_observations": self.observations.get(token, []),
+                        "decision_is_set_at_note": self.decisions[token].is_set(),
+                        "observed_task_present": task is not None,
+                        "observed_task_done_at_note": task.done() if task is not None else None,
+                        "observed_task_cancelled_at_note": (
+                            task.cancelled() if task is not None else None
+                        ),
+                    },
+                    sort_keys=True,
+                )
+            )
+            raise
+
+
+# These controls exercise the real witness with a SYNTHETIC emitter boundary.
+# They do not construct a feed/server or prove the production hosting path.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["return", "raise"])
+async def test_banner_witness_records_owned_emitter_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, request: pytest.FixtureRequest
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.desktop_feed import DesktopFeed
+
+    root = tmp_path / "owned"
+    feed = SimpleNamespace(
+        root=root, epoch="helper-epoch", sequence=7, _task=asyncio.current_task()
+    )
+    rows = [{"token": str(uuid.uuid4())}]
+    states = {}
+    calls = []
+    failure = ValueError("synthetic emitter failure")
+    error_identity: bool | None = None
+    cursor_wait_completed = False
+
+    async def emitter(actual_feed, actual_rows, actual_states):
+        calls.append((actual_feed, actual_rows, actual_states))
+        if outcome == "raise":
+            raise failure
+
+    monkeypatch.setattr(DesktopFeed, "_emit_notifications", emitter)
+    witness = _BannerProcessingWitness(root, monkeypatch)
+    if outcome == "raise":
+        with pytest.raises(ValueError) as raised:
+            await DesktopFeed._emit_notifications(feed, rows, states)
+        assert raised.value is failure
+        error_identity = raised.value is failure
+        assert witness.through == {}
+        assert witness.decisions == {}
+        assert witness.observations[rows[0]["token"]][0]["stage"] == "raised"
+        assert witness.observations[rows[0]["token"]][0]["error_type"] == "ValueError"
+    else:
+        await DesktopFeed._emit_notifications(feed, rows, states)
+        assert witness.through == {rows[0]["token"]: (feed.epoch, feed.sequence)}
+        assert witness.decisions[rows[0]["token"]].is_set()
+        assert witness.observations[rows[0]["token"]][0] == {
+            "stage": "returned",
+            "root_match_before": True,
+            "task_is_feed_poller_at_entry": True,
+            "root_match_after": True,
+            "tokens_unchanged": True,
+        }
+        # Exercise the actual cursor wait, without substituting its algorithm.
+        witness.received({"epoch": feed.epoch, "seq": feed.sequence})
+        await witness.wait(rows[0]["token"])
+        cursor_wait_completed = True
+    assert len(calls) == 1
+    assert calls[0][0] is feed and calls[0][1] is rows and calls[0][2] is states
+    assert witness.tasks[rows[0]["token"]] is asyncio.current_task()
+    # Export assertion-backed helper facts: successful stdout is not JUnit evidence.
+    record = witness.observations[rows[0]["token"]][0]
+    request.node.user_properties.append(
+        (
+            "banner_witness_helper",
+            json.dumps(
+                {
+                    "boundary": "synthetic_emitter",
+                    "outcome": outcome,
+                    "calls": len(calls),
+                    "delegation_identity": calls[0][0] is feed
+                    and calls[0][1] is rows
+                    and calls[0][2] is states,
+                    "stage": record["stage"],
+                    "error_class": record.get("error_type"),
+                    "error_identity": error_identity,
+                    "cursor_count": len(witness.through),
+                    "decision_count": len(witness.decisions),
+                    "cursor_wait_completed": cursor_wait_completed,
+                    "entry_task_is_current": witness.tasks[rows[0]["token"]]
+                    is asyncio.current_task(),
+                },
+                sort_keys=True,
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_banner_witness_delegates_foreign_rows_without_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.desktop_feed import DesktopFeed
+
+    feed = SimpleNamespace(root=tmp_path / "foreign")
+    rows = [{}]  # Legal for an emitter which returns before inspecting its rows.
+    states = {}
+    calls = []
+
+    async def emitter(actual_feed, actual_rows, actual_states):
+        calls.append((actual_feed, actual_rows, actual_states))
+
+    monkeypatch.setattr(DesktopFeed, "_emit_notifications", emitter)
+    witness = _BannerProcessingWitness(tmp_path / "owned", monkeypatch)
+    await DesktopFeed._emit_notifications(feed, rows, states)
+    assert len(calls) == 1
+    assert calls[0][0] is feed and calls[0][1] is rows and calls[0][2] is states
+    assert witness.observations == {} and witness.tasks == {}
+    assert witness.through == {} and witness.decisions == {}
+    assert rows == [{}]
+    request.node.user_properties.append(
+        (
+            "banner_witness_helper",
+            json.dumps(
+                {
+                    "boundary": "synthetic_emitter",
+                    "outcome": "foreign_passthrough",
+                    "calls": len(calls),
+                    "delegation_identity": calls[0][0] is feed
+                    and calls[0][1] is rows
+                    and calls[0][2] is states,
+                    "rows_unchanged": rows == [{}],
+                    "owned_collection_counts": {
+                        "observations": len(witness.observations),
+                        "tasks": len(witness.tasks),
+                        "cursors": len(witness.through),
+                        "decisions": len(witness.decisions),
+                    },
+                },
+                sort_keys=True,
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_banner_witness_timeout_note_precedes_successful_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.desktop_feed import DesktopFeed
+
+    root = tmp_path / "owned"
+    feed = SimpleNamespace(root=root, epoch="helper-epoch", sequence=7, _task=None)
+    rows = [{"token": str(uuid.uuid4())}]
+    states = {}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    body_finally = asyncio.Event()
+    calls = []
+
+    async def emitter(actual_feed, actual_rows, actual_states):
+        calls.append((actual_feed, actual_rows, actual_states))
+        try:
+            entered.set()
+            await release.wait()
+        finally:
+            body_finally.set()
+
+    monkeypatch.setattr(DesktopFeed, "_emit_notifications", emitter)
+    witness = _BannerProcessingWitness(root, monkeypatch)
+    witness.phase = "synthetic-held-emitter"
+    invocation = asyncio.create_task(DesktopFeed._emit_notifications(feed, rows, states))
+    feed._task = invocation
+    try:
         async with asyncio.timeout(5):
-            await self.decisions.setdefault(token, asyncio.Event()).wait()
-            epoch, sequence = self.through[token]
-            while not any(
-                frame.get("epoch") == epoch and frame.get("seq", -1) >= sequence
-                for frame in self.frames
-            ):
-                self.changed.clear()
-                await self.changed.wait()
+            await entered.wait()
+        assert witness.observations[rows[0]["token"]][0]["stage"] == "entered"
+        # Do not patch the guard or clock: this exercises the original 5s wait.
+        with pytest.raises(TimeoutError) as timed_out:
+            await witness.wait(rows[0]["token"])
+        captured_note = timed_out.value.__notes__[-1]
+        note = json.loads(captured_note)
+        assert note == {
+            "banner_wait_stage": "decision",
+            "matrix_cell": "synthetic-held-emitter",
+            "cursor_recorded_at_note": False,
+            "received_frame_count_at_note": 0,
+            "token_observations": [
+                {
+                    "stage": "entered",
+                    "root_match_before": True,
+                    "task_is_feed_poller_at_entry": True,
+                }
+            ],
+            "decision_is_set_at_note": False,
+            "observed_task_present": True,
+            "observed_task_done_at_note": False,
+            "observed_task_cancelled_at_note": False,
+        }
+        assert witness.through == {} and not witness.decisions[rows[0]["token"]].is_set()
+        assert not invocation.done() and not body_finally.is_set()
+    finally:
+        release.set()
+        # Own this short async invocation, not the production long-lived poller.
+        # Settle it before monkeypatch undo; no worker/thread reaping assertion.
+        await asyncio.shield(invocation)
+    assert invocation.done() and not invocation.cancelled()
+    assert body_finally.is_set() and invocation.result() is None
+    assert len(calls) == 1
+    assert calls[0][0] is feed and calls[0][1] is rows and calls[0][2] is states
+    assert witness.observations[rows[0]["token"]][0]["stage"] == "returned"
+    assert witness.through == {rows[0]["token"]: (feed.epoch, feed.sequence)}
+    assert witness.decisions[rows[0]["token"]].is_set()
+    witness.received({"epoch": feed.epoch, "seq": feed.sequence})
+    await witness.wait(rows[0]["token"])
+    # Retain the original timeout string separately from settled async-task facts.
+    # This is the fake invocation's body, not an OS worker/thread cleanup receipt.
+    assert json.loads(captured_note) == note
+    request.node.user_properties.append(
+        (
+            "banner_witness_helper",
+            json.dumps(
+                {
+                    "boundary": "synthetic_emitter",
+                    "outcome": "held_timeout_then_return",
+                    "calls": len(calls),
+                    "delegation_identity": calls[0][0] is feed
+                    and calls[0][1] is rows
+                    and calls[0][2] is states,
+                    "captured_timeout_note": captured_note,
+                    "captured_note_unchanged_after_settlement": json.loads(captured_note) == note,
+                    "post_settlement": {
+                        "same_invocation_done": invocation.done(),
+                        "same_invocation_cancelled": invocation.cancelled(),
+                        "same_invocation_result_is_none": invocation.result() is None,
+                        "fake_body_finally_seen": body_finally.is_set(),
+                        "observed_stage": witness.observations[rows[0]["token"]][0]["stage"],
+                        "cursor": list(witness.through[rows[0]["token"]]),
+                        "decision_set": witness.decisions[rows[0]["token"]].is_set(),
+                        "cursor_wait_completed": True,
+                    },
+                },
+                sort_keys=True,
+            ),
+        )
+    )
 
 
 def test_the_presence_cache_clock_is_not_the_server_or_another_roots_clock(tmp_path, monkeypatch):
@@ -1001,6 +1301,7 @@ async def _assert_window_banner_matrix(
                     clock.now += presence_module.PRESENCE_CACHE_TTL_S / 16
                 expiry, _ = presence_module._CACHE[str(root)]
                 target = displayed if same else other
+                witness.phase = name
                 token = await asyncio.to_thread(_publish, root, target)
                 await witness.wait(token)
                 age = clock.now - (expiry - presence_module.PRESENCE_CACHE_TTL_S)
