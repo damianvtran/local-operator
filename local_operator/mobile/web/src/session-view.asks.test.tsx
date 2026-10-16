@@ -251,6 +251,34 @@ describe("SessionScreen and queued asks", () => {
 		expect(dialog.querySelector('[data-ask-id="mine-1"]')).not.toBeNull();
 	});
 
+	it("gives a lapsed-only queue a quiet header entry that does not say waiting", () => {
+		render(<SessionScreen sessionId="s1" />);
+		slot = {
+			projection: projection({ asks: [ask({ status: "timed_out" })], asks_open: 1 }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+		const entry = screen.getByRole("button", { name: "queued asks in this session (1 lapsed)" });
+		expect(entry.textContent).toBe("? 1");
+		expect(entry.className).not.toMatch(/text-accent/);
+		expect(screen.queryByRole("button", { name: /waiting/ })).toBeNull();
+	});
+
+	it("counts only the offered questions in the header when lapsed ones sit beside them", () => {
+		render(<SessionScreen sessionId="s1" />);
+		slot = {
+			projection: projection({
+				asks: [ask(), ask({ ask_id: "ask-8", status: "timed_out" })],
+				asks_open: 2,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+		expect(
+			screen.getByRole("button", { name: "queued asks in this session (1 question waiting)" }),
+		).toBeTruthy();
+	});
+
 	it("collapses the sheet on Back instead of leaving the conversation", async () => {
 		/* U2 (UX round 1): the phone's back gesture popped the ROUTE and took the
 		   draft with it; the sheet claims one history entry while it is open, so a

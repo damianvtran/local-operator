@@ -2985,3 +2985,51 @@ def test_durable_projection_leaves_asks_absent_without_an_index_entry(
     assert projection is not None
     assert projection.asks is None
     assert projection.asks_open is None
+
+
+def test_durable_projection_reads_a_stale_open_ask_as_timed_out_with_no_mirror(
+    tmp_path, monkeypatch
+) -> None:
+    """A stopped session's index row still says ``open`` past its deadline. Its
+    screen must carry it as ``timed_out`` — Dismiss is then offered, the count
+    stops calling it waiting — and must not publish the legacy single-slot card,
+    which mirrors only open asks so it never paints "waiting for you" late."""
+    import time
+
+    from local_operator.asks import store as ask_store
+    from local_operator.mobile.daemon import _durable_projection
+
+    cfg = _durable_ask_session(tmp_path, monkeypatch, "stale-session")
+    now = int(time.time() * 1000)
+    ask_store.write_entry(
+        cfg,
+        "stale-session",
+        cwd="/tmp/w",
+        asks=[
+            {
+                "ask_id": "stale-1",
+                "created_at": now - 600_000,
+                "expires_at": now - 60_000,
+                "timeout_s": 540,
+                "urgent": False,
+                "status": "open",
+                "delivered": False,
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "ship it?",
+                        "options": [{"label": "yes", "description": ""}],
+                        "multi": False,
+                        "secret": False,
+                        "persist": False,
+                    }
+                ],
+            }
+        ],
+    )
+
+    projection = _durable_projection("stale-session")
+    assert projection is not None
+    asks = projection.asks or []
+    assert [(row.ask_id, row.status) for row in asks] == [("stale-1", "timed_out")]
+    assert projection.pending is None
