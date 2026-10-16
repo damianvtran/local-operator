@@ -754,6 +754,12 @@ class AskPickerScreen(Container):
         #: future that raises if it is resolved twice. The same idempotence the
         #: approval prompt's :meth:`resolve` has, for the same reason.
         self._settled = False
+        #: Set by the owner when the ask behind a MOUNTED queued card lapses
+        #: (decision D10: a timed-out ask is read-only on every surface). The card
+        #: stays on screen — it is not yanked from under someone reading or typing
+        #: — but nothing it holds can be sent: Enter, a click, a routed digit and a
+        #: phone answer all stop committing, and Escape still closes it.
+        self._read_only = False
         #: What held focus when the card appeared, so answering hands it back
         #: rather than leaving the user out of the composer.
         self._restore_target: object | None = None
@@ -913,6 +919,25 @@ class AskPickerScreen(Container):
         """Whether the answers have already been handed back."""
         return self._settled
 
+    @property
+    def read_only(self) -> bool:
+        """Whether the card has stopped taking answers (see :meth:`set_read_only`)."""
+        return self._read_only
+
+    def set_read_only(self) -> None:
+        """Stop taking answers: the queued ask behind this card has LAPSED (D10).
+
+        One-way. A lapse does not un-happen, and a card that could become
+        answerable again would need the owner to prove the ask is open — which
+        it would do by mounting a fresh card. Escape keeps working: it settles
+        with nothing, which the owner reads as a back-out, never an answer, so the
+        user returns to the list where the row now reads ``timed out``.
+        """
+        if self._read_only:
+            return
+        self._read_only = True
+        self._repaint()
+
     def restore_focus(self) -> None:
         """Return focus to whatever held it when the question appeared.
 
@@ -931,8 +956,12 @@ class AskPickerScreen(Container):
 
     # -- actions -------------------------------------------------------------
     def action_cancel(self) -> None:
-        """Escape: stop answering. Whatever was already answered still counts."""
-        self.settle(self._answers or None)
+        """Escape: stop answering. Whatever was already answered still counts.
+
+        A READ-ONLY card settles with NOTHING: answers the user gave before the
+        ask lapsed must not ride the back-out to the owner as a complete map.
+        """
+        self.settle(None if self._read_only else (self._answers or None))
 
     def action_move(self, delta: int) -> None:
         """Arrow/vi movement WRAPS: a discrete, deliberate keypress."""
@@ -1056,6 +1085,9 @@ class AskPickerScreen(Container):
         # user was never shown. The footer already refuses to advertise `enter`
         # there for exactly this reason; this makes the key agree with the hint
         # rather than merely going unadvertised (D9, design round 2).
+        if self._read_only:
+            # A lapsed ask takes no answer (D10); the footer already says so.
+            return
         if not self.visible_rows:
             self._rejected = True
             self._repaint()
@@ -1105,6 +1137,9 @@ class AskPickerScreen(Container):
         # card could not even draw.
         if self.settled:
             return True
+        if self._read_only:
+            # The phone's route in: a lapsed ask takes no answer from it either.
+            raise ValueError("that ask timed out — the agent went ahead without an answer")
         if not values:
             # Nothing chosen. On Q0 this is "the user answered nothing" — settle
             # with None so the tool falls back to its recommendation. Past Q0,
@@ -1200,7 +1235,7 @@ class AskPickerScreen(Container):
         rows are numbered, and swallowing letters would cost the vi movement
         for nothing.
         """
-        if self.state.selected != self.other_row:
+        if self._read_only or self.state.selected != self.other_row:
             return
         char = event.character
         if char is not None and char.isprintable() and len(char) == 1:
@@ -1268,6 +1303,11 @@ class AskPickerScreen(Container):
         # choosing this card, and that has to end a passive card's passivity for good,
         # not only while it happens to hold the caret.
         self.engage()
+        if self._read_only:
+            # A click selects nothing on a lapsed card: on a single-select it
+            # would have been an answer (D10).
+            event.stop()
+            return
         index = self._index_at(event)
         if index is None:
             return
@@ -2575,6 +2615,8 @@ class AskPickerScreen(Container):
             # `^e more` becomes `^e less` and back, and the hint disappears
             # entirely once the reveal has drawn everything there was.
             self.state.revealed,
+            # A lapse strips every answer key from the footer (D10).
+            self._read_only,
         )
 
     def repaint_if_stale(self) -> None:
@@ -2662,7 +2704,7 @@ class AskPickerScreen(Container):
         lets Tab hand it the caret. The alternative, routing digits to a card the
         user has not engaged with, answers questions by accident (see ``_passive``).
         """
-        if self._passive or self.question.multi or not self.visible_rows:
+        if self._read_only or self._passive or self.question.multi or not self.visible_rows:
             return frozenset()
         return frozenset(
             str(index + 1) for index in self._window() if index < 9 and index != self.other_row
@@ -3496,6 +3538,11 @@ class AskPickerScreen(Container):
         # reachable: the composer has focus and takes the arrows, Enter and the
         # printable keys as text. Only what the app routes still works — the
         # row ordinals and Escape — so those are all the footer claims.
+        if self._read_only:
+            # A LAPSED card (D10) takes no answer by any key, so the footer names
+            # the one key that still does something. The card's own exit word,
+            # never a secret question's `decline`: Escape here declines nothing.
+            return self._shed_to_fit([self._exit_hint], [], width)
         #
         # A footer describing one keyboard while the caret sits on another is
         # the same lie this row already refuses to tell about `enter` on a

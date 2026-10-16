@@ -61,15 +61,16 @@ LATE_LEAD = (
 )
 
 #: The timeout notice. "Proceed without it" is the actionable half — the point of
-#: the deadline is that the session must not stall forever — and the last sentence
-#: is what makes a late answer safe to accept rather than a second decision the
-#: model did not ask for.
+#: the deadline is that the session must not stall forever. It used to end "The ask
+#: stays open for the user; if they answer later you will be told", which stopped
+#: being true when decision D10 made a lapsed ask read-only on every surface: no
+#: surface offers the late answer it promised. A late answer through chat is still
+#: delivered (``LATE_LEAD`` frames it), so nothing here forbids one.
 TIMEOUT_NOTICE = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
     "Proceed without it: use your recommended option or best judgment and state the "
-    "assumption in your report. The ask stays open for the user; if they answer later "
-    "you will be told."
+    "assumption in your report."
 )
 
 #: Added when the ask was urgent (``timeout <= 15 min``). An urgent ask whose
@@ -96,8 +97,7 @@ TIMEOUT_LAPSED_WHILE_STOPPED = (
 TIMEOUT_SECRET = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "The credential {keys} was not provided. Do not run anything that needed it; "
-    "report what was left undone. The ask stays open for the user; if they answer "
-    "later you will be told."
+    "report what was left undone."
 )
 
 #: When a secret answer was stored but the session restarted before the response

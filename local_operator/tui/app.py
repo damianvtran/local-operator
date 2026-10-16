@@ -371,7 +371,6 @@ from local_operator.tui.widgets.ask_queue import (
     SCOPE_FLEET,
     SCOPE_SESSION,
     STATUS_OPEN,
-    STATUS_TIMED_OUT,
     AskBar,
     AskQueueList,
     AskRow,
@@ -26770,6 +26769,12 @@ class OperatorApp(App[None]):
             row = next((item for item in active_rows if item.ask_id == self._ask_mounted_id), None)
             if row is not None:
                 self._ask_card.set_title(self._ask_card_title(row))
+                if row.lapsed:
+                    # D10: the ask lapsed UNDER the open card. It stays on screen
+                    # (yanking it would take the surface from under someone
+                    # typing) but stops taking answers; Esc returns to the list,
+                    # where the row now reads `timed out`.
+                    self._ask_card.set_read_only()
         if self._ask_mounted_id is not None and not any(
             row.ask_id == self._ask_mounted_id for row in active_rows
         ):
@@ -26821,11 +26826,16 @@ class OperatorApp(App[None]):
         if not decider.awaiting(conversation):
             return
         answerable = self._open_ask_rows()
+        # LAPSED rows are named to the reading but never counted as pending (D12):
+        # the wire's tally includes them, so leaving them out would read a
+        # lapsed-only queue as a dropped row and wait instead of settling.
+        lapsed = sum(1 for row in self._ask_rows if row.lapsed)
         reading = read_queue(
             published=len(self._ask_rows),
             outstanding_created_ms=[row.created_at for row in answerable],
             tally=self._ask_open_count,
             opened_at_ms=decider.opened_at_ms,
+            lapsed=lapsed,
         )
         settling = (
             self._swapping_session
@@ -26842,7 +26852,7 @@ class OperatorApp(App[None]):
             outstanding_ids=(
                 [row.ask_id for row in answerable]
                 if names_every_outstanding(
-                    tally=self._ask_open_count, named_outstanding=len(answerable)
+                    tally=self._ask_open_count, named_outstanding=len(answerable) + lapsed
                 )
                 else None
             ),
@@ -26909,7 +26919,7 @@ class OperatorApp(App[None]):
         return int(time.time() * 1000)
 
     def _open_ask_rows(self) -> list[AskRow]:
-        """The rows still waiting on the user: open, or timed out and answerable.
+        """The rows still waiting on the user: open, and not lapsed (D10).
 
         NOT ``late``, and that is round 1's D6/U3 fix in the second place it
         had to be made: a late answer is an ANSWER (the agent was told, one
@@ -27010,7 +27020,11 @@ class OperatorApp(App[None]):
         """
         marks = dict(self._ask_marks if index is None else index)
         session_id = str(getattr(getattr(self, "_session", None), "session_id", "") or "")
-        live = len(self._open_ask_rows())
+        # The OUTSTANDING set, lapsed rows included: the index the other sessions'
+        # marks come from still counts a timed-out ask (D10 leaves the store's
+        # contract alone), so the live half must count it too or one session's
+        # mark would disagree with its own index entry.
+        live = sum(1 for row in self._ask_rows if row.answerable or row.lapsed)
         if session_id and live:
             marks[session_id] = max(live, int(marks.get(session_id, 0)))
         return marks
@@ -27231,13 +27245,17 @@ class OperatorApp(App[None]):
         Two counts, deliberately: ``count`` is what the user still OWES (the OPEN
         asks — "3 questions waiting" must not include one the agent already
         gave up on), while ``present`` is whether there is anything to open at
-        all. A queue of nothing but timed-out asks is still ANSWERABLE (§5's
-        copy says so on every surface), so hiding the bar on ``count == 0``
-        would make those asks unreachable from the terminal; the bar stays and
-        its copy changes instead.
+        all. A queue of nothing but timed-out asks owes nothing (they are
+        read-only since D10), but their ``x`` dismiss lives behind the bar, so
+        hiding it on ``count == 0`` would make them unreachable from the
+        terminal; the bar stays and its copy changes instead.
         """
         answerable = self._open_ask_rows()
         waiting = [row for row in answerable if row.status == STATUS_OPEN]
+        # LAPSED asks keep the bar up (Dismiss lives behind it, D10) and are named
+        # by the chip's "N asks timed out" clause; they owe nothing, so they are
+        # neither the head question nor counted as waiting.
+        lapsed = [row for row in self._ask_rows if row.lapsed]
         self._ask_bar.set_state(
             count=len(waiting),
             head=self._ask_head_text(answerable),
@@ -27249,8 +27267,8 @@ class OperatorApp(App[None]):
             # describe). Counted over what the user still OWES, the same set
             # `count` is taken from.
             urgent_count=len([row for row in waiting if row.urgent]),
-            present=bool(answerable),
-            timed_out=len(answerable) - len(waiting),
+            present=bool(answerable) or bool(lapsed),
+            timed_out=len(lapsed),
         )
 
     def _sync_ask_tick(self) -> None:
@@ -27942,6 +27960,10 @@ class OperatorApp(App[None]):
             exit_hint=("esc", "collapse"),
             caret=caret,
         )
+        if row.lapsed:
+            # Reached only by an explicit id (the list never picks a lapsed row):
+            # whatever opened it, a lapsed card takes no answer (D10).
+            card.set_read_only()
         draft = self._ask_drafts.pop(row.ask_id, None)
         self._ask_card = card
         self._ask_mounted_id = row.ask_id
@@ -27990,20 +28012,21 @@ class OperatorApp(App[None]):
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
         bridge = _is_bridge_ask_row(row)
-        if row.status == STATUS_TIMED_OUT:
+        if row.lapsed:
+            # D10: a lapsed card is READ-ONLY, so the title stops promising that an
+            # answer still lands. The words are the shared lapsed line (the
+            # transcript receipt in ``harness/rows.ask_timeout_notice`` and the
+            # phone's card say the same thing).
             if bridge:
                 # D2: a carriage's ask is not this user's own agent. The
                 # timeout line says the same true thing; only the SUBJECT
                 # changes, so a reader is not told their own agent asked when
                 # the request came from another member's.
                 return (
-                    f"{ASK_MARKER} this request timed out — the sender moved on; "
-                    "your answer still reaches them"
+                    f"{ASK_MARKER} this request timed out — the sender goes ahead "
+                    "without your answer"
                 )
-            return (
-                f"{ASK_MARKER} this ask timed out — the agent moved on; "
-                "your answer still reaches it"
-            )
+            return f"{ASK_MARKER} this ask timed out — the agent goes ahead without your answer"
         if bridge:
             # A cross-member request: the answer travels back to the requester,
             # so "the agent asked" (this user's own) is the wrong subject.

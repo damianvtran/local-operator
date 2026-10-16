@@ -951,17 +951,16 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
 def ask_timeout_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_timeout`` row: ``(text, kind)``.
 
-    It says the agent MOVED ON and that the ask is still answerable, because
-    both halves are true and each is useless without the other: "timed out"
-    alone reads as finished, and "you can still answer" alone hides that the
-    agent stopped waiting. ``warning`` ink: this is the moment the user learns
-    their silence had a cost.
+    It says the agent went ahead WITHOUT the answer, in the phone's lapsed-card
+    words. It no longer adds "you can still answer": no surface offers a late
+    answer since decision D10, so that half became untrue. ``warning`` ink: this
+    is the moment the user learns their silence had a cost.
     """
     details = details or {}
     ask_id = str(details.get("ask_id") or "")
     waited = gate_waited_text(details)
     return (
-        f"Timed out after {waited} — the agent moved on; you can still answer (ask {ask_id})",
+        f"Timed out after {waited} — the agent goes ahead without your answer (ask {ask_id})",
         "warning",
     )
 
