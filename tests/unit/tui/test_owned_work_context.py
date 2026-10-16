@@ -26,7 +26,12 @@ from local_operator.tui.internal_work_membership import (
     owned_work_clauses,
     project_internal_work,
 )
-from local_operator.tui.quiet_groups import QuietGroupRecord, quiet_groups_of
+from local_operator.tui.quiet_groups import (
+    QuietGroupRecord,
+    group_splitter_of,
+    quiet_family_of,
+    quiet_groups_of,
+)
 from local_operator.tui.session_presentation import PreparedReplay, project_settled_rows
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -238,6 +243,51 @@ def test_context_corpus_is_one_ordered_group_and_receipts_are_not_actions() -> N
     assert groups[0].key == "qg:tool:launch"
     assert list(owned_work_clauses(records[1:9], members) or ()) == CORPUS["counts"]
     assert members["job-result-a"].outcome == "unknown"
+
+
+def test_a_failed_or_interrupted_tool_row_folds_inside_the_run() -> None:
+    """RF-1: a FAILED / stopped / never-sent tool row must stay INSIDE the run.
+
+    The internal-work view calls such a row ``role=boundary, attention=required``
+    because it demands the reader's attention. Reading that role in this fold's
+    boundary rule turned the row into a run SPLITTER, which is wrong twice: a
+    tool kind is base-INTERIOR (never a splitter), and splitting evicted the
+    failed row from the group that owns it — so the bar lost both the row and
+    the ``failed`` count. This pins the shared parity fixture's own failed-call
+    case ("a failed call is counted as failed": the failed row inside, actions
+    counted, ``failed: 1``) on the REAL contextual path, and it fails if the
+    work arm ever widens back over a base-interior kind.
+    """
+    records = [
+        WorkRecord("human", "user"),
+        WorkRecord("t0", "tool", tool_name="bash", real_tool=True),
+        WorkRecord("p1", "peer"),
+        WorkRecord("t1", "tool", tool_name="read", real_tool=True, is_error=True),
+        WorkRecord("p2", "peer"),
+    ]
+    members = project_internal_work(records)
+    assert members["t1"].role == "boundary" and members["t1"].attention == "required"
+
+    quiet = [
+        QuietGroupRecord(
+            kind=r.kind,
+            id=r.source_id,
+            tool_name=r.tool_name,
+            tool_state="failed" if r.source_id == "t1" else "success",
+            work=members[r.source_id],
+        )
+        for r in records
+    ]
+    # The failed row is INTERIOR: it must not split, and its kind must never be
+    # re-classified as a trigger.
+    assert group_splitter_of(quiet[3]) is False
+    assert quiet_family_of(quiet[3]) is None
+
+    groups = quiet_groups_of(quiet)
+    assert len(groups) == 1, "the failed tool row must not split the run"
+    (group,) = groups
+    assert group.row_ids == ("t0", "p1", "t1", "p2")
+    assert (group.count, group.actions, group.failed) == (2, 2, 1)
 
 
 def _history(*, held: bool = False, failed: bool = False, with_user: bool = True):

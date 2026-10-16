@@ -146,6 +146,18 @@ class QuietGroupRecord:
     work: WorkMembership | None = None
 
 
+#: The kinds the BASE vocabulary already classifies as interior — a row every
+#: reader may have hidden. Named ONCE and read by both the base checks and the
+#: work gate below: two copies of this list are how the work arm came to rescue
+#: a FAILED ``tool`` row (the deny-list omitted ``tool``/``inside``, so a tool
+#: row carrying ``work`` was classified by its membership role, and a
+#: failed/stopped call — ``role=boundary`` — split the very run it must fold
+#: into, contradicting the shared parity fixture's own failed-call case).
+WORK_ARM_EXEMPT_KINDS: frozenset[str] = frozenset(
+    {"tool", "peer", "hub", "wake", "monitor", "inside"}
+)
+
+
 def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
     """The family this row contributes when it is a trigger, or null.
 
@@ -163,12 +175,7 @@ def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
     # the ordering/prefix runs (test_hub_message ordered-repair, seated-picture
     # and human-prefix cases). The role belongs to the membership view, not to
     # this fold's boundary rule.
-    if record.work is not None and record.kind not in (
-        "peer",
-        "hub",
-        "wake",
-        "monitor",
-    ):
+    if record.work is not None and record.kind not in WORK_ARM_EXEMPT_KINDS:
         if record.work.role != "receipt":
             return None
         if record.work.family in ("peer", "hub"):
@@ -209,14 +216,9 @@ def group_splitter_of(record: QuietGroupRecord) -> bool:
     # Same gate as `quiet_family_of`: the work arm speaks only for rows the
     # base vocabulary does not classify, so a receipt kind keeps its base
     # reading (not a splitter) whatever the membership view calls its role.
-    if record.work is not None and record.kind not in (
-        "peer",
-        "hub",
-        "wake",
-        "monitor",
-    ):
+    if record.work is not None and record.kind not in WORK_ARM_EXEMPT_KINDS:
         return record.work.role == "boundary"
-    if record.kind in ("tool", "peer", "hub", "wake", "monitor", "inside"):
+    if record.kind in WORK_ARM_EXEMPT_KINDS:
         return False
     if record.kind == "assistant":
         return bool(record.text.strip())

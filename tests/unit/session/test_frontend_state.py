@@ -101,6 +101,37 @@ def _state(**changes) -> FrontendSessionState:  # noqa: ANN003
     return state.model_copy(update=changes)
 
 
+def test_internal_observer_is_not_a_viewer_and_a_reused_callable_cannot_leak() -> None:
+    """RF-2/RF-3: ``has_subscribers`` reads VIEWERS from the callback set.
+
+    Work reserved for an attached frontend (the turn-end checkpoint write) must
+    not run for a session whose only observer is the harness's own display fold.
+    Reading the classification from the CALLBACK SET rather than a parallel
+    counter is what makes a reused callable safe: registering the same function
+    as a viewer and then as an internal observer, then dropping the viewer, must
+    leave the session unattended -- with a counter it left ``has_subscribers``
+    True, i.e. a headless runtime doing viewer-only work.
+    """
+    store = FrontendStateStore(_state())
+
+    def observer(_update) -> None:
+        return None
+
+    assert store.has_subscribers is False
+    viewer = store.subscribe(observer)
+    assert store.has_subscribers is True
+    viewer.unsubscribe()
+    assert store.has_subscribers is False
+
+    # The collision the fix closes: SAME callable, viewer then internal.
+    viewer = store.subscribe(observer)
+    internal = store.subscribe_internal_threadsafe(observer)
+    viewer.unsubscribe()
+    assert store.has_subscribers is False, "an internal observer must not read as a viewer"
+    internal.unsubscribe()
+    assert store.has_subscribers is False
+
+
 def test_state_json_roundtrip_preserves_full_model_usage_and_future_fields() -> None:
     payload = _state().model_dump(mode="json")
     payload["future_owner_field"] = {"new": True}
