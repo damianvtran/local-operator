@@ -191,9 +191,12 @@ export function readQueue(
  * under-open, never override a refusal.
  *
  * ONE RESIDUAL LIMIT, not closable on the client: the runtime projects at most 20
- * rows before it computes the tally, so an outstanding timed-out ask that sorts
- * behind 20 newer rows is on neither field and no client can name it. The residue
- * is at most one extra auto-open, which is the surface the feature exists to show.
+ * rows before it computes the tally, so an outstanding ask that sorts behind 20
+ * newer rows is on neither field and no client can name it. A current runtime
+ * cannot reach that (open asks are capped at 8 and a timed-out one is not in the
+ * tally); a runtime from before #2388 could, by timed-out asks piling up. The
+ * residue is at most one extra auto-open, which is the surface the feature exists
+ * to show.
  */
 export function namesEveryOutstanding(
 	tally: number | undefined | null,

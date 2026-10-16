@@ -986,7 +986,7 @@ def _foreign_ask_projection() -> SessionProjection:
 
 
 def _ended_ask_projection() -> SessionProjection:
-    """A conversation whose runtime is GONE, with an ask still outstanding.
+    """A conversation whose runtime is GONE, with a lapsed (timed-out) ask.
 
     WHY IT IS ITS OWN SESSION (QA round 3, Q-1). Making `asks-foreign` ended
     turned its own route into a durable row with no asks and its frame stopped
@@ -1024,7 +1024,9 @@ def _ended_ask_projection() -> SessionProjection:
             ],
         )
     ]
-    projection.asks_open = 1
+    # Its only ask is timed out, which no longer counts (#2388): a live runtime
+    # would publish 0 here, so the committed rig shows the same chip-less list row.
+    projection.asks_open = 0
     return projection
 
 

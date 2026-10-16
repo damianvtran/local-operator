@@ -122,9 +122,9 @@ STATUS_EXPIRED = store.STATUS_EXPIRED
 #: the question (design §12) — nobody is waiting on it, and a stale tap can only
 #: be refused. ``expired`` injects nothing at all (§2.2). ``timed_out`` joins
 #: them on this surface (decision D10/D11): its deadline fired and the agent went
-#: ahead without an answer, so no surface offers one any more — the store still
-#: counts it outstanding and still takes a late answer through chat, but the list
-#: reads it the way it reads a declined ask, one settled line with a status word.
+#: ahead without an answer, so no surface offers one any more — the store no
+#: longer counts it outstanding (#2388) but still takes a late answer through
+#: chat, and the list reads it the way it reads a declined ask, one settled line with a status word.
 #:
 #: A SURFACE NO LONGER DROPS THEM (design §4): the list keeps every row and the
 #: three-way filter picks the half, so what this set is FOR now is the question a
@@ -320,10 +320,10 @@ class AskRow:
     def lapsed(self) -> bool:
         """Whether the row's deadline fired with no answer (``store.is_lapsed``).
 
-        Still outstanding to the store, but read-only here (D10): it sits in the
-        Settled half behind its ``timed out`` chip, and the only gesture it takes
-        is ``x`` dismiss — the one op the queue accepts on a timed-out ask, which
-        answers nobody.
+        No longer outstanding to the store (#2388), though it still takes a late
+        answer, and read-only here (D10): it sits in the Settled half behind its
+        ``timed out`` chip, and the only gesture it takes is ``x`` dismiss — the
+        one op the queue accepts on a timed-out ask, which answers nobody.
         """
         return store.is_lapsed(self.status)
 
@@ -460,7 +460,7 @@ def delivering_chip(row: AskRow) -> tuple[str, str] | None:
     its chip (round 2: F3/Q1/U4).
 
     IT DOES NOT HOLD THE SESSION'S MARK (round 2: F13). The mark is the index's
-    OUTSTANDING set (``open``/``timed_out``, §4.8) unioned with the current
+    OUTSTANDING set (``open`` only since #2388, §4.8) unioned with the current
     session's answerable rows, so it clears the moment the user answers — which
     is right, because it tracks a debt the USER owes and this ask's debt was
     paid. The agent's own delivery lag is what this row states; the sidebar is
