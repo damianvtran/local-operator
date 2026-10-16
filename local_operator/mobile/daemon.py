@@ -2569,37 +2569,6 @@ async def _engage_and_publish(
     return detail
 
 
-async def _republish_durable_projection(daemon: "MobileDaemon", session_id: str) -> None:
-    """Push the durable projection to a session's subscribers, with no engage.
-
-    THE NO-BOOT DISMISSAL IS THE ONE SETTLE THAT PUSHES NO FRAME OF ITS OWN (UX
-    round 1, U1). Every other ask op reaches a runtime, whose own fold publishes
-    the frame; a dismissal is decided by the fold on disk, so nothing repaints an
-    open screen — and the dock and the header chip read ``projection.asks``, so
-    they kept showing a question the user had just dismissed (measured at +45 s,
-    and the dock disagreed with the sheet the whole time). Main did not have this
-    because its engage pushed a frame.
-
-    ``_capture_durable_projection`` is the same fold site the phone's own open and
-    ``/api/asks`` use, so the frame says what a reload would say; the subscribe set
-    is the one the SSE route registers. Nothing here dials, and nothing is claimed
-    active: the session is still cold, and this only corrects what is drawn.
-    """
-    try:
-        projection = await daemon._capture_durable_projection(session_id)
-    except _StaleProjection:
-        # A fenced reconstruction: a live owner's frame has the screen, and the
-        # dismissal is already durable. Nothing here is worth failing it for.
-        return
-    if projection is None:
-        return
-    for target in daemon.table.session_subscribers.get(session_id, set()):
-        try:
-            target.put_nowait(_projection_frame(projection))
-        except asyncio.QueueFull:
-            pass
-
-
 def _journal_page(
     directory: Path,
     state: Any,
@@ -6331,7 +6300,23 @@ def build_app(daemon: MobileDaemon):
                         # and the dock/chip read ``projection.asks``. The same detail
                         # the live op answers with, because it IS the same op: only
                         # the door differs.
-                        await _republish_durable_projection(daemon, session_id)
+                        #
+                        # IT IS THE DAEMON'S OWN STOPPED-SCREEN REPAINT, not a
+                        # second publish spelling (agent review round 2, M-3/M-4).
+                        # Two properties ride on that reuse and both were missing
+                        # from the spelling this replaced:
+                        #
+                        # * the ENDED RECEIPT. ``_repaint_stopped_screen`` computes
+                        #   ``ended`` from the table the way the SSE route does, and
+                        #   the composer reads ``projection.ended`` — a conversation
+                        #   this daemon has watched die must not come back to life on
+                        #   the phone because a dismissal repainted it;
+                        # * the failure is the PAINT's, not the dismissal's. The
+                        #   dismissal is durable before this line, so a fold that
+                        #   raises is logged and the user is still told what they
+                        #   asked for, rather than served a 422/502 for a settled
+                        #   ask.
+                        await daemon._repaint_stopped_screen(session_id)
                         return JSONResponse({"ok": True, "detail": "dismissed"})
                     # ONLY a live owner falls back to the dial, and only because that
                     # owner settles the ask itself. Every other refusal is the ANSWER

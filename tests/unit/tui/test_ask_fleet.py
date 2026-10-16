@@ -1000,7 +1000,7 @@ async def test_an_unexpected_fleet_dismiss_failure_is_worded_as_a_dismissal(
 ):
     """Design round 1, D2: the TUI's fallback sentence must name the act that failed.
 
-    ``_fleet_ask_worker``'s fallback is "the answer could not be delivered", which
+    ``_fleet_ask_worker``'s fallback is "the answer could not be delivered.", which
     is the right sentence for the three ops that HAVE an answer to deliver — and
     the wrong one for a dismissal, whose whole promise is that nothing is sent. It
     fires only when the exception carries no message (every refusal from
