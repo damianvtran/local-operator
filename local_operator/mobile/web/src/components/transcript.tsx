@@ -354,7 +354,14 @@ function QuietGroupRow({
 					<span className="shrink-0" title={countTitle} aria-label={countTitle}>
 						{partial ? `${group.count}+` : `${group.count}`}
 					</span>
-					{group.mixedActions ? <span>· {group.actions} actions</span> : null}
+					{/* State the work whenever the group HAS work, not only above the
+					    old >=3 gate: the design's fact shape (quiet-turns §5) defines
+					    `actions` as "n non-quiet tool rows" with no gate, and a 1-2 tool
+					    run must not read bare `messages · 2` while expanding to more
+					    rows. Mirrors the TUI's clause for the same derivation (design
+					    round 1, D-1). Gated on a NONZERO count so a workless group never
+					    states `0 actions`. */}
+					{group.actions ? <span>· {group.actions} actions</span> : null}
 					{group.replyRequested ? <span>· {group.replyRequested} reply requested</span> : null}
 					{group.steered ? <span>· {group.steered} steered</span> : null}
 				</span>

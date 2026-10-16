@@ -86,7 +86,6 @@ export type QuietGroup = {
 	open: boolean;
 	/** Every row of the group, in order. */
 	rowIds: string[];
-	mixedActions?: boolean;
 	replyRequested?: number;
 	steered?: number;
 };
@@ -340,7 +339,6 @@ export function quietGroupOfSegment(
 		failed,
 		open: options.open ?? (span.to === records.length - 1),
 		rowIds,
-		...(realActions >= 3 && (triggers.length < 2 || triggers.some(r => isHubReceipt(r))) ? {mixedActions: true} : {}),
 		...(triggers.some(r => r.details?.expects_reply === true) ? {replyRequested: triggers.filter(r => r.details?.expects_reply === true).length} : {}),
 		...(triggers.some(r => r.details?.steer === true) ? {steered: triggers.filter(r => r.details?.steer === true).length} : {}),
 	};
@@ -365,6 +363,32 @@ export function quietGroupsOf(records: readonly QuietGroupRecord[]): QuietGroup[
 		start = i + 1;
 	}
 	return groups;
+}
+
+/** The summary clause FACTS a bar states, in order, as the shared contract.
+ *
+ * WHY THIS IS A SHARED DERIVATION. The clause set is the only part of a group
+ * that a reader actually reads, and it is derived (never sent). While each
+ * surface decided its own clause conditions, the SAME group could read
+ * `messages · 2 · 3 actions` in one client and bare `messages · 2` in another:
+ * the desktop gated its actions clause behind its own >=3 mixed-work flag, so a
+ * 1-2 tool run lost the clause here (design round 1, D-1). Deriving the facts
+ * once, and pinning them in the shared parity fixture, is what makes that drift
+ * fail in a tree instead of shipping.
+ *
+ * The facts are clause identifiers with their counts, not rendered text: a
+ * surface still owns its own words and formatting, exactly as it owns the
+ * family word (`quietGroupLabel`). Count semantics match the group fields: the
+ * count is TRIGGER rows, `actions` is non-quiet work rows.
+ */
+export function quietGroupClauseFacts(group: QuietGroup, options: { partial?: boolean } = {}): string[] {
+	const facts = [`count:${options.partial ? `${group.count}+` : `${group.count}`}`];
+	// Nonzero, not a threshold: a group with ANY work states it, and a workless
+	// group states no actions clause at all (never `0 actions`).
+	if (group.actions) facts.push(`actions:${group.actions}`);
+	if (group.replyRequested) facts.push(`reply_requested:${group.replyRequested}`);
+	if (group.steered) facts.push(`steered:${group.steered}`);
+	return facts;
 }
 
 /** The family's word for a group bar: family plural, `Messages` for a mix

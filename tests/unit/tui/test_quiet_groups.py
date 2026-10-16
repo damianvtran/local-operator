@@ -108,7 +108,32 @@ def _record_of(row: dict[str, Any]) -> QuietGroupRecord:
     return QuietGroupRecord(kind=kind, id=record_id, ts=ts, text=row.get("text", ""))
 
 
-def _as_fixture(group: QuietGroup | None) -> Any:
+def clause_facts(group: QuietGroup, *, partial: bool = False) -> list[str]:
+    """The summary clause FACTS a bar states, in the shared fixture's vocabulary.
+
+    The clause set is the only part of a group a reader actually reads, and it
+    is derived (never sent). While each surface decided its own conditions, the
+    SAME group read `messages · 2 · 3 actions` on one client and bare
+    `messages · 2` on another — the desktop gated its actions clause behind its
+    own >=3 mixed-work flag, so a 1-2 tool run lost the clause (design round 1,
+    D-1). Pinning the facts in the shared fixture is what makes that drift fail
+    in a tree rather than ship. Count semantics match the group fields (count =
+    trigger rows, actions = non-quiet work rows); the facts are clause
+    identifiers with counts, not rendered text — each surface owns its words.
+    """
+    facts = [f"count:{group.count}{'+' if partial else ''}"]
+    # Nonzero, not a threshold: any work states the clause, and a workless
+    # group states none (never `0 actions`).
+    if group.actions:
+        facts.append(f"actions:{group.actions}")
+    if group.reply_requested:
+        facts.append(f"reply_requested:{group.reply_requested}")
+    if group.steered:
+        facts.append(f"steered:{group.steered}")
+    return facts
+
+
+def _as_fixture(group: QuietGroup | None, *, partial: bool = False) -> Any:
     """The fixture's own JSON shape for a derived group, so the comparison is
     against the shared contract rather than against this port's field names."""
     if group is None:
@@ -124,6 +149,7 @@ def _as_fixture(group: QuietGroup | None) -> Any:
         "failed": group.failed,
         "open": group.open,
         "rowIds": list(group.row_ids),
+        "clauseFacts": clause_facts(group, partial=partial),
     }
 
 
@@ -135,7 +161,7 @@ def test_the_copied_fixture_stays_byte_identical_to_the_shared_contract() -> Non
     local-operator-ui PR #945's branch (``f9b041f8``); the two copies are
     byte-identical by construction."""
     digest = hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest()
-    assert digest == "3e5dca2158ef4103ff0e905e979daae2cb4dd61f4e379fecfb03cb9a53631dac"
+    assert digest == "ba02cd3d62ef763f97023d055d1951f88539de351a01cae5765ba899d4738138"
 
 
 @pytest.mark.parametrize(
@@ -152,9 +178,41 @@ def test_fixture_case_replays(case: dict[str, Any]) -> None:
             span_head_loaded=case.get("spanHeadLoaded", True),
             open=case.get("open"),
         )
-        assert _as_fixture(group) == case["expected"]
+        assert _as_fixture(group, partial=case.get("spanHeadLoaded") is False) == case["expected"]
         return
     assert [_as_fixture(group) for group in quiet_groups_of(records)] == case["expected"]
+
+
+@pytest.mark.parametrize(
+    "case", EXPRESSIBLE_CASES, ids=[case["name"] for case in EXPRESSIBLE_CASES]
+)
+def test_fixture_case_clause_facts(case: dict[str, Any]) -> None:
+    """The summary clause FACTS, pinned per case on this surface too.
+
+    `expected` alone pins counts but not the clause set, which is how the
+    actions clause drifted between clients with both suites green (design round
+    1, D-1). The shared fixture now carries `clauseFacts`, so a surface that
+    gates the clause differently fails HERE rather than shipping a bar that
+    reads one way in the TUI and another on the phone.
+    """
+    if case["expected"] is None:
+        pytest.skip("the refusal case derives no group, so it states no clauses")
+    records = [_record_of(row) for row in case["rows"]]
+    if "span" in case:
+        group = quiet_group_of_segment(
+            records,
+            tuple(case["span"]),
+            span_head_loaded=case.get("spanHeadLoaded", True),
+            open=case.get("open"),
+        )
+        groups = [group] if group is not None else []
+        want = [case["expected"]["clauseFacts"]]
+    else:
+        groups = quiet_groups_of(records)
+        want = [entry["clauseFacts"] for entry in case["expected"]]
+    # `partial` is the head-cut read: the fixture says so with `spanHeadLoaded: false`.
+    partial = case.get("spanHeadLoaded") is False
+    assert [clause_facts(group, partial=partial) for group in groups] == want
 
 
 def test_skips_exactly_the_cases_this_surface_cannot_express() -> None:
