@@ -348,5 +348,85 @@
     "role": "detail row",
     "tone": "plain",
     "note": "Relay-running row; `relay:` and `pid` are protocol words, and the padding after the colon aligns the value column."
+  },
+  "tui.small.approval.decision_allowed": {
+    "role": "row prefix",
+    "tone": "plain",
+    "note": "The live ask's decision row; the trailing space separates it from the tool name that follows, so it is layout."
+  },
+  "tui.small.approval.decision_denied": {
+    "role": "row prefix",
+    "tone": "plain",
+    "note": "The denial variant of the same row; keeps its trailing space and is deliberately a separate key from the allowed form."
+  },
+  "tui.small.info_panel.not_answering": {
+    "role": "state word",
+    "tone": "plain",
+    "note": "Stand-in for a wedged heartbeat, written as a state word rather than a sentence so it sits in the same slot as the real state values."
+  },
+  "tui.small.info_panel.install_info_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading over the install block; the trailing newline is part of the heading and the rule below it is drawn in code, not copy."
+  },
+  "tui.small.panels.scroll_hint": {
+    "role": "affordance suffix",
+    "tone": "plain",
+    "note": "Appended to a panel's hint only when it can actually scroll; the leading space and the arrows are the whole point, so keep both."
+  },
+  "tui.small.model_picker.effort": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Reasoning-effort list on a model row; the value is a slash-joined token list from the catalogue data and must stay untranslated."
+  },
+  "tui.small.model_picker.none_word": {
+    "role": "value word",
+    "tone": "plain",
+    "note": "The value shown when a model reports no reasoning efforts at all; a word, not an em dash, so it reads as a value."
+  },
+  "tui.small.model_picker.default": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "The model's default reasoning effort; the value is a protocol token and stays as-is."
+  },
+  "tui.small.model_picker.released": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Release date on a model row; the value is a date string supplied by the catalogue, not a formatted date."
+  },
+  "tui.small.model_picker.no_matching_models": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Empty state when a filter is active and matched nothing."
+  },
+  "tui.small.model_picker.no_models_available": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Empty state when no filter is active; distinct from the filtered form because the two states need different guidance."
+  },
+  "tui.small.network_panel.mesh_networks_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading of the mesh-networks card; trailing newline included, the rule under it is drawn in code."
+  },
+  "tui.small.session_panel.diagnostics_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading of the diagnostics card; trailing newline included, the rule under it is drawn in code."
+  },
+  "tui.small.subagent_panel.ctrl_g_shrink": {
+    "role": "keybinding hint",
+    "tone": "plain",
+    "note": "Shown while the panel is expanded; `ctrl+g` is the literal chord a user presses and stays verbatim."
+  },
+  "tui.small.subagent_panel.ctrl_g_expand": {
+    "role": "keybinding hint",
+    "tone": "plain",
+    "note": "Shown while the panel is collapsed; the paired state of the shrink hint and a separate key because the wording differs."
+  },
+  "tui.small.wake_panel.scheduled_count": {
+    "role": "header count",
+    "tone": "plain",
+    "note": "Count of scheduled wakes; the singular branch spells the digit into the sentence, matching the pre-split form, and the digit is raw (never grouped)."
   }
 }

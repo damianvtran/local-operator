@@ -14,6 +14,14 @@ def approval_allow_verb() -> Msg:
     return Msg("tui.small.approval.allow_verb", {})
 
 
+def approval_decision_allowed() -> Msg:
+    return Msg("tui.small.approval.decision_allowed", {})
+
+
+def approval_decision_denied() -> Msg:
+    return Msg("tui.small.approval.decision_denied", {})
+
+
 def aside_off_the_record() -> Msg:
     return Msg("tui.small.aside.off_the_record", {})
 
@@ -114,6 +122,10 @@ def info_panel_deeper_below_depth(*, deeper: str, depth: str) -> Msg:
     return Msg("tui.small.info_panel.deeper_below_depth", {"deeper": deeper, "depth": depth})
 
 
+def info_panel_install_info_heading() -> Msg:
+    return Msg("tui.small.info_panel.install_info_heading", {})
+
+
 def info_panel_last_heartbeat_ago(*, age: str) -> Msg:
     return Msg("tui.small.info_panel.last_heartbeat_ago", {"age": age})
 
@@ -122,8 +134,36 @@ def info_panel_needs_pending(*, pending: str) -> Msg:
     return Msg("tui.small.info_panel.needs_pending", {"pending": pending})
 
 
+def info_panel_not_answering() -> Msg:
+    return Msg("tui.small.info_panel.not_answering", {})
+
+
 def link_picker_title() -> Msg:
     return Msg("tui.small.link_picker.title", {})
+
+
+def model_picker_default(*, value: str) -> Msg:
+    return Msg("tui.small.model_picker.default", {"value": value})
+
+
+def model_picker_effort(*, value: str) -> Msg:
+    return Msg("tui.small.model_picker.effort", {"value": value})
+
+
+def model_picker_no_matching_models() -> Msg:
+    return Msg("tui.small.model_picker.no_matching_models", {})
+
+
+def model_picker_no_models_available() -> Msg:
+    return Msg("tui.small.model_picker.no_models_available", {})
+
+
+def model_picker_none_word() -> Msg:
+    return Msg("tui.small.model_picker.none_word", {})
+
+
+def model_picker_released(*, value: str) -> Msg:
+    return Msg("tui.small.model_picker.released", {"value": value})
 
 
 def model_picker_window_position(*, shown: str, total: str) -> Msg:
@@ -144,6 +184,10 @@ def network_panel_installed_row(*, value: str) -> Msg:
 
 def network_panel_member_count(*, count: int | float, shown: str) -> Msg:
     return Msg("tui.small.network_panel.member_count", {"count": count, "shown": shown})
+
+
+def network_panel_mesh_networks_heading() -> Msg:
+    return Msg("tui.small.network_panel.mesh_networks_heading", {})
 
 
 def network_panel_no_members() -> Msg:
@@ -194,6 +238,10 @@ def org_chart_view_zoom_clause(*, tier: str) -> Msg:
     return Msg("tui.small.org_chart_view.zoom_clause", {"tier": tier})
 
 
+def panels_scroll_hint() -> Msg:
+    return Msg("tui.small.panels.scroll_hint", {})
+
+
 def picker_of_separator() -> Msg:
     return Msg("tui.small.picker.of_separator", {})
 
@@ -204,6 +252,10 @@ def picker_showing_prefix() -> Msg:
 
 def session_resume_hint(*, hint: str) -> Msg:
     return Msg("tui.small.session.resume_hint", {"hint": hint})
+
+
+def session_panel_diagnostics_heading() -> Msg:
+    return Msg("tui.small.session_panel.diagnostics_heading", {})
 
 
 def session_picker_all_archived(*, total: str) -> Msg:
@@ -232,6 +284,14 @@ def session_picker_type_to_filter() -> Msg:
 
 def spend_channel_not_itemised() -> Msg:
     return Msg("tui.small.spend.channel_not_itemised", {})
+
+
+def subagent_panel_ctrl_g_expand() -> Msg:
+    return Msg("tui.small.subagent_panel.ctrl_g_expand", {})
+
+
+def subagent_panel_ctrl_g_shrink() -> Msg:
+    return Msg("tui.small.subagent_panel.ctrl_g_shrink", {})
 
 
 def subagent_view_no_longer_on_ledger() -> Msg:
@@ -290,6 +350,10 @@ def wake_panel_monitors_need_attention(*, count: int | float, shown: str, total:
 
 def wake_panel_monitors_title() -> Msg:
     return Msg("tui.small.wake_panel.monitors_title", {})
+
+
+def wake_panel_scheduled_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.wake_panel.scheduled_count", {"count": count, "shown": shown})
 
 
 def wake_panel_wakes_title() -> Msg:

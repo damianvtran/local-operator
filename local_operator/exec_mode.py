@@ -706,7 +706,7 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     try:
         resolve_hosting_model_dry(exec_args)
     except ValueError as exc:
-        print(
+        print(  # i18n: ignore SGR colour codes around extracted copy, not prose
             "\n\033[1;31m" + _t(_wd.error_line(error=str(exc))) + "\033[0m",
             file=sys.stderr,
         )
@@ -715,7 +715,7 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         # preflight failure exits with a clean non-zero, not a wrapped -1).
         return 1
     except Exception as exc:  # noqa: BLE001 — never spawn blind
-        print(
+        print(  # i18n: ignore SGR colour codes around extracted copy, not prose
             "\n\033[1;31m" + _t(_wd.error_preflight(error=str(exc))) + "\033[0m",
             file=sys.stderr,
         )
