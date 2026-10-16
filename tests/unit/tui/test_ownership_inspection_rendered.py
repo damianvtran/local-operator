@@ -117,7 +117,15 @@ async def test_standard_ownership_help_and_receipts_real_app(
             app._append_block(card)
             await pilot.pause()
             assert card.toggle_expanded()
-            card.scroll_visible(immediate=True)
+            # NON-ANIMATED on purpose (architect decision, Option A). The default
+            # animate=True runs a 0.2s scroll_y animation, and two failed
+            # attempts to OBSERVE that animation (a pre-loop idle settle, then a
+            # per-sample animator/scroll-target await) both still measured the
+            # identical 2-row offset delta. With animate=False Textual takes its
+            # non-animated branch and writes scroll_y and scroll_target_y
+            # together, so there is no in-flight motion for the two samples to
+            # straddle. The sticky tail re-lands with animate=False anyway.
+            card.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
             # Logical payload identity is not a painted-field assertion. The
             # production compact line may crop in the standard card; preserve
