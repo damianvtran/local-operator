@@ -579,7 +579,10 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
     must now keep standing over the rows it condensed and release only the row
     a reader has to see.
     """
-    from local_operator.harness.types import ToolCallComposeEvent, ToolExecutionStartEvent
+    from local_operator.harness.types import (
+        ToolCallComposeEvent,
+        ToolExecutionStartEvent,
+    )
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.events import ToolComposing, ToolStarted, UserMessageStart
     from local_operator.tui.widgets.transcript import QuietGroupBlock, TranscriptView
@@ -634,9 +637,9 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
         assert failed.display, "the failed row is released and visible"
         kept = list(bar._members)
         assert kept and all(member is not failed for member in kept)
-        assert not any(member.display for member in kept), (
-            "the rows already condensed stay condensed — handing them back is the the flicker"
-        )
+        assert not any(
+            member.display for member in kept
+        ), "the rows already condensed stay condensed — handing them back is the the flicker"
 
 
 @pytest.mark.asyncio

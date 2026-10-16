@@ -5051,7 +5051,7 @@ class QuietGroupTracker:
                 if own >= 0:
                     self._release_splitter(prior_bar, own)
             self._reconnect_tail()
-            return        # Bounds are decided in SOURCE space, with the SAME vocabulary the walk
+            return  # Bounds are decided in SOURCE space, with the SAME vocabulary the walk
         # used: the row above the span is a real source row (or the window
         # edge), never a synthetic bar. The physical helper reads the bar
         # whenever the span sits under an old one, which is precisely the
@@ -5295,7 +5295,15 @@ class QuietGroupTracker:
         members = list(bar._members)
         splitter = self._boundary_member_index(members)
         if splitter < 0:
-            splitter = last_splitter
+            # No member's own row carries attention, so fall back to the index
+            # the caller derived. That index comes from a record walk over the
+            # bar's OWN members, which is trustworthy only INSIDE the bar: with
+            # no row above it the walk cannot give the first member a family and
+            # coordinate, so a split it reports at index 0 is the bar's own head
+            # rather than a row inside it. An interior index is accepted; the
+            # head case falls through to the unfold below, which is what a
+            # first-member boundary means.
+            splitter = last_splitter if last_splitter > 0 else 0
         kept = members[:splitter]
         released = members[splitter:]
         if not kept:
@@ -5368,9 +5376,7 @@ class QuietGroupTracker:
                 if record.kind == "tool" and not is_quiet_turn_name(record.tool_name)
             ),
             failed=sum(
-                1
-                for record in records
-                if record.kind == "tool" and record.tool_state == "failed"
+                1 for record in records if record.kind == "tool" and record.tool_state == "failed"
             ),
             senders=(
                 tuple(
@@ -5381,6 +5387,12 @@ class QuietGroupTracker:
                 else ()
             ),
             row_ids=tuple(record.id for record in records),
+            # These two are painted as chips on the bar's line, so they are
+            # re-derived from the kept triggers exactly as `count` is: a chip
+            # announcing a reply request or a steer for a row the fold has let
+            # go would be the same lie as a stale count.
+            reply_requested=sum(1 for record in triggers if record.expects_reply is True),
+            steered=sum(1 for record in triggers if record.steer is True),
             open=False,
         )
 
