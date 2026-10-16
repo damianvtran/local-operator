@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import json
 import os
 import socket
@@ -597,7 +598,7 @@ def test_a_detached_ceremony_is_reaped_by_a_waiter_of_its_own() -> None:
     reaped = subprocess.Popen([sys.executable, "-c", script])
     control = subprocess.Popen([sys.executable, "-c", script])
     try:
-        net_tool._reap_when_it_exits(reaped.pid)  # noqa: SLF001 — the helper under test
+        net_tool._reap_when_it_exits(reaped)  # noqa: SLF001 — the helper under test
         deadline = time.time() + 15.0
         gone = False
         corpse = False
@@ -643,7 +644,7 @@ def test_the_reaper_names_how_the_child_ended(
 
     child = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(7)"])
     with caplog.at_level("WARNING"):
-        net_tool._reap_when_it_exits(child.pid)  # noqa: SLF001 — the helper under test
+        net_tool._reap_when_it_exits(child)  # noqa: SLF001 — the helper under test
         deadline = time.time() + 15.0
         while time.time() < deadline and "exited with status 7" not in caplog.text:
             time.sleep(0.05)
@@ -669,7 +670,7 @@ def test_a_clean_exit_is_logged_but_not_as_a_warning(
 
     child = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"])
     with caplog.at_level("INFO"):
-        net_tool._reap_when_it_exits(child.pid)  # noqa: SLF001 — the helper under test
+        net_tool._reap_when_it_exits(child)  # noqa: SLF001 — the helper under test
         deadline = time.time() + 15.0
         while time.time() < deadline and "exited with status 0" not in caplog.text:
             time.sleep(0.05)
@@ -696,6 +697,166 @@ def test_a_signalled_child_is_named_as_a_signal() -> None:
     )
     _pid, status = os.waitpid(child.pid, 0)
     assert net_tool._describe_child_exit(status) == "killed by signal 9"  # noqa: SLF001
+
+
+def test_a_forced_gc_pass_does_not_kill_the_parked_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The join_park ROOT fix end to end: a GC pass in the parked window spares the child.
+
+    THE DEFECT. ``_start_parked_join`` leaves a detached child running so the person's
+    own ``lop network join --confirm`` can reach it. Before the fix, only the child's
+    PID was handed to ``_reap_when_it_exits``, so the child's asyncio subprocess
+    transport was referenced by nothing but its own reference cycle — and a GC pass in
+    the parked window could free it, running ``BaseSubprocessTransport.__del__`` ->
+    ``close()`` -> ``self._proc.kill()``, SIGKILLing the ceremony the answer had to
+    reach. On CI that surfaced as ``parked pairing child <pid> killed by signal 9``
+    (three consecutive main pushes). THIS TEST DRIVES THE REAL ``_start_parked_join``
+    and asserts the child outlives a forced GC pass; reverting EITHER end (the call
+    site handing over ``process.pid``, or the reaper not referring to the object) fails
+    it, reproduced here before the fix with exactly the CI signature.
+
+    WHY THE WATCHER IS REPLACED, AND WHY THAT IS THE HONEST FORM ON DARWIN. macOS has
+    no ``os.pidfd_open``, so its default ``ThreadedChildWatcher`` starts a thread whose
+    arguments include the transport's bound ``_process_exited`` — which PINS the
+    transport and hides the defect, so an unmodified darwin run passes either way. The
+    watcher installed here holds nothing, which is the state Linux's
+    ``PidfdChildWatcher`` leaves once ``asyncio.run`` closes the loop, making the
+    collection the fix prevents deterministic on this platform.
+
+    THE 3.12 RESIDUAL, STATED. CPython 3.13 added the gh-114177 guard that SKIPS
+    ``proto.pipe.close()`` when the loop is already closed, so ``close()`` reaches
+    ``kill()``; on 3.12 that guard is absent and ``pipe.close()`` raises out of
+    ``__del__`` before the child is signalled, so the KILL is unreachable there and this
+    assertion cannot discriminate a reverted fix on a 3.12 host. It is the CI 3.13 leg
+    that flakes, and that leg is where this test does its work; the 3.12 run still
+    asserts the child survives the parked window, which is a true product property.
+    """
+    if not hasattr(os, "waitpid"):
+        pytest.skip("no zombies off POSIX — and no reaper to exercise")
+
+    # The body phase one reads carries the child's OWN pid, so the assertion can read
+    # liveness for the exact process the parked ceremony is holding.
+    script = (
+        "import json,os,sys,time; "
+        "sys.stdout.write(json.dumps({'ok': True, 'sas': '123456', 'pid': os.getpid()}) + '\\n'); "
+        "sys.stdout.flush(); time.sleep(30)"
+    )
+    monkeypatch.setattr(
+        net_tool, "_cli_argv", lambda: [sys.executable, "-c", script]
+    )  # noqa: SLF001 — patch the argv prefix, not the tool
+
+    class _NullWatcher(asyncio.AbstractChildWatcher):
+        """A child watcher that REGISTERS a handler and holds nothing (the pidfd shape)."""
+
+        def add_child_handler(self, pid: int, callback: Any, *args: Any) -> None:
+            pass
+
+        def remove_child_handler(self, pid: int) -> bool:
+            return True
+
+        def attach_loop(self, loop: Any) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def is_active(self) -> bool:
+            return True
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+    policy = asyncio.get_event_loop_policy()
+    setter = getattr(policy, "set_child_watcher", None)
+    if setter is None:  # pragma: no cover — Python 3.14 removed the policy API
+        pytest.skip("no set_child_watcher on this Python; the watcher cannot be pinned")
+    previous = policy.get_child_watcher()  # noqa: SLF001
+    setter(_NullWatcher())
+    pid = None
+    try:
+        code, body, _err = asyncio.run(net_tool._start_parked_join(["join"]))  # noqa: SLF001
+        assert code == 0
+        pid = json.loads(body)["pid"]
+
+        # The loop is now CLOSED (``asyncio.run`` returned) and nothing on this side
+        # references the child's transport — exactly the parked window. Force the GC
+        # passes a loaded shard runs constantly; the fix's retention is what must keep
+        # the transport alive so ``close()`` never SIGKILLs the ceremony.
+        for _ in range(3):
+            gc.collect()
+        time.sleep(0.2)
+
+        assert _child_is_alive(pid), (
+            f"the parked child {pid} was killed by a GC pass: the child's asyncio "
+            "transport was collected and ran __del__ -> close() -> kill(). The reaper "
+            "must retain the process object (the join_park flake)."
+        )
+    finally:
+        setter(previous)
+        if pid is not None:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:  # pragma: no cover — the reaper thread won the race
+                pass
+
+
+def _child_is_alive(pid: int) -> bool:
+    """True when the pid is a LIVE (non-zombie) process."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return "Z" not in os.popen(f"ps -o state= -p {pid}").read().strip()
+
+
+def test_the_parked_join_hands_the_reaper_the_process_not_its_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CALL SITE, pinned: ``_start_parked_join`` hands over the process object.
+
+    The end-to-end test above already fails if the caller reverts, but this names the
+    wiring directly and cheaply: it drives the real ``_start_parked_join`` with a stub
+    child and asserts the ARGUMENT the reaper receives is the process object, not a
+    pid. The stub prints exactly the one-body-then-stay-open shape phase one reads, so
+    the park path proceeds down the branch that hands the child to the reaper.
+    """
+    handed: list[Any] = []
+
+    class _StubStream:
+        async def readline(self) -> bytes:
+            return b'{"ok": true, "sas": "123456"}\n'
+
+    class _StubProcess:
+        pid = 4242
+        stdout = _StubStream()
+
+    async def _fake_exec(*args: Any, **kwargs: Any) -> Any:
+        return _StubProcess()
+
+    def _capture(process: Any) -> None:
+        handed.append(process)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(net_tool, "_reap_when_it_exits", _capture)
+
+    code, body, _err = asyncio.run(net_tool._start_parked_join(["join"]))  # noqa: SLF001
+
+    assert code == 0 and "123456" in body
+    assert handed, "the parked join never handed the child to a reaper"
+    assert not isinstance(handed[0], int), (
+        "the call site handed the reaper a bare pid: the asyncio transport is then "
+        "unreferenced and a GC pass in the parked window SIGKILLs the child (the "
+        "join_park flake). Hand it the process object."
+    )
+    assert handed[0].pid == 4242
 
 
 def test_a_missing_argument_is_refused_with_a_sentence_not_a_call() -> None:

@@ -54,7 +54,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -682,8 +682,20 @@ def _describe_child_exit(status: int) -> str:
     return ""
 
 
-def _reap_when_it_exits(pid: int) -> None:
-    """Reap a DETACHED child from a thread, because this call's loop will be gone.
+class _ReapableChild(Protocol):
+    """A child the reaper can wait on: anything carrying its pid.
+
+    ``asyncio.subprocess.Process`` and ``subprocess.Popen`` both qualify. Structural,
+    not nominal, because the reaper genuinely needs only the pid — but it takes the
+    WHOLE OBJECT on purpose; see ``_reap_when_it_exits`` for why the pid alone is the
+    bug this protocol's shape prevents.
+    """
+
+    pid: int
+
+
+def _reap_when_it_exits(process: _ReapableChild) -> None:
+    """Reap a DETACHED child from a thread, KEEPING THE PROCESS OBJECT until it is reaped.
 
     The parked ceremony outlives the call that started it by design, and the loop it
     was started under does not: the harness runs each tool call in its own
@@ -693,6 +705,33 @@ def _reap_when_it_exits(pid: int) -> None:
     made a liveness probe answer "alive" for a process that had finished (agent review
     round 1, code finding 1). A blocking ``os.waitpid`` on ONE pid, in one daemon
     thread, is that waiter: it returns the moment this child exits, whenever that is.
+
+    WHY THE PROCESS OBJECT AND NOT ITS PID — THE RETENTION IS THE FIX, NOT TIDINESS.
+    Handing this thread the pid alone left the child's ``asyncio`` subprocess transport
+    referenced by nothing but its own reference cycle (transport <->
+    ``SubprocessStreamProtocol`` <-> ``StreamReader`` <-> the pipe transport), so a GC
+    pass could free it while the parked child was still running. Freeing it runs
+    ``BaseSubprocessTransport.__del__`` -> ``close()`` -> ``self._proc.kill()`` — a
+    SIGKILL to the very process the person's confirmation has to reach. That is the
+    join_park flake: ``test_the_tool_parks_and_the_person_runs_phase_two`` died with
+    ``parked pairing child <pid> killed by signal 9``, three times in a row on main,
+    because a loaded CI shard runs GC passes constantly in the window between "child
+    parked" and "the person confirms". Holding ``process`` here keeps the transport
+    reachable for exactly as long as this thread waits, so the GC trigger cannot fire.
+
+    THE PLATFORM SPLIT IS WHY THIS WAS CI-ONLY, AND WHY THE FIX IS NOT OPTIONAL. The
+    default child watcher is chosen by ``can_use_pidfd()``: Linux has ``pidfd_open``,
+    so ``PidfdChildWatcher`` registers the exit callback on the loop's reader and the
+    transport is collectable once ``asyncio.run`` closes that loop; macOS has no
+    ``pidfd_open``, so ``ThreadedChildWatcher`` starts a thread whose arguments include
+    the transport's bound ``_process_exited``, which PINS the transport and hid the
+    defect locally. The defective path is therefore unreachable on darwin and live on
+    Linux/CI — an isolation pass here is real but was never proof.
+
+    DO NOT "SIMPLIFY" THIS BACK TO ``_reap_when_it_exits(process.pid)``. The pid is
+    all this thread *uses*; the object is what it *holds*, and
+    ``tests/unit/network/test_tool.py::test_a_forced_gc_pass_does_not_kill_the_parked_child``
+    fails if the retention is removed (the exact CI signature, reproduced).
 
     THE EXIT STATUS IS KEPT, not discarded (the flaky-sweep fix): a clean exit and an
     early signal are what tell a future reader whether the ceremony finished or died,
@@ -713,8 +752,13 @@ def _reap_when_it_exits(pid: int) -> None:
     import threading
 
     def wait() -> None:
+        # LOAD-BEARING REFERENCE. ``held`` exists to keep the process object — and
+        # through it the asyncio transport whose ``__del__`` SIGKILLs the child — alive
+        # until ``os.waitpid`` returns. Removing it restores the GC-kill flake; the
+        # regression test names this. See this function's docstring.
+        held = process
         try:
-            _reaped_pid, status = os.waitpid(pid, 0)
+            _reaped_pid, status = os.waitpid(held.pid, 0)
         except (ChildProcessError, OSError):
             # Somebody else reaped it first (an alive loop's watcher), or it was never
             # ours: either way the process table is already consistent.
@@ -732,7 +776,7 @@ def _reap_when_it_exits(pid: int) -> None:
         logger.log(
             logging.INFO if clean else logging.WARNING,
             "parked pairing child %d %s",
-            pid,
+            held.pid,
             ended,
         )
 
@@ -804,8 +848,10 @@ async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
             await _reap(process)
         else:
             # THE SOCKET IS STILL OPEN, so this child is still ours and will exit long
-            # after this loop is gone: hand it a waiter that outlives the call.
-            _reap_when_it_exits(process.pid)
+            # after this loop is gone: hand it a waiter that outlives the call. The
+            # PROCESS is handed over, not its pid: the waiter must retain the object or
+            # a GC pass here would SIGKILL the parked child (see ``_reap_when_it_exits``).
+            _reap_when_it_exits(process)
         return 0, text[start : start + end], ""
     # No body, so nothing is parked and nobody could answer it: the socket goes now
     # rather than at the end of a window nothing is watching.
