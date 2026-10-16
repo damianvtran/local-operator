@@ -719,6 +719,16 @@ async def test_a_pending_attach_behind_attempt_holds_the_never_row(tmp_path, mon
         attempt = app._attach_behind_attempt_for(app._interaction, session)
         assert attempt is not None and attempt.phase in ("pending", "narrated"), "premise"
         assert not app._starting_runtime, "the form under test is the attempt alone"
+        # F2: the attempt is a CUE SOURCE IN ITS OWN RIGHT, not only a cue
+        # silencer. The old composition read `_starting_runtime or (a waiting
+        # send)`, so this frame -- the paint-first window whose engage a swap
+        # cancelled, schedule still armed -- could neither raise the cue nor,
+        # with the reader suppressing NEVER over it, paint a verdict: blank.
+        # The push below is the one a reveal makes
+        # (`_resurface_attach_behind`), and it must RAISE the cue here.
+        assert app._starting_shown is False, "premise: the cue is down before the push"
+        app._push_starting_band()
+        assert app._starting_shown, "the pending attempt must hold the cue up"
 
         app._liveness_probe_last = None
         app._probe_foreground_liveness()
@@ -793,3 +803,188 @@ async def test_a_prompt_awaiting_its_bind_holds_the_never_row(tmp_path, monkeypa
         await _probe_settled(app, pilot)
         assert getattr(app._status, "_connection", "") == LIVENESS_TEXT[OwnerLiveness.NEVER]
         assert app._liveness_painted == LIVENESS_TEXT[OwnerLiveness.NEVER]
+
+
+# --------------------------------------------------------------------------
+# THE REGISTER AND THE GATE: two properties a TEXT-only suite cannot see.
+#
+# `set_connecting(True)` means "animate the connection segment": the glyph
+# rides it and the row stays muted. STALE and NEVER have nothing arriving, so
+# they keep the quiet register; COMING is the one verdict that IS arriving, so
+# the glyph is its own. Asserted on the FLAGS and on the rendered INK, because
+# the glyph itself is shimmer-gated — with the shimmer off a "pinned-still"
+# harness renders the inverted composition as a seemingly-correct row, which is
+# exactly how the inversion below reached CI green.
+# --------------------------------------------------------------------------
+
+
+class _OwnerSideSession:
+    """The owner shape `_is_viewer` must refuse: in-process, no dial, no stamp."""
+
+    owns_runtime = True
+    verified_at: float | None = None
+    attaching = False
+
+
+@pytest.mark.asyncio
+async def test_the_register_maps_the_glyph_to_coming_and_keeps_the_quiet_rows_still(
+    tmp_path, monkeypatch
+):
+    """The register pin (reviewer F1 / QA Q1 / design D1), on the real band.
+
+    The three reachable verdicts, each driven through the fill the app itself
+    runs, asserted on the widget flags the render reads (`_connecting`,
+    `_connection_muted`, `_spinner_timer`) and on the ink in the rendered row --
+    never on the text alone, which cannot see a glyph, an ink or a timer.
+    """
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        status = app._status
+        assert status is not None
+        muted = theme_mod.semantic_color("muted")
+        danger = theme_mod.semantic_color("danger")
+
+        def inks() -> set[str]:
+            return {str(span.style) for span in status.render_text(100).spans}
+
+        # NEVER: the ordinary state of a conversation nothing is serving — cold,
+        # no stamp, and no bring-up in flight (no attempt, no engage, no send).
+        cold = await _cold_viewer(tmp_path)
+        app._interaction.session = cold
+        assert owner_liveness(cold) is OwnerLiveness.NEVER, "premise"
+        assert not app._bring_up_in_flight(app._interaction), "premise: nothing is arriving"
+        app._show_sidebar_connection(app._interaction)
+        assert status._connection == LIVENESS_TEXT[OwnerLiveness.NEVER], status._connection
+        assert status._connecting is False, "NEVER must not animate: nothing is arriving"
+        assert status._spinner_timer is None, "NEVER must not start the band's timer"
+        assert LIVENESS_TEXT[OwnerLiveness.NEVER] in status.render_text(100).plain
+        assert muted in inks() and danger not in inks(), "NEVER is quiet, not an error"
+
+        # STALE: PROVISIONAL — a long turn ends, a SIGCONT lands — so it takes
+        # the same quiet register and NOT the alarm ink.
+        stale = await _viewer_facade(tmp_path, quiet_for=600.0)
+        app._interaction.session = stale
+        assert owner_liveness(stale) is OwnerLiveness.STALE, "premise"
+        assert not app._bring_up_in_flight(app._interaction), "premise: nothing is arriving"
+        app._show_sidebar_connection(app._interaction)
+        assert status._connection.startswith(LIVENESS_TEXT[OwnerLiveness.STALE]), status._connection
+        assert status._connecting is False, "STALE must not animate: nothing is arriving"
+        assert status._spinner_timer is None, "STALE must not start the band's timer"
+        assert LIVENESS_TEXT[OwnerLiveness.STALE] in status.render_text(100).plain
+        assert muted in inks() and danger not in inks(), "STALE is provisional, not an error"
+
+        # COMING: a dial is retained and its canonical state has not arrived —
+        # something IS arriving, so this verdict keeps the glyph, and the band
+        # animates for it.
+        coming = await _cold_viewer(tmp_path)
+        coming._socketed_unsynced = True  # the wire's own "attaching"
+        assert owner_liveness(coming) is OwnerLiveness.COMING, "premise"
+        assert not app._bring_up_in_flight(app._interaction), "premise: the verdict is the cue"
+        app._interaction.session = coming
+        app._show_sidebar_connection(app._interaction)
+        assert status._connection == LIVENESS_TEXT[OwnerLiveness.COMING], status._connection
+        assert status._connecting is True, "COMING keeps the glyph: something is arriving"
+        assert status._spinner_timer is not None, "COMING animates the band"
+        assert LIVENESS_TEXT[OwnerLiveness.COMING] in status.render_text(100).plain
+        assert danger not in inks(), "in-progress must not wear the alarm ink"
+        assert muted in inks(), "COMING takes the muted register, as the connect path does"
+
+
+@pytest.mark.asyncio
+async def test_the_reader_paints_nothing_for_a_non_viewer(tmp_path, monkeypatch):
+    """F3: the non-viewer guard yields "", never a verdict about an owner.
+
+    An owner-side session never dials, so it carries no stamp and would classify
+    as NEVER — a confident-wrong `No owner` about the process that IS the owner
+    (design §7.2). The guard is the only thing between the two, and the fill
+    reads it too, so both sides of the gate answer alike.
+    """
+    from local_operator.tui.app import OperatorApp, _is_viewer
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        session = _OwnerSideSession()
+        app._interaction.session = session  # type: ignore[assignment]
+        assert _is_viewer(session) is False, "premise: the owner side is not a viewer"
+        assert (
+            owner_liveness(session) is OwnerLiveness.NEVER
+        ), "premise: the shape that would paint the false row"
+        assert app._liveness_row_text(app._interaction) == ""
+        assert app._liveness_fill_text(app._interaction) == "", "and the gate agrees"
+
+
+@pytest.mark.asyncio
+async def test_the_suppressed_fork_row_gates_on_what_it_paints(tmp_path, monkeypatch):
+    """D2: the gate must remember the fork prefix, not only the liveness tail.
+
+    While a bring-up is being narrated the reader yields "" and the row is
+    `forking · esc` ALONE. Remembering only the tail left the gate at "" over a
+    non-empty row: the post-bind tick compared "" == "" and skipped, and the
+    takeover row stood on a live session (measured as `forking · esc … fake`).
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        session = await _cold_viewer(tmp_path)
+        session.attach_behind = True  # the paint-first bring-up
+        session.has_pending_fork = lambda: True  # type: ignore[method-assign]
+        app._interaction.session = session
+        attempt = app._attach_behind_attempt_for(app._interaction, session)
+        assert attempt is not None and not attempt.silences_cue, "premise: a bring-up is in flight"
+        assert app._liveness_row_text(app._interaction) == "", "premise: the tail is suppressed"
+
+        painted = _record_connection_paints(monkeypatch)
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+
+        assert app._status is not None
+        row = getattr(app._status, "_connection", "")
+        assert row == FORK_PENDING_TEXT, f"the fork keeps the row on screen: {row!r}"
+        assert app._liveness_painted == row, (
+            "the gate must remember the row it painted, not the suppressed tail",
+            app._liveness_painted,
+        )
+
+        # A second due tick with nothing changed: the gate AGREES with the row,
+        # so there is no repaint — the other half of the same assertion.
+        before = len(painted)
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert len(painted) == before, "an unchanged fork row must not repaint"
+
+        # The bring-up lands and the fork drains at its turn boundary: the row is
+        # no longer the one the gate remembers, so the next due tick clears it.
+        session._client = BoundClient()  # type: ignore[assignment]
+        session._ready_for_events = True
+        session._verified_at = time.time()
+        session.has_pending_fork = lambda: False  # type: ignore[method-assign]
+        assert owner_liveness(session) is OwnerLiveness.LIVE, "premise: the bind landed"
+
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert getattr(app._status, "_connection", "") == "", (
+            "the takeover row outlived the bind",
+            getattr(app._status, "_connection", ""),
+        )
+        assert app._liveness_painted == "", "and the gate followed it down"
+        assert "" in painted[before:], ("the clearing repaint happened", painted)
