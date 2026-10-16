@@ -11,6 +11,7 @@ way no live process would reveal.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -1093,6 +1094,112 @@ def test_a_config_edit_is_read_on_the_next_command(tmp_path: object) -> None:
         override = _configured_memory_budget(123)
         assert override.source == "override"
         assert override.ceiling_mb == 123
+
+
+@pytest.mark.parametrize("mode,configured", [("manual", 777), ("auto", 2651)])
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("override", [None, 0, 64])
+def test_configured_cap_preserves_the_master_switch_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    configured: int,
+    enabled: bool,
+    override: int | None,
+) -> None:
+    """Exercise the config reader with fixed inputs, never a real host or file."""
+    from local_operator.tools import builtin
+
+    values: dict[tuple[str, ...], object] = {
+        mg.BASH_MEMORY_MODE_PATH: mode,
+        mg.BASH_MEMORY_LIMIT_MB_PATH: 777,
+        mg.BASH_MEMORY_ENABLED_PATH: enabled,
+    }
+
+    class FixedConfig:
+        def get_nested_value(self, path: tuple[str, ...], default: object) -> object:
+            return values.get(path, default)
+
+    monkeypatch.setattr(builtin, "ConfigManager", lambda _root: FixedConfig())
+    monkeypatch.setattr(builtin, "config_dir", lambda: tmp_path)
+    _pin_host(monkeypatch, available_mb=3675, total_mb=36864, free_swap_mb=1192)
+    budget = builtin._configured_memory_budget(override)
+    if not enabled or override == 0:
+        expected_source, expected_ceiling = "disabled", 0
+    elif override is not None:
+        expected_source, expected_ceiling = "override", override
+    else:
+        expected_source, expected_ceiling = mode, configured
+    assert (budget.source, budget.ceiling_mb) == (expected_source, expected_ceiling)
+
+
+@pytest.mark.parametrize(
+    "override,source,ceiling", [(None, "auto", 2651), (0, "disabled", 0), (64, "override", 64)]
+)
+def test_cap_constructor_failure_uses_enabled_defaults_without_dropping_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    override: int | None,
+    source: str,
+    ceiling: int,
+) -> None:
+    from local_operator.tools import builtin
+
+    def unavailable(_root: Path) -> None:
+        raise OSError("synthetic constructor failure")
+
+    monkeypatch.setattr(builtin, "ConfigManager", unavailable)
+    monkeypatch.setattr(builtin, "config_dir", lambda: tmp_path)
+    _pin_host(monkeypatch, available_mb=3675, total_mb=36864, free_swap_mb=1192)
+    budget = builtin._configured_memory_budget(override)
+    assert (budget.source, budget.ceiling_mb) == (source, ceiling)
+
+
+def test_cap_getter_failure_preserves_fields_read_before_the_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The existing reader is sequential, not an atomic all-default fallback."""
+    from local_operator.tools import builtin
+
+    seen: list[tuple[str, ...]] = []
+    values: dict[tuple[str, ...], object] = {
+        mg.BASH_MEMORY_MODE_PATH: "manual",
+        mg.BASH_MEMORY_LIMIT_MB_PATH: 777,
+    }
+
+    class PartialConfig:
+        def get_nested_value(self, path: tuple[str, ...], default: object) -> object:
+            seen.append(path)
+            if path == mg.BASH_MEMORY_SOFT_FRACTION_PATH:
+                raise OSError("synthetic later getter failure")
+            return values.get(path, default)
+
+    monkeypatch.setattr(builtin, "ConfigManager", lambda _root: PartialConfig())
+    monkeypatch.setattr(builtin, "config_dir", lambda: tmp_path)
+    _pin_host(monkeypatch, available_mb=3675, total_mb=36864, free_swap_mb=1192)
+    budget = builtin._configured_memory_budget(None)
+    assert seen == [
+        mg.BASH_MEMORY_MODE_PATH,
+        mg.BASH_MEMORY_LIMIT_MB_PATH,
+        mg.BASH_MEMORY_SOFT_FRACTION_PATH,
+    ]
+    assert (budget.source, budget.ceiling_mb) == ("manual", 777)
+    assert budget.soft_mb == int(777 * mg.BASH_MEMORY_SOFT_FRACTION_DEFAULT)
+
+
+def test_published_bash_cap_schema_states_the_master_switch_condition() -> None:
+    from local_operator.tools.builtin import BashParams, build_bash_tool
+
+    # Inspect the actual advertised tool, not a second hand-written schema.
+    field = build_bash_tool().parameters["properties"]["memory_mb"]
+    assert field == BashParams.model_json_schema()["properties"]["memory_mb"]
+    description = field["description"]
+    assert "Process-group RAM ceiling in MB" in description
+    assert "Omit for configured budget" in description
+    assert "0 disables this call's limit" in description
+    assert "Positive overrides the budget only when bash.memory.enabled=true" in description
+    assert "Exceeding the limit kills the group" in description
+    assert field["default"] is None
 
 
 # ---------------------------------------------------------------------------
