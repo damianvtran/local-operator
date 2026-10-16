@@ -36,8 +36,11 @@ description: "Save or recall goals, files, channels, threads, contacts and decis
 nonsecret personal/user knowledge in **global** memory, across sessions. Recall with
 `memory(op="recall", text="Elara location")`. Both operations are bound to global;
 there is **no scope argument**. Old scope-bearing calls are refused, never stripped
-or reinterpreted. This is a declared personal-only convenience, not a content
-classifier or a guarantee that a model will always choose the right tool.
+or reinterpreted. This is a declared personal-only convenience with a bounded shape
+check: a tracker reference, a named commit, a CI/release status verb or a `next step`
+phrase is refused with a redirect to `memory://session`. It is a narrow locator
+filter — it cannot judge arbitrary prose, and it is not a guarantee that a model
+will always choose the right tool.
 
 Work state and checkpoints use `memory://session`; intentionally shared work uses
 `memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
