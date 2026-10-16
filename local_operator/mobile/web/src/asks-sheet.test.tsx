@@ -320,7 +320,7 @@ describe("AsksSheet", () => {
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
 		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
-		expect(screen.getByText("Timed out — the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.getByText("the agent goes ahead without your answer")).toBeTruthy();
 		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
 	});
 
