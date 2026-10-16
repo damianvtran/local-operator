@@ -20,7 +20,7 @@ import fcntl
 import json
 import os
 import re
-import select
+import selectors
 import signal
 import socket
 import struct
@@ -228,17 +228,30 @@ class _TuiChild:
 
     def drain(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([self.master], [], [], 0.1)
-            if not readable:
-                continue
-            try:
-                data = os.read(self.master, 65536)
-            except OSError:
-                return
-            if not data:
-                return
-            self.chunks.append(data)
+        # A SELECTOR, NOT ``select.select`` — the fd NUMBER is the trap.
+        # ``select.select`` indexes a bit set by the raw fd number, so an
+        # ``os.openpty()`` descriptor at or above ``FD_SETSIZE`` (1024) makes it
+        # raise ``ValueError: filedescriptor out of range in select()`` instead of
+        # ever reading the wire, and a loaded runner hands back the next free fd —
+        # which on a long-lived job sits above that ceiling (a parent-harness
+        # limit, not a boot failure; the same conversion the unit pty harnesses
+        # ``test_pixel_mouse_latch`` / ``test_pixel_mouse_gate`` already carry,
+        # reproduced deterministically by holding 1100 fds before this helper).
+        # ``selectors.DefaultSelector`` is epoll on Linux and kqueue on macOS,
+        # neither of which has the limit, and it watches the same bytes on the
+        # same pty with the same 0.1 s budget.
+        with selectors.DefaultSelector() as reader:
+            reader.register(self.master, selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                if not reader.select(0.1):
+                    continue
+                try:
+                    data = os.read(self.master, 65536)
+                except OSError:
+                    return
+                if not data:
+                    return
+                self.chunks.append(data)
 
     def screen(self) -> str:
         return _decode(self.chunks)
