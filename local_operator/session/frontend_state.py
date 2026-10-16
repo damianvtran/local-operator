@@ -7236,7 +7236,17 @@ class FrontendStateStore:
             # fold keeps the legacy shape an old surface renders today.
             spend_channels=_spend_channels_payload(session, ledger, child_costs, spend),
             streaming=bool(getattr(session, "is_streaming", False)),
-            generation=int(getattr(session, "_generation", current.generation) or 0),
+            # The generation the turn EVENTS carry, not the raw per-run counter:
+            # a post-compaction continuation re-enters ``_run_turn`` and bumps
+            # ``_generation`` while staying the same turn, and a snapshot that
+            # said N+1 while that turn's ``agent_end`` said N made every viewer
+            # guard comparing the two drop the turn's own end (review R7-M1). A
+            # host without the attribute keeps the raw counter it always had.
+            generation=int(
+                getattr(session, "_turn_generation", None)
+                or getattr(session, "_generation", current.generation)
+                or 0
+            ),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
             last_turn_cut_off=_last_turn_cut_off_from(session, current.last_turn_cut_off),
             activity_started_at=(
