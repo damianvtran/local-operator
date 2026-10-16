@@ -287,6 +287,25 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(screen.getByText("asks")).toBeTruthy());
 	});
 
+	it("titles a lapsed-only queue by what it holds, and counts only offered questions as waiting", async () => {
+		/* Design round 1, D1: "asks · 1 question" above a card reading Lapsed
+		   stated a live decision one element above the card that says there is
+		   none. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "t", status: "timed_out" })],
+		});
+		const { unmount } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 lapsed")).toBeTruthy());
+		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
+		unmount();
+
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "o" }), ask({ ask_id: "t", status: "timed_out" })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 question")).toBeTruthy());
+	});
+
 	it("promises no bring-up above a lapsed ask, which offers nothing to answer", async () => {
 		/* A lapsed card (deadline passed, or `timed_out`) shows its question
 		   read-only, so "answering will bring it up" would promise a tap the card
