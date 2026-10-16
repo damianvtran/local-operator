@@ -108,6 +108,28 @@ async def _boot(pilot, app: OperatorApp) -> None:
     raise AssertionError("the session never bound")
 
 
+async def _await_notice(pilot, app: OperatorApp, needle: str, *, frames: int = 400) -> str:
+    """Pump until a notice containing ``needle`` is on screen; return every notice.
+
+    WHY THIS EXISTS. `_submit`'s fixed two `pause()` calls drain UI messages; they
+    do not wait for a worker's THREAD hop. `_cmd_delete` produces the /delete
+    rehearsal inside `asyncio.to_thread(delete_session, ...)` and appends the
+    notice AFTER that hop returns, so on a loaded shard the read landed on the
+    empty pre-settle frame and `"<title>" in rehearsal` was red for a reason that
+    has nothing to do with the sentence (reproduced deterministically by making
+    the thread hop longer than the pause budget: the rehearsal read as `''`).
+    Wait on the FACT the assertion reads — the notice itself — with the fixed
+    frame count kept only as a deadlock backstop, the way
+    ``test_cross_session_visibility._wait_for`` and the other pump helpers here do.
+    """
+    for _ in range(frames):
+        await pilot.pause()
+        text = _notices(app)
+        if needle in text:
+            return text
+    return _notices(app)
+
+
 # ---------------------------------------------------------------------------
 # /archive and /unarchive
 # ---------------------------------------------------------------------------
@@ -556,7 +578,9 @@ async def test_the_rehearsal_names_the_conversation_by_title(root: Path) -> None
         await _boot(pilot, app)
         await _submit(pilot, app, "/delete")
 
-        rehearsal = _notices(app)
+        # WAIT FOR THE NOTICE, NOT A PAUSE COUNT: the rehearsal crosses a
+        # `to_thread` hop (see `_await_notice`).
+        rehearsal = await _await_notice(pilot, app, "Parser crash on nested frontmatter")
         assert "Parser crash on nested frontmatter" in rehearsal, rehearsal
         assert f"({SESSION})" in rehearsal, rehearsal
         assert (root / "sessions" / SESSION).is_dir(), "still a rehearsal"
