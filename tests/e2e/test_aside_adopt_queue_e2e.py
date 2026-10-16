@@ -436,3 +436,60 @@ async def test_an_adopt_after_the_last_in_pipeline_flush_lands_before_the_lock_f
     finally:
         gate.set()
         await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_the_release_flush_still_frees_the_lock(
+    headless_tui_env: Path,
+) -> None:
+    """Review R2-1, the reviewer's probe L as a cell.
+
+    A receipt queued after the pipeline's own flush is written by the flush
+    before release. A cancel delivered WHILE that write awaits is a
+    ``BaseException`` the helper does not catch; the release must still run,
+    or the session refuses every later prompt as "already streaming".
+    """
+    stream = ScriptedStream([text_turn("DONE"), text_turn("NEXT")])
+    session = build_session(
+        headless_tui_env / "sessions" / "cancel-release", stream, cwd=headless_tui_env
+    )
+    gate, inside = asyncio.Event(), asyncio.Event()
+    writing, write_gate = asyncio.Event(), asyncio.Event()
+    original_patience = session._flush_patience_armed_after
+    original_persist = session._persist_shell_record
+
+    async def slow_patience() -> None:
+        inside.set()
+        await gate.wait()
+        await original_patience()
+
+    async def slow_persist(command: str, result: ToolResult) -> None:
+        writing.set()
+        await write_gate.wait()
+        await original_persist(command, result)
+
+    session._flush_patience_armed_after = slow_patience  # type: ignore[method-assign]
+    session._persist_shell_record = slow_persist  # type: ignore[method-assign]
+    try:
+        with bounded(BOUND_S, "a cancel inside the release flush"):
+            task = asyncio.ensure_future(session.prompt("start"))
+            await asyncio.wait_for(inside.wait(), BOUND_S)
+            receipt = ToolResult(
+                tool_call_id="shell-1", tool_name="bash", content=[TextContent(text="1")]
+            )
+            await session.record_shell("echo one", receipt)
+            assert len(session._pending_shell_records) == 1
+            gate.set()
+            await asyncio.wait_for(writing.wait(), BOUND_S)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert not session._turn_lock.locked(), "the cancel skipped the release"
+            write_gate.set()
+            await asyncio.wait_for(session.prompt("next"), BOUND_S)
+            assert len(stream.requests) == 2
+    finally:
+        gate.set()
+        write_gate.set()
+        await dispose_quietly(session)
