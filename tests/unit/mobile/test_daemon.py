@@ -2899,3 +2899,89 @@ def test_durable_projection_carries_supplement_rows_per_anchor(tmp_path, monkeyp
     assert projection.supplements["a" * 32]["version"] == 2
     assert projection.supplements["a" * 32]["state"] == "done"
     assert projection.supplements["b" * 32]["state"] == "queued"
+
+
+def _durable_ask_session(tmp_path, monkeypatch, session_id: str):
+    """A durable user conversation with one turn and NO live runtime: the screen
+    a stopped session renders (``_durable_projection``)."""
+    import asyncio
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    cfg = tmp_path / "config"
+    directory = cfg / "sessions" / session_id
+    directory.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    asyncio.run(Transcript(directory).append_message(Message.user("ask me", id="u-1")))
+    return cfg
+
+
+def test_durable_projection_carries_the_stopped_session_s_asks_from_the_index(
+    tmp_path, monkeypatch
+) -> None:
+    """A STOPPED conversation's asks reach its own screen.
+
+    The phone's asks sheet lists only the conversation it was opened from, so a
+    stopped conversation's screen is the one place its asks can be seen — and
+    that screen is the durable projection, which no runtime folds. The index
+    (``asks/store``) is what outlives the runtime, so the projection reads it:
+    the same rows the aggregate would serve for this session (a dismissed row
+    dropped), and the tally counting the outstanding ones.
+    """
+    import time
+
+    from local_operator.asks import store as ask_store
+    from local_operator.mobile.daemon import _durable_projection
+
+    cfg = _durable_ask_session(tmp_path, monkeypatch, "stopped-session")
+    now = int(time.time() * 1000)
+
+    def ask(ask_id: str, status: str) -> dict[str, Any]:
+        return {
+            "ask_id": ask_id,
+            "created_at": now - 600_000,
+            "expires_at": now - 60_000,
+            "timeout_s": 540,
+            "urgent": False,
+            "status": status,
+            "delivered": False,
+            "questions": [
+                {
+                    "id": "q1",
+                    "question": "ship it?",
+                    "options": [{"label": "yes", "description": ""}],
+                    "multi": False,
+                    "secret": False,
+                    "persist": False,
+                }
+            ],
+        }
+
+    ask_store.write_entry(
+        cfg,
+        "stopped-session",
+        cwd="/tmp/w",
+        asks=[ask("lapsed-1", "timed_out"), ask("gone-1", "dismissed")],
+    )
+
+    projection = _durable_projection("stopped-session")
+    assert projection is not None
+    asks = projection.asks or []
+    assert [row.ask_id for row in asks] == ["lapsed-1"]
+    assert asks[0].status == "timed_out"
+    assert projection.asks_open == 1
+
+
+def test_durable_projection_leaves_asks_absent_without_an_index_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """No index entry is "this session has no ask record", which the wire spells
+    as ABSENCE — never ``asks_open: 0``, which would claim a live empty queue."""
+    from local_operator.mobile.daemon import _durable_projection
+
+    _durable_ask_session(tmp_path, monkeypatch, "no-asks-session")
+    projection = _durable_projection("no-asks-session")
+    assert projection is not None
+    assert projection.asks is None
+    assert projection.asks_open is None
