@@ -1122,18 +1122,6 @@ def hub_check_interval_min_label() -> Msg:
     return Msg("wire.settings.hub_check_interval_min.label", {})
 
 
-def hub_merge_model_help() -> Msg:
-    return Msg("wire.settings.hub_merge_model.help", {})
-
-
-def hub_merge_model_label() -> Msg:
-    return Msg("wire.settings.hub_merge_model.label", {})
-
-
-def hub_merge_model_placeholder() -> Msg:
-    return Msg("wire.settings.hub_merge_model.placeholder", {})
-
-
 def keymap_description() -> Msg:
     return Msg("wire.settings.keymap.description", {})
 

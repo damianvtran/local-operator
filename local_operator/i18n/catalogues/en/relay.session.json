@@ -1,0 +1,19 @@
+{
+  "relay.session.list.search_placeholder": "Search conversations…",
+  "relay.session.list.empty_hint": "start one below, or from the TUI on your machine",
+  "relay.session.list.no_matches": "no matching conversations",
+  "relay.session.list.start_idle": "new session",
+  "relay.session.list.start_busy": "starting…",
+  "relay.session.view.back": "back to sessions",
+  "relay.session.view.empty_title": "no messages yet",
+  "relay.session.view.empty_hint": "send a message below to get started",
+  "relay.session.past.back": "back",
+  "relay.session.past.heading": "past sessions",
+  "relay.session.past.search_placeholder": "search names and conversations…",
+  "relay.session.past.loading": "loading…",
+  "relay.session.directory.sheet_title": "working directory",
+  "relay.session.directory.path_placeholder": "or type another path…",
+  "relay.session.model.sheet_title": "model",
+  "relay.session.model.filter_placeholder": "filter models",
+  "relay.session.model.loading": "loading…"
+}

@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getModels, sendCommand } from "../api";
 import { cn } from "../lib/cn";
 import { filterModels } from "../lib/model-filter";
+import { messageRuntime } from "../store";
 import type { ModelEntry, SessionProjection } from "../types";
 import { Sheet } from "./ui/sheet";
 
@@ -89,12 +90,12 @@ export function ModelSheet({
 	};
 
 	return (
-		<Sheet open={open} onClose={onClose} title="model">
+		<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.session.model.sheet_title")}>
 			<div className="flex flex-col gap-1 p-2">
 				<input
 					value={filter}
 					onChange={(e) => setFilter(e.target.value)}
-					placeholder="filter models"
+					placeholder={messageRuntime.t("relay.session.model.filter_placeholder")}
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
@@ -126,7 +127,9 @@ export function ModelSheet({
 						{error}
 					</p>
 				) : models === null ? (
-					<p className="px-3 py-2 text-body-sm text-ink-dim">loading…</p>
+					<p className="px-3 py-2 text-body-sm text-ink-dim">
+						{messageRuntime.t("relay.session.model.loading")}
+					</p>
 				) : null}
 				{filtered.map((m) => {
 					const current = m.selector === projection.model_selector;
