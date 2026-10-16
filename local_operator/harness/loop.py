@@ -447,6 +447,7 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
             # Iterate OBSERVED rows only, never declared numeric ranges. A cap
             # ellipsis, premature frame, unconsumed tail or count mismatch fails
             # the entire field before any supposedly processed content escapes.
+            saw_change = False
             while old_count or new_count:
                 if at >= len(value) or not value[at] or value[at][0] not in " +-":
                     raise ValueError
@@ -457,9 +458,17 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
                 if tag in " +":
                     new.append((at, text))
                     new_count -= 1
+                if tag in "+-":
+                    saw_change = True
                 if old_count < 0 or new_count < 0:
                     raise ValueError
                 at += 1
+            # A hunk that claims to be a change must actually CHANGE something.
+            # Context-only hunks carry no edit to explain and are exactly the
+            # shape that lets a removed header and an added body row read as a
+            # credential, so they are refused rather than projected (review R1).
+            if not saw_change:
+                raise ValueError
             hunks.append((old, new))
             if len(hunks) > _DIFF_DETAIL_ROWS // 2:
                 raise ValueError

@@ -531,6 +531,161 @@ def test_diff_details_carries_a_rendered_diff_and_honours_the_cap() -> None:
     assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
 
 
+def _pem_block(line: str, *, prefix: str = "") -> str:
+    """A synthetic PRIVATE KEY armour block built from a repeated body line."""
+    return (
+        prefix
+        + "-----BEGIN "
+        + "PRIV"
+        "ATE KEY-----\n"
+        + line
+        + "\n"
+        + line
+        + "\n-----END "
+        + "PRIV"
+        "ATE KEY-----\n"
+    )
+
+
+class TestDiffDetailsKeepsPemBlocksWhole:
+    """The producer must not hand the publication seam a view that splits a block.
+
+    ``unified_diff``'s default context can place body rows inside a hunk while
+    the BEGIN/END armour sits outside it. No single view then holds a credential,
+    and the seam's span rule cannot fire, so body rows would be judged as
+    ordinary prose and published. Widening happens HERE because the framing is
+    only knowable from the file, not from the rows.
+    """
+
+    LINE = "M7qA9zKd3PxW8sVn" * 4
+
+    def _details(self, before: str, after: str) -> list[str]:
+        from local_operator.tools import builtin
+
+        return builtin._diff_details("synthetic.md", before, after)["diff"]
+
+    def _classes(self, rows: list[str]) -> str:
+        return "".join(
+            "@"
+            if row[:1] == "@"
+            else (
+                "H"
+                if row[1:].startswith("-----BEGIN")
+                else (
+                    "E"
+                    if row[1:].startswith("-----END")
+                    else "B"
+                    if row[1:].startswith(self.LINE[:8])
+                    else "o"
+                )
+            )
+            for row in rows
+        )
+
+    def test_edit_between_two_pems_keeps_both_blocks_whole(self) -> None:
+        middle = "Middle guidance "
+        before = _pem_block(self.LINE) + middle + "111.\n" + _pem_block(self.LINE)
+        after = _pem_block(self.LINE) + middle + "222.\n" + _pem_block(self.LINE)
+        rows = self._details(before, after)
+        classes = self._classes(rows)
+        # Both complete blocks are present as ROWS, not split at a hunk edge.
+        assert classes.count("H") >= 2 and classes.count("E") >= 2
+        assert classes.count("B") == 4
+        # The edit itself is untouched: one added and one removed guidance line.
+        assert sum(1 for r in rows if r[:1] == "+" and middle in r) == 1
+        assert sum(1 for r in rows if r[:1] == "-" and middle in r) == 1
+
+    def test_deep_body_edit_whose_framing_falls_outside_the_context(self) -> None:
+        body = "\n".join([self.LINE] * 12)
+        before = (
+            "-----BEGIN "
+            + "PRIV"
+            "ATE KEY-----\n" + body + "\n-----END "
+            + "PRIV"
+            "ATE KEY-----\n"
+        )
+        six = "\n".join([self.LINE] * 6)
+        replacement = self.LINE * 4
+        after = before.replace(six, six[:-len(self.LINE)] + replacement, 1)
+        rows = self._details(before, after)
+        classes = self._classes(rows)
+        assert classes.count("H") == 1 and classes.count("E") == 1
+        assert classes.startswith("oo@")
+
+    def test_benign_diff_without_framing_is_untouched(self) -> None:
+        import difflib
+
+        before = "alpha\nbeta\ngamma\ndelta\nepsilon\n"
+        after = "alpha\nBETA\ngamma\ndelta\nEPSILON\nzeta\n"
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert self._details(before, after) == expected
+
+    def test_public_armour_is_not_widened(self) -> None:
+        import difflib
+
+        block = (
+            "-----BEGIN "
+            + "PUBLIC KEY-----\n"
+            + self.LINE
+            + "\n"
+            + self.LINE
+            + "\n-----END "
+            + "PUBLIC KEY-----\n"
+        )
+        before = block + "Middle guidance 111.\n" + block
+        after = block + "Middle guidance 222.\n" + block
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert self._details(before, after) == expected
+
+    def test_truncated_header_without_end_is_not_widened(self) -> None:
+        import difflib
+
+        before = (
+            "-----BEGIN "
+            + "PRIV"
+            "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 111.\n"
+        )
+        after = (
+            "-----BEGIN "
+            + "PRIV"
+            "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 222.\n"
+        )
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert self._details(before, after) == expected
+
+    def test_counters_and_cap_are_unchanged_by_widening(self) -> None:
+        from local_operator.tools import builtin
+
+        middle = "Middle guidance "
+        before = _pem_block(self.LINE) + middle + "111.\n" + _pem_block(self.LINE)
+        after = _pem_block(self.LINE) + middle + "222.\n" + _pem_block(self.LINE)
+        details = builtin._diff_details("synthetic.md", before, after)
+        assert (details["added"], details["removed"]) == (1, 1)
+        # A pathological block cannot escape the stored cap: widening happens
+        # BEFORE the cap, and the truncation marker is what the seam refuses on.
+        huge_before = (
+            "-----BEGIN "
+            + "PRIV"
+            "ATE KEY-----\n"
+            + "\n".join([self.LINE] * 400)
+            + "\n-----END "
+            + "PRIV"
+            "ATE KEY-----\n"
+        )
+        huge_after = huge_before.replace(
+            self.LINE + "\n" + self.LINE, self.LINE + "\n" + self.LINE * 2, 1
+        )
+        capped = builtin._diff_details("synthetic.md", huge_before, huge_after)
+        assert len(capped["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+        assert capped["diff"][-1] == "…"
+
+
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:
     """The tool card renders +N/-N from these keys, so they must always be
     present on the success path (new file = all additions)."""
