@@ -971,6 +971,9 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # arbitrary "round-trip-probe" spelling would do fine — but a real name
     # keeps the sample honest about what the field carries).
     settings_io._validate_aida_name: "Sovereign",
+    # A subagent tier's ordinary form is still a bare selector (#2428 adds the
+    # ``{model, effort}`` mapping beside it; test_config covers that form).
+    settings_io.validate_tier_value: "openai/gpt-5-mini",
 }
 
 

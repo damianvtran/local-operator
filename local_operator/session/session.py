@@ -139,7 +139,8 @@ from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     is_inherit_tier_sentinel,
-    read_effort_tier_selectors,
+    malformed_tier_reason,
+    read_effort_tier_targets,
     resolve_launch_target,
     run_subagent,
 )
@@ -211,7 +212,7 @@ from local_operator.incidents import (
     format_cut_off_raw,
     render_cut_off_reason,
 )
-from local_operator.model.effort import cheapest_real_rung
+from local_operator.model.effort import cheapest_real_rung, resolve_effort_in
 from local_operator.monitors.classify import MonitorClassify
 from local_operator.monitors.delivery import (
     MonitorDelivery,
@@ -2731,6 +2732,25 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             # and the one a block with no known split still gets): the text IS
             # the block.
             blocks[index] = str(value)
+
+
+def _with_tier_effort(spec: ModelSpec, effort: str | None) -> ModelSpec:
+    """``spec`` running at a tier's configured reasoning ``effort`` (#2428).
+
+    ``None`` (a bare-selector tier) returns ``spec`` untouched, so the child
+    keeps the model's own default — the only behaviour before the mapping form
+    existed. A level is clamped against the SPEC's ladder with
+    :func:`resolve_effort_in`, the clamp a fallback-chain hop's explicit effort
+    gets (``failover.spec_for_target``): a level the model lacks moves to its
+    nearest rung rather than reaching the wire as an HTTP 400. A model with no
+    effort knob (empty ladder) is returned unchanged.
+    """
+    if effort is None:
+        return spec
+    clamped = resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, effort)
+    if clamped is None or clamped == spec.reasoning_effort:
+        return spec
+    return spec.model_copy(update={"reasoning_effort": clamped})
 
 
 def _dispose_hook_failure_label(hook: object, exc: BaseException) -> str:
@@ -17864,7 +17884,12 @@ class Session:
             # the first provider call. Malformed selectors are still kept by
             # the read: they must reach the named refusal below, not vanish
             # into "not configured".
-            selector = read_effort_tier_selectors().get(wanted)
+            #
+            # The TARGETS read rather than the bare selectors, for the
+            # reasoning effort a ``{model, effort}`` tier carries (#2428): the
+            # selector half is exactly what ``read_effort_tier_selectors``
+            # returns, so the checks below are unchanged for both forms.
+            selector, tier_effort = read_effort_tier_targets().get(wanted, (None, None))
         except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
             return _unavailable(f"config could not be read ({exc})")
         # Type before falsiness, and the ``is not None`` is what makes the two
@@ -17879,7 +17904,7 @@ class Session:
         # strips) stays quiet: a session with no ``subagents.models`` at all
         # names itself on the parent model by design and must not warn.
         if selector is not None and not isinstance(selector, str):
-            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
+            return _unavailable(malformed_tier_reason(wanted, selector))
         if not selector:
             return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
         if is_inherit_tier_sentinel(selector):
@@ -17900,7 +17925,7 @@ class Session:
             # at the session's own model, and the disclosure code already
             # anticipates exactly that (a pin whose label equals the parent's
             # is why ``owns_model`` is a separate field).
-            return self.model
+            return _with_tier_effort(self.model, tier_effort)
         provider, _, model_id = selector.partition("/")
         # BOTH halves, to the same standard ``configured_effort_tiers`` applies
         # (review R3-F11). Checking only the model let a leading-slash selector
@@ -17914,7 +17939,7 @@ class Session:
         try:
             from local_operator.model.configure import build_model_spec
 
-            return build_model_spec(provider, model_id)
+            return _with_tier_effort(build_model_spec(provider, model_id), tier_effort)
         except Exception as exc:  # noqa: BLE001 — an unbuildable selector is a reason, not a crash
             return _unavailable(f"{selector!r} could not be resolved ({exc})")
 

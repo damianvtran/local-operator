@@ -89,6 +89,45 @@ SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max
 FALLBACK_EFFORTS = SUPPORTED_EFFORTS | {"auto"}
 
 
+#: The keys a ``subagents.models.<tier>`` MAPPING may carry (#2428). A tier was
+#: only ever a bare ``provider/model`` selector, so a child launched on it ran at
+#: that model's own default reasoning effort and no config could change it. The
+#: mapping form ``{model: provider/model, effort: high}`` mirrors a fallback
+#: chain hop (``providers.failover.FallbackTarget``) — the repo's existing shape
+#: for "a model plus the depth to run it at". Closed on purpose: an unknown key
+#: (``temperature``) is refused by name rather than silently ignored.
+TIER_MAPPING_KEYS = frozenset({"model", "effort"})
+
+
+def parse_tier_mapping(value: object) -> tuple[str, str | None] | None:
+    """``(selector, effort)`` for a well-formed tier mapping, else ``None``.
+
+    Lives in this leaf module for the reason :data:`SUPPORTED_EFFORTS` does:
+    ``settings_io`` validates the mapping at config-WRITE time and must not drag
+    the harness onto the TUI's import graph, while the launch path
+    (``harness.subagent.read_effort_tier_targets``) must accept exactly what the
+    write accepted — one parser, so the two cannot disagree.
+
+    ``effort`` is optional (absent means the model's own default, the bare
+    selector's behaviour) and is any word of :data:`EFFORT_ORDER`; the launch
+    path clamps it to the target's ladder, as a chain hop's effort is. The
+    selector is returned stripped and otherwise unjudged: whether it is a
+    usable ``provider/model`` (or the ``default`` sentinel) is the tier
+    reader's question, answered identically for both forms.
+    """
+    if not isinstance(value, dict) or not value or set(value) - TIER_MAPPING_KEYS:
+        return None
+    model = value.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    effort = value.get("effort")
+    if effort is None:
+        return model.strip(), None
+    if not isinstance(effort, str) or effort.strip().lower() not in EFFORT_ORDER:
+        return None
+    return model.strip(), effort.strip().lower()
+
+
 def is_effort_sentinel(level: str) -> bool:
     """Whether ``level`` is a sentinel rather than a rankable rung.
 
