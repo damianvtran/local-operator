@@ -39,6 +39,8 @@ from rich.text import Text
 from textual.app import NoScreen
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_small as copy
+from local_operator.i18n.text import tr
 from local_operator.model.ranking import (
     _MINOR_VERSION_PATTERN,
     _VERSION_PATTERN,
@@ -50,6 +52,11 @@ from local_operator.model.ranking import (
 from local_operator.model.tariff import scale_at, window_label
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+#: The slice's catalogued copy, resolved per frame. This module holds no copy
+#: CONSTANT, so it registers no locale refresher (text.py: only constants
+#: re-materialise when the active locale moves).
+_t = tr("tui.small")
 
 #: Re-exported so every importer of this module keeps working after the ranking
 #: moved to ``model/ranking.py``: ``tui/app.py``, ``settings_view``, ``editor``
@@ -969,7 +976,14 @@ class ModelPicker(Static):
             else:
                 bits.append("no matching models" if query else "no models available")
         elif total > end - start:
-            bits.append(f"{end - start} of {total}")
+            # The bare digits the pre-extraction f-string printed: `shown` and
+            # `total` are typed str, NOT {x, number}/`#`, because grouping them
+            # ('1,200 of 3,000') would be a visible change this extraction must
+            # not smuggle in — the same raw-count rule
+            # ``tui.analytics.totals.calls_meta`` follows.
+            bits.append(
+                _t(copy.model_picker_window_position(shown=str(end - start), total=str(total)))
+            )
         bits.extend(status)
         ordinary = list(bits)
         if status:
