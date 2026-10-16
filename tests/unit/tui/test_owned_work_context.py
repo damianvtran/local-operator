@@ -585,6 +585,7 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
     )
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.events import ToolComposing, ToolStarted, UserMessageStart
+    from local_operator.tui.widgets.tool_card import ToolCard
     from local_operator.tui.widgets.transcript import QuietGroupBlock, TranscriptView
     from tests.unit.tui.conftest import await_session_boot
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -626,6 +627,11 @@ async def test_a_failed_member_keeps_the_fold_and_releases_only_its_row() -> Non
         assert len(held) == 3, "the batch is folded"
         assert not any(member.display for member in held), "and hidden behind the bar"
         failed = held[2]
+        # `_members` is typed as the base block while the batch's rows are
+        # ledger cards: the isinstance narrows for the checker (CI's whole-tree
+        # pyright gate is fail-closed on the miss) and pins what this test is
+        # driving.
+        assert isinstance(failed, ToolCard), "the batch member is a ledger card"
         # What `on_tool_ended` does: settle the card, then reconcile its seat.
         failed.mark_failed("boom")
         view.note_quiet_source_part(failed)
