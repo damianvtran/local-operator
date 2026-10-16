@@ -254,7 +254,9 @@ describe("SessionScreen and queued asks", () => {
 	it("gives a lapsed-only queue a quiet header entry that does not say waiting", () => {
 		render(<SessionScreen sessionId="s1" />);
 		slot = {
-			projection: projection({ asks: [ask({ status: "timed_out" })], asks_open: 1 }),
+			/* #2388: the runtime counts a timed-out ask settled, so the tally is 0 while
+			   the row rides; the entry is gated on the ROWS, so the Dismiss door stays. */
+			projection: projection({ asks: [ask({ status: "timed_out" })], asks_open: 0 }),
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
@@ -269,7 +271,7 @@ describe("SessionScreen and queued asks", () => {
 		slot = {
 			projection: projection({
 				asks: [ask(), ask({ ask_id: "ask-8", status: "timed_out" })],
-				asks_open: 2,
+				asks_open: 1,
 			}),
 			connected: true,
 		};
