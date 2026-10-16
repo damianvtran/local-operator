@@ -1602,3 +1602,44 @@ async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(enabl
         await _settle(pilot)
         assert app._ask_scope == SCOPE_SESSION and app._ask_fleet_rows == []
         assert app._ask_tick is None, "the fleet list's clock outlived the fleet list"
+
+
+async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, isolated_index):
+    """``asks.lapsed_visible_for`` (decision D8, review round 1 R1-1): the tally
+    behind the sidebar marks and the picker's ``asks: N`` must hide the rows the
+    fleet LIST hides, or "asks: 1" opens an empty list. Under ``at_expiry`` a
+    timed-out row 2 h past its deadline (and a stale ``open`` past its deadline,
+    which the readers judge as lapsed) is out of both; an open ask is in both."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import process_watcher
+
+    created_at, expires_at = _NOW - 3 * 3_600_000, _NOW - 2 * 3_600_000
+    _seed(
+        isolated_index,
+        "s-lapsed",
+        [_row("l1", status="timed_out", created_at=created_at, expires_at=expires_at)],
+    )
+    _seed(isolated_index, "s-stale", [_row("s1", created_at=created_at, expires_at=expires_at)])
+    _seed(isolated_index, "s-open", [_row("o1")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        counts, total = app._read_fleet_asks()
+        assert counts == {"s-lapsed": 1, "s-stale": 1, "s-open": 1} and total == 3
+
+        settings_io._store(
+            ConfigManager(isolated_index),
+            settings_io.BY_KEY["asks.lapsed_visible_for"].path,
+            "at_expiry",
+        )
+        process_watcher(isolated_index).poll_now()
+        counts, total = app._read_fleet_asks()
+        listed = store.index_asks(isolated_index, lapsed_visible_ms=0)
+        assert counts == {"s-open": 1} and total == 1
+        listed_counts: dict[str, int] = {}
+        for row in listed:
+            if store.is_outstanding(row.get("status")):
+                sid = str(row["session_id"])
+                listed_counts[sid] = listed_counts.get(sid, 0) + 1
+        assert counts == listed_counts

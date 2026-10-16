@@ -1632,3 +1632,110 @@ def test_the_timer_does_not_wait_on_a_lapsed_row_already_hidden(tmp_path: Path, 
     monkeypatch.setattr(queue_module.asyncio, "sleep", fake_sleep)
     _run(queue._run_timer())
     assert sleeps == []
+
+
+@pytest.mark.parametrize("with_open", [True, False], ids=["open+lapsed", "lapsed-only"])
+def test_rearm_restarts_a_sleeping_timer_on_the_new_window(
+    tmp_path: Path, monkeypatch, with_open: bool
+):
+    """QA round 1, Q2: a window narrowed while the timer sleeps. ``rearm`` must
+    replace the sleeping task so the next wake is computed with the NEW window;
+    ``arm`` alone kept the old task (and so the old delay), which hid the row
+    40 s late with an open ask present and never with lapsed rows only."""
+    from local_operator.asks import queue as queue_module
+
+    window = {"ms": 7 * 24 * 3_600_000}
+    monkeypatch.setattr(queue_module, "_lapsed_visible_ms", lambda _dir: window["ms"])
+    clock = {"now": BASE}
+    session = FakeSession()
+    published: list[int] = []
+    session.publish_ask_state = lambda: published.append(clock["now"])  # type: ignore[attr-defined]
+    queue = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: clock["now"])
+    queue.enqueue(_questions(), 120)
+    if with_open:
+        queue.enqueue(_questions(text="still open"), 86_400)
+    expires_at = BASE + 120_000
+    # 59 m 40 s past the lapsed row's deadline: under a 1 h window it hides 20 s on.
+    clock["now"] = expires_at + 3_600_000 - 20_000
+    hide_at = expires_at + 3_600_000 + 1
+
+    async def scenario() -> None:
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(seconds: float) -> None:
+            # The clock moves by what the timer ASKED for; yield so a cancel lands.
+            clock["now"] += int(round(seconds * 1000))
+            await real_sleep(0)
+
+        monkeypatch.setattr(queue_module.asyncio, "sleep", fake_sleep)
+        queue.arm()
+        first = queue._timer
+        assert first is not None
+        await real_sleep(0)  # the task is now asleep on the 7 d window's delay
+        window["ms"] = 3_600_000
+        clock["now"] = expires_at + 3_600_000 - 20_000
+        published.clear()
+        queue.rearm()
+        assert queue._timer is not None and queue._timer is not first
+        assert first.cancelling() or first.done()
+        for _ in range(200):
+            await real_sleep(0)
+            if published and published[-1] >= hide_at:
+                break
+        queue.dispose()
+
+    _run(scenario())
+    assert published, "the re-armed timer never republished"
+    assert published[-1] == hide_at
+    lapsed = [r for r in queue.projection(lapsed_visible_ms=3_600_000) if r["status"] != "open"]
+    assert lapsed == []
+
+
+def test_a_lapsed_only_wait_does_not_refold_the_log_every_tick(tmp_path: Path, monkeypatch):
+    """Review round 1, R1-4: with lapsed rows only, nothing but the clock can
+    move, so the timer waits to the window edge in bounded ticks WITHOUT a log
+    read and fold per tick — and an enqueue (which goes through ``arm``) still
+    sends it back to re-plan for the new, earlier deadline."""
+    from local_operator.asks import queue as queue_module
+
+    monkeypatch.setattr(queue_module, "_lapsed_visible_ms", lambda _dir: HOUR_MS)
+    clock = {"now": BASE}
+    session = FakeSession()
+    queue = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: clock["now"])
+    queue.enqueue(_questions(), 120)
+    clock["now"] = BASE + 120_000 + 1  # lapsed; its 1 h window edge is ~60 ticks away
+    folds = {"n": 0}
+    real_records = queue.records
+
+    def counting_records(now_ms=None):
+        folds["n"] += 1
+        return real_records(now_ms)
+
+    monkeypatch.setattr(queue, "records", counting_records)
+
+    async def scenario() -> None:
+        real_sleep = asyncio.sleep
+        ticks = {"n": 0}
+
+        async def fake_sleep(seconds: float) -> None:
+            ticks["n"] += 1
+            clock["now"] += int(round(seconds * 1000))
+            if ticks["n"] == 30:
+                # Mid-wait, a fresh ask arrives through the real path.
+                queue.enqueue(_questions(text="new"), 120)
+            await real_sleep(0)
+            if ticks["n"] >= 40:
+                queue.dispose()
+
+        monkeypatch.setattr(queue_module.asyncio, "sleep", fake_sleep)
+        queue.arm()
+        task = queue._timer
+        assert task is not None
+        # ``dispose`` cancels the task at tick 40; the wait ends either way.
+        await asyncio.gather(task, return_exceptions=True)
+        assert ticks["n"] >= 30
+
+    _run(scenario())
+    # 30 lapsed-only ticks cost ONE plan fold, not 30; the enqueue's re-plan and
+    # the open ask's every-tick loop account for the rest.
+    assert folds["n"] < 20, folds
