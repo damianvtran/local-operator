@@ -477,6 +477,52 @@ async def test_a_server_amount_with_no_basis_yields_no_basis(manager) -> None:
     assert response.cost_basis is None
 
 
+async def test_an_oversized_server_amount_is_unknown_and_does_not_escape(manager) -> None:
+    """A huge wire amount reads as unknown; it must not escape ``_parse_response``.
+
+    ``amount_usd`` of 401 nines parses to a 408-digit integer micro-USD, and the
+    micros -> USD division on it raises ``OverflowError: integer division result too
+    large for a float`` — which, before the range check, escaped the parser entirely
+    (a new escape path: the ``usage.cost`` arm returned ``None`` cleanly). The amount
+    is now range-checked against the same bound ``answered_record`` uses, so it reads
+    as unknown. Driven through the LEG, not by calling the helper, because the escape
+    path is the thing under test.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "amount_usd": int("9" * 401), "basis": "billed"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd is None
+    assert response.cost_basis is None
+
+
+async def test_a_storable_large_server_amount_is_still_stated(manager) -> None:
+    """The range guard must not swallow a large-but-plausible receipt.
+
+    An upper bound that read as unknown too eagerly would hide real money; the bound
+    is SQLite's signed INTEGER range in micro-USD, which is far above any real
+    decision call.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "amount_usd": 1234.5678, "basis": "billed"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd == pytest.approx(1234.5678)
+    assert response.cost_basis == "billed"
+
+
 async def test_an_unanswered_question_is_not_a_failure(manager) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return json_response({"answers": {}})
