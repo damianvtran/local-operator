@@ -248,5 +248,105 @@
     "role": "session picker preview-mode key label",
     "tone": "plain, factual",
     "note": "The 'ctrl+e' key label in the session picker's footer, naming the chord that toggles the preview mode whose name follows it. A key name is syntax shown to the user, kept verbatim like tui.hub_links.hint.confirm ('ctrl+y'); it is extracted because the footer paints it as user-facing copy. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.goal_panel.settled_heading": {
+    "role": "heading",
+    "tone": "plain",
+    "note": "Section heading over the settled-goal history; a noun, not a verb, and it carries no count because the rows below do."
+  },
+  "tui.small.goal_panel.no_goal_hint": {
+    "role": "empty-state hint",
+    "tone": "plain",
+    "note": "Empty state for the goal card; the literal `/goal <text>` is a command a user types, so it must stay unmodified in every locale."
+  },
+  "tui.small.goal_panel.none_yet": {
+    "role": "empty-state fragment",
+    "tone": "plain",
+    "note": "Prefixed by two spaces as its own indent; a claim about the record, so it is withheld when the record is truncated."
+  },
+  "tui.small.goal_panel.done_suffix": {
+    "role": "row suffix",
+    "tone": "plain",
+    "note": "Trails a finished goal row; keeps its two leading spaces and the em dash, which separates it from the goal text."
+  },
+  "tui.small.goal_panel.judge_absent": {
+    "role": "placeholder",
+    "tone": "plain",
+    "note": "Shown when no judge is attached; the em dash is the absent-value sentinel, and `judge:` is a protocol word kept as-is."
+  },
+  "tui.small.goal_panel.judge_line": {
+    "role": "row label",
+    "tone": "plain",
+    "note": "`judge:` is protocol vocabulary and the state word comes from the generated table, so only the label is copy here."
+  },
+  "tui.small.goal_panel.judge_run": {
+    "role": "counter fragment",
+    "tone": "plain",
+    "note": "Run counter appended to the judge line; both numbers are raw digits with no grouping, matching the pre-slice f-string."
+  },
+  "tui.small.goal_panel.more_settled_indent": {
+    "role": "overflow row",
+    "tone": "plain",
+    "note": "Indented overflow notice carrying the hidden count; raw digits, and the ellipsis is a single character, not three dots."
+  },
+  "tui.small.goal_panel.more_settled": {
+    "role": "overflow row",
+    "tone": "plain",
+    "note": "Unindented overflow notice for the same fact as its indented sibling; a separate key because the indentation differs between the two call sites."
+  },
+  "tui.small.network_panel.relay_checking_indent": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Pending relay row; the trailing newline is part of the row and the two-space indent is its list indent."
+  },
+  "tui.small.network_panel.checking_indent": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Generic pending row shared by the members and identity sections; trailing newline and two-space indent are load-bearing."
+  },
+  "tui.small.network_panel.no_members": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Shown when the payload reports no members; the double-space indent and trailing newline are part of the row."
+  },
+  "tui.small.network_panel.relay_not_running": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Relay-not-running row; the run of spaces aligns its value with the sibling `running, pid …` row, so the padding is layout."
+  },
+  "tui.small.network_panel.stale_tag": {
+    "role": "row tag",
+    "tone": "plain",
+    "note": "Bracketed staleness marker on a member row; the brackets are part of the tag, and it never takes an argument."
+  },
+  "tui.small.network_panel.suspect_tag": {
+    "role": "row warning",
+    "tone": "yellow",
+    "note": "Warning tag for a possibly copied key; keeps its two-space indent and the sentence is deliberately cautious about the inference."
+  },
+  "tui.small.network_panel.member_count": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Member count with knowable singular/plural; the count is carried as a string so the digit stays raw (never `1,200`)."
+  },
+  "tui.small.network_panel.trust_field": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Trust state of a member; the value is protocol vocabulary from the payload and is not translated."
+  },
+  "tui.small.network_panel.installed_row": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "`installed:` is a protocol label whose column padding aligns it with the identity row; the value is a bare yes/no."
+  },
+  "tui.small.network_panel.identity_row": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "`identity:` is a protocol label kept as-is; the value comes from `present`/`missing` and the spacing aligns the column."
+  },
+  "tui.small.network_panel.relay_running": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "Relay-running row; `relay:` and `pid` are protocol words, and the padding after the colon aligns the value column."
   }
 }
