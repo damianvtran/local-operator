@@ -10118,8 +10118,8 @@ class OperatorApp(App[None]):
             exit_on_error=False,
         )
 
-    def _liveness_row_text(self, session: Any, *, now: float | None = None) -> str:
-        """The exact string the row would paint for ``session`` right now.
+    def _liveness_row_text(self, source: SessionInteraction, *, now: float | None = None) -> str:
+        """The exact liveness term the row would paint for ``source`` right now.
 
         THE REPAINT GATE IS ON THIS STRING, NOT ON THE VERDICT ENUM, and the
         difference is the whole feature. A FAILED probe deliberately touches
@@ -10132,9 +10132,28 @@ class OperatorApp(App[None]):
         (a failed probe does not clear the stamp) while letting the failing arm
         repaint, because the *rendering* changes as the age grows: STALE at 4 m
         and STALE at 10 m are different rows even though they are one state.
+
+        AND ONE SUPPRESSION, asked of the one shared predicate
+        (:meth:`_bring_up_in_flight`) so this string, the gate that watches it
+        and the row that paints from it cannot drift: a viewer with no stamp
+        and no retained dial honestly reads NEVER, but during a bring-up a
+        runtime IS arriving — the band narrates that window with ``starting…``
+        — and painting the verdict over it is the startup flash (measured: a
+        probe tick landing in the mount engage's spawn phase, ~2 s before the
+        bind landed, painted the false row with the cue up). ONLY NEVER is
+        suppressed: STALE and COMING carry evidence of their own. The
+        suppression yields an empty string — the same string
+        ``_show_sidebar_connection`` composes the row from — so a bring-up
+        that ends without binding repaints the verdict on the next due tick,
+        which is the state the row exists for.
         """
+        session = source.session
+        if not _is_viewer(session):
+            return ""
         verdict = owner_liveness(session, now=now)
         if verdict is OwnerLiveness.LIVE:
+            return ""
+        if verdict is OwnerLiveness.NEVER and self._bring_up_in_flight(source):
             return ""
         return liveness_text(verdict, now=now, verified_at=getattr(session, "verified_at", None))
 
@@ -10159,7 +10178,7 @@ class OperatorApp(App[None]):
         await self._liveness_probe.tick(session)
         if not self._is_current(source):
             return
-        current = self._liveness_row_text(session)
+        current = self._liveness_row_text(source)
         if current == self._liveness_painted:
             return
         self._show_sidebar_connection(source)
@@ -10275,11 +10294,23 @@ class OperatorApp(App[None]):
         if not status and _is_viewer(source.session):
             verdict = owner_liveness(source.session)
             if verdict is not OwnerLiveness.LIVE:
-                text = liveness_text(
-                    verdict,
-                    verified_at=getattr(source.session, "verified_at", None),
-                )
-                status = f"{_FORK_PENDING_TEXT} · {text}" if fork_pending else text
+                # THE READER, NOT A SECOND COMPOSITION OF IT: this is the same
+                # call the probe's gate compares against (`_liveness_row_text`),
+                # so the string remembered and the string painted cannot
+                # disagree -- including that reader's in-flight suppression,
+                # which yields an empty string while a bring-up for THIS
+                # conversation is arriving (see `_bring_up_in_flight`).
+                text = self._liveness_row_text(source)
+                # A pending fork still renders while the liveness tail is
+                # suppressed, with no tail: it states a DIFFERENT fact (what
+                # the user can do), and the precedence above is what keeps it
+                # visible next to a verdict of the same length.
+                if fork_pending and text:
+                    status = f"{_FORK_PENDING_TEXT} · {text}"
+                elif fork_pending:
+                    status = _FORK_PENDING_TEXT
+                else:
+                    status = text
                 # STALE is PROVISIONAL — a long turn ends, a SIGCONT lands, a
                 # starved loop catches up — so it takes the muted register and NOT
                 # `danger`, which stays the latch's terminal verdict. The same
@@ -10289,7 +10320,7 @@ class OperatorApp(App[None]):
                 # AND NO SPINNER ON STALE OR NEVER: a spinner claims something is
                 # arriving, and neither state has anything coming. COMING keeps the
                 # glyph, exactly as the connect path does.
-                connecting = verdict is OwnerLiveness.COMING
+                connecting = verdict is not OwnerLiveness.COMING
         if self._status is not None:
             self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
@@ -24347,8 +24378,48 @@ class OperatorApp(App[None]):
         self._starting_runtime = starting
         self._push_starting_band()
 
+    def _bring_up_in_flight(self, source: SessionInteraction | None) -> bool:
+        """Whether a runtime is being brought up FOR this conversation now.
+
+        THE ONE COMPOSITION OF THE BRING-UP FACTS, because two surfaces must
+        agree about this window and a second copy is how they drift: the band
+        narrates it with ``starting…`` (:meth:`_push_starting_band`), and the
+        liveness reader must not paint its NEVER verdict over a runtime that IS
+        arriving — a probe tick landing in the mount engage's spawn phase (no
+        dial retained yet, so the reader honestly reads NEVER) painted a false
+        row ~2 s before the bind landed, which is the startup flash.
+
+        The facts, and what each one is:
+
+        * the engage running (``_starting_runtime``): the mount/draft/slash
+          engage has been started and has not reached its bind or failure;
+        * THIS conversation's paint-first attach (``_attach_behind_attempts``)
+          still in its pending or narrated phase. A JUDGED or UNSENT attempt
+          (``silences_cue``) states its outcome in the conversation's own row
+          — that is an answer, not a wait — so it is NOT in flight here: the
+          cue stays down AND the reader is free to paint what the state says;
+        * a prompt this conversation sent while cold
+          (``_prompts_awaiting_bind``): its send BINDS first, and until it
+          returns nothing has reached the owner.
+
+        Keyed by ``source.token`` like the cue itself: a bring-up left in
+        flight by a swap belongs to the conversation that left, not to the one
+        on screen.
+        """
+        attempt = self._attach_behind_attempts.get(source.token) if source is not None else None
+        if attempt is not None and attempt.silences_cue:
+            # THIS conversation's attach ended in an outcome its row states; an
+            # optimistic `starting…` beside it — or a reader that stayed silent
+            # through the verdict that answers it — would contradict it.
+            return False
+        if self._starting_runtime:
+            return True
+        if source is None:
+            return False
+        return attempt is not None or source.token in self._prompts_awaiting_bind.values()
+
     def _push_starting_band(self) -> None:
-        """Show ``starting…`` while the engage runs OR a prompt waits on the bind.
+        """Show ``starting…`` while a bring-up is in flight for this conversation.
 
         Two sources, one cue (UX round 1, U4). The engage alone ended it too
         early: the moment a prompt is accepted the background engage SURRENDERS
@@ -24361,17 +24432,14 @@ class OperatorApp(App[None]):
 
         Counted per BINDING, so a prompt left in flight by a swap cannot hold
         the cue up over the conversation that replaced it.
+
+        THE FACTS COME FROM :meth:`_bring_up_in_flight`, not a copy of them
+        kept here: the liveness reader suppresses its NEVER verdict on exactly
+        the window this cue narrates (``_liveness_row_text``), and two
+        compositions of "a bring-up is in flight" is how the cue and the
+        reader would drift.
         """
-        source = self._interaction
-        attempt = self._attach_behind_attempts.get(source.token) if source else None
-        if attempt is not None and attempt.silences_cue:
-            # THIS conversation's attach ended in an outcome its row states; an
-            # optimistic `starting…` beside it would contradict it.
-            shown = False
-        else:
-            shown = self._starting_runtime or (
-                source is not None and source.token in self._prompts_awaiting_bind.values()
-            )
+        shown = self._bring_up_in_flight(self._interaction)
         if shown == self._starting_shown:
             return
         self._starting_shown = shown
