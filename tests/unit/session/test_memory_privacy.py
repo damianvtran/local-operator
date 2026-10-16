@@ -12,7 +12,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     ToolCall,
 )
-from local_operator.memory_privacy import retained_message
+from local_operator.memory_privacy import retained_arguments, retained_message
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript, encode_message_payload
 from local_operator.tools.builtin import build_write_tool
@@ -150,3 +150,23 @@ def test_non_memory_message_byte_identity():
         role="assistant", content=[], tool_calls=[ToolCall(name="write", arguments=args)]
     )
     assert retained_message(message) is message
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # The read-path recall exemption is applied to the value the guards
+        # inspect at EXECUTION. This is the second carrier of the same call, so
+        # it must NOT inherit that exemption: an id-shaped memory argument keeps
+        # being refused and the copy fails closed. These bytes are the pre-fix
+        # bytes, proved by comparing this same corpus before and after.
+        "memory://global?q=d_ef73a4312e5c4686196b30c035c8a05a",
+        "memory://global?q=4111111111111111",
+        "memory://global?q=GB82WEST12345698765432",
+    ],
+)
+def test_an_id_shaped_memory_read_argument_is_redacted_before_retention(path):
+    kept, raw, masked = retained_arguments("read", {"path": path})
+    assert masked is True
+    assert kept == {"memory_arguments_redacted": True, "path": "memory://"}
+    assert json.loads(raw) == kept

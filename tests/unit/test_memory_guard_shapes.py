@@ -5,6 +5,8 @@ benign neighbours it must not break (QA Q2), so a loosening or a new false posit
 fails by name.
 """
 
+import hashlib
+
 import pytest
 
 from local_operator.memory import (
@@ -139,6 +141,133 @@ def test_iban_shaped_device_id_is_structural_not_fact_text(tmp_path, device_id):
         store.show("global", item["id"], version=item["version"])["fact"]["body"]
         == "staging host is stage-2"
     )
+
+
+DEVICE_ID = "d_ef73a4312e5c4686196b30c035c8a05a"
+UUID_ID = "019a5e3c-9f2b-7c41-8d5e-6f7a8b9c0d1e"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Minted as ``d_`` + sha256 hex[:32] (network/identity.device_id_for; the
+        # truncation is the 128-bit id of §3.1). Each hex tail satisfies the IBAN
+        # shape + mod-97 check by chance, which is what refused the read: search()
+        # ran the free-text STORE guard over a query that IS an identifier.
+        DEVICE_ID,
+        "d_cd474787b1adaa67f8cb5934196c4834",
+        "d_ba65518d4cd0f218ddd960d22f3dc6c6",
+    ],
+)
+def test_a_minted_device_id_query_is_not_guarded_as_fact_text(tmp_path, query):
+    """A recall whose query IS a minted identifier is a lookup, not fact text.
+
+    search() persists nothing, so the exemption is scoped to this read: the
+    journal and provider-payload copy of the same arguments stays guarded and
+    fails closed (tests/unit/session/test_memory_privacy.py pins the bytes).
+    """
+    assert refused(query), "precondition: the free-text guard itself refuses the value"
+    store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin="dev")
+    store.put("global", {"title": "Host", "body": "staging host is stage-2"})
+    assert store.search(query) == []
+    assert store.search("staging host"), "the same store still answers a prose query"
+
+
+def test_the_uuid_reference_the_read_path_consumes_is_not_guarded(tmp_path):
+    """The other minted reference shape (memory._id()), pinned at the same site.
+
+    Not a fix but a boundary: a canonical UUID already passes the free-text guard
+    (its hyphens break every shape rule), and listing it as a reference keeps a
+    lookup by the ``SCOPE/ID`` the CLI prints from ever failing for being an id.
+    """
+    assert not refused(UUID_ID)
+    store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin="dev")
+    store.put("global", {"title": "Host", "body": "staging host is stage-2"})
+    assert store.search(UUID_ID) == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # The v1 rejection, pinned by name: each of these IS one safe CHARSET
+        # segment, so a charset-only exemption (safe_segment) admitted all three
+        # as if they were identifiers. The exemption is the minted-reference
+        # SHAPE, so the real card/IBAN/SSN spelling keeps the refusal.
+        "4111111111111111",
+        "GB82WEST12345698765432",
+        "123-45-6789",
+    ],
+)
+def test_a_bare_secret_shaped_query_is_still_refused(tmp_path, query):
+    assert refused(query)
+    store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin="dev")
+    with pytest.raises(MemoryError, match="Sensitive value refused"):
+        store.search(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        f"{DEVICE_ID} extra",  # a reference inside a multi-token query is prose
+        "the SSN is 123-45-6789",
+        "card 4111 1111 1111 1111",
+        "my login is bob / pa55w0rd!",
+    ],
+)
+def test_a_prose_query_around_a_secret_is_still_refused(tmp_path, query):
+    assert refused(query)
+    store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin="dev")
+    with pytest.raises(MemoryError, match="Sensitive value refused"):
+        store.search(query)
+
+
+def test_the_reference_classifier_admits_only_minted_identifier_shapes():
+    """Both sides of the boundary the two query exemptions rest on, by name.
+
+    Admitting too much re-opens the v1 rejection (a charset is not a shape);
+    admitting too little restores the refusal on a benign identifier lookup. The
+    admitted set is exactly the shapes this codebase mints as references, each
+    one cited at its source; a shape nothing here mints as a reference is not a
+    reference, which is why a bare 64-hex digest is excluded even though
+    ``body_sha`` is spelled that way (it is an integrity value over the op
+    payload, never a handle any surface hands back).
+    """
+    from local_operator.memory import _id, structural_reference
+    from local_operator.network.identity import device_id_for, mint_instance_id
+
+    for value in (
+        DEVICE_ID,  # network.identity.device_id_for, held verbatim from the refusal
+        device_id_for(b"synthetic-public-key"),  # the live minter, not an exemplar
+        UUID_ID,  # memory._id()
+        _id(),  # the live minter
+    ):
+        assert structural_reference(value), value
+    for value in (
+        "4111111111111111",  # card/Luhn
+        "GB82WEST12345698765432",  # IBAN/mod-97
+        "123-45-6789",  # SSN
+        "e5b8f0a2c7d94f13b6a8c0d2e4f60718",  # bare 32-hex: no minted source
+        "d_ef73a4312e5c4686196b30c035c8a05",  # 31 hex: truncated id
+        "d_ef73a4312e5c4686196b30c035c8a05aa",  # 33 hex
+        "D_ef73a4312e5c4686196b30c035c8a05a",  # minting is lowercase
+        "d_EF73A4312E5C4686196B30C035C8A05A",  # uppercase hex
+        "ef73a4312e5c4686196b30c035c8a05a",  # the tail without its d_ prefix
+        mint_instance_id(),  # identity: a relay process id, not a minted reference
+        f"{DEVICE_ID} extra",  # multi-token
+        f"{DEVICE_ID},",
+        f" {DEVICE_ID}",
+        f"{DEVICE_ID} ",
+        UUID_ID + " ",
+        "019a5e3c9f2b7c418d5e6f7a8b9c0d1e",  # uuid without hyphens
+        "a" * 64,  # bare 64-hex: body_sha shape, not a reference
+        hashlib.sha256(b"fact-one").hexdigest(),
+        "the SSN is 123-45-6789",
+        "",
+        None,
+        12345,
+        [DEVICE_ID],
+    ):
+        assert not structural_reference(value), repr(value)
 
 
 @pytest.mark.parametrize(
