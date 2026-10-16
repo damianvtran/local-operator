@@ -231,6 +231,22 @@ remove the file, so delete the plaintext afterwards. Verify a round trip with
 `lop secret get NAME | shasum -a 256` against the original when the value has
 to be byte-exact.
 
+## Published copies and secret names
+
+In supported published-copy consumers, the complete-text redaction callback
+additionally masks known values through one complete valid escaped JSON
+string-value layer, judged as a decoded scalar. Nested JSON-string documents
+are not recursively interpreted. This is not global live-stream containment:
+pipe fragments and raw execution events retain their existing behavior. The
+executor's inputs and file bytes are unchanged; copying a masked published read
+back into a write can still put masks on disk. Invalid/truncated JSON escapes
+are not decoded by this additive pass; existing exact-value and credential-shape
+rules still apply. These limits do not unblock an ambiguous catalogue audit.
+Secret names remain readable in normal receipts, lists, and variable refusals,
+except when a name is byte-identical to an independently registered secret
+value: masking wins that collision. There is no name-based exemption for values.
+Resolving that ambiguity requires semantic name authority, not a text bypass.
+
 ## What actually counts as a compromise
 
 Detection still runs on every result, and masking and containment still work —

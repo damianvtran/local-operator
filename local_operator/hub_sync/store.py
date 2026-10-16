@@ -57,7 +57,11 @@ MISSING_RETRY_S = 24 * 3600
 LEASE_TTL_S = 180.0
 
 #: Classes that are decided by a human, not a timer (B4.3).
-NO_AUTO_RETRY = {"merge-refused", "prompt-too-long"}
+NO_AUTO_RETRY = {"merge-refused"}
+#: prompt-too-long is NOT here: it stays on a cheap SCHEDULED eligibility retry
+#: (never a permanent human-only dead end), gated by the input/config fingerprint
+#: so an unchanged request is never re-sent to the paid model.
+PROMPT_TOO_LONG_RETRY_S = 3600
 #: Classes that are not counted attempts.
 UNCOUNTED = {"no-credential", "concurrent-edit"}
 #: Systemic: one item hitting these stops an apply-all run (B4.4).
@@ -237,6 +241,10 @@ def blank_item(
         "first_seen_available_at": None,
         "last_checked_at": None,
         "last_applied_at": None,
+        # Per-DIRECTION activity: a pull and a push have independent due times, so
+        # a fast inbound cadence never masks a stalled push and vice versa.
+        "last_pulled_at": None,
+        "last_pushed_at": None,
         "next_retry_at": None,
         "auto_retry": True,
         "applied_backup": None,
@@ -363,6 +371,7 @@ def settle_applied(
         auto_retry=True,
         summary=dict(summary),
         last_applied_at=_iso(now),
+        last_pulled_at=_iso(now),
         applied_backup=backup,
         first_seen_available_at=None,
     )
@@ -384,12 +393,36 @@ def settle_unchanged(item: dict[str, Any]) -> None:
         first_seen_available_at=None,
         summary={},
     )
+    # A no-op merge is still a completed inbound pass: stamp the pull side so the
+    # independent inbound interval advances and the item is not re-integrated.
+    item["last_pulled_at"] = _iso(datetime.now(timezone.utc))
     item.pop("updating_since", None)
 
 
 def mark_updating(item: dict[str, Any], now: datetime | None = None) -> None:
     item["state"] = "updating"
     item["updating_since"] = _iso(now or datetime.now(timezone.utc))
+
+
+def mark_push_skipped(item: dict[str, Any], reason: str, now: datetime | None = None) -> None:
+    """Persist WHY an outbound push was skipped, durably and with a name.
+
+    A skip is not an inbound failure: the item's pull state, error class and
+    retry schedule are untouched. The named reason is what an operator reads to
+    understand why an enabled auto-push is not publishing (no capability
+    attestation, an unsafe public origin, no CAS revision, retries exhausted,
+    ...). Stored beside the item so it survives daemon restarts.
+    """
+
+    item["push_blocked_reason"] = str(reason)
+    item["push_blocked_at"] = _iso(now or datetime.now(timezone.utc))
+
+
+def clear_push_skipped(item: dict[str, Any]) -> None:
+    """Drop a stale skip mark after an eligible attempt actually ran."""
+
+    item.pop("push_blocked_reason", None)
+    item.pop("push_blocked_at", None)
 
 
 def record_failure(
@@ -424,6 +457,11 @@ def record_failure(
     delay: float | None
     if cls in NO_AUTO_RETRY:
         item["auto_retry"], delay = False, None
+    elif cls == "prompt-too-long":
+        # A cheap SCHEDULED eligibility retry, never a permanent retirement: the
+        # next due time is recorded, but the request itself is only re-sent when
+        # its input/config fingerprint changes (``prompt_too_long_due``).
+        item["auto_retry"], delay = True, PROMPT_TOO_LONG_RETRY_S
     elif cls == "concurrent-edit":
         delay = None  # next tick
     elif cls == "hub-item-missing":
@@ -432,7 +470,14 @@ def record_failure(
         delay = MODEL_UNAVAILABLE_RETRY_S
     else:
         delay = backoff_delay_s(int(item["attempts"]), rng)
-    if item.get("attempts", 0) >= MAX_ATTEMPTS and cls not in UNCOUNTED:
+    # Six counted failures retire the automatic retry EXCEPT for prompt-too-long,
+    # which must not become a forever dead end: it retries when its fingerprint
+    # changes however many times it has failed (no-forever-retirement rule).
+    if (
+        item.get("attempts", 0) >= MAX_ATTEMPTS
+        and cls not in UNCOUNTED
+        and cls != "prompt-too-long"
+    ):
         item["auto_retry"], delay = False, None
     item["next_retry_at"] = _iso(now + timedelta(seconds=delay)) if delay is not None else None
 
@@ -459,6 +504,21 @@ def clear_retry(item: dict[str, Any]) -> None:
     item.update(attempts=0, next_retry_at=None, auto_retry=True)
 
 
+def prompt_too_long_eligible(item: Mapping[str, Any], current_fingerprint: str) -> bool:
+    """Whether a scheduled prompt-too-long retry may re-send the paid request.
+
+    A prompt-too-long item keeps a scheduled eligibility check, but the request
+    is only re-sent when its INPUT/config fingerprint differs from the one on the
+    failed attempt: an unchanged request that was too long once is still too long,
+    so re-sending it would spend tokens to learn nothing. A changed fingerprint
+    (the edits shrank, the window grew, the model changed) re-arms it, and the
+    rule is unbounded -- six failures do not retire it.
+    """
+    if item.get("error_class") != "prompt-too-long":
+        return auto_apply_due(item)
+    return str(item.get("prompt_fingerprint") or "") != current_fingerprint
+
+
 def auto_apply_due(
     item: Mapping[str, Any], now: datetime | None = None, *, manual: bool = False
 ) -> bool:
@@ -479,6 +539,26 @@ def check_due(item: Mapping[str, Any], now: datetime | None = None) -> bool:
         due = _parse(item.get("next_retry_at"))
         return due is None or due <= (now or datetime.now(timezone.utc))
     return True
+
+
+def pull_due(item: Mapping[str, Any], interval_min: int, now: datetime | None = None) -> bool:
+    """Independent inbound due time: has the pull interval elapsed since last pull?
+
+    Keyed on the last actual PULL (integrated update), never on the cheap check:
+    an item that is available and was checked but not yet applied is due
+    immediately; the interval only spaces genuine integrations, so a busy inbound
+    cadence cannot make a stalled PUSH look freshly serviced (or the reverse).
+    """
+    now = now or datetime.now(timezone.utc)
+    last = _parse(item.get("last_pulled_at"))
+    return last is None or (now - last) >= timedelta(minutes=max(0, interval_min))
+
+
+def push_due(item: Mapping[str, Any], interval_min: int, now: datetime | None = None) -> bool:
+    """Independent outbound due time: has the push interval elapsed since last push?"""
+    now = now or datetime.now(timezone.utc)
+    last = _parse(item.get("last_pushed_at"))
+    return last is None or (now - last) >= timedelta(minutes=max(0, interval_min))
 
 
 def prune_items(doc: dict[str, Any], live: set[str]) -> None:

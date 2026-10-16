@@ -27,6 +27,7 @@ from local_operator.tui.widgets.subagent_view import entry_block, fold_trajector
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
 from tests.unit.harness.test_comms import _CountingRecords
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_band_panels import _fake_jobs, _Job
 from tests.unit.tui.test_subagent_view import (
     FakeSession,
@@ -217,6 +218,7 @@ async def test_the_dock_says_whose_children_it_lists_and_which_rows_go_deeper() 
     session._subagent_comms = comms = CountingComms(state.jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()
@@ -281,6 +283,7 @@ async def test_a_long_scope_label_cannot_push_the_header_past_its_row() -> None:
     install(session, state)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()
@@ -312,6 +315,7 @@ async def test_a_host_with_no_comms_graph_docks_the_roster_without_marks() -> No
     assert session._subagent_comms is None
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()
@@ -554,10 +558,8 @@ async def test_opening_a_leaf_settles_the_dock_in_the_same_handler(leaf_has_plan
     install(session, state)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        for _ in range(80):
-            await pilot.pause()
-            if app._session is not None:
-                break
+        await await_session_boot(app)
+        await pilot.pause()
         app._refresh_band()
         await pilot.pause()
         panel_shown, _, inset = _dock_state(app)
@@ -626,6 +628,7 @@ async def test_a_mark_never_promises_a_level_that_would_open_empty() -> None:
     session.jobs = WindowedJobs(state.jobs, 5 * 60_000)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()
@@ -665,6 +668,7 @@ async def test_a_mark_costs_one_walk_of_the_graph_however_many_rows_list_it() ->
     session._subagent_comms = comms = CountingComms(state.jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._refresh_band()
         await pilot.pause()
@@ -701,6 +705,7 @@ async def test_the_mark_survives_the_widths_where_it_used_to_disappear(
     install(session, state)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=size) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()
@@ -728,6 +733,7 @@ async def test_the_header_keeps_the_hint_inside_the_terminal_at_forty_columns(wi
     install(session, state)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(width, 30)) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()
@@ -756,6 +762,7 @@ async def test_the_compact_caption_names_the_level_it_counts() -> None:
     install(session, state)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(40, 20)) as pilot:
+        await await_session_boot(app)
         panel = app.query_one(SubagentPanel)
         await pilot.pause()
         app._refresh_band()

@@ -33,7 +33,10 @@ import pytest
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
-from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    PEER_MESSAGE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
+)
 from local_operator.harness.types import (
     AgentToolUpdate,
     Message,
@@ -47,14 +50,19 @@ from local_operator.harness.types import (
     ToolExecutionUpdateEvent,
     ToolResult,
 )
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import ToolComposing, ToolEnded, ToolStarted, ToolUpdated
+from local_operator.tui.quiet_groups import group_splitter_of
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     PeerMessageBlock,
+    QuietGroupBlock,
+    TeamBridgeBlock,
     TranscriptView,
     UserBlock,
+    quiet_group_record_of,
 )
 
 from .test_app_pilot import FakeSession, _factory
@@ -533,3 +541,389 @@ def test_the_hidden_set_is_decided_in_one_place() -> None:
         "local_operator/tui/session_presentation.py",
         "local_operator/tui/widgets/subagent_view.py",
     }, sorted(predicate_users)
+
+
+# ---------------------------------------------------------------------------
+# The inbound TEAM BRIDGE receipt (H4e-render, §13.4's own provenance kind)
+# ---------------------------------------------------------------------------
+
+
+def _bridge_history_row() -> Any:
+    """The persisted shape a ``/resume`` reads back: a custom BRIDGE row."""
+    return SimpleNamespace(
+        role=None,
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+        id="bridge-1",
+        text="",
+        tool_calls=None,
+        content=[],
+        details=dict(BRIDGE_DETAILS),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_row_replays_as_its_own_card(hide_cross_session) -> None:
+    """§13.4: the bridge wake paints as a DISTINCT card, never the peer one.
+
+    ``TeamBridgeBlock`` subclasses ``PeerMessageBlock`` (the receipt mechanics
+    are shared on purpose), so the discriminating assertions are ``type(...)``
+    and the classes: a regression that collapsed the bridge kind back onto the
+    peer card would satisfy ``isinstance`` and fail here.
+    """
+    session = FakeSession()
+    session._history = [_bridge_history_row()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _wait_for(
+            pilot,
+            lambda: any(isinstance(b, TeamBridgeBlock) for b in _blocks(app)),
+            what="the bridge card",
+        )
+        cards = [b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)]
+        assert len(cards) == 1
+        # D1: the card paints what the RECEIVER validated, never the wire body
+        # the same row also carries. Round 13 corrected this assertion — it
+        # still expected "org note", i.e. the model's payload on the human card,
+        # which is the defect D1 exists to remove (the node was red on the
+        # branch head before this round).
+        assert cards[0].text() == BRIDGE_CARD_TEXT
+        assert "body_sha256" not in cards[0].text()
+        assert "team-bridge-block" in cards[0].classes
+        assert "peer-message-block" not in cards[0].classes
+        # No PLAIN peer card for the bridge row: the kind is preserved, not
+        # overloaded.
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+        # The claim set consumed the row at the END of the boot pass, exactly
+        # like the peer branch's (single-paint is per pass; the live path's
+        # dedup is ``_live_peer_receipts``).
+        assert "bridge-1" in app._resume_mounted_ids
+        # A fresh resume of the same history stays TYPE-STABLE: every replayed
+        # card for that row is the bridge card — a regression to the peer kind
+        # would paint a plain ``PeerMessageBlock`` here.
+        app._project_settled_rows(list(session._history))
+        for _ in range(5):
+            await pilot.pause()
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_bridge_row_mounts_nothing_under_the_gate(hide_cross_session) -> None:
+    """``hide_cross_session`` gating matches the peer branch: consumed, hidden."""
+    hide_cross_session(True)
+    session = FakeSession()
+    session._history = [_bridge_history_row()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _wait_for(
+            pilot, lambda: "bridge-1" in app._resume_mounted_ids, what="the boot replay pass"
+        )
+        assert [b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)] == []
+
+        hide_cross_session(False)
+        app._project_settled_rows(list(session._history))
+        await _wait_for(
+            pilot,
+            lambda: any(isinstance(b, TeamBridgeBlock) for b in _blocks(app)),
+            what="the re-projected bridge card",
+        )
+        assert len([b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)]) == 1
+
+
+BRIDGE_SENDER: dict[str, object] = {
+    "account_id": "acc_org",
+    "source": TEAM_BRIDGE_MESSAGE_TYPE,
+}
+#: The persisted ``details`` of a STAMPED carriage: the wire body the model
+#: reads, the wake's own sender, and the provenance the RECEIVER validated. The
+#: human card is built from the last of those (D1), and the live receipt carries
+#: this same dict (round 13), so a delivery paints the same card live that the
+#: replay fold paints later.
+BRIDGE_DETAILS: dict[str, Any] = {
+    "body": "org note",
+    "sender": dict(BRIDGE_SENDER),
+    "bridge": {
+        "delivery_ref": "dref_1",
+        "sender_name": "Priya Raman",
+        "organization": "Acme Research",
+        "excerpt": "could you approve the Q3 spend?",
+        "body_sha256": "ab" * 32,
+    },
+}
+#: What the human card's BODY paints for :data:`BRIDGE_DETAILS`: the screened
+#: excerpt ALONE — never the wire body, and (D8) no longer prefixed with the
+#: member, whom the identity column immediately to its left already names. The
+#: collapsed row is ``identity · body``, composed by the block itself.
+BRIDGE_CARD_TEXT = "could you approve the Q3 spend?"
+BRIDGE_CARD_IDENTITY = "Priya Raman (Acme Research)"
+#: D9 (design round 3): the same carriage with the excerpt unavailable — the
+#: byte-fitter trims it to "", a screened body can be empty, and the render-time
+#: lookup degrades to "" by design. The human row states the absence.
+BRIDGE_DETAILS_WITHOUT_EXCERPT: dict[str, Any] = {
+    **BRIDGE_DETAILS,
+    "bridge": {
+        "delivery_ref": "dref_1",
+        "sender_name": "Priya Raman",
+        "organization": "Acme Research",
+        "excerpt": "",
+        "body_sha256": "ab" * 32,
+    },
+}
+#: Long enough that the expanded card wraps to several rows at 100 columns
+#: (the peer control's own growth measurement is 96x4 under the same toggle).
+LONG_BRIDGE_BODY = (
+    "The release window opens at 18:00 UTC and the claim is one plain sentence; "
+    "reply with the claim text and the bump class you argue, and the notes will "
+    "name every pull request merged since the last tag. " * 2
+).strip()
+
+
+def _bridge_blocks(app: OperatorApp) -> list[TeamBridgeBlock]:
+    return [b for b in _blocks(app) if type(b) is TeamBridgeBlock]
+
+
+def test_the_bridge_identity_names_the_member_and_their_organization() -> None:
+    """Round 13: the identity column names the HUMAN, not the transport.
+
+    ``bridge_card_sender`` enriches the wake's sender dict from the provenance
+    the receiver VALIDATED (``team_bridge/card.py``), and this card is the only
+    surface that reads it: the inherited ladder saw only ``conversation_name`` /
+    ``cwd`` / ``session_id``, none of which a bridge wake carries, so every org
+    card fell through to ``sender_unknown`` and read "another session". On the
+    one card whose whole subject is that a human is asking, the identity named
+    no human and no organization at all.
+
+    The row is built the production way — the same two helpers the live attach
+    and the replay fold call — so this pins the wiring, not the helpers alone.
+    """
+    details: dict[str, Any] = {
+        "body": "org note",
+        "sender": {"account_id": "acc_local", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+        "bridge": {
+            "delivery_ref": "dref_1",
+            "sender_name": "Priya Raman",
+            "organization": "Acme Research",
+            "excerpt": "could you approve the Q3 spend?",
+        },
+    }
+    block = TeamBridgeBlock(bridge_card_text(details), bridge_card_sender(details))
+    identity, _ = block._summary()
+    assert "Priya Raman" in identity, identity
+    assert "Acme Research" in identity, identity
+    assert "another session" not in identity, identity
+    header = block._header(100)
+    assert "Priya Raman" in header, header
+
+    # D8: the collapsed row composes the identity column with the body, so the
+    # member is stated ONCE and the budget goes to the request. The budgets are
+    # the row's own (width - 18, measured with the real ``truncate_cells``).
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    persona, body = block._summary()
+    assert persona == BRIDGE_CARD_IDENTITY
+    assert body == BRIDGE_CARD_TEXT
+    assert truncate_cells(f"{persona} · {body}", 82) == (
+        "Priya Raman (Acme Research) · could you approve the Q3 spend?"
+    )
+    # At 60 columns the reader still gets the member once and a legible request
+    # fragment, instead of the name twice and no request at all (the string the
+    # reviewer saw as ``Priya Raman (Acme Research) · Priya Raman…``).
+    assert truncate_cells(f"{persona} · {body}", 42) == (
+        "Priya Raman (Acme Research) · could you a…"
+    )
+
+    # D9 (design round 3, PR #2378): with the excerpt empty the SAME composed
+    # shape states the absence — measured 52 cells against the 82-cell collapsed
+    # budget, one uncut row at 100 columns.
+    no_preview = TeamBridgeBlock(
+        bridge_card_text(BRIDGE_DETAILS_WITHOUT_EXCERPT),
+        bridge_card_sender(BRIDGE_DETAILS_WITHOUT_EXCERPT),
+    )
+    persona, body = no_preview._summary()
+    assert persona == BRIDGE_CARD_IDENTITY
+    assert body == "(no preview available)"
+    assert truncate_cells(f"{persona} · {body}", 82) == (
+        "Priya Raman (Acme Research) · (no preview available)"
+    )
+    assert "Acme Research" in header, header
+    assert "another session" not in header, header
+
+
+def test_a_bridge_row_without_a_validated_name_keeps_the_old_ladder() -> None:
+    """The enrichment is a JOIN, not a replacement: no meta name, no override.
+
+    A carriage whose provenance lacks the member fields must still render the
+    way it did before round 13 — the identity falls back to the inherited
+    ladder rather than to an invented name or an empty line.
+    """
+    details: dict[str, Any] = {
+        "body": "org note",
+        "sender": {"account_id": "acc_local", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+    }
+    block = TeamBridgeBlock(bridge_card_text(details), bridge_card_sender(details))
+    # The same sender dict through the PARENT class is the control: the override
+    # must make no difference when there is no validated name to show.
+    base = PeerMessageBlock(bridge_card_text(details), bridge_card_sender(details))
+    assert block._sender_name() == base._sender_name() == ("", False)
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_live_delivery_paints_the_bridge_card_once(hide_cross_session) -> None:
+    """F1/A1: the LIVE paint selects the SAME card the replay fold does."""
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.emit(
+            PeerMessageDeliveredEvent(
+                body="org note",
+                sender=BRIDGE_SENDER,
+                message_id="bridge-live-1",
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                details=dict(BRIDGE_DETAILS),
+            )
+        )
+        await _wait_for(pilot, lambda: _bridge_blocks(app), what="the live bridge card")
+        assert len(_bridge_blocks(app)) == 1
+        # The live card is the SAME view the replay paints (the file's whole
+        # subject): the provenance view of the row, not the wire body. The live
+        # receipt carries the row's details for exactly this reason — without
+        # them the live paint read a field the TUI message did not have and
+        # painted nothing at all.
+        assert _bridge_blocks(app)[0].text() == BRIDGE_CARD_TEXT
+        # Not a peer-typed card for the same delivery.
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+        # The dedup id is recorded, so a later REPLAY of this attach skips it
+        # (live-vs-live is at-least-once by design; the record exists for the
+        # replay fold, exactly as the peer branch's does).
+        assert "bridge-live-1" in app._live_peer_receipts
+        app._project_settled_rows(
+            [
+                SimpleNamespace(
+                    role=None,
+                    custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                    id="bridge-live-1",
+                    text="",
+                    tool_calls=None,
+                    content=[],
+                    details={"body": "org note", "sender": BRIDGE_SENDER},
+                )
+            ]
+        )
+        for _ in range(10):
+            await pilot.pause()
+        assert len(_bridge_blocks(app)) == 1, "the replay must skip the live-painted id"
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_live_bridge_delivery_mounts_nothing(hide_cross_session) -> None:
+    """The hide gate runs BEFORE the de-dup record: nothing painted, nothing to de-dup."""
+
+    hide_cross_session(True)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.emit(
+            PeerMessageDeliveredEvent(
+                body="org note",
+                sender=BRIDGE_SENDER,
+                message_id="bridge-live-2",
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+        )
+        # A second event rides behind it so the queue provably drained past the
+        # bridge delivery (delivered-and-suppressed, not not-yet-delivered).
+        app._append_block(UserBlock("hello"))
+        session.emit(NoticeEvent(text="after the bridge note", kind="info"))
+        await _wait_for(
+            pilot,
+            lambda: any(isinstance(b, NoticeBlock) for b in _blocks(app)),
+            what="the notice queued behind the bridge delivery",
+        )
+        assert _bridge_blocks(app) == []
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+        assert "bridge-live-2" not in app._live_peer_receipts
+
+
+@pytest.mark.asyncio
+async def test_a_default_live_delivery_still_paints_the_peer_card(hide_cross_session) -> None:
+    """The default path is byte-for-byte the old one: no kind, peer card."""
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.emit(
+            PeerMessageDeliveredEvent(body="peer note", sender=SENDER, message_id="peer-live-3")
+        )
+        await _wait_for(pilot, lambda: _peer_blocks(app), what="the live peer card")
+        peers = [b for b in _blocks(app) if type(b) is PeerMessageBlock]
+        assert len(peers) == 1 and peers[0].text() == "peer note"
+        assert _bridge_blocks(app) == []
+        assert "peer-live-3" in app._live_peer_receipts
+
+
+@pytest.mark.asyncio
+async def test_an_expanded_bridge_card_grows_beyond_one_row() -> None:
+    """D1: the shipped stylesheet frees the expanded card, exactly like the peer's."""
+
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        bridge = TeamBridgeBlock(LONG_BRIDGE_BODY, BRIDGE_SENDER)
+        peer = PeerMessageBlock(LONG_BRIDGE_BODY, SENDER)
+        view.append_block(bridge)
+        view.append_block(peer)
+        await pilot.pause()
+        await pilot.pause()
+        assert bridge.size.height == 1 and peer.size.height == 1
+        assert bridge.toggle_expanded() is True
+        assert peer.toggle_expanded() is True
+        await pilot.pause()
+        await pilot.pause()
+        # The control: the peer card grows under the same toggle.
+        assert peer.size.height > 1
+        # D1's discrimination: WITHOUT the stylesheet rule this stayed pinned
+        # at one row (measured 96x1 by the design round); the rule frees it.
+        assert bridge.size.height > 1
+
+
+def test_a_bridge_receipt_is_a_quiet_fold_splitter_not_a_peer_member() -> None:
+    """D2: never folded under the peer family's word ("peer messages · 2")."""
+
+    record = quiet_group_record_of(TeamBridgeBlock("org note", BRIDGE_SENDER))
+    assert record.kind == "bridge"
+    assert group_splitter_of(record) is True
+    # The peer control still classifies as a member of its own family.
+    peer_record = quiet_group_record_of(PeerMessageBlock("peer note", SENDER))
+    assert peer_record.kind == "peer" and group_splitter_of(peer_record) is False
+
+
+@pytest.mark.asyncio
+async def test_two_bridge_receipts_are_never_folded_into_a_bar(hide_cross_session) -> None:
+    """The mounted consequence: two live bridge deliveries stay two cards."""
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        for i, mid in enumerate(("bridge-a", "bridge-b"), start=1):
+            session.emit(
+                PeerMessageDeliveredEvent(
+                    body=f"org note {i}",
+                    sender=BRIDGE_SENDER,
+                    message_id=mid,
+                    custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                    details=dict(BRIDGE_DETAILS),
+                )
+            )
+        await _wait_for(pilot, lambda: len(_bridge_blocks(app)) == 2, what="both bridge cards")
+        blocks = _blocks(app)
+        bars = [b for b in blocks if isinstance(b, QuietGroupBlock)]
+        assert bars == [], "bridge receipts are splitters: no fold bar may appear"
+        assert all(b.display for b in _bridge_blocks(app)), "both cards stay visible"

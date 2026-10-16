@@ -1,0 +1,396 @@
+{
+ "_about": "Trimmed, identifier-scrubbed replay of a real session turn (transcript idx 1232-1272): a turn that RESUMED AFTER an answered ask, did its work in bash (cd + cp + python heredoc + shasum redirect) and ended with an answer that links RUN-RECORD.md only in backticks. Client, person and tenant names are replaced with placeholders; counts and shapes are unchanged. Consumed by tests/unit/supplements/test_replay_ask_resume.py.",
+ "messages": [
+  {
+   "idx": 1232,
+   "id": "5c4845c2-8973-4b09-85fb-3bb1e07c8851",
+   "ts": 1792030053.895336,
+   "role": "user",
+   "custom_type": null,
+   "text": "<reply-to>Some rationales are missing from the comments. I wrote one comment per profile, but 226 profiles have two or more listed matches with different rationale text in the spreadsheet. Only one rationale was posted on each. As a result, 326 closed matches on 226 profiles don't have their own spreadsheet rationale in any comment. Every comment does say \"Bulk closure approved by Taylor on 14 October 2026\". My earlier \"all verified\" report missed this. The omitted wording is in rationale-gap-226-profiles.csv. I have not posted supplementary comments; that is a write to production, so I'm leaving it for you to approve.</reply-to>\nWhat should we do about this to close this gap",
+   "tool_calls": [],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1233,
+   "id": "a085991dc99e44258991ae5d5fa2c2df",
+   "ts": 1792030056.3003168,
+   "role": null,
+   "custom_type": "session_state",
+   "text": "",
+   "tool_calls": [],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1235,
+   "id": "a75a9c4ce26f4656b004c1138c4bd0d9",
+   "ts": 1792030069.8930938,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "Before recommending, I'll size the fix with a read-only calculation. Nothing is written to production in this step.",
+   "tool_calls": [
+    {
+     "id": "toolu_01Jd5sTXADaaFeZNKADohzBb",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"; python3 - <<'PY'\nimport csv,collections,json\nplan=list(csv.DictReader(open('acme-readonly-plan.csv')))\naud={r['match_id']:r for r in csv.DictReader(open('acme-closeout-audit-rows.csv'))}\ngap=list(csv.DictReader(open(__import__('os').path.expanduser('~/workspace/acme-bulk-closeout-20261014/rationale-gap-226-profiles.csv'))))\nprint('gap rows',len(gap),collections.Counter(g['match_outcome'] for g in gap))\n# rationale body = after the \"approved by Taylor\" header\nbody=lambda t:t.split('\\n\\n',1)[-1].strip()\ngroups=collections.defaultdict(list)\nfor g in gap:\n    if g['match_outcome']=='MATCH_CLOSED_BY_RUN': groups[(g['profile_id'],body(g['rationale_in_spreadsheet_not_posted']))].append(g['match_id'])\nprint('supplementary comments needed (one per profile+distinct rationale):',len(groups),'| profiles',len({k[0] for k in groups}),'| matches linked',sum(len(v) for v in groups.values()))\nprint('comments per profile:',dict(collections.Counter(collections.Counter(k[0] for k in groups).values())))\n# do the omitted rationales differ materially from what was posted? classify by first 40 chars\nposted=collections.Counter(); omitted=collections.Counter()\nfor k in groups: omitted[k[1][:60]]+=1\nprint('distinct omitted rationale heads:',len(omitted)); \nfor h,n in omitted.most_common(6): print(' ',n,repr(h))\nprint('max len',max(len(k[1]) for k in groups))\nPY",
+      "i": "Sizing the supplementary comment fix read-only",
+      "timeout": 60
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1236,
+   "id": "1e1336bc0fb043f3a6cceca35bb3e236",
+   "ts": 1792030069.8931031,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\ngap rows 326 Counter({'MATCH_CLOSED_BY_RUN': 325, 'SKIPPED_MATCH_RESOLVED_BEFORE_RUN': 1})\nsupplementary comments needed (one per profile+distinct rationale): 296 | profiles 225 | matches linked 325\ncomments per profile: {1: 171, 3: 5, 2: 44, 4: 4, 6: 1}\ndistinct omitted rationale heads: 64\n  57 'True Match: Acceptable Risk - user is not materially impacte'\n  30 'False ",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01Jd5sTXADaaFeZNKADohzBb"
+  },
+  {
+   "idx": 1238,
+   "id": "c0d191327a0f4450809e51edf0ef4cd1",
+   "ts": 1792030083.279116,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "Recommendation: add supplementary comments to the affected profiles. I'd do that rather than edit the existing comments or leave the gap and note it in the receipt.\n\n**Sizing (read-only, nothing written)**\n- **Comments to add:** 296, one per profile and distinct omitted rationale. They cover 225 profiles. 171 profiles need one, 44 need two, 5 need three, 4 need four and 1 needs six.\n- **Matches linked:** 325, the ones this run closed. The 326th gap row is a match an analyst had already resolved, so I'd skip it. A comment announcing a closure on a match this run didn't close would be wrong.\n- **Wording:** 64 distinct rationale heads, longest 538 characters. The biggest groups are \"True Match: Acceptable Risk…\" (57) and \"False Match – PEP record does not match user…\" (30 and 26). All of it is taken verbatim from Taylor's spreadsheet.\n\n**Why supplementary comments rather than the alternatives**\n- **Editing the existing comments:** this would rewrite 2,761-run history that is already in the ledger, so I'd rather not.\n- **Leaving the gap and disclosing it:** the original request was a rationale on each row, and the receipt would then show it as unmet.\n- **Supplementary comments:** these are purely additive and reversible by soft-deleting their ids. They use the same shape as the existing comments, with `metadata.match_ids` pointing at the matches each one covers, so the receipt can state that every closed match now carries its own rationale.\n\n**Plan once approved**\n1. Build the 296 comments with the same \"Bulk closure approved by Taylor on 14 October 2026\" opening, the verbatim rationale, and links to its matches.\n2. Write 2 profiles first and read them back (comment shape, links, no duplicates), then the remainder in throttled batches of about 100.\n3. Insert only if no comment with that exact text exists on the profile, so a re-run can't duplicate. Each insert goes in a new ledger with its comment id.\n4. Add no new activity records, since the profile status didn't change again.\n5. Read all 296 back, then update the receipt (new ledger, hashes and counts, with the gap section marked remediated) and re-run the disclosure check.\n\nNo other data would be touched. The one thing to settle first is whether the supplementary comments should say they are an addendum. I'd word the header as \"Bulk closure approved by Taylor on 14 October 2026 (supplementary rationale)\". The alternative is the identical header, which makes the history read as if it were duplicates.",
+   "tool_calls": [
+    {
+     "id": "toolu_01TbDD96eqBmDxq1BbnvMDVZ",
+     "name": "ask",
+     "arguments": {
+      "questions": [
+       {
+        "id": "gap_fix",
+        "question": "Post 296 supplementary rationale comments (225 ACME Production profiles, verbatim from Taylor's spreadsheet) to close the rationale gap?",
+        "options": [
+         {
+          "label": "Yes, with '(supplementary rationale)' in the header",
+          "description": "Sample 2 profiles with readback, then throttled batches of ~100, idempotent, ledgered; then update the receipt. Recommended: history reads clearly as an addendum.",
+          "recommended": true
+         },
+         {
+          "label": "Yes, with the identical header",
+          "description": "Same procedure; comments are worded exactly like the originals, so history may read as duplicates."
+         },
+         {
+          "label": "No, leave as disclosed",
+          "description": "Keep the receipt's disclosure and make no further production writes."
+         }
+        ],
+        "recommended": 0
+       }
+      ],
+      "timeout": "3600",
+      "i": "Requesting approval for supplementary comments"
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1239,
+   "id": "27515bf4d07648bb8f6a937242d62597",
+   "ts": 1792030083.2791219,
+   "role": "tool",
+   "custom_type": null,
+   "text": "invalid arguments:\n- questions.0.options.0.recommended: Extra inputs are not permitted",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01TbDD96eqBmDxq1BbnvMDVZ"
+  },
+  {
+   "idx": 1242,
+   "id": "909a5b5297b94d8d973c7c9823fa8ff3",
+   "ts": 1792030087.3839848,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "",
+   "tool_calls": [
+    {
+     "id": "toolu_01EhJSu7DHFtsfHv6teDM5Uw",
+     "name": "ask",
+     "arguments": {
+      "questions": [
+       {
+        "id": "gap_fix",
+        "question": "Post 296 supplementary rationale comments (225 ACME Production profiles, verbatim from Taylor's spreadsheet) to close the rationale gap?",
+        "options": [
+         {
+          "label": "Yes, with '(supplementary rationale)' in the header",
+          "description": "Sample 2 profiles with readback, then throttled batches of ~100, idempotent, ledgered; then update the receipt. Recommended: history reads clearly as an addendum."
+         },
+         {
+          "label": "Yes, with the identical header",
+          "description": "Same procedure; comments are worded exactly like the originals, so history may read as duplicates."
+         },
+         {
+          "label": "No, leave as disclosed",
+          "description": "Keep the receipt's disclosure and make no further production writes."
+         }
+        ],
+        "recommended": 0
+       }
+      ],
+      "timeout": "3600",
+      "i": "Requesting approval for supplementary comments"
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1243,
+   "id": "1f550da7e97342fcae6df84a8296cc75",
+   "ts": 1792030087.383997,
+   "role": "tool",
+   "custom_type": null,
+   "text": "Ask a-ce93 queued (1 question(s)); showing on desktop. Continue with other work — their answer arrives as an **ask response** turn. A RECEIPT IS NOT CONSENT: do not run anything the answer was meant to authorise. If nothing arrives by 23:08 you will get a timeout notice.",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01EhJSu7DHFtsfHv6teDM5Uw"
+  },
+  {
+   "idx": 1244,
+   "id": "b8a5904b9c2145e2a3024190d5d2b0f8",
+   "ts": 1792030093.971031,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "I recommend adding supplementary comments, and I've queued the approval request (a-ce93). Nothing is written to production until you answer.\n\n**Fix: 296 additive comments**\n- They cover 225 ACME Production profiles and link to the 325 matches this run closed. I'd skip the 326th gap row, because an analyst had already resolved that match before the run.\n- The wording is taken verbatim from Taylor's spreadsheet.\n- I'd rather not edit the existing 2,761 comments, because that rewrites run history already recorded in the ledger. Leaving the gap and disclosing it would leave the original per-row rationale request unmet.\n\n**Procedure after approval**\n1. Write a 2-profile sample and read it back for comment shape and match links.\n2. Run the remainder in throttled batches of about 100, skipping any profile that already has a comment with the same text.\n3. Log every insert to a new ledger.\n4. Read all 296 back.\n5. Update the receipt, marking the gap remediated and refreshing the counts and hashes.\n\nNo activity records or status changes would be added.\n\n**Your choices** are in a-ce93:\n- Add the supplementary comments with \"(supplementary rationale)\" in the header. This is my recommendation, because the history then reads clearly as an addendum.\n- Add them with the identical header.\n- Leave the gap as disclosed.",
+   "tool_calls": [],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1250,
+   "id": "ask-response-a-ce93",
+   "ts": 1792030136.464174,
+   "role": null,
+   "custom_type": "ask_response",
+   "text": "",
+   "tool_calls": [],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1252,
+   "id": "958c67dcbea544aea623794de2905977",
+   "ts": 1792030139.9919722,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "Approved. First I'll check how the original script built comments and activity so the supplementary ones match.",
+   "tool_calls": [
+    {
+     "id": "toolu_01Jyh5CLku755ReSmRHtQNda",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"; grep -n -i -E 'comment|metadata|created_by|ADMIN|sleep|BATCH' acme_apply.py | head -60",
+      "i": "Reading original comment insert logic",
+      "timeout": 30
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1253,
+   "id": "e4692075a0c24b69b717ee7e47f137be",
+   "ts": 1792030139.992003,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\n7:  comment   one per listed profile, metadata.match_ids = its listed matches\n8:  activity  one synthesized Example Admin record per profile\n18:ADMIN_ID = \"ADMINIDADMINIDADMINIDADMINID\"\n19:ADMIN_META = {\"id\": ADMIN_ID, \"kind\": \"app\", \"name\": \"Example Admin\"}\n42:        if r[\"planned_comment_group_key\"] and r[\"planned_comment_text\"]:\n43:            p[\"text\"] = r[\"planned",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01Jyh5CLku755ReSmRHtQNda"
+  },
+  {
+   "idx": 1255,
+   "id": "d761f9bc9dd244bf9a869ee30a84c44a",
+   "ts": 1792030143.421063,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "",
+   "tool_calls": [
+    {
+     "id": "toolu_01KrwipdNku7eex4HB8ogE4n",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"; sed -n 130,152p acme_apply.py; grep -n '^RATE\\|^T *=' acme_apply.py",
+      "i": "Viewing exact comment document shape",
+      "timeout": 30
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1256,
+   "id": "8220504d13404c33b2b3b330803ca5a7",
+   "ts": 1792030143.421095,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\n        n += r.modified_count; time.sleep(RATE)\n    print(f\"profiles accepted={n}\")\n\n    # comments\n    n = 0\n    for p in comment_pids:\n        text = profiles[p][\"text\"]\n        if not text.startswith(PREFIX):\n            text = PREFIX + \"\\n\\n\" + text\n        if c_com.find_one({\"profile_id\": p, \"text\": text}):\n            lg.write(json.dumps({\"ts\": ts, \"id\": p, \"kind\"",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01KrwipdNku7eex4HB8ogE4n"
+  },
+  {
+   "idx": 1258,
+   "id": "bfa47050ca034996a2d4951ebd59df24",
+   "ts": 1792030172.74881,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "",
+   "tool_calls": [
+    {
+     "id": "toolu_01RYMKSS6QJoddJoPzUrsRHu",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"\ncat > acme_supp.py <<'PY'\n#!/usr/bin/env python3\n\"\"\"ACME bulk closure — supplementary rationale comments (approved by operator, a-ce93).\n\nWHY: the original run posted ONE comment per profile (the last row's rationale). 226 profiles had\nseveral listed matches with different spreadsheet rationales, so 325 closed matches lacked their own\nrationale. This adds one comment per (profile, distinct omitted rationale), verbatim from the\nspreadsheet, linked via metadata.match_ids to the matches it covers.\n\nConstraints: additive only (no edits to existing comments, no status/activity writes). A match is\nlinked only if it was closed BY THE RUN and is still 'closed' now. Idempotent: skipped if a comment\nwith the identical text already exists on the profile. Modes: plan | sample (2 profiles) | bulk.\n\"\"\"\nimport os, sys, csv, json, time, collections, datetime\nfrom pymongo import MongoClient\nfrom bson import ObjectId\nMODE = sys.argv[1]\nTENANT = \"00000000-0000-4000-8000-000000000000\"\nADMIN_ID = \"ADMINIDADMINIDADMINIDADMINID\"\nADMIN_META = {\"id\": ADMIN_ID, \"kind\": \"app\", \"name\": \"Example Admin\"}\nHEADER = \"Bulk closure approved by Taylor on 14 October 2026 (supplementary rationale)\"\nRATE, BATCH = 0.05, 100\nutc = lambda: datetime.datetime.now(datetime.timezone.utc)\n\nplan = list(csv.DictReader(open(\"acme-readonly-plan.csv\")))\naud = {r[\"match_id\"]: r for r in csv.DictReader(open(\"acme-closeout-audit-rows.csv\"))}\nby = collections.defaultdict(list)\nfor r in plan:\n    if r[\"planned_comment_text\"]: by[r[\"profile_id\"]].append(r)\nbody = lambda t: t.split(\"\\n\\n\", 1)[-1].strip()\ngroups = collections.OrderedDict()\nfor p, v in by.items():\n    posted = v[-1][\"planned_comment_text\"]\n    for r in v:\n        if r[\"planned_match_action\"] == \"close\" and r[\"planned_comment_text\"] != posted \\\n           and aud[r[\"match_id\"]][\"outcome\"] == \"MATCH_CLOSED_BY_RUN\":\n            groups.setdefault((p, body(r[\"planned_comment_text\"])), []).append(r[\"match_id\"])\nitems = sorted(groups.items(), key=lambda kv: kv[0][0])\nprint(f\"mode={MODE} supplementary_comments={len(items)} profiles={len({k[0] for k,_ in items})} \"\n      f\"matches={sum(len(v) for _,v in items)}\")\nif MODE == \"plan\": sys.exit(0)\n\ncli = MongoClient(os.environ[\"DB_DSN\"], serverSelectionTimeoutMS=15000)\nC = cli[\"clm-svc\"][\"clm-svc.clm_comments\"]; M = cli[\"core-svc\"][\"search_matches\"]\nif MODE == \"sample\":\n    seen = []; sel = []\n    for k, v in items:           # one profile with 1 and one with 2+ comments\n        if k[0] not in seen and len(seen) < 2: seen.append(k[0])\n        if k[0] in seen: sel.append((k, v))\n    items = sel\nledger = open(\"acme-supp-ledger.jsonl\", \"a\"); ins = skip = unlinked = 0\nfor n, ((p, text), mids) in enumerate(items, 1):\n    live = {str(d[\"_id\"]) for d in M.find({\"_id\": {\"$in\": [ObjectId(m) for m in mids]}, \"review_status\": \"closed\"}, {\"_id\": 1})}\n    link = [m for m in mids if m in live]; unlinked += len(mids) - len(link)\n    full = HEADER + \"\\n\\n\" + text\n    if not link or C.find_one({\"profile_id\": p, \"tenant_id\": TENANT, \"text\": full, \"deleted_at\": None}):\n        skip += 1; ledger.write(json.dumps({\"ts\": utc().isoformat(), \"id\": p, \"kind\": \"supp_skip\", \"link\": len(link)}) + \"\\n\"); continue\n    doc = {\"created_at\": utc(), \"updated_at\": None, \"deleted_at\": None, \"_version\": 1, \"kind\": \"profile\",\n           \"text\": full, \"match_id\": \"\", \"task_id\": \"\", \"profile_id\": p, \"tenant_id\": TENANT,\n           \"created_by\": ADMIN_ID, \"created_by_meta\": ADMIN_META, \"updated_by\": \"\",\n           \"updated_by_meta\": {\"id\": \"\", \"kind\": \"\", \"name\": \"\"}, \"metadata\": {\"match_ids\": link}}\n    rr = C.insert_one(doc); ins += 1\n    ledger.write(json.dumps({\"ts\": utc().isoformat(), \"id\": p, \"kind\": \"supp_comment_insert\",\n                             \"comment_id\": str(rr.inserted_id), \"matches\": link}) + \"\\n\"); ledger.flush()\n    time.sleep(RATE)\n    if MODE == \"bulk\" and n % BATCH == 0: print(f\"  ...{n}/{len(items)} inserted={ins}\", flush=True); time.sleep(2)\nprint(f\"inserted={ins} skipped={skip} unlinked_matches={unlinked}\")\nPY\nlop secret run --secret DB_DSN_PROD=DB_DSN -- sh -c 'python3 acme_supp.py plan' 2>&1 | tail -3",
+      "i": "Writing supplementary comment script, plan mode",
+      "timeout": 120
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1259,
+   "id": "9843778ad4e84242ae9f8e3e7b9b6fec",
+   "ts": 1792030172.748839,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\nmode=plan supplementary_comments=296 profiles=225 matches=325\n\n--- stderr ---\n(empty)",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01RYMKSS6QJoddJoPzUrsRHu"
+  },
+  {
+   "idx": 1261,
+   "id": "b2792b400e4c43639ad1a20fa00ff09d",
+   "ts": 1792030191.787935,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "The plan reproduces my numbers. Next is the 2-profile sample and a readback.",
+   "tool_calls": [
+    {
+     "id": "toolu_014TaNM6FZrywbGPD2hmLQ2r",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"\nlop secret run --secret DB_DSN_PROD=DB_DSN -- sh -c 'python3 acme_supp.py sample' 2>&1 | tail -3\necho '--- ledger ---'; cat acme-supp-ledger.jsonl\ncat > acme_supp_read.py <<'PY'\nimport os,json\nfrom pymongo import MongoClient\nfrom bson import ObjectId\nC=MongoClient(os.environ[\"DB_DSN\"],serverSelectionTimeoutMS=15000)[\"clm-svc\"][\"clm-svc.clm_comments\"]\nfor l in open(\"acme-supp-ledger.jsonl\"):\n    d=json.loads(l)\n    if d[\"kind\"]!=\"supp_comment_insert\": continue\n    c=C.find_one({\"_id\":ObjectId(d[\"comment_id\"])})\n    print(d[\"id\"],\"| links ok:\",c[\"metadata\"][\"match_ids\"]==d[\"matches\"],\"| actor:\",c[\"created_by_meta\"][\"name\"],\"| kind:\",c[\"kind\"],\"| tenant ok:\",c[\"tenant_id\"].startswith(\"fcb395ef\"))\n    print(\"   \",repr(c[\"text\"][:230]))\nPY\nlop secret run --secret DB_DSN_PROD=DB_DSN -- sh -c 'python3 acme_supp_read.py' 2>&1 | tail -20",
+      "i": "Running 2-profile sample with readback",
+      "timeout": 120
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1262,
+   "id": "a877618b0b6c42e68deebb954f5bc619",
+   "ts": 1792030191.7879539,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\nmode=sample supplementary_comments=296 profiles=225 matches=325\ninserted=2 skipped=0 unlinked_matches=0\n--- ledger ---\n{\"ts\": \"2026-10-15T02:09:43.031905+00:00\", \"id\": \"000000000000000000000000\", \"kind\": \"supp_comment_insert\", \"comment_id\": \"000000000000000000000000\", \"matches\": [\"000000000000000000000000\"]}\n{\"ts\": \"2026-10-15T02:09:43.236115+00:00\", \"id\": \"6723d12d1cd4",
+   "tool_calls": [],
+   "tool_call_id": "toolu_014TaNM6FZrywbGPD2hmLQ2r"
+  },
+  {
+   "idx": 1264,
+   "id": "8a73ce093c2e4864a73afd8b5ac07aba",
+   "ts": 1792030261.878093,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "The sample is correct: shape, actor, tenant and links all match. Now the throttled bulk run for the remaining 294; the 2 sample comments are skipped by the idempotency check.",
+   "tool_calls": [
+    {
+     "id": "toolu_013CgMMFP7dsrNAFLRnwitfJ",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"; lop secret run --secret DB_DSN_PROD=DB_DSN -- sh -c 'python3 acme_supp.py bulk' 2>&1 | tail -8",
+      "i": "Running throttled supplementary bulk",
+      "timeout": 900
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1265,
+   "id": "a9fe16ac06b04080aa176ccceec31881",
+   "ts": 1792030261.878114,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\nmode=bulk supplementary_comments=296 profiles=225 matches=325\n  ...100/296 inserted=98\n  ...200/296 inserted=198\ninserted=294 skipped=2 unlinked_matches=0\n\n--- stderr ---\n(empty)",
+   "tool_calls": [],
+   "tool_call_id": "toolu_013CgMMFP7dsrNAFLRnwitfJ"
+  },
+  {
+   "idx": 1267,
+   "id": "1ee9e9f05b084449b34fe803b810f2c1",
+   "ts": 1792030286.84374,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "Now the full readback of all 296, plus a check that nothing else moved.",
+   "tool_calls": [
+    {
+     "id": "toolu_01AgN7oDTUFcQ9BNJhvpx9Az",
+     "name": "bash",
+     "arguments": {
+      "command": "cd \"$LOCAL_OPERATOR_SCRATCHPAD\"\ncat > acme_supp_verify.py <<'PY'\nimport os,csv,json,collections\nfrom pymongo import MongoClient\nfrom bson import ObjectId\nT=\"00000000-0000-4000-8000-000000000000\"\ncli=MongoClient(os.environ[\"DB_DSN\"],serverSelectionTimeoutMS=15000)\nC=cli[\"clm-svc\"][\"clm-svc.clm_comments\"];M=cli[\"core-svc\"][\"search_matches\"]\nled=[json.loads(l) for l in open(\"acme-supp-ledger.jsonl\")]\nins=[d for d in led if d[\"kind\"]==\"supp_comment_insert\"]\nprint(\"ledger inserts\",len(ins),\"distinct ids\",len({d[\"comment_id\"] for d in ins}))\ndocs={str(c[\"_id\"]):c for c in C.find({\"_id\":{\"$in\":[ObjectId(d[\"comment_id\"]) for d in ins]}})}\nprint(\"found in db\",len(docs),\"| header ok\",sum(c[\"text\"].startswith(\"Bulk closure approved by Taylor on 14 October 2026 (supplementary rationale)\\n\\n\") for c in docs.values()),\n \"| tenant ok\",sum(c[\"tenant_id\"]==T for c in docs.values()),\"| links match ledger\",sum(docs[d[\"comment_id\"]][\"metadata\"][\"match_ids\"]==d[\"matches\"] for d in ins))\n# all linked matches closed-by-run & still closed\naud={r[\"match_id\"]:r for r in csv.DictReader(open(\"acme-closeout-audit-rows.csv\"))}\nlinked={m for d in ins for m in d[\"matches\"]}\nst=collections.Counter(M.find_one({\"_id\":ObjectId(m)},{\"review_status\":1})[\"review_status\"] for m in linked)\nprint(\"linked matches\",len(linked),\"status\",dict(st),\"| all closed-by-run\",all(aud[m][\"outcome\"]==\"MATCH_CLOSED_BY_RUN\" for m in linked))\n# coverage: every run-closed match with a spreadsheet rationale now has it in some comment on its profile\nplan=list(csv.DictReader(open(\"acme-readonly-plan.csv\")))\nbody=lambda t:t.split(\"\\n\\n\",1)[-1].strip()\nbyp=collections.defaultdict(list)\nfor r in plan:\n    if r[\"planned_match_action\"]==\"close\" and aud[r[\"match_id\"]][\"outcome\"]==\"MATCH_CLOSED_BY_RUN\" and r[\"planned_comment_text\"]: byp[r[\"profile_id\"]].append(r)\ntexts=collections.defaultdict(list)\npids=list(byp)\nfor i in range(0,len(pids),500):\n    for c in C.find({\"tenant_id\":T,\"profile_id\":{\"$in\":pids[i:i+500]},\"deleted_at\":None,\"created_by\":\"ADMINIDADMINIDADMINIDADMINID\"},{\"profile_id\":1,\"text\":1,\"metadata\":1}):\n        texts[c[\"profile_id\"]].append(c)\nmiss=0;tot=0\nfor p,rs in byp.items():\n    for r in rs:\n        tot+=1; b=body(r[\"planned_comment_text\"])\n        if not any(body(c[\"text\"])==b and r[\"match_id\"] in (c.get(\"metadata\") or {}).get(\"match_ids\",[]) for c in texts[p]): miss+=1\nprint(\"run-closed matches with a sheet rationale:\",tot,\"| lacking own rationale in a comment linking them:\",miss)\n# collateral: admin comments in window not in any ledger\nids={d[\"comment_id\"] for d in ins}|{json.loads(l).get(\"comment_id\") for l in open(\"acme-apply-ledger.jsonl\") if \"comment_id\" in l}\nlo=ObjectId.from_datetime(__import__(\"datetime\").datetime(2026,10,15,2,0,tzinfo=__import__(\"datetime\").timezone.utc))\nprint(\"admin comments since 02:00Z not in ledgers:\",sum(1 for c in C.find({\"_id\":{\"$gte\":lo},\"created_by\":\"ADMINIDADMINIDADMINIDADMINID\"},{\"_id\":1}) if str(c[\"_id\"]) not in ids))\nPY\nlop secret run --secret DB_DSN_PROD=DB_DSN -- sh -c 'python3 acme_supp_verify.py' 2>&1 | tail -12",
+      "i": "Verifying all supplementary comments and coverage",
+      "timeout": 300
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1268,
+   "id": "f6ee2da4b8bd438cafb4707a0d723d90",
+   "ts": 1792030286.843759,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\nledger inserts 296 distinct ids 296\nfound in db 296 | header ok 296 | tenant ok 296 | links match ledger 296\nlinked matches 325 status {'closed': 325} | all closed-by-run True\nrun-closed matches with a sheet rationale: 3194 | lacking own rationale in a comment linking them: 0\nadmin comments since 02:00Z not in ledgers: 0\n\n--- stderr ---\n(empty)",
+   "tool_calls": [],
+   "tool_call_id": "toolu_01AgN7oDTUFcQ9BNJhvpx9Az"
+  },
+  {
+   "idx": 1270,
+   "id": "df5b35cf80934094af99695031ccb275",
+   "ts": 1792030296.71362,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "The gap is closed: all 3,194 run-closed matches now have their own spreadsheet rationale in a comment that links them. Next I'll update the receipt package.",
+   "tool_calls": [
+    {
+     "id": "toolu_014Qf6BvCVk24kRBb5k4WrqL",
+     "name": "bash",
+     "arguments": {
+      "command": "cd ~/workspace/acme-bulk-closeout-20261014; cp \"$LOCAL_OPERATOR_SCRATCHPAD/acme-supp-ledger.jsonl\" write-ledger-supplementary-comments.jsonl\npython3 - <<'PY'\ns=open('RUN-RECORD.md').read()\n# header note\ns=s.replace('## Summary\\n','''## Addendum (2026-10-15 02:10 UTC): rationale gap remediated\n\nThe first run posted one comment per profile, which left 325 closed matches on 225 profiles without\ntheir own spreadsheet rationale (disclosure 1 below). With operator approval, **296 supplementary\ncomments** were added to those 225 profiles. Each opens \"Bulk closure approved by Taylor on\n14 October 2026 (supplementary rationale)\", carries the spreadsheet rationale verbatim, and lists the\nmatches it covers in `metadata.match_ids` (325 links). Same actor and shape as the original comments;\nno existing comment, status or activity record was changed. Written in 2 + 294 inserts, ledger:\n`write-ledger-supplementary-comments.jsonl`. Re-read afterwards: 296/296 present, tenant correct,\nlinks match the ledger, every linked match still `closed`; **all 3,194 closed matches now have their\nown spreadsheet rationale in a comment linking them (0 lacking)**. Total bulk-closure comments on\nthese profiles: 2,761 original + 296 supplementary = 3,057.\nThe one remaining gap row (a match an analyst resolved before the run) was deliberately not\ncommented, since this run did not close it.\n\n## Summary\n''',1)\ns=s.replace('1. **One comment per profile, but some rationale is not on the profile.**','1. **(Remediated, see Addendum.) One comment per profile, but some rationale was not on the profile.**')\ns=s.replace('This is a shortfall against \"apply the rationale from the spreadsheet per row\" and needs\\n   a supplementary-comment pass; it has **not** been done.','This was a shortfall against \"apply the rationale from the spreadsheet per row\"; the supplementary\\n   comments described in the Addendum close it.')\ns=s.replace('2,761 comments to soft-delete','2,761 comments to soft-delete (plus the 296 supplementary comments listed in `write-ledger-supplementary-comments.jsonl`)')\ns=s.replace('| `rationale-gap-226-profiles.csv` | Disclosure 1: rationales not posted |','| `rationale-gap-226-profiles.csv` | Disclosure 1: rationales that were missing (now remediated) |\\n| `write-ledger-supplementary-comments.jsonl` | Record of the 296 supplementary comment inserts |')\nopen('RUN-RECORD.md','w').write(s)\nPY\npython3 - <<'PY'\nimport json,os\np=os.path.expanduser('~/workspace/acme-bulk-closeout-20261014/reversal-ids.json'); d=json.load(open(p))\nd['supplementary_comment_ids_to_soft_delete']=sorted(json.loads(l)['comment_id'] for l in open(os.path.expanduser('~/workspace/acme-bulk-closeout-20261014/write-ledger-supplementary-comments.jsonl')) if '\"supp_comment_insert\"' in l)\njson.dump(d,open(p,'w'),indent=1); print(len(d['supplementary_comment_ids_to_soft_delete']))\nPY\nshasum -a 256 *.csv *.jsonl *.json > SHA256SUMS; grep -c 'supplementary' RUN-RECORD.md; grep -n 'reversal-ids' RUN-RECORD.md | head -3; wc -l SHA256SUMS",
+      "i": "Updating receipt, reversal ids and hashes",
+      "timeout": 60
+     }
+    }
+   ],
+   "tool_call_id": null
+  },
+  {
+   "idx": 1271,
+   "id": "04ade28b98c54e3489cab8ec458844ce",
+   "ts": 1792030296.71363,
+   "role": "tool",
+   "custom_type": null,
+   "text": "exit code: 0\n--- stdout ---\n296\n7\n124:`reversal-ids.json` lists every id changed with its prior value: 2,287 profiles to restore to\n140:| `reversal-ids.json` | Disclosure: reversal ids |\n       8 SHA256SUMS\n\n--- stderr ---\n(empty)",
+   "tool_calls": [],
+   "tool_call_id": "toolu_014Qf6BvCVk24kRBb5k4WrqL"
+  },
+  {
+   "idx": 1272,
+   "id": "e8f800bfa20e43979af1c2df9aab6d15",
+   "ts": 1792030303.11662,
+   "role": "assistant",
+   "custom_type": null,
+   "text": "The rationale gap is closed in production. All 3,194 matches this run closed now have their own spreadsheet rationale in a comment that links them; none lack one.\n\n**What changed**\n- I added 296 supplementary comments to 225 ACME Production profiles. They were written as a 2-profile sample, then the remaining 294 in throttled batches. Nothing failed.\n- Each comment starts \"Bulk closure approved by Taylor on 14 October 2026 (supplementary rationale)\". The rationale text comes verbatim from Taylor's spreadsheet, and the comment links the matches it covers (325 links). The author is Example Admin, as on the original comments.\n- No existing comment, status or activity record was touched. The one remaining gap row is a match an analyst resolved before the run, so I deliberately left it uncommented.\n\n**Checks I ran**\n- All 296 comments are in the database, in the right tenant, with the header and with links matching the ledger. All 325 linked matches are still `closed`.\n- Every run-closed match now has its rationale in a linking comment. For each of the 3,194 run-closed matches, I looked for a comment on its profile that carries its spreadsheet rationale and lists it in `metadata.match_ids`; none are missing.\n- No comments from the Example Admin author after 02:00 UTC fall outside the ledgers.\n- I did not check the rendered UI, only the stored documents. That caveat is in the receipt.\n\n**Receipt**\n`RUN-RECORD.md` in `~/workspace/acme-bulk-closeout-20261014/` now opens with an addendum describing the remediation. The earlier disclosure is marked remediated. The new ledger is `write-ledger-supplementary-comments.jsonl`, and `reversal-ids.json` includes the 296 new comment ids. `SHA256SUMS` is refreshed.\n\nThe two other disclosures stay as written: the 40 comment links to matches an analyst had already resolved, and no events or webhooks emitted from the direct writes. I haven't posted to Slack or contacted ACME, so the reply to Taylor is yours.",
+   "tool_calls": [],
+   "tool_call_id": null
+  }
+ ]
+}

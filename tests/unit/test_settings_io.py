@@ -25,6 +25,8 @@ from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
 from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -75,6 +77,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
+        OPENROUTER_RETIRE_BELOW_TPS,
     )
 
     # The mesh audit log's three bounds, taken from the module that READS them:
@@ -270,6 +273,12 @@ def _consumer_defaults() -> dict[str, object]:
         # (``rollouts.rollout_policy`` resolves an absent key against exactly
         # this constant — the reader's own fallback, not a restatement).
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
+        "memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "memory.capture": MEMORY_DEFAULT_ENABLED,
+        "memory.suggest": MEMORY_DEFAULT_ENABLED,
+        "network.memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "network.memory.scopes": list(SCOPES),
+        "network.memory.exclude_devices": list(DEFAULT_EXCLUDED_DEVICES),
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
@@ -330,6 +339,11 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.openrouter.preferred_max_latency": (
             DEFAULT_CONFIG.values["providers"]["openrouter"]["preferred_max_latency"]
         ),
+        # Three restatements of one number (registry literal, DEFAULT_CONFIG, the
+        # consumer constant): the registry default is checked against the
+        # constant here, and DEFAULT_CONFIG against it in
+        # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
+        "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -603,7 +617,6 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.rate": "tui/settings.py derives its defaults from this registry",
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
-    "hub.merge_model": "free text; empty means 'use the default model', no constant",
     "subagents.models.lo": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.med": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.hi": "free text; empty removes the tier; 'default' tracks it, no constant",
@@ -1381,7 +1394,7 @@ def test_openrouter_defaults_mean_no_opinion() -> None:
         for key in settings_io.BY_KEY
         if key.startswith("providers.openrouter.")
     }
-    assert len(defaults) == 14
+    assert len(defaults) == 15
     # STILL None with all 14 defaults present, including the ON-by-default
     # ``provider_affinity``. That is the point of asserting it here: that key is
     # a HARNESS switch read by ``SessionStreamFn._affinity_enabled``, and it is

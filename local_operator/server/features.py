@@ -90,6 +90,14 @@ def feature_flags() -> dict[str, Any]:
         # no network) plus check/apply/apply-all/retry. A renderer gates the
         # sidebar indicator on this so it never polls a backend that lacks it.
         "hub_updates": 1,
+        # The full local-only LINKS inventory: GET /v1/desktop/hub/links plus
+        # PATCH /v1/desktop/hub/links/{link_id} (independent subscribe/auto_push
+        # with a policy-revision CAS). Its OWN key rather than a bump of
+        # `hub_updates`: a renderer gated on `hub_updates` keeps its existing
+        # pending-only sidebar and never polls this, while a renderer that sees
+        # `hub_links` may show the healthy inventory with a direct source-scoped
+        # toggle. The legacy `/hub/updates` projection stays compatible.
+        "hub_links": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
@@ -269,6 +277,18 @@ def feature_flags() -> dict[str, Any]:
         # state, not an error -- the capability advertises that the routes
         # EXIST, never that the deployment carries traffic.
         "team_bridge": 1,
+        # The READ slice of agent messages (RFC §6.1 reads):
+        # `GET /v1/desktop/team-bridge/inbox` -- what this machine may SHOW the
+        # person it already received. Its own key rather than a bump of
+        # `team_bridge`, by the same rule as its sibling above, and for one
+        # more reason: this is the half that does not need the decision gate.
+        # A renderer on >= 1 may mount the inbox read and its (metadata-only)
+        # states; a renderer that does not see it keeps the surfaces it has and
+        # says "update the backend" -- it must NOT probe decision operations to
+        # find out, because the fact that reads exist says nothing about them.
+        # The number is the READ SHAPE's version, not a gate: 1 is ids, states
+        # and coarse codes with no message body.
+        "team_bridge_read": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -580,6 +600,10 @@ def feature_flags() -> dict[str, Any]:
         # an old renderer ignores the extra fields, and bumping would
         # hide a working sign-in flow behind an update it does not need.
         "tunnel": 1,
+        # Explicit setup is a separate capability. Older renderers/backends
+        # retain health/sign-in behavior; only this key admits the new account-
+        # pinned quote/run affordance, never an automatic poll-side mutation.
+        "tunnel_setup": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
@@ -831,6 +855,24 @@ def feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
+        # conversation and its subagents produced: written, edited, command outputs,
+        # screenshots, downloads, generated images/videos and Highlights callouts, derived
+        # from the journal, paged, filtered and sorted) plus its
+        # `POST …/files/{file_id}/materialise` child (copy a digest-only artifact out to a real
+        # file under the session scratchpad). ONE key for the pair, as `code_requests` does:
+        # a renderer that can list artifacts is the renderer that owns the "save/open" action.
+        #
+        # WHY A KEY: the routes are ADDITIVE, so this gates nothing for an old client. It is how
+        # a renderer learns the surface EXISTS before it issues a query that would 404 on a
+        # backend without it. ABSENT MEANS the Files view builds from its own transcript scan
+        # exactly as before, and the renderer MUST NOT call the route (it would 404). A 404 from
+        # a backend that advertised the key is a broken backend, not a slow one: treat it as
+        # definitive "unsupported" for the session.
+        #
+        # `1` is the feature's first contract revision; new row fields are additive and do not
+        # bump it.
+        "session_files": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a

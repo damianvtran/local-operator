@@ -23,10 +23,19 @@ from local_operator.server.routes.desktop_radient import (
 )
 
 
-def test_the_org_operations_are_exactly_the_documented_four() -> None:
+def test_the_org_operations_are_exactly_the_documented_six() -> None:
     """The dispatch set and the Literal's org entries cannot silently diverge."""
     assert ORG_OPERATIONS == frozenset(
-        {"memberships.list", "org_agents.list", "org_teams.list", "org_team.get"}
+        {
+            "memberships.list",
+            "org_agents.list",
+            "org_teams.list",
+            "org_team.get",
+            # The skills lane's two reads: an org catalogue refusal must carry
+            # the same membership vocabulary as its siblings.
+            "org_skills.list",
+            "org_skill.get",
+        }
     )
     assert set(_ORG_REFUSAL_MESSAGES) == {
         "not_a_member",
@@ -69,6 +78,22 @@ def test_org_operations_need_their_own_identifier() -> None:
         RadientRequest.model_validate({"operation": "org_agents.list"})
     with pytest.raises(ValueError, match="team"):
         RadientRequest.model_validate({"operation": "org_team.get"})
+    with pytest.raises(ValueError, match="organization"):
+        RadientRequest.model_validate({"operation": "org_skills.list"})
+    with pytest.raises(ValueError, match="organization"):
+        RadientRequest.model_validate({"operation": "org_skill.get", "skill_id": "sk-1"})
+    with pytest.raises(ValueError, match="skill"):
+        RadientRequest.model_validate({"operation": "org_skill.get", "tenant_id": "org-1"})
+    # The skill id becomes an upstream path segment: characters outside the
+    # shared identifier grammar are refused before a request could be built.
+    with pytest.raises(ValueError):
+        RadientRequest.model_validate(
+            {"operation": "org_skill.get", "tenant_id": "org-1", "skill_id": ".."}
+        )
+    with pytest.raises(ValueError, match="Unsupported query fields"):
+        RadientRequest.model_validate(
+            {"operation": "org_skills.list", "tenant_id": "org-1", "query": {"page": 1}}
+        )
 
 
 def test_endpoint_maps_the_org_family() -> None:
@@ -86,6 +111,13 @@ def test_endpoint_maps_the_org_family() -> None:
         "GET",
         "/teams/team-1",
     )
+    assert endpoint(RadientRequest(operation="org_skills.list", tenant_id="org-1")) == (
+        "GET",
+        "/tenants/org-1/skills",
+    )
+    assert endpoint(
+        RadientRequest(operation="org_skill.get", tenant_id="org-1", skill_id="sk-1")
+    ) == ("GET", "/tenants/org-1/skills/sk-1")
 
 
 @pytest.mark.parametrize(
@@ -97,6 +129,11 @@ def test_endpoint_maps_the_org_family() -> None:
         ("org_agents.list", {"code": "something_else"}, None),
         ("org_agents.list", ["not", "a", "dict"], None),
         ("agents.list", {"code": "team_plan_required"}, None),
+        # The skill reads joined the org family: their refusals take the same
+        # code-preserving reading, and a non-org op still does not.
+        ("org_skills.list", {"code": "not_a_member"}, "not_a_member"),
+        ("org_skill.get", {"code": "insufficient_role"}, "insufficient_role"),
+        ("org_skill.get", {"code": "skill_not_found"}, None),
     ],
 )
 def test_org_refusal_code_reads_only_frozen_codes_for_org_operations(

@@ -134,6 +134,8 @@ async def send_peer_message(
     wake: bool,
     sender: dict[str, Any],
     message_id: str | None = None,
+    custom_type: str | None = None,
+    bridge_meta: dict[str, Any] | None = None,
     deadline_s: float = 5.0,
 ) -> PeerAck:
     """Deliver one message to ``record``'s session and return the ack.
@@ -147,6 +149,11 @@ async def send_peer_message(
     entirely when ``None``, which is what keeps this frame byte-identical for a
     caller that has no id to offer (and for an old receiver, which ignores it).
 
+    ``custom_type`` is the sender-declared PROVENANCE kind (H4e-render): a
+    member of the client-local ``PEER_DELIVERABLE_CUSTOM_TYPES`` allowlist,
+    carried under the same omission discipline and re-validated by the receiver
+    at every hop — a declaration the wire cannot widen.
+
     Raises ``RuntimeError`` on an ``error`` reply (e.g. an older registrant
     that does not know the op, or a handle that cannot receive), and
     ``ConnectionError`` if the session closes before acking. Both are soft
@@ -156,6 +163,22 @@ async def send_peer_message(
     fields: dict[str, Any] = {"text": text, "mode": mode, "wake": wake, "sender": sender}
     if message_id is not None:
         fields["message_id"] = message_id
+    if custom_type is not None:
+        # Sender-declared PROVENANCE (H4e-render), carried with the exact
+        # ``message_id`` discipline: omitted entirely when ``None``, so a
+        # legacy caller's frame stays byte-identical and an older receiver
+        # never sees a key it would silently drop. The RECEIVER re-validates
+        # against the client-local allowlist at every hop, so this is a
+        # declaration, never an authority.
+        fields["custom_type"] = custom_type
+    if bridge_meta is not None:
+        # The internal bridge LOCATOR (H5 F3): omitted entirely when ``None``
+        # (legacy frames stay byte-identical), VALIDATED here against the
+        # bounded closed key set before it can travel, and re-validated by
+        # the receiver at every hop — a locator hint, never authority.
+        from local_operator.harness.message_types import validate_bridge_meta
+
+        fields["bridge_meta"] = validate_bridge_meta(bridge_meta)
     return await send_control_op(
         record,
         "peer_message",

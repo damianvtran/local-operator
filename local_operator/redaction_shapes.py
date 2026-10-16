@@ -1041,15 +1041,20 @@ def is_strong_credential_name(name: str) -> bool:
 #: model needs to fix the command, and registering it contains nothing. Detection is
 #: still COUNTED for these (the notice is the signal for a bare value), so this is a
 #: predicate over masking and registration alone.
-_PLACEHOLDER_SHAPES = re.compile(
-    r"^(?:"
+# Keep the structural alternatives shared with the existing placeholder policy,
+# but separate them from repeated characters and generic words. A DSN or CLI
+# password can genuinely be one of those words/repetitions; releasing them there
+# would weaken an existing credential shape rather than fix reference syntax.
+_PLACEHOLDER_REFERENCE_BODY = (
     r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|"  # ${CI_JOB_TOKEN}, $GITLAB_TOKEN
     r"<[^<>]{1,40}>|"  # <password>
     r"%s|%\([a-z_]+\)s|"  # printf-style
     r"\{\{[^{}]{1,80}\}\}|"  # {{ … }}
-    r"\[\[.*?\]\]|"
-    r"(.)\1{2,}"  # ***, xxx, ...
-    r")$"
+    r"\[\[.*?\]\]"
+)
+_PLACEHOLDER_REFERENCE_SHAPES = re.compile(r"(?:" + _PLACEHOLDER_REFERENCE_BODY + r")")
+_PLACEHOLDER_SHAPES = re.compile(
+    r"^(?:" + _PLACEHOLDER_REFERENCE_BODY + r"|(.)\1{2,})$"  # ***, xxx, ...
 )
 
 _PLACEHOLDER_WORDS = frozenset(
@@ -1094,6 +1099,26 @@ def is_placeholder_component(value: str) -> bool:
     if _PLACEHOLDER_SHAPES.match(stripped):
         return True
     return stripped.lower() in _PLACEHOLDER_WORDS
+
+
+def _is_structural_placeholder_reference(value: str) -> bool:
+    """A whole reference/usage token, never prose or a guessed encoded value.
+
+    Assignment rules already preserve this syntax; unconditional DSN masking and
+    the CLI guard previously destroyed it, so even a documented reference became
+    a mask in the published copy. Known-value masking still runs first and wins
+    if this exact spelling was independently registered as a real secret.
+
+    No partial match, percent decoding, repeated-character or placeholder-word
+    release belongs here. An unknown password byte-identical to admitted syntax
+    remains indistinguishable from a reference under this existing contract.
+    """
+    if _PLACEHOLDER_REFERENCE_SHAPES.fullmatch(value) is None:
+        return False
+    # The older general policy tolerates incomplete shell-reference braces.
+    # This narrower release needs a complete token: partial references can be
+    # actual credentials and must retain their original DSN/CLI mask.
+    return not value.startswith("$") or value.startswith("${") == value.endswith("}")
 
 
 def _repeats_its_own_name(value: str, name: str) -> bool:
@@ -1620,12 +1645,7 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # auth"`` is a claim NAME; the value proves itself the same way a ``*_URL``
     # name's does — userinfo password or credential-shaped query parameter.
     if _URL_LIKE.match(value):
-        return not (
-            _URL_USERINFO_PASSWORD.search(value)
-            or _URL_USERINFO_PASSWORD_PLAIN.search(value)
-            or _URL_CRED_QUERY.search(value)
-            or _URL_KEY_USERINFO.search(value)
-        )
+        return not _url_contains_credential(value)
     # A dotted attribute path is a REFERENCE to a credential, not one:
     # ``key="providers.anthropic.cache_ttl_1h_min_context_tokens"``. Digits in a
     # path are ordinary (``cache_ttl_1h``), so this clause does not depend on
@@ -2272,6 +2292,8 @@ def _flag_value_guard(match: Match[str]) -> bool:
     for the value-side cases it keeps masked, and for the residual it accepts.
     """
     value = match.group(2)
+    if _is_structural_placeholder_reference(value):
+        return False
     if any(char in value for char in _EXPRESSION_CHARS):
         return False
     if _value_is_a_reference_to_a_credential(value):
@@ -2554,6 +2576,25 @@ def _assignment_guard_quoted(match: Match[str]) -> bool:
     return _assignment_value_guard(match)
 
 
+def _url_contains_credential(value: str) -> bool:
+    """Keep URL guards consistent with the DSN's structural-reference decision.
+
+    Releasing only the DSN component is insufficient: the named-URL rule and
+    assignment fallback would immediately mask the same example again. Judge
+    only the exact userinfo component recognized by their existing patterns;
+    query credentials and opaque userinfo keys retain their independent proof.
+    Do not URL-decode a percent-encoded password into apparent reference syntax.
+    """
+    for pattern in (_URL_USERINFO_PASSWORD, _URL_USERINFO_PASSWORD_PLAIN):
+        for match in pattern.finditer(value):
+            # Both existing patterns start at :// and end at @. Split on the
+            # first colon only: later colons are part of a genuine password.
+            password = match.group(0)[3:-1].partition(":")[2]
+            if not _is_structural_placeholder_reference(password):
+                return True
+    return bool(_URL_CRED_QUERY.search(value) or _URL_KEY_USERINFO.search(value))
+
+
 def _url_value_guard(match: Match[str]) -> bool:
     """A ``*_URL``/``*_URI``/``*_DSN`` name whose VALUE carries a credential.
 
@@ -2563,13 +2604,7 @@ def _url_value_guard(match: Match[str]) -> bool:
     name = match.group(1).lower()
     if not any(hint in name for hint in _URL_NAME_HINTS):
         return False
-    value = match.group(4)
-    return bool(
-        _URL_USERINFO_PASSWORD.search(value)
-        or _URL_USERINFO_PASSWORD_PLAIN.search(value)
-        or _URL_CRED_QUERY.search(value)
-        or _URL_KEY_USERINFO.search(value)
-    )
+    return _url_contains_credential(match.group(4))
 
 
 #: The query-parameter names whose VALUE gets the ambiguous-name value proof,
@@ -3602,14 +3637,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "dsn-password",
         _DSN_PATTERN,
-        lambda m: m.group(1) + REDACTION_MARKER + "@",
+        None,  # guarded path preserves the user/host and masks only group 2
         2,
+        guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
     ),
     Shape(
         "dsn-password-plain",
         _DSN_PATTERN_PLAIN,
-        lambda m: m.group(1) + REDACTION_MARKER + "@",
+        None,  # guarded path preserves the user/host and masks only group 2
         2,
+        guard=lambda match: not _is_structural_placeholder_reference(match.group(2)),
     ),
     # A named URL/URI/endpoint value that CARRIES a credential: a userinfo
     # password, or a credential-shaped query parameter.
@@ -4947,7 +4984,7 @@ def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit
 
     The mask itself is rendered exactly as ``sub`` rendered it before: a template goes
     through ``match.expand`` (the same expansion ``sub`` applies to a string
-    replacement), and the five rules whose replacement is a CALLABLE keep calling it.
+    replacement), and rules whose replacement is a CALLABLE keep calling it.
     """
     value = _hit_value(shape, match)
     if value:
@@ -5937,6 +5974,65 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
             else:
                 result = result.replace(form, REDACTION_MARKER)
     return result
+
+
+# Consume an entire quoted token, including escaped pairs and an unterminated
+# tail, before asking the JSON decoder whether it is valid. Consuming the tail
+# prevents retrying each escaped quote in a malformed suffix (quadratic work),
+# and never recovers a valid-looking token from inside an invalid escape.
+_JSON_QUOTED_VALUE = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\\?\Z)', re.DOTALL)
+_JSON_VALUE_KEY_SUFFIX = re.compile(r"\s*:")
+
+
+def scrub_known_json_string_values(text: str, values: Iterable[Optional[str]]) -> str:
+    """Mask known literals in valid escaped JSON scalars, then serialize the copy.
+
+    This is ADDITIVE, after the original composed shape/value pass: masking a
+    short known substring first could destroy an unknown credential's shape and
+    release its remainder. No decoded shape judgement belongs here. The existing
+    shape pass and its containment learning must see the original text.
+
+    A JSON scalar denotes characters, not a permutation of them. Judge those
+    characters with the existing literal-value boundaries, without lowering the
+    unrelated transformed-spelling floor. Validate complete tokens strictly;
+    malformed escapes, keys, and unchanged spellings keep their exact bytes.
+    This does not infer semantic name spans inside tool-result prose: a name
+    byte-identical to an independently registered secret value stays masked.
+    Normal noncolliding names remain readable; names never exempt value text.
+    """
+    if "\\" not in text:
+        return text
+    ordered = sorted(
+        {value for value in values if isinstance(value, str) and value},
+        key=lambda value: (-len(value), value),
+    )
+    if not ordered:
+        return text
+    # Compile once per value, not once per scalar. The walk has the same linear
+    # value-count factor as the existing literal pass; it enumerates no encodings.
+    literals = [
+        (value, _word_pattern(value) if _is_word_like(value) else None) for value in ordered
+    ]
+
+    def judge(match: Match[str]) -> str:
+        token = match.group(0)
+        if "\\" not in token or _JSON_VALUE_KEY_SUFFIX.match(text, match.end()):
+            return token
+        try:
+            decoded = json.loads(token)
+        except ValueError:
+            return token
+        masked = decoded
+        for value, pattern in literals:
+            if value in masked:
+                masked = (
+                    pattern.sub(REDACTION_MARKER, masked)
+                    if pattern is not None
+                    else masked.replace(value, REDACTION_MARKER)
+                )
+        return token if masked == decoded else json.dumps(masked)
+
+    return _JSON_QUOTED_VALUE.sub(judge, text)
 
 
 def match_shape_names(text: str) -> list[str]:

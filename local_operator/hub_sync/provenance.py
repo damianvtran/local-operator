@@ -70,6 +70,30 @@ def baselines_dir(config_dir: Path) -> Path:
     return hub_root(config_dir) / "baselines"
 
 
+def alias_owner(config_dir: Path, kind: Kind, alias: str) -> str | None:
+    """The immutable local id a managed alias belongs to, durable across a crash gap.
+
+    A crash between the two directory renames leaves the alias temporarily absent
+    from the live root, but its baseline still names it. Reading only the live
+    directory therefore let a DIFFERENT origin install the same alias and then
+    return the other origin's text for the original id (reviewer R5). This reads
+    the durable baselines so an alias that belongs to one origin is never
+    claimable by another, present or not.
+    """
+
+    directory = baselines_dir(config_dir)
+    try:
+        entries = list(directory.glob(f"{kind}-*.json"))
+    except OSError:
+        return None
+    for path in entries:
+        local_id = path.name[len(kind) + 1 : -len(".json")]
+        record = read_baseline(config_dir, kind, local_id)
+        if record is not None and record.local_alias == alias:
+            return record.local_id
+    return None
+
+
 def backups_dir(config_dir: Path) -> Path:
     return hub_root(config_dir) / "backups"
 
@@ -294,6 +318,32 @@ def baseline_path(config_dir: Path, kind: Kind, local_id: str) -> Path:
     return baselines_dir(config_dir) / f"{kind}-{_check_id(local_id, 'local id')}.json"
 
 
+def iter_baselines(config_dir: Path) -> list[BaselineRecord]:
+    """Every readable baseline record, across kinds, sorted for a stable listing.
+
+    The identity inventory the links endpoint enumerates: a baseline IS the
+    per-origin record, so there is no second links database. An unreadable file
+    is skipped rather than failing the whole read -- one corrupt record must not
+    hide the rest, and the reader surfaces what it can.
+    """
+
+    directory = baselines_dir(config_dir)
+    try:
+        entries = sorted(directory.glob("*.json"))
+    except OSError:
+        return []
+    records: list[BaselineRecord] = []
+    for path in entries:
+        stem = path.name[: -len(".json")]
+        kind, _, local_id = stem.partition("-")
+        if kind not in ("agent", "team", "skill") or not local_id:
+            continue
+        record = read_baseline(config_dir, kind, local_id)  # type: ignore[arg-type]
+        if record is not None:
+            records.append(record)
+    return records
+
+
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
     """Temp file in the same directory + ``os.replace`` (the monitors/state shape)."""
 
@@ -359,6 +409,15 @@ def write_baseline(config_dir: Path, record: BaselineRecord) -> Path:
             outbound=record.outbound or current.outbound,
             lineage=current.lineage if record.lineage == "unknown" else record.lineage,
             local_alias=record.local_alias or current.local_alias,
+            # The last known revision is ancestry, not content: a helper that does
+            # not carry one (legacy stamping) must not erase the fallback expected
+            # revision a later conditional write uses. A caller that integrated a
+            # NEWER remote passes its fresh revision explicitly and wins here.
+            remote_revision=(
+                record.remote_revision
+                if record.remote_revision is not None
+                else current.remote_revision
+            ),
         )
     if type(record.scope_known) is not bool or (
         record.legacy_subscribe_hint is not None and type(record.legacy_subscribe_hint) is not bool
@@ -386,6 +445,11 @@ def read_baseline(config_dir: Path, kind: Kind, local_id: str) -> BaselineRecord
     except (BaselineError, OSError, ValueError) as exc:
         logger.warning("ignoring unreadable hub baseline for %s %s: %s", kind, local_id, exc)
         return None
+    return parse_baseline_record(raw, kind, local_id)
+
+
+def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord | None:
+    """Validate a host journal candidate before replacing the live side record."""
     if not isinstance(raw, dict) or raw.get("schema") not in (LEGACY_SCHEMA, SCHEMA):
         return None
     fields = raw.get("fields")

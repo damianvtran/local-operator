@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ApprovalRow(BaseModel):
@@ -37,6 +37,16 @@ class ApprovalRow(BaseModel):
     #: present; the record's own kind is what tells a reader which.
     device: dict[str, Any] | None = None
     machine: dict[str, Any] | None = None
+    #: OPTIONAL extras, present ONLY on a credential-permission row (never stored: derived
+    #: from the signed record by the backend at read time). An older UI ignores them; an
+    #: older backend omits them. ``can_approve_here`` is False until the app can state what
+    #: is signed, and ``approve_remedy`` names the terminal command instead. ``exclude_if``
+    #: (the ``desktop_sessions`` policy for additive keys) drops them from every other row,
+    #: so the frozen §3.5 key set is byte-identical for onboarding and local-authority rows.
+    summary: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    details: list[str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    can_approve_here: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    approve_remedy: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ApprovalList(BaseModel):

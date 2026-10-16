@@ -21,6 +21,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.css.query import NoMatches
 
 from local_operator.harness.types import ImageContent
@@ -43,6 +44,7 @@ from local_operator.tui.widgets.subagent_panel import (
     row_facts,
 )
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
+from tests.unit.tui.conftest import await_session_boot
 
 
 @pytest.mark.asyncio
@@ -626,6 +628,7 @@ async def test_todo_panel_renders_items_with_done_and_pending() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": "wire the band", "status": "done"},
@@ -657,6 +660,7 @@ async def test_todo_panel_renders_blocked_and_dropped_and_counts_resolved() -> N
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": "wire the band", "status": "done"},
@@ -714,6 +718,7 @@ async def test_todo_header_names_its_arithmetic_and_the_abandoned_count() -> Non
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": "ship the guardrail", "status": "done"},
@@ -740,6 +745,7 @@ async def test_todo_rows_separate_done_from_dropped_and_pending_from_blocked() -
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         panel = app.query_one(TodoPanel)
         done = panel._item_row("finished work", "done")
@@ -788,6 +794,7 @@ async def test_todo_rows_clip_with_a_visible_ellipsis_at_a_narrow_width() -> Non
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(52, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {
@@ -828,6 +835,7 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 14)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
@@ -867,6 +875,7 @@ async def test_todo_row_cap_follows_the_screen_and_the_marker_counts_the_hidden(
     # floor and cannot pay for it.
     short = OperatorApp(_async_factory(FakeSession()))
     async with short.run_test(size=(100, 12)) as pilot:
+        await await_session_boot(short)
         await pilot.pause()
         await pilot.press(*"go")
         await pilot.press("enter")
@@ -893,6 +902,7 @@ async def test_todo_shows_a_ninth_row_rather_than_a_one_item_marker() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"}
@@ -919,6 +929,7 @@ async def test_todo_panel_repaints_when_only_a_blocker_reason_changes() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": "pick a domain", "status": "blocked", "reason": "waiting on legal"}
@@ -972,6 +983,7 @@ async def test_subagent_panel_opens_full_page_view() -> None:
     session.jobs = _fake_jobs(job)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._refresh_band()
         await pilot.pause()
@@ -994,6 +1006,7 @@ async def test_todo_panel_hides_on_store_error_or_empty() -> None:
     session = FakeSession()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         todo = app.query_one(TodoPanel)
         app._refresh_band()
@@ -1015,6 +1028,7 @@ async def test_subagent_band_does_not_crush_the_transcript() -> None:
     session.jobs = _fake_jobs(_Job("sub-1", "summarize workspace"))
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._refresh_band()
         await pilot.pause()
@@ -1128,6 +1142,7 @@ async def test_the_band_inset_never_costs_the_subagent_list_its_screen(
     session.jobs = _fake_jobs(*[_Job(f"sub-{i}", f"child task {i}") for i in range(children)])
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, height)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._refresh_band()
         for _ in range(4):
@@ -1354,6 +1369,7 @@ async def test_a_restored_dock_leaves_the_conversation_readable_on_a_short_termi
     )
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
@@ -1411,6 +1427,7 @@ async def test_ctrl_g_still_reaches_every_child_from_the_compact_roster() -> Non
     )
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         builtin.TODO_STORE["sess"] = [
             {"text": f"step {n} of the plan", "status": "pending"} for n in range(1, 13)
@@ -2835,3 +2852,28 @@ async def test_the_dock_names_a_FAILED_cut_off_child_as_cut_off_not_failed() -> 
         "a cut-off child and a plain failure render identically — the cause "
         f"reaches no visible surface: cut={rendered['cut']!r} plain={rendered['plain']!r}"
     )
+
+
+def test_no_two_app_bindings_share_a_key() -> None:
+    """A second binding on one key silently shadows the first (the ctrl+g bug).
+
+    ``ctrl+g`` was bound to BOTH ``hub_links`` (this slice) and the pre-existing
+    ``toggle_subagents``; the later-wins resolution meant the hub panel could
+    never be reached by its own advertised key and the subagent cycle was dead.
+    Nothing caught it because each binding is individually valid. This pins the
+    invariant that no key has two app-level bindings.
+    """
+    seen: dict[str, str] = {}
+    clashes: list[str] = []
+    for binding in OperatorApp.BINDINGS:
+        # Textual's BINDINGS union also admits tuple spellings; the app's own
+        # list is materialised as ``Binding`` objects, asserted so a regression
+        # that reintroduces a bare tuple fails HERE rather than silently skipping.
+        assert isinstance(binding, Binding)
+        key = str(binding.key)
+        action = str(binding.action)
+        if key in seen and seen[key] != action:
+            clashes.append(f"{key!r}: {seen[key]!r} vs {action!r}")
+        else:
+            seen.setdefault(key, action)
+    assert not clashes, f"duplicate app bindings: {clashes}"

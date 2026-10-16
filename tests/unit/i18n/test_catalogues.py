@@ -47,6 +47,7 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.desktop",
         "wire.errors.files",
         "wire.errors.media",
+        "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
         "wire.errors.settings",
         "wire.exec",
@@ -56,9 +57,16 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings.hub_defaults",
         "wire.slash",
         "wire.aida_cadence",
+        # The OpenRouter host-speed settings row (English-only, own namespace so
+        # the audited wire.settings hash is untouched).
+        "wire.host_speed",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
+        # The desktop phone-setup refusals (this PR's own namespace).
+        "wire.tunnel_setup",
+        # Memory settings copy (LOH-25): the registry rows resolve through it.
+        "wire.memory",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -66,6 +74,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.errors.settings") != {}
     assert catalogues.load_catalogue("en", "wire.errors.media") != {}
     assert catalogues.load_catalogue("en", "wire.errors.files") != {}
+    # Specification diagnostics are an approved populated English source child,
+    # not a stub or an exemption from the exact namespace contract.
+    assert catalogues.load_catalogue("en", "wire.errors.sdk_spec") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
     # Approved source namespace, not a prefix-wide wildcard. Mutation controls
     # below still reject undeclared additions, removals and emptied namespaces.
@@ -83,9 +94,10 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
 
 
+@pytest.mark.parametrize("target_namespace", ["wire.errors.files", "wire.errors.sdk_spec"])
 @pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
 def test_exact_wire_namespace_contract_rejects_mutations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, target_namespace: str
 ) -> None:
     # Exercise the real exact-set/population assertion against synthetic roots,
     # so an extraction cannot silently weaken it to a subset or an empty stub.
@@ -101,12 +113,12 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 continue
             for namespace in namespaces:
                 if variant == "mutated" and mutation == "missing-declared":
-                    if namespace == "wire.errors.files":
+                    if namespace == target_namespace:
                         continue
                 empty = namespace in _PENDING_EXTRACTION or (
                     variant == "mutated"
                     and mutation == "empty-declared"
-                    and namespace == "wire.errors.files"
+                    and namespace == target_namespace
                 )
                 body = {} if empty else {"fixture": "populated"}
                 (directory / f"{namespace}.json").write_text(json.dumps(body), encoding="utf-8")

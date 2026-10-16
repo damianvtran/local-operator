@@ -10067,6 +10067,230 @@
           }
         }
       }
+    },
+    "/v1/desktop/sessions/{session_id}/files": {
+      "get": {
+        "tags": [
+          "Desktop session files"
+        ],
+        "summary": "List Session Files",
+        "description": "The files this conversation produced, newest first by default.\n\n``scope=family`` (default) includes the conversation's subagents (depth <= 3, <= 64\nchildren, each PROVEN to be this conversation's by its roster); ``scope=self`` is the\nconversation alone. ``kind``/``origin`` are comma lists; ``highlighted=1`` keeps the files\nthe turn-summary \"Highlights\" flagged; ``q`` is a case-folded substring over name and\ndisplay path. ``sort`` is one of ``recent|name|kind|modified|created|size`` and ``order``\n``asc|desc`` (default per sort). ``cursor`` is the opaque ``next_cursor`` of the previous\npage; a cursor from another query is 422 ``session_files_bad_cursor`` and one from an\nolder revision restarts at the top with ``cursor_reset: true``.\n\n``state``: ``ready`` (complete), ``building`` (partial; poll again), ``unsupported`` (a\npeer's conversation). Unknown id: 404. A silent peer might hold the id: 409, as on every\nother desktop read.",
+        "operationId": "list_session_files_v1_desktop_sessions__session_id__files_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{12}$",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "family",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Origin"
+            }
+          },
+          {
+            "name": "highlighted",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Highlighted"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "recent",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Order"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_FilesListing_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/sessions/{session_id}/files/{file_id}/materialise": {
+      "post": {
+        "tags": [
+          "Desktop session files"
+        ],
+        "summary": "Materialise Session File",
+        "description": "Copy one digest-only artifact to ``<session scratchpad>/generated/<name>``.\n\nPOST only and session-confined: the destination is built server-side from the URL\nsession's own scratchpad and a sanitised name; the client names a ROW, never a path. A\nrow that already has a filesystem path answers 409 ``session_files_not_an_artifact``; an\nid that is not in this conversation's family answers 404 ``session_files_file_not_found``;\na store entry that was pruned answers 410 ``session_files_artifact_missing``.\nA hostile/moved destination or unavailable no-follow directory operations answers\n409 ``session_files_unsafe_destination`` (never a pathname-based fallback).\nIdempotent: an identical existing copy is reused (``created: false``).",
+        "operationId": "materialise_session_file_v1_desktop_sessions__session_id__files__file_id__materialise_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{12}$",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{16}$",
+              "title": "File Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_MaterialiseReceipt_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -11499,6 +11723,53 @@
               }
             ],
             "title": "Machine"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "can_approve_here": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Can Approve Here"
+          },
+          "approve_remedy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approve Remedy"
           }
         },
         "type": "object",
@@ -23473,6 +23744,514 @@
         ],
         "title": "RungAvailability",
         "description": "One rung's availability, with the reason a user would be shown.\n\nAvailability answers \"is there a credential for this rung\", NOT \"will the\ncall succeed\" \u2014 see :func:`local_operator.tts.cascade.resolve_voice_path`."
+      },
+      "CRUDResponse_FilesListing_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilesListing"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[FilesListing]"
+      },
+      "CRUDResponse_MaterialiseReceipt_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MaterialiseReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[MaterialiseReceipt]"
+      },
+      "FileRef": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "path",
+              "artifact"
+            ],
+            "title": "Type"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "FileRef",
+        "description": "Where the bytes are: a filesystem path, or a digest in the attachment store.\n\n``type == \"path\"``: ``path`` is ABSOLUTE on the desktop route (``~/``/cwd-relative only\nwhen the service is asked for its display form). ``type == \"artifact\"``: ``digest`` +\n``content_type``; NO path exists until ``\u2026/materialise`` copies one out."
+      },
+      "FileRow": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/FileRef"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "modified_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified At"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "tool": {
+            "type": "string",
+            "title": "Tool"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent"
+          },
+          "first_seq": {
+            "type": "integer",
+            "title": "First Seq",
+            "default": 0
+          },
+          "last_seq": {
+            "type": "integer",
+            "title": "Last Seq",
+            "default": 0
+          },
+          "first_ts": {
+            "type": "number",
+            "title": "First Ts",
+            "default": 0.0
+          },
+          "last_ts": {
+            "type": "number",
+            "title": "Last Ts",
+            "default": 0.0
+          },
+          "touches": {
+            "type": "integer",
+            "title": "Touches",
+            "default": 1
+          },
+          "highlighted": {
+            "type": "boolean",
+            "title": "Highlighted",
+            "default": false
+          },
+          "highlight_why": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Highlight Why"
+          },
+          "session": {
+            "$ref": "#/components/schemas/FileSession"
+          },
+          "exists": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exists"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "ref",
+          "name",
+          "kind",
+          "origin",
+          "tool",
+          "session"
+        ],
+        "title": "FileRow",
+        "description": "One file (or digest-only artifact) the conversation or one of its subagents produced."
+      },
+      "FileSession": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "self",
+              "subagent",
+              "peer"
+            ],
+            "title": "Role",
+            "default": "self"
+          },
+          "child_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Child Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "FileSession",
+        "description": "Whose journal produced the file. ``child_id`` selects the child attachment route."
+      },
+      "FilesListing": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "building",
+              "unsupported"
+            ],
+            "title": "State"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision",
+            "default": 0
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "family",
+              "self"
+            ],
+            "title": "Scope",
+            "default": "family"
+          },
+          "sort": {
+            "type": "string",
+            "title": "Sort",
+            "default": "recent"
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Order",
+            "default": "desc"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/FileRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "cursor_reset": {
+            "type": "boolean",
+            "title": "Cursor Reset",
+            "default": false
+          },
+          "stat_complete": {
+            "type": "boolean",
+            "title": "Stat Complete",
+            "default": true
+          },
+          "scan": {
+            "$ref": "#/components/schemas/FilesScan"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "FilesListing",
+        "description": "``data`` of the list route."
+      },
+      "FilesScan": {
+        "properties": {
+          "rows": {
+            "type": "integer",
+            "title": "Rows",
+            "default": 0
+          },
+          "complete": {
+            "type": "boolean",
+            "title": "Complete",
+            "default": true
+          },
+          "children": {
+            "type": "integer",
+            "title": "Children",
+            "default": 0
+          },
+          "children_skipped": {
+            "type": "integer",
+            "title": "Children Skipped",
+            "default": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          },
+          "covered_bytes": {
+            "type": "integer",
+            "title": "Covered Bytes",
+            "default": 0
+          },
+          "total_bytes": {
+            "type": "integer",
+            "title": "Total Bytes",
+            "default": 0
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "FilesScan",
+        "description": "How much of the journal the answer reflects."
+      },
+      "MaterialiseReceipt": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "created": {
+            "type": "boolean",
+            "title": "Created",
+            "default": true
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "MaterialiseReceipt",
+        "description": "``data`` of the materialise route."
       }
     }
   },

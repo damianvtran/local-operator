@@ -557,8 +557,8 @@ async def test_arriving_at_the_top_holds_with_cascade_rows(tmp_path: Path) -> No
 async def test_a_retired_row_stops_advertising_keys_that_cannot_act() -> None:
     """The footer names what the keys do on THIS row.
 
-    The last six rows of the page are ``Kind.READONLY``: ``enter`` only reports
-    that the setting is retired and ``r`` returns without resetting. The clamp
+    Retired rows are ``Kind.READONLY``: ``enter`` only reports that the setting
+    is retired and ``r`` returns without resetting. The clamp
     turned the bottom of the list from a waypoint into a place users park, under
     a footer still promising ``enter change · r default`` (UX round 1, U2).
     """
@@ -569,11 +569,25 @@ async def test_a_retired_row_stops_advertising_keys_that_cannot_act() -> None:
         view = app.query_one(SettingsView)
         await pilot.pause()
 
+        # Sections are extensible: Memory legitimately ends with an interactive
+        # bool. Identify a retired setting, then use real navigation actions;
+        # a missing/changed retired capability must fail, not select a fallback.
+        retired_key = "conversation_length"
+        retired_rows = [
+            index
+            for index, candidate in enumerate(view._rows)
+            if candidate.setting is not None and candidate.setting.key == retired_key
+        ]
+        assert len(retired_rows) == 1, f"missing unique retired row: {retired_key}"
+        selectable = view._selectable()
         view.action_jump(1)
+        for _ in range(len(selectable) - 1 - selectable.index(retired_rows[0])):
+            view.action_move(-1)
         await pilot.pause()
         row = view._current()
         assert row is not None and row.setting is not None
-        assert row.setting.kind is Kind.READONLY, "premise: the last row is retired"
+        assert row.setting.key == retired_key
+        assert row.setting.kind is Kind.READONLY, "premise: the named setting is retired"
         hints = view.rendered_hints()
         assert "change" not in hints, hints
         assert "default" not in hints, hints

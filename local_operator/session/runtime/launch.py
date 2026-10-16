@@ -175,6 +175,16 @@ class PeerMessageErrand:
     wake: bool = False
     sender: dict[str, Any] = field(default_factory=dict)
     command_id: str = ""
+    #: The sender's declared PROVENANCE kind (H4e-render), forwarded to the
+    #: receiver's ``send_peer_message`` on delivery. Empty means "no
+    #: declaration", and the client then omits the key entirely — the frame a
+    #: pre-carriage errand produced, byte for byte.
+    custom_type: str = ""
+    #: The internal bridge LOCATOR (H5 F3), forwarded on delivery for the same
+    #: reason ``custom_type`` is: the cold-boot receiver cannot re-derive it.
+    #: Empty means "no locator", and the client then omits the key entirely —
+    #: the frame a pre-carriage errand produced, byte for byte.
+    bridge_meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,6 +884,8 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
             wake=work.wake,
             sender=work.sender,
             message_id=work.command_id or None,
+            custom_type=work.custom_type or None,
+            bridge_meta=work.bridge_meta or None,
         )
         return detail, False
 

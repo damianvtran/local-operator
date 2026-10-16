@@ -3,6 +3,7 @@
   "note": "enforced = blocking scope (path prefixes or exact paths); findings elsewhere are advisory (report-only) until the area's extraction slice adds its prefix. files = per-file literal ceilings (shrink-only; new files start at 0). See scripts/i18n/check.py.",
   "enforced": [
     "local_operator/i18n/",
+    "local_operator/tui/widgets/projects_send.py",
     "scripts/i18n/",
     "local_operator/exec_mode.py",
     "local_operator/exec_session.py",
@@ -36,7 +37,9 @@
     "local_operator/tui/widgets/analytics_panel.py",
     "local_operator/tui/widgets/status_line.py",
     "local_operator/tui/widgets/transcript.py",
-    "local_operator/tui/widgets/welcome.py"
+    "local_operator/tui/widgets/welcome.py",
+    "local_operator/tunnels/setup.py",
+    "local_operator/headless_print.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -78,7 +81,6 @@
     "local_operator/harness/secret_sinks.py": 11,
     "local_operator/harness/subagent.py": 4,
     "local_operator/harness/wake.py": 1,
-    "local_operator/headless_print.py": 9,
     "local_operator/hub_sync/merge.py": 12,
     "local_operator/hub_sync/report.py": 4,
     "local_operator/hub_sync/resolver.py": 4,
@@ -196,7 +198,6 @@
     "local_operator/tui/widgets/org_chart_view.py": 5,
     "local_operator/tui/widgets/projects_detail.py": 2,
     "local_operator/tui/widgets/projects_form.py": 2,
-    "local_operator/tui/widgets/projects_send.py": 2,
     "local_operator/tui/widgets/projects_view.py": 8,
     "local_operator/tui/widgets/session_panel.py": 1,
     "local_operator/tui/widgets/session_picker.py": 7,

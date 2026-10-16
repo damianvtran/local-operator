@@ -47,8 +47,11 @@ becoming unconditional.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -60,6 +63,7 @@ from local_operator.harness.message_types import (
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
 from local_operator.harness.types import CustomMessage, ImageContent
+from local_operator.team_bridge.ask_issuance import bridge_scope_digest
 
 logger = logging.getLogger(__name__)
 
@@ -211,15 +215,15 @@ class AskQueue:
             return {"ok": False, "error": bounds_error}
         now = self._now()
         records = self.records(now)
-        open_rows = [r for r in records if r["status"] == store.STATUS_OPEN]
-        if len(open_rows) >= policy.OPEN_ASK_CAP:
-            return {
-                "ok": False,
-                "error": (
-                    f"this session already has {len(open_rows)} open asks (the cap is "
-                    f"{policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
-                ),
-            }
+        cap_refusal = _ask_cap_refusal(
+            records,
+            incoming_is_bridge=any(
+                str(_as_mapping(question).get("question_id") or "") for question in questions
+            ),
+        )
+        if cap_refusal:
+            return {"ok": False, "error": cap_refusal}
+        open_rows = [row for row in records if row["status"] == store.STATUS_OPEN]
         shapes = [_question_shape(q) for q in questions]
         open_secret_keys = {
             str(q.get("id"))
@@ -263,6 +267,185 @@ class AskQueue:
                 "ok": False,
                 "error": "the ask could not be recorded on this session's ask log.",
             }
+        self._arm_deadline_wake(record)
+        self._refresh(now)
+        receipt = render.receipt_text(record, self._reach())
+        details = {
+            "ask_id": ask_id,
+            "status": "queued",
+            "question_ids": [q["id"] for q in shapes],
+            "timeout_s": timeout_s,
+            "expires_at": record["expires_at"],
+            "urgent": record["urgent"],
+            "secret": any(q["secret"] for q in shapes),
+            "reach": self._reach(),
+        }
+        self.arm()
+        return {"ok": True, "text": receipt, "details": details}
+
+    def enqueue_idempotent(
+        self,
+        *,
+        issuance_key: str,
+        fingerprint: str,
+        questions: Sequence[Mapping[str, Any]],
+        timeout: Any = None,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """KEYED-IDEMPOTENT bridge enqueue (S-10), under ONE interprocess lock.
+
+        The harness-only companion to :meth:`enqueue`: the durable ask id is
+        DERIVED from the preallocated issuance identity (never caller/model/
+        UI-chosen), and the exact-key lookup + fingerprint validation + append
+        run inside ONE ``_NonBlockingLock`` section on the ask log — the same
+        lock discipline as every other writer — and under lock contention this
+        door FAILS CLOSED (a retryable refusal) rather than deciding on a read
+        it cannot prove exclusive (TB-10). Same key + same fingerprint returns
+        the SAME ask id (even after the ask was consumed); a mismatched
+        fingerprint or multiple exact rows REFUSE. The generic heuristic
+        duplicate-text refusal does not apply here: the KEY is the identity,
+        and a retry legitimately carries the same wording.
+
+        ``timeout`` follows :func:`policy.parse_timeout_param`: ``None`` (the
+        default) means the policy default window, and anything out of range —
+        an empty string included — is a validation error naming the bounds,
+        exactly as for :meth:`enqueue`. It is never silently defaulted here,
+        so a caller cannot ship an unintended window by passing ``""``.
+        """
+
+        if not issuance_key or not fingerprint:
+            return {"ok": False, "error": "an issuance key and fingerprint are required."}
+        # R1-3 (PR #2378): the derived id MUST sit inside the store's own
+        # ``a-<hex>`` namespace — ``parse_mirror_request_id`` refuses anything
+        # else — while staying DETERMINISTIC, so a retry/dedupe resolves to
+        # the same id.
+        ask_id = (
+            "a-" + hashlib.sha1(("bridge-idem:" + issuance_key).encode("utf-8")).hexdigest()[:16]
+        )
+        timeout_s, bounds_error = policy.parse_timeout_param(timeout)
+        if bounds_error is not None:
+            return {"ok": False, "error": bounds_error}
+        now = self._now()
+        # The lock fd must be opened on the log itself, so the per-session
+        # directory has to exist first — the same discipline as
+        # ``store.append_event`` for every other writer. A first-ever ask for a
+        # session (the bridge's usual shape) otherwise died on FileNotFoundError.
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                store.asks_log_path(self.session_dir),
+                store.append_flags(),
+                0o600,
+            )
+        except OSError:
+            logger.warning("could not open the ask log in %s", self.session_dir, exc_info=True)
+            return {"ok": False, "error": "the ask log could not be opened; not enqueuing."}
+        try:
+            lock = store._NonBlockingLock(fd)
+            with lock:
+                if not lock.acquired:
+                    # TB-10: the lookup+mint DECISION needs the lock — the
+                    # atomic append alone only protects the write — so under
+                    # contention this door fails closed (retryable) instead of
+                    # deciding on a read it cannot prove exclusive.
+                    return {"ok": False, "error": "the ask log is contended; retry shortly."}
+                try:
+                    rows = self.records()
+                except Exception:  # noqa: BLE001 — unreadable is its own answer
+                    return {
+                        "ok": False,
+                        "error": "the ask log could not be read; not enqueuing.",
+                    }
+                exact = [r for r in rows if str(r.get("ask_id") or "") == ask_id]
+                if len(exact) > 1:
+                    return {
+                        "ok": False,
+                        "error": "multiple asks already carry this issuance key; not enqueuing.",
+                    }
+                if exact:
+                    if _bridge_fingerprint_from_row(exact[0]) != fingerprint:
+                        return {
+                            "ok": False,
+                            "error": (
+                                "this issuance key already carries a different request; "
+                                "not enqueuing."
+                            ),
+                        }
+                    row = exact[0]
+                    # SAME key + SAME fingerprint: the SAME ask, even when it
+                    # has since been answered/consumed — a crash retry or a
+                    # live+cold duplicate must never mint a second one.
+                    # TB-08: the idempotent return keeps the deadline/wake
+                    # behaviour of a fresh enqueue — a cold runtime still gets
+                    # its timeout row armed and the fold republished.
+                    self._arm_deadline_wake(row)
+                    self._refresh()
+                    return {
+                        "ok": True,
+                        "text": "",
+                        "details": {
+                            "ask_id": ask_id,
+                            "status": "existing",
+                            "question_ids": [
+                                str(q.get("id") or "")
+                                for q in (row.get("questions") or [])
+                                if isinstance(q, Mapping)
+                            ],
+                            "timeout_s": row.get("timeout_s"),
+                            "expires_at": row.get("expires_at"),
+                            "urgent": bool(row.get("urgent")),
+                            "secret": any(
+                                bool(q.get("secret"))
+                                for q in (row.get("questions") or [])
+                                if isinstance(q, Mapping)
+                            ),
+                            "reach": self._reach(),
+                        },
+                    }
+                cap_refusal = _ask_cap_refusal(
+                    rows,
+                    incoming_is_bridge=any(
+                        str(_as_mapping(question).get("question_id") or "")
+                        for question in questions
+                    ),
+                )
+                if cap_refusal:
+                    return {"ok": False, "error": cap_refusal}
+                shapes = [_question_shape(q) for q in questions]
+                # THE MINT MUST AGREE WITH ITS OWN FINGERPRINT. Every later
+                # lookup compares a caller's fingerprint against the digest
+                # RECOMPUTED from the stored question's bridge block (the log
+                # keeps no separate fingerprint column), so the first writer's
+                # claim is only ever checked if it is checked HERE. Without
+                # this, a writer holding a conflicting fingerprint that landed
+                # first minted the ask under the stored block's digest, and the
+                # honest writer behind it then matched that digest and was
+                # answered "existing" — two writers, both ok, for one key.
+                if _bridge_fingerprint_from_row({"questions": shapes}) != fingerprint:
+                    return {
+                        "ok": False,
+                        "error": (
+                            "the fingerprint does not match the request's original scope; "
+                            "not enqueuing."
+                        ),
+                    }
+                record = {
+                    "ask_id": ask_id,
+                    "created_at": now,
+                    "expires_at": now + timeout_s * 1000,
+                    "timeout_s": timeout_s,
+                    "urgent": policy.is_urgent(timeout_s),
+                    "tool_call_id": str(tool_call_id or ""),
+                    "questions": shapes,
+                }
+                event = {"v": store.EVENT_SCHEMA, "kind": store.EVENT_QUEUED, "at": now, **record}
+                os.write(
+                    fd,
+                    json.dumps(event, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    + b"\n",
+                )
+        finally:
+            os.close(fd)
         self._arm_deadline_wake(record)
         self._refresh(now)
         receipt = render.receipt_text(record, self._reach())
@@ -329,7 +512,21 @@ class AskQueue:
             return {"ok": False, "error": render.refusal_copy(None)}
         refusal = render.refusal_copy(record)
         if refusal:
-            return {"ok": False, "error": refusal}
+            # F5-1: a bridge carriage's declined/dismissed row is a same-uid
+            # RECORD, not proof that a human declined anything, and it carries no
+            # answers for :meth:`revise` to supersede (the fold applies a
+            # revision only on top of an ``answered`` event), so the human's
+            # admitted decision is taken here as the FIRST answer — the fold's
+            # own ordering does the rest, since a genuine ``answered`` event
+            # outranks a recorded ``declined`` row. This is not the bypass: the
+            # grant is minted by the authority seam, the door checks it, and the
+            # dispatcher consumes it, so an answer without one still never
+            # reaches the model.
+            if not (
+                str(record.get("status") or "") in (store.STATUS_DECLINED, store.STATUS_DISMISSED)
+                and self._is_bridge_ask_record(record)
+            ):
+                return {"ok": False, "error": refusal}
         cleaned, map_refusal = self._whole_ask_cells(record, answers)
         if map_refusal:
             return {"ok": False, "error": map_refusal}
@@ -663,6 +860,11 @@ class AskQueue:
         if status not in (store.STATUS_ANSWERED, store.STATUS_LATE):
             # declined / dismissed / expired: the state table's own sentence,
             # byte-for-byte the one every other path gives for that state.
+            # F5-1 does NOT change this: a revision supersedes a recorded
+            # ANSWER, and ``fold`` applies one only on top of an ``answered``
+            # event, so a revision of a declined carriage could carry nothing
+            # (measured, not assumed) — the declined/dismissed BRIDGE case is
+            # admitted as a FIRST answer in :meth:`respond` instead.
             return record, render.refusal_copy(record)
         response_id = store.response_row_id(ask_id)
         if response_id in present or response_id in self._committing:
@@ -1065,9 +1267,20 @@ class AskQueue:
                     )
                 )
             if response_missing:
-                responses.append(
-                    (int(record.get("created_at") or 0), self._response_message(record))
-                )
+                if self._bridge_answer_is_proven(record):
+                    responses.append(
+                        (int(record.get("created_at") or 0), self._response_message(record))
+                    )
+                else:
+                    # S3-1: the record holds an answer NOTHING admitted — the
+                    # model must never read it as the user's pick, and the row
+                    # is the delivery marker, so withholding it also keeps the
+                    # revision window open for the verified door to supersede.
+                    logger.warning(
+                        "bridge ask %s carries an UNPROVEN answer — its response row is "
+                        "withheld until the verified door decides it",
+                        record.get("ask_id"),
+                    )
         messages: list[CustomMessage] = []
         # Timeouts first: within a batch they are the older event, and a notice
         # that predates the answer it sits beside reads in the order it happened.
@@ -1090,6 +1303,97 @@ class AskQueue:
     # SESSION (the four delivery paths call ``Session._append_injected_message``
     # around it). These four methods are that append's queue-side contract, and
     # nothing else in this module touches ``_committing`` or ``_handed``:
+
+    def _is_bridge_ask_record(self, record: Mapping[str, Any]) -> bool:
+        """Whether a folded ask record is a BRIDGE request at all (structural).
+
+        The SAME predicate the session's door uses (``_is_bridge_ask_record``:
+        ANY question carrying a non-empty ``question_id``) — structure, never
+        sniffing of which pick happened to resolve. Keying the provenance gate
+        off "did one bridge pick resolve" was the S3-1 BLOCKER: a record whose
+        bridge question lost its ``id``, carried two picks, or left its first
+        bridge question unanswered fell through to the ordinary-ask arm, where
+        the forged pick rendered as the user's and its append closed the
+        revision window on the human's genuine tap.
+        """
+
+        return any(
+            str(question.get("question_id") or "")
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        )
+
+    def _bridge_picks(self, record: Mapping[str, Any]) -> list[tuple[str, str]]:
+        """Every bridge (question_id, word) the record's answers decided.
+
+        One entry per bridge question that carries a single pick. A bridge
+        question with zero or two-plus picks is NOT represented — the caller
+        reads the count against the number of bridge questions to see that
+        resolution failed and must withhold.
+        """
+
+        answers = record.get("answers") or {}
+        picks: list[tuple[str, str]] = []
+        for question in record.get("questions") or ():
+            if not isinstance(question, Mapping):
+                continue
+            candidate = str(question.get("question_id") or "")
+            if not candidate:
+                continue
+            values = [str(value) for value in ((answers.get(str(question.get("id") or "")) or ()))]
+            if len(values) != 1:
+                continue
+            picks.append((candidate, values[0].strip().lower()))
+        return picks
+
+    def _bridge_question_count(self, record: Mapping[str, Any]) -> int:
+        """How many bridge questions the record carries."""
+
+        return sum(
+            1
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping) and str(question.get("question_id") or "")
+        )
+
+    def _bridge_answer_is_proven(self, record: Mapping[str, Any]) -> bool:
+        """Whether a BRIDGE record's recorded answer may reach the model.
+
+        The fold is a RECORD, not a proof (§1.4, S3-1): a forged line can claim
+        any surface and any word, so a bridge ask's response row is built ONLY
+        when the answer is backed by a decision THIS runtime's authority seam
+        admitted for this session — the one-shot grant, live (the human's
+        gesture, dispatched around the append) or already consumed by the
+        dispatcher.
+
+        FAIL-CLOSED ON RESOLUTION, not just on absence: a bridge record whose
+        answers do not resolve to exactly ONE pick per bridge question (none,
+        two, or a bridge question without its own ``id`` so its answer cannot
+        be read) is WITHHELD — the ordinary-ask arm is only for records that
+        carry no bridge question at all. An unproven answer is withheld rather
+        than rendered as the user's: the human still decides through the
+        verified door, which supersedes the forged record while the window is
+        open.
+        """
+
+        if not self._is_bridge_ask_record(record):
+            return True
+        picks = self._bridge_picks(record)
+        if len(picks) != self._bridge_question_count(record):
+            # At least one bridge question did not resolve to a single pick:
+            # there is no admitted decision to point at, so nothing may render.
+            return False
+        if not picks:
+            return False
+        from local_operator.harness.approval import bridge_decide_grant_seen
+
+        session_id = str(self._session_id or "")
+        ask_id = str(record.get("ask_id") or "")
+        return all(
+            bridge_decide_grant_seen(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=word
+            )
+            for question_id, word in picks
+        )
 
     def begin_row_commit(self, row_id: str) -> None:
         """Mark an ask row's durable append as IN FLIGHT (the commit guard).
@@ -1162,6 +1466,25 @@ class AskQueue:
             store.STATUS_DECLINED,
             store.STATUS_LATE,
         ):
+            return message
+        if self._is_bridge_ask_record(record) and not self._bridge_answer_is_proven(record):
+            # M3: this rebuild re-derives the row from the CURRENT fold, so the
+            # provenance VERDICT is re-taken here — never inherited from the
+            # preview's shape or from the earlier reconcile. A fold rewritten
+            # between the gate and the append (or a grant withdrawn since) must
+            # not have its content landed, and it must not carry the marker.
+            # The preview the queue already deemed owed is returned unchanged:
+            # that content came from the fold at the moment the gate passed —
+            # INCLUDING the provenance marker the reconcile-time block stamped on
+            # it — and dropping the row here would be the silent loss this
+            # method's own contract forbids. So the row that lands is the
+            # gate-approved PREVIEW: nothing that failed the gate is written, and
+            # nothing owed is dropped, marker and all.
+            logger.warning(
+                "bridge ask %s no longer proves its decision at the append — the "
+                "rebuilt row is refused and the pre-append preview is kept",
+                ask_id,
+            )
             return message
         return self._response_message(record)
 
@@ -1255,6 +1578,12 @@ class AskQueue:
             images_missing=images_missing,
         )
         extra: dict[str, Any] = {}
+        # M3: the marker is stamped on a VERDICT, never on the shape of the
+        # record — this builder is reached from the reconcile (always gated) and
+        # from the append-time refresh (which re-takes the verdict), and a
+        # record that cannot show an admitted decision must not be able to earn
+        # the marker by merely looking like a bridge row.
+        bridge_proven = self._is_bridge_ask_record(record) and self._bridge_answer_is_proven(record)
         if images:
             # THE IMAGES RIDE AS A TOP-LEVEL ``content`` EXTRA, not inside
             # ``details`` -- measured, not assumed (design §1.3, spikes A and B):
@@ -1298,6 +1627,15 @@ class AskQueue:
                 "secret_lost": lost,
                 "tool_call_id": str(record.get("tool_call_id") or ""),
                 "text": text,
+                # R3-5/S3-1: a CORRELATION marker, not unforgeable provenance.
+                # It records that THIS builder wrote the row under a confirmed
+                # admitted verdict, which is what lets the recovery door tell a
+                # row the harness rendered from a fold line a forger appended —
+                # within the same-uid trust boundary, where the transcript file
+                # is itself writable. The AUTHORITY stays the consumed grant; an
+                # absent marker means "not written by this path" and is
+                # non-authorizing on its own.
+                **({"bridge_provenance": "authority_grant"} if bridge_proven else {}),
                 # REFS for the cards (TUI, desktop, phone): thumbnails come from
                 # the digest route, never from bytes on the row. Absent for a
                 # text-only answer so the row is unchanged for every existing ask.
@@ -1768,6 +2106,63 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _ask_cap_refusal(rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: bool) -> str:
+    """The typed cap refusal for one readiness window, split by custody (TB-13).
+
+    OPEN_ASK_CAP is the MODEL's asking capacity — "free for the model and
+    costly for the human" — and a remote sender is not the model, so bridge
+    requests ride a SEPARATE bounded budget. EACH direction is checked against
+    the INCOMING ask's own class: a sender burst never blocks the model's
+    asks, and a full model queue never blocks a waiting request. A bridge ask
+    is identified by its carriage (a non-empty ``question_id`` on any question
+    — the same predicate ``asks_bridge.bridge_pending_count`` counts by),
+    never by copy. ``""`` means the relevant budget has room.
+    """
+
+    open_rows = [row for row in rows if row["status"] == store.STATUS_OPEN]
+    bridge_rows = [
+        row
+        for row in open_rows
+        if any(
+            str(question.get("question_id") or "")
+            for question in (row.get("questions") or ())
+            if isinstance(question, Mapping)
+        )
+    ]
+    if incoming_is_bridge:
+        if len(bridge_rows) >= policy.BRIDGE_ASK_CAP:
+            return (
+                f"this session already has {len(bridge_rows)} waiting agent-messages "
+                f"requests (the cap is {policy.BRIDGE_ASK_CAP}); wait for responses "
+                f"before more arrive."
+            )
+        return ""
+    model_rows = len(open_rows) - len(bridge_rows)
+    if model_rows >= policy.OPEN_ASK_CAP:
+        return (
+            f"this session already has {model_rows} open asks (the cap is "
+            f"{policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
+        )
+    return ""
+
+
+def _bridge_fingerprint_from_row(row: Mapping[str, Any]) -> str:
+    """The canonical scope fingerprint, recomputed from a FOLDED ask row.
+
+    The bridge scope block IS the stored original block (with the issuance
+    identity fields embedded), so the same canonical JSON hash the session
+    computes server-side is recomputable from the log ALONE — no side table,
+    no correlation-only ledger (S-10).
+    """
+
+    for question in row.get("questions") or []:
+        if isinstance(question, Mapping):
+            bridge = question.get("bridge")
+            if isinstance(bridge, Mapping):
+                return bridge_scope_digest(bridge)
+    return ""
+
+
 def _question_shape(question: Any) -> dict[str, Any]:
     """One question as the plain dict the stdlib-only log stores.
 
@@ -1780,7 +2175,7 @@ def _question_shape(question: Any) -> dict[str, Any]:
     options: list[dict[str, Any]] = []
     for option in raw.get("options") or ():
         options.append(_as_mapping(option))
-    return {
+    shape = {
         "id": str(raw.get("id") or ""),
         "question": str(raw.get("question") or ""),
         "options": options,
@@ -1788,7 +2183,23 @@ def _question_shape(question: Any) -> dict[str, Any]:
         "recommended": raw.get("recommended"),
         "secret": bool(raw.get("secret")),
         "persist": bool(raw.get("persist")),
+        # H5a: BRIDGE REQUESTS are human-required by contract (§10.3, #125) —
+        # a bridge ask must ALWAYS land in the human queue, so the mark rides
+        # the projection: the gate short-circuits on it (``Session._gate_ask``)
+        # and the ask's ``question_id`` is the bridge message id the decide
+        # receipt (`ask_ref`) binds to. Both default empty/false for every
+        # existing ask, so their logs and folds are byte-compatible.
+        "human_required": bool(raw.get("human_required")),
+        "question_id": str(raw.get("question_id") or ""),
     }
+    bridge = raw.get("bridge")
+    if isinstance(bridge, Mapping):
+        # H5b/S-3: the ORIGINAL bridge scope block travels WHOLE (it is the
+        # provenance a later recovery re-validates), and the key is added ONLY
+        # when present — an ask without it keeps the exact pre-scope shape, so
+        # existing logs fold and serialize byte-identically.
+        shape["bridge"] = dict(bridge)
+    return shape
 
 
 __all__ = ["AskQueue"]

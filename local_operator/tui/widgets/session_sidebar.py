@@ -401,6 +401,7 @@ class SessionSidebar(Widget, can_focus=True):
             # chip cannot be claimed, so the stash is cleared and the focus
             # decision stands — the pre-reconciliation behaviour.
             self._press_chip_hit = False
+            self._press_hub_hit = False
             return super().focus_on_click() and not focus_is_claimed(self.app)
         self._press_chip_hit = self._chip_hit(
             position.x - self.region.x, position.y - self.region.y
@@ -408,7 +409,8 @@ class SessionSidebar(Widget, can_focus=True):
         self._press_asks_hit = self._asks_hit(
             position.x - self.region.x, position.y - self.region.y
         )
-        if self._press_chip_hit or self._press_asks_hit:
+        self._press_hub_hit = self._hub_hit(position.x - self.region.x, position.y - self.region.y)
+        if self._press_chip_hit or self._press_asks_hit or self._press_hub_hit:
             return False
         return super().focus_on_click() and not focus_is_claimed(self.app)
 
@@ -484,6 +486,16 @@ class SessionSidebar(Widget, can_focus=True):
         # is Textual's own fall-through — a declined binding is skipped and the
         # app's `fork_aside` runs, i.e. the behaviour the aside advertises.
         Binding("ctrl+f", "fleet_asks", show=False),
+        # NO `ctrl+n` CHORD FOR THE HUB DOOR (round-2 D10). The earlier binding
+        # claimed `ctrl+n` was "unbound at app level (audited)" — that was FALSE:
+        # `app.py` materialises a `Binding(action.default, ...)` for every
+        # app-scoped `KEY_ACTIONS` entry, and `keymap.new_session` defaults to
+        # `ctrl+n`. A focused-widget binding outranks the app's, so the chord
+        # silently shadowed the user's (remappable!) new-session hotkey. Rather
+        # than spend another key, the door keeps its two real routes — the
+        # footer note's press and `/hub` — and this widget binds no key for it.
+        # `test_sidebar_footer_bindings_do_not_shadow_app_bindings` pins the
+        # invariant that no sidebar binding shadows an app binding.
     ]
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -550,6 +562,16 @@ class SessionSidebar(Widget, can_focus=True):
         of queues — it paints a total and a mark, both of the app's supplying.
         """
 
+    class HubLinksRequested(Message):
+        """A press on the footer's hub-links door: open the Hub links surface.
+
+        The bounded, geometry-preserving route to the operator's sidebar
+        affordance (architect placement decision): a footer PARTICIPANT beside
+        the `⌥N` chip and the `asks: N` note, reusing their hit-zone and
+        focus-exemption machinery rather than adding a lane. It carries nothing;
+        the app owns the link inventory and the panel/roster.
+        """
+
     def __init__(self) -> None:
         super().__init__(id="session-sidebar")
         self.entries: tuple[CatalogEntry, ...] = ()
@@ -602,6 +624,10 @@ class SessionSidebar(Widget, can_focus=True):
         #: places when the ladder changes length under a press.
         self._press_asks_hit = False
         self._pressed_asks = False
+        #: The same press-time stash for the footer's HUB door (the architect's
+        #: placement). Kept apart for the same reason the ask note's is.
+        self._press_hub_hit = False
+        self._pressed_hub = False
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a
         #: catalog refresh reorders rows beneath a stationary pointer, and a
@@ -637,6 +663,12 @@ class SessionSidebar(Widget, can_focus=True):
         #: and it is the one place a reader with no marked row on screen can see
         #: that questions are outstanding somewhere.
         self._asks_total: int = 0
+        #: The Hub links count — the footer's DOOR to the Hub links surface
+        #: (architect placement decision). Painted only while > 0, so a device
+        #: with no links paints the footer it always did. A PARTICIPANT in the
+        #: footer ladder (like the chip and the ask note), never a new lane, so
+        #: the sidebar's hit-test geometry is untouched.
+        self._hub_total: int = 0
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
         #: Whether the pointer rests on that chip. The chip is a CONTROL (issue
@@ -650,6 +682,9 @@ class SessionSidebar(Widget, can_focus=True):
         #: discipline as the chip's (round 2: U11). Separate state because the
         #: two are different controls a few cells apart.
         self._asks_hover: bool = False
+        #: The hub door's own hover affordance, the ask note's discipline:
+        #: separate state because it is a third control on the same line.
+        self._hub_hover: bool = False
         #: The pointer's last position, kept so `set_entries` can re-derive
         #: `_chip_hover` under a RESTING pointer: the ladder can move the
         #: chip's cells when the count, the paging facts or focus change.
@@ -1176,6 +1211,21 @@ class SessionSidebar(Widget, can_focus=True):
         self._asks_total = max(0, total)
         self.refresh()
 
+    def set_hub_total(self, total: int) -> None:
+        """The Hub links count, for the footer's hub DOOR (the architect's placement).
+
+        Painted on the footer beside the chip and the ask note only while it is
+        > 0, and it is the geometry-preserving route to the Hub links surface:
+        a footer PARTICIPANT, never a new lane, so the sidebar's hit-test
+        geometry is untouched. Absence is not emptiness — an empty hub renders
+        NOTHING, so a device with no links paints the footer it always did.
+        """
+        total = int(total or 0)
+        if total == self._hub_total:
+            return
+        self._hub_total = max(0, total)
+        self.refresh()
+
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
         # The order the list presents — and scrolls in — not the bare ranking:
         # see `_presentation_order` for why the window has to slide over the
@@ -1224,6 +1274,7 @@ class SessionSidebar(Widget, can_focus=True):
         # the flag must tell the truth about the NEXT painted frame.
         self._set_chip_hover(self._hover_x, self._hover_y)
         self._set_asks_hover(self._hover_x, self._hover_y)
+        self._set_hub_hover(self._hover_x, self._hover_y)
         self._sync_animation()
         # Polling must still adopt fresh summaries (including tooltip-only
         # status), but an unchanged frame must not invalidate Rich's content
@@ -1397,6 +1448,8 @@ class SessionSidebar(Widget, can_focus=True):
             self._asks_total,
             self._chip_hover,
             self._asks_hover,
+            self._hub_total,
+            self._hub_hover,
         )
 
     def refresh(
@@ -1762,6 +1815,16 @@ class SessionSidebar(Widget, can_focus=True):
         """
         self.post_message(self.FleetAsksRequested())
 
+    def action_hub_links(self) -> None:
+        """Open the Hub links surface (the architect's placement).
+
+        No KEY binds this (round-2 D10: a chord would shadow the remappable
+        new-session hotkey); the footer hub note's press and `/hub` are the two
+        real routes. Both post the SAME message, and the app's `action_hub_links`
+        is behind it — one door, two gestures.
+        """
+        self.post_message(self.HubLinksRequested())
+
     def action_toggle_pin(self) -> None:
         """`ctrl+k` — pin/unpin through the app's ONE pin path.
 
@@ -1901,6 +1964,12 @@ class SessionSidebar(Widget, can_focus=True):
             self._pressed_chip = False
             self._pressed_asks = True
             self.capture_mouse()
+        elif event.button == 1 and self._press_hub_hit:
+            # A press on the footer's HUB door — the ask note's shape exactly.
+            self._pressed_pin = False
+            self._pressed_chip = False
+            self._pressed_hub = True
+            self.capture_mouse()
         event.stop()
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
@@ -1910,6 +1979,7 @@ class SessionSidebar(Widget, can_focus=True):
             self._pressed_pin = False
             self._pressed_chip = False
             self._pressed_asks = False
+            self._pressed_hub = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1925,11 +1995,19 @@ class SessionSidebar(Widget, can_focus=True):
         pin_press = self._pressed_pin
         chip_press = self._pressed_chip
         asks_press = self._pressed_asks
+        hub_press = self._pressed_hub
         self._pressed_id = None
         self._pressed_pin = False
         self._pressed_chip = False
         self._pressed_asks = False
-        if asks_press:
+        self._pressed_hub = False
+        if hub_press:
+            # The hub door's OWN gesture (the architect's placement): a press on
+            # the footer note opens the Hub links surface. Like the chip's and
+            # the ask note's, it moves no cursor and posts no `Selected`, so a
+            # press meant for the door can never open the row under it.
+            self.post_message(self.HubLinksRequested())
+        elif asks_press:
             # The fleet total's OWN gesture (amendment A2): a press on the
             # footer note opens the ONE list on the fleet scope. Like the
             # chip's, it moves no cursor and posts no `Selected`, so a press
@@ -2211,6 +2289,8 @@ class SessionSidebar(Widget, can_focus=True):
         if self._set_chip_hover(event.x, event.y):
             self._refresh_rows(self.size.height - 1)
         if self._set_asks_hover(event.x, event.y):
+            self._refresh_rows(self.size.height - 1)
+        if self._set_hub_hover(event.x, event.y):
             self._refresh_rows(self.size.height - 1)
         if row_changed:
             # Only the two rows whose ground changes, not all 38: a hover move
@@ -2576,6 +2656,9 @@ class SessionSidebar(Widget, can_focus=True):
         note_span = self._asks_span_in(footer)
         if note_span is not None and self._asks_hover:
             underlined = note_span
+        hub_span = self._hub_span_in(footer)
+        if hub_span is not None and self._hub_hover:
+            underlined = hub_span
         if underlined is not None:
             start, end = underlined
             result.append("\n" + footer[:start], style=footer_style)
@@ -2643,8 +2726,34 @@ class SessionSidebar(Widget, can_focus=True):
         # after it: appended text would void the fit tests above and the final
         # `truncate_cells` would crop it mid-word.
         ask_note = self._asks_note()
-        tail_parts = [part for part in (ask_note, chip) if part]
-        tail = f" · {' · '.join(tail_parts)}" if tail_parts else ""
+        hub_note = self._hub_note()
+
+        # THE HUB DOOR IS THE FIRST TAIL FACT TO DROP (round-2 D9). The door is a
+        # CONTROL whose route outlives it (the mouse and `/hub` both remain), so
+        # it must never be the reason a FACT yields: before any candidate that
+        # would drop the ask note or the chip, the ladder tries the SAME rung
+        # with the door removed. So the tail is built two ways — full, and
+        # hub-free — and every rung is expanded full-then-hub-free, in that
+        # order, before the ladder moves to a narrower rung.
+        def _tail(*parts: str) -> str:
+            kept = [part for part in parts if part]
+            return f" · {' · '.join(kept)}" if kept else ""
+
+        tail_full = _tail(ask_note, hub_note, chip)
+        tail_nohub = _tail(ask_note, chip)
+        tail_variants = [tail_full]
+        if hub_note and tail_nohub != tail_full:
+            tail_variants.append(tail_nohub)
+
+        def expand(rung_templates: list[str]) -> list[str]:
+            """Every rung, expanded full-tail then hub-free, in preference order."""
+
+            out: list[str] = []
+            for template in rung_templates:
+                for variant in tail_variants:
+                    out.append(template.format(t=variant))
+            return out
+
         # THE FOCUSED LADDER (issue #1357 slice 2a; reranked by #1944). When the
         # list holds the keyboard its footer teaches the action set the keyboard
         # now owns: `ctrl+k pin` from 30 cells of list width up — pinning was
@@ -2714,51 +2823,67 @@ class SessionSidebar(Widget, can_focus=True):
             # 100-column terminal gives this panel.
             key = " · ctrl+f asks" if ask_note else ""
             key_short = " · ctrl+f" if ask_note else ""
-            candidates: list[str] = []
+            rungs: list[str] = []
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
                 if chip:
-                    candidates.append(f"{position} · {pin}{key}{layer}{tail}")
-                candidates.append(f"{position} · {pin}{key}{tail}")
+                    rungs.append(f"{position} · {pin}{key}{layer}{{t}}")
+                rungs.append(f"{position} · {pin}{key}{{t}}")
                 if chip:
-                    candidates.append(f"{position} · {pin}{layer}{tail}")
-                candidates.append(f"{position} · {pin}{tail}")
+                    rungs.append(f"{position} · {pin}{layer}{{t}}")
+                rungs.append(f"{position} · {pin}{{t}}")
             if chip:
-                candidates.append(f"{pin}{key}{layer}{tail}")
-            candidates += [
-                f"{pin}{key}{tail}",
+                rungs.append(f"{pin}{key}{layer}{{t}}")
+            rungs += [
+                f"{pin}{key}{{t}}",
                 # The ask door's teacher outranks the pin's rung (U13): both are
                 # whole-or-nothing facts, and this one is the only teacher the
                 # chord has. Inserted BEFORE the pin-only candidate, so at a
                 # width where the pin cannot ride beside it the pin is what
                 # yields — never the note or the lead.
-                f"{lead}{key}{tail}",
-                f"{lead}{key_short}{tail}",
-                f"{pin}{tail}",
-                f"{lead}{tail}",
-                lead,
+                f"{lead}{key}{{t}}",
+                f"{lead}{key_short}{{t}}",
+                f"{pin}{{t}}",
+                f"{lead}{{t}}",
             ]
+            candidates = expand(rungs)
+            candidates.append(lead)
         else:
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
-                candidates = [
-                    f"{position} · {lead} · ctrl+b hide{tail}",
-                    f"{position} · {lead}{tail}",
-                ]
+                # D2 (pre-release batch): the hub door OUTLIVES `ctrl+b hide` —
+                # see the unpaged branch below for the rule; the same order is
+                # applied to this two-template rung (hide-dropped full variants
+                # before the hub-free ones).
+                head_hide = f"{position} · {lead} · ctrl+b hide"
+                head_plain = f"{position} · {lead}"
+                candidates = [head_hide + tail_full, head_plain + tail_full]
+                if hub_note and tail_nohub != tail_full:
+                    candidates.extend([head_hide + tail_nohub, head_plain + tail_nohub])
             else:
-                candidates = [f"{base}{tail}"]
-                if tail:
-                    # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round
-                    # 2: U3). At 80x24 an unfocused sidebar has 29 content cells
-                    # and `f9 focus · ctrl+b hide · asks: 4` is 32, so the
-                    # ladder used to fall all the way to `f9 focus · ctrl+b hide`
-                    # — dropping the total, the only fleet surface on the frame,
-                    # while keeping a hint about hiding a panel. `ctrl+b hide`
-                    # is discovered by pressing ctrl+b and is also on the frame
-                    # that toggles it; the count is discovered from nowhere else.
-                    candidates.append(f"{lead}{tail}")
+                # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round 2:
+                # U3), and since the pre-release batch so does the HUB DOOR
+                # (D2). At 80x24 an unfocused sidebar has 29 content cells and
+                # `f9 focus · ctrl+b hide · asks: 4` is 32, so the ladder used to
+                # fall all the way to `f9 focus · ctrl+b hide` — dropping the
+                # total, the only fleet surface on the frame, while keeping a
+                # hint about hiding a panel. `ctrl+b hide` is discovered by
+                # pressing ctrl+b and is also on the frame that toggles it; the
+                # count is discovered from nowhere else — and the hub door has
+                # NO key teacher at this width, so a hub note one cell over
+                # budget must not die while the hide hint survives.
+                #
+                # THE ORDER (D2): every template WITH the full tail (hub kept,
+                # `ctrl+b hide` dropped), then the hub-free tail. That is the
+                # only place the door outranks the hide hint; the door never
+                # displaces asks or the chip — those candidates come first and
+                # the hub-free variants drop the DOOR before either fact yields.
+                templates = [f"{base}", f"{lead}"]
+                candidates = [t + tail_full for t in templates]
+                if hub_note and tail_nohub != tail_full:
+                    candidates.extend(t + tail_nohub for t in templates)
             if chip:
                 candidates.append(f"{lead} · {chip}")
         hint = next(
@@ -2826,3 +2951,45 @@ class SessionSidebar(Widget, can_focus=True):
         if at < 0 or not painted[:at].endswith(" · "):
             return None
         return (at, at + len(note))
+
+    def _hub_note(self) -> str:
+        """The hub links door's footer note, or "" when there is nothing to state.
+
+        Absence is not emptiness, the ask note's rule: a device with no links
+        renders NOTHING, so it paints the footer it always did.
+        """
+        return f"hub: {self._hub_total}" if self._hub_total > 0 else ""
+
+    def _hub_hit(self, x: int, y: int) -> bool:
+        """Whether a point lands on the footer's hub door (the ask note's own rule)."""
+        note = self._hub_note()
+        if not note or y != self.size.height - 1:
+            return False
+        painted = self._footer_line(max(1, self.size.width))[0]
+        span = self._hub_span_in(painted)
+        if span is None:
+            return False
+        column = x - self.styles.padding.left
+        return span[0] <= column < span[1]
+
+    def _hub_span_in(self, painted: str) -> tuple[int, int] | None:
+        """The hub door's painted cell span, or ``None`` when it is not on the line.
+
+        One resolution shared by the press target, the hover affordance and the
+        paint, so the three cannot disagree — the ask note's rule.
+        """
+        note = self._hub_note()
+        if not note:
+            return None
+        at = painted.rfind(note)
+        if at < 0 or not painted[:at].endswith(" · "):
+            return None
+        return (at, at + len(note))
+
+    def _set_hub_hover(self, x: int | None, y: int | None) -> bool:
+        """Point the hub door's affordance at the pointer (the ask note's rule)."""
+        hovered = x is not None and y is not None and self._hub_hit(x, y)
+        if hovered == self._hub_hover:
+            return False
+        self._hub_hover = hovered
+        return True

@@ -7,12 +7,13 @@ one question with one honest answer, and the answer already lives on this device
 (``tunnels/report.py``, which `lop tunnel status` reads too). This route is the
 read half of it.
 
-READ-ONLY, and there is no write half: the remedy is a command an operator runs
-in a terminal (`lop login radient`, `lop tunnel install`, `lop tunnel connect`),
-so this reports it as a string rather than exposing an operation that would run
-it on their behalf. A route that restarted a connector from a browser click is a
-privilege nobody asked for, and the `actions` slot in the composer can carry the
-sign-in flow the UI already has.
+THIS HEALTH GET STAYS READ-ONLY: its remedy is a string, never an automatic
+poll-side restart. Explicit setup now has its own `tunnel_setup` capability and
+separately guarded `/v1/desktop/tunnel/setup` POST (desktop_tunnel_setup.py).
+That additive authority matches the requested CLI setup scope: explicit owner,
+fresh exact-price acceptance only when needed, no terms/credit purchase/package
+build/bind change or silent working-route repoint. The sign-in action continues
+to use the existing human OAuth flow, not the setup route.
 
 Poll-on-open, and refetch when a sign-in the UI started settles: this state
 changes on human timescales (a login, a console edit), so an SSE frame would be

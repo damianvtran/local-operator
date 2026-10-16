@@ -60,6 +60,7 @@ def _entry_owners() -> dict[str, str]:
     """
     from local_operator.browser_bridge.resources import RESOURCE_NAME
     from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.monitors.arm import MONITOR_LOCK_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
@@ -89,6 +90,7 @@ def _entry_owners() -> dict[str, str]:
 
     return {
         TRANSCRIPT_FILENAME: "session.transcript",
+        SESSION_EXPORT_NAME: "memory",
         TITLE_SIDECAR_NAME: "resume",
         ATTACHMENT_SIDECAR_NAME: "resume",
         ATTACHMENT_SIDECAR_FILENAME: "resume",
@@ -277,6 +279,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/team_bridge/connector/lock.py": (
+        1,
+        "``CONNECTOR_LOCK_NAME`` ('connector.lock'): the machine-wide connector "
+        "singleton under ``<config>/team_bridge/`` — beside the bridge state "
+        "database, the same family as the wake lock's dotted sidecars. Outside "
+        "``sessions/``, keyed to a long-lived process rather than to a "
+        "conversation, and deliberately dotted so a listing that walks the config "
+        "dir cannot mistake it for a user file",
+    ),
     "local_operator/session/runtime/stop_ledger.py": (
         1,
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
@@ -368,6 +379,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``GRACE_FILE``: the first-run marker under ``<config>/hub/`` — the hub update "
         "runner's own install-level state, beside ``sessions/``, never inside a session",
+    ),
+    # The push outbox (``hub_sync/outbox.py``): one durable intent/receipt JSON per
+    # publication operation under ``<config>/hub/outbox/``, the directory this
+    # constant names. It is the install's own crash-recovery journal for IN-FLIGHT
+    # hub pushes — keyed by link identity and operation id, bound to this machine's
+    # leases, pins and credentials (the sibling of the runner's GRACE_FILE above and
+    # of ``install_transaction.OPERATION_DIR``). A session directory travelling
+    # between devices carries neither the journal nor its pending operations, and no
+    # copy walk of a session can meet it: it is not an entry of a session directory.
+    "local_operator/hub_sync/outbox.py": (
+        1,
+        "``OUTBOX_DIR``: the push outbox under ``<config>/hub/``, beside "
+        "``sessions/`` — install-level publication state, never an entry of a session "
+        "directory",
     ),
     "local_operator/skills/discovery.py": (
         1,
@@ -549,6 +574,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "a credential and who may borrow it — a store file beside ``sessions/``, never an "
         "entry a session directory holds",
     ),
+    "local_operator/network/credentials/lifecycle.py": (
+        3,
+        "``lifecycle.json``, ``.lifecycle.lock`` and ``.lifecycle-restriction-overflow.json`` "
+        "under ``network/credentials/<network_id>/``: the overflow marker is a device-local "
+        "recovery-required restriction that must never travel with a session; "
+        "the owner's per-network record of the material generation / login-chain revision "
+        "each recipient was told about, and its flock file — per-device owner/recipient "
+        "state that must never be copied to another device, a store file beside "
+        "``sessions/``, never an entry a session directory holds",
+    ),
     "local_operator/network/credentials/sync.py": (
         1,
         "``.sync.lock`` under ``network/credentials/<network_id>/`` (its ``sync.json`` "
@@ -658,6 +693,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "``code_requests``: the derived index under the store root and the scan cache "
         "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
+    ),
+    # Files inventory uses the same out-of-session derived-store convention: moving a
+    # session carries its journal, never a device-local cache of that journal's file facts.
+    # Rebuild on the receiving device so cached absolute paths/stats are not transported.
+    "local_operator/session_files/ledger.py": (
+        1,
+        "``CACHE_DIRNAME`` (``session_files``): regenerable scan cache under "
+        "``<config>/cache/session_files/``, never an entry inside a session directory",
     ),
     "local_operator/code_requests/cache.py": (
         1,

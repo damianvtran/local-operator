@@ -10,6 +10,7 @@ import os
 import socket
 import sys
 import uuid
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -402,6 +403,10 @@ async def dispatch(args: argparse.Namespace) -> str:
     from local_operator.tunnels import install
 
     action = args.tunnel_command
+    if action == "setup":
+        from local_operator.tunnels.setup import command
+
+        return await command(args)
     if action in {"billing", "activate"}:
         async with httpx.AsyncClient(trust_env=False) as client:
             selected = credential_id(getattr(args, "credential_id", None))
@@ -726,7 +731,13 @@ def main(args: argparse.Namespace) -> int:
         return 1
 
 
-def mobile_action(action: str, accepted: str | None = None) -> str:
+def mobile_action(
+    action: str,
+    accepted: str | None = None,
+    *,
+    selected: int | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> str:
     """The TUI calls this in a worker thread; CLI and slash flows cannot drift."""
     from local_operator.tunnels.arguments import add_parser
 
@@ -734,24 +745,19 @@ def mobile_action(action: str, accepted: str | None = None) -> str:
     add_parser(parser.add_subparsers())
 
     async def run() -> str:
-        if action == "enable":
-            receipts = []
-            if not (config.directory() / "config.json").exists():
-                args = ["tunnel", "create"]
-                if accepted is not None:
-                    args += ["--accept-monthly-price", accepted]
-                receipts.append(await dispatch(parser.parse_args(args)))
-            else:
-                # An existing local config may refer to a remotely paused or
-                # billing-suspended tunnel. Re-enable through the same explicit
-                # quote acceptance before starting any connector service.
-                args = ["tunnel", "configure", "--enable"]
-                if accepted is not None:
-                    args += ["--accept-monthly-price", accepted]
-                receipts.append(await dispatch(parser.parse_args(args)))
-            receipts.append(await dispatch(parser.parse_args(["tunnel", "install"])))
-            return "\n".join(receipts)
-        return await dispatch(parser.parse_args(["tunnel", action]))
+        if action in {"enable", "status"}:
+            from local_operator.tunnels import setup
+
+            plan = (
+                await setup.apply(selected, accepted, progress=progress)
+                if action == "enable"
+                else await setup.observe(selected)
+            )
+            return setup.text(plan, surface="tui", include_receipts=progress is None)
+        args = ["tunnel", action]
+        if action == "billing" and selected is not None:
+            args += ["--credential-id", str(selected)]
+        return await dispatch(parser.parse_args(args))
 
     try:
         return asyncio.run(run())

@@ -165,6 +165,60 @@ class LinkIdentity:
 
 
 @dataclass(frozen=True)
+class PublicationTarget:
+    """A draft destination before creation returns a remote id; never a fake link."""
+
+    kind: Kind
+    local_id: str
+    hub_source: str
+    visibility: Visibility
+    tenant_id: str | None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("agent", "team", "skill"):
+            raise LinkError("origin-conflict", "publication kind is unsupported")
+        if not isinstance(self.local_id, str) or not _ID.fullmatch(self.local_id):
+            raise LinkError("origin-conflict", "publication local id is invalid")
+        if self.visibility == "public":
+            if self.tenant_id is not None:
+                raise LinkError(
+                    "origin-conflict", "public publication cannot carry an organization"
+                )
+        elif self.visibility == "org":
+            if not isinstance(self.tenant_id, str) or not _ID.fullmatch(self.tenant_id):
+                raise LinkError(
+                    "origin-conflict", "organization publication requires an explicit scope"
+                )
+        else:
+            raise LinkError("origin-conflict", "publication visibility is unsupported")
+        object.__setattr__(self, "hub_source", normalize_source(self.hub_source))
+
+    @classmethod
+    def from_identity(cls, identity: LinkIdentity) -> "PublicationTarget":
+        return cls(
+            identity.kind,
+            identity.local_id,
+            identity.hub_source,
+            identity.visibility,
+            identity.tenant_id,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "local_id": self.local_id,
+            "hub_source": self.hub_source,
+            "visibility": self.visibility,
+            "tenant_id": self.tenant_id,
+        }
+
+    def bind(self, hub_id: str) -> LinkIdentity:
+        return LinkIdentity(
+            self.kind, self.local_id, self.hub_source, self.visibility, self.tenant_id, hub_id
+        )
+
+
+@dataclass(frozen=True)
 class PublicEgressGrant:
     """Explicit future-publication consent, not proof of safe content lineage."""
 

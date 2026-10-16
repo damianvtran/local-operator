@@ -170,10 +170,188 @@ async def test_find_returns_ranked_hits_oldest_first(harness: _Harness) -> None:
 async def test_find_soft_hit_carries_empty_ranges(harness: _Harness) -> None:
     session_id = await harness.create_session()
     await _seed(harness.root, session_id, [Message.user("the classifier needs work")])
-    response = await _find(harness, session_id, q="classifer")
-    assert response.status_code == 200, response.text
-    hits = response.json()["result"]["hits"]
-    assert [(hit["tier"], hit["ranges"]) for hit in hits] == [("soft", [])]
+    # A flushed journal and HTTP 200 do not mean the cold index is ready.
+    # Follow only building -> ready; never retry a terminal but wrong answer.
+    async with asyncio.timeout(30):
+        while True:
+            response = await _find(harness, session_id, q="classifer")
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            if result["state"] != "building":
+                break
+            assert result["partial"] is True, result
+    assert result["state"] == "ready", result
+    assert result["partial"] is False
+    hits = result["hits"]
+    assert [(hit["tier"], hit["ranges"]) for hit in hits] == [("soft", [])], result
+
+
+@pytest.mark.asyncio
+async def test_find_soft_hit_waits_for_owned_cold_build(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Exercise the actual test cell, with its first real response held partial."""
+    import json
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    worker_done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    real_refresh = transcript_index.refresh_index
+    real_start = transcript_index.start_refresh
+    real_find = _find
+    target: str | None = None
+    owned: list[asyncio.Task[Any]] = []
+    first: list[dict[str, Any]] = []
+    terminal: list[dict[str, Any]] = []
+    old_rejected = False
+    outcomes: list[Any] = []
+
+    def held_refresh(
+        config_dir: str | Path, session_id: str
+    ) -> transcript_index.TranscriptIndex | None:
+        if Path(config_dir) != harness.root or session_id != target:
+            return real_refresh(config_dir, session_id)
+        entered.set()
+        try:
+            assert release.wait(30), "cold-build control was never released"
+            return real_refresh(config_dir, session_id)
+        finally:
+            loop.call_soon_threadsafe(worker_done.set)
+
+    def track_start(config_dir: str | Path, session_id: str) -> tuple[asyncio.Task[Any], bool]:
+        task, started = real_start(config_dir, session_id)
+        if Path(config_dir) == harness.root and session_id == target and task not in owned:
+            owned.append(task)
+        return task, started
+
+    async def observe_find(live: _Harness, session_id: str, **params: Any) -> Any:
+        nonlocal target, old_rejected
+        if first:
+            response = await real_find(live, session_id, **params)
+            result = response.json()["result"]
+            # Observe the first terminal answer without filtering or changing it:
+            # the original cell, not this observer, decides whether it is correct.
+            if result["state"] != "building" and not terminal:
+                terminal.append({"status_code": response.status_code, "result": result})
+            return response
+        target = session_id
+        # A new session must really be cold; no ready prewarm may satisfy this control.
+        assert transcript_index.resident(harness.root, session_id) is None
+        assert not transcript_index.index_path(harness.root, session_id).exists()
+        response = await real_find(live, session_id, **params)
+        result = response.json()["result"]
+        assert response.status_code == 200, response.text
+        assert entered.is_set() and len(owned) == 1
+        assert result["state"] == "building" and result["partial"] is True, result
+        assert result["hits"] == [], result
+        # This is the removed one-GET oracle applied to the ACTUAL cold response,
+        # not a second implementation of the new readiness loop.
+        with pytest.raises(AssertionError) as rejected:
+            assert [(hit["tier"], hit["ranges"]) for hit in result["hits"]] == [("soft", [])]
+        old_rejected = isinstance(rejected.value, AssertionError)
+        first.append({"status_code": response.status_code, "result": result})
+        release.set()
+        return response
+
+    monkeypatch.setattr(transcript_index, "refresh_index", held_refresh)
+    monkeypatch.setattr(transcript_index, "start_refresh", track_start)
+    monkeypatch.setitem(globals(), "_find", observe_find)
+    try:
+        # Invoke the same permanent cell: same seed/query/wait/final result oracle.
+        await test_find_soft_hit_carries_empty_ranges(harness)
+        assert len(first) == 1 and len(owned) == 1 and old_rejected
+        assert len(terminal) == 1 and terminal[0]["status_code"] == 200, terminal
+        assert terminal[0]["result"]["state"] == "ready", terminal
+        assert terminal[0]["result"]["partial"] is False, terminal
+        assert [(hit["tier"], hit["ranges"]) for hit in terminal[0]["result"]["hits"]] == [
+            ("soft", [])
+        ], terminal
+    finally:
+        # Release even when the observer/original cell raises or is cancelled.
+        # Shield the owned index task; cancelling a to_thread await cannot reap its worker.
+        release.set()
+        if owned:
+            async with asyncio.timeout(30):
+                outcomes = await asyncio.gather(
+                    *(asyncio.shield(task) for task in owned), return_exceptions=True
+                )
+                if entered.is_set():
+                    await worker_done.wait()
+            assert all(task.done() and not task.cancelled() for task in owned), outcomes
+            assert all(not isinstance(value, BaseException) for value in outcomes), outcomes
+            assert entered.is_set() and worker_done.is_set()
+        else:
+            assert not entered.is_set(), "refresh worker started without its owned task"
+
+    # Ordinary CI captures passing stdout. Attach observed proof to the existing
+    # JUnit report only after the assertions AND owned-work settlement succeeded.
+    # The worker callback witnesses body-finally, not OS-thread termination.
+    request.node.user_properties.extend(
+        [
+            ("find_control_first_response", json.dumps(first[0], sort_keys=True)),
+            ("find_control_old_one_get_rejected", str(old_rejected)),
+            ("find_control_first_terminal", json.dumps(terminal[0], sort_keys=True)),
+            ("find_control_owned_task_count", str(len(owned))),
+            ("find_control_owned_tasks_done", str(all(task.done() for task in owned))),
+            (
+                "find_control_owned_tasks_noncancelled",
+                str(all(not task.cancelled() for task in owned)),
+            ),
+            (
+                "find_control_owned_outcomes_ok",
+                str(all(not isinstance(value, BaseException) for value in outcomes)),
+            ),
+            ("find_control_worker_body_finally_seen", str(worker_done.is_set())),
+        ]
+    )
+
+
+@pytest.mark.parametrize("terminal", ["ready", "error"])
+@pytest.mark.asyncio
+async def test_find_soft_hit_rejects_first_wrong_terminal(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    """A later favorable reply must never repair the first wrong terminal reply."""
+    import json
+
+    from httpx import Response
+
+    calls: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+
+    async def wrong_then_good(live: _Harness, session_id: str, **params: Any) -> Response:
+        calls.append(params)
+        # Fake only the response boundary; real session creation/seed and the
+        # actual permanent cell's wait/assertions remain in use. This is not router proof.
+        hits = [] if len(calls) == 1 else [{"tier": "soft", "ranges": []}]
+        state = terminal if len(calls) == 1 else "ready"
+        result = {"state": state, "partial": False, "hits": hits}
+        replies.append(result)
+        return Response(200, json={"result": result})
+
+    monkeypatch.setitem(globals(), "_find", wrong_then_good)
+    with pytest.raises(AssertionError) as rejected:
+        await test_find_soft_hit_carries_empty_ranges(harness)
+    assert calls == [{"q": "classifer"}], calls
+    # These are synthetic response-boundary controls, not real router failures.
+    # Export only after the actual cell rejected the first reply with one call.
+    request.node.user_properties.extend(
+        [
+            ("find_control_boundary", "synthetic_response"),
+            ("find_control_first_terminal", json.dumps(replies[0], sort_keys=True)),
+            (
+                "find_control_first_terminal_rejected",
+                str(isinstance(rejected.value, AssertionError)),
+            ),
+            ("find_control_call_count", str(len(calls))),
+            ("find_control_query", str(calls[0]["q"])),
+            ("find_control_later_good_unread", str(len(calls) == 1)),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -184,9 +362,7 @@ async def test_find_reports_truncation_at_the_limit(harness: _Harness) -> None:
         session_id,
         [Message.user(f"needle number {index}") for index in range(3)],
     )
-    response = await _find(harness, session_id, q="needle", limit=2)
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = await _published_find_result(harness, session_id, q="needle", limit=2)
     assert len(result["hits"]) == 2
     assert result["truncated"] is True
 
@@ -272,14 +448,33 @@ async def test_find_bounds_are_the_declared_ones(harness: _Harness) -> None:
     assert over.status_code == 422, over.text
 
 
+async def _published_find_result(
+    harness: _Harness, session_id: str, *, q: str, **params: Any
+) -> dict[str, Any]:
+    # D9 allows a cold first paint to be building/partial with no previous hits.
+    # Hit shape and truncation assertions need a published generation, not a
+    # lucky <200ms scan. Cold/partial/latency tests must still query it directly.
+    # Await the actual single-flight publication task; never retry until a hit.
+    task, _started = transcript_index.start_refresh(harness.root, session_id)
+    async with asyncio.timeout(30):  # Deadlock guard, not a latency expectation.
+        built = await asyncio.shield(task)
+    assert built is not None and built.journal_generation
+    published = transcript_index.read_index(harness.root, session_id)
+    assert published is not None and published.journal_generation == built.journal_generation
+    response = await _find(harness, session_id, q=q, **params)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["state"] == "ready" and result["partial"] is False, result
+    assert result["hits"], f"ready index missing requested {q} hit"
+    return result
+
+
 @pytest.mark.asyncio
 async def test_find_response_model_matches_the_d9_shape(harness: _Harness) -> None:
     """Every key D9 names is present, and nothing rides outside it."""
     session_id = await harness.create_session()
     await _seed(harness.root, session_id, [Message.user("deploy")])
-    response = await _find(harness, session_id, q="deploy")
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = await _published_find_result(harness, session_id, q="deploy")
     assert set(result) == {"query", "state", "partial", "hits", "truncated"}
     assert set(result["hits"][0]) == {"id", "role", "ts", "snippet", "ranges", "tier"}
 
@@ -328,3 +523,47 @@ async def test_hidden_cross_session_hides_peer_rows_from_the_route(
     hide_cross_session(False)
     result = (await _find(harness, session_id, q="green")).json()["result"]
     assert [hit["id"] for hit in result["hits"]] == ["p1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,count,limit", [("deploy", 1, 1), ("needle", 3, 2)])
+async def test_ready_hit_assertions_wait_for_publication_not_first_paint(
+    harness, monkeypatch, query, count, limit
+):
+    import threading
+
+    session_id = await harness.create_session()
+    await _seed(
+        harness.root,
+        session_id,
+        [Message.user(query if count == 1 else f"{query} number {n}") for n in range(count)],
+    )
+    refresh = transcript_index.refresh_index
+    release = threading.Event()
+
+    def held_refresh(*args, **kwargs):
+        assert release.wait(30), "test publication gate never released"
+        return refresh(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_index, "refresh_index", held_refresh)
+    try:
+        response = await _find(harness, session_id, q=query, limit=limit)
+        result = response.json()["result"]
+        assert response.status_code == 200
+        assert result["state"] == "building" and result["partial"] is True
+        assert result["hits"] == []  # Original hits[0] assertion fails at this boundary.
+    finally:
+        release.set()
+    published = await _published_find_result(harness, session_id, q=query, limit=limit)
+    assert len(published["hits"]) == limit
+    assert published["truncated"] is (count > limit)
+    assert query in published["hits"][0]["snippet"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["deploy", "needle"])
+async def test_ready_publication_wait_does_not_hide_a_missing_seed(harness, query):
+    session_id = await harness.create_session()
+    await _seed(harness.root, session_id, [Message.user("unrelated fixture")])
+    with pytest.raises(AssertionError, match=f"ready index missing requested {query} hit"):
+        await _published_find_result(harness, session_id, q=query)

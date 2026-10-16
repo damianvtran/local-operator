@@ -65,8 +65,12 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
+from local_operator.i18n.keys import wire_host_speed as _hs
+from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
+from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
@@ -117,6 +121,14 @@ try:
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
+# The OpenRouter host-speed row is a small English-only addition, merged for the
+# same reason as ``wire.aida_cadence``: it must not move the already-audited
+# ``wire.settings`` source hash the translated locales are pinned to.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
 # The console-admission section reads its copy from its own namespace for the
 # same reason as `wire.aida_cadence`: the section is new, so adding it beside
 # already-translated settings must not move those sources. Without this merge the
@@ -124,6 +136,7 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 # which is what the byte-identical golden caught.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.memory"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -870,6 +883,8 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.retired_description()),
     ),
+    # Preserve the established Model landing row and short-terminal editor target.
+    Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
 )
 
 
@@ -1464,6 +1479,66 @@ def _validate_aida_name(value: Any) -> None:
 
 
 SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        key="memory.enabled",
+        path=("memory", "enabled"),
+        section="memory",
+        label=_t(_mm.enabled_label()),
+        help=_t(_mm.enabled_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+    ),
+    Setting(
+        key="memory.capture",
+        path=("memory", "capture"),
+        section="memory",
+        label=_t(_mm.capture_label()),
+        help=_t(_mm.capture_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+        gated_by="memory.enabled",
+    ),
+    Setting(
+        key="memory.suggest",
+        path=("memory", "suggest"),
+        section="memory",
+        label=_t(_mm.suggest_label()),
+        help=_t(_mm.suggest_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+        gated_by="memory.enabled",
+    ),
+    Setting(
+        key="network.memory.enabled",
+        path=("network", "memory", "enabled"),
+        section="network",
+        label=_t(_mm.sync_label()),
+        help=_t(_mm.sync_help()),
+        kind=Kind.BOOL,
+        default=MEMORY_DEFAULT_ENABLED,
+    ),
+    Setting(
+        key="network.memory.scopes",
+        path=("network", "memory", "scopes"),
+        section="network",
+        label=_t(_mm.scopes_label()),
+        help=_t(_mm.scopes_help()),
+        kind=Kind.LIST,
+        default=list(SCOPES),
+        members=SCOPES,
+        gated_by="network.memory.enabled",
+    ),
+    Setting(
+        key="network.memory.exclude_devices",
+        path=("network", "memory", "exclude_devices"),
+        section="network",
+        label=_t(_mm.exclude_label()),
+        help=_t(_mm.exclude_help()),
+        kind=Kind.LIST,
+        default=list(DEFAULT_EXCLUDED_DEVICES),
+        empty_unsets=True,
+        gated_by="network.memory.enabled",
+    ),
     # -- model --------------------------------------------------------------
     Setting(
         key="hosting",
@@ -1880,6 +1955,23 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.providers_openrouter_preferred_max_latency_help())),
         minimum=0.0,
         maximum=600.0,
+    ),
+    # Like ``provider_affinity`` above, a HARNESS switch rather than a wire key:
+    # ``_openrouter_provider_preferences`` deliberately does not read it, so it
+    # can never make the shipped config start emitting a ``provider`` object. It
+    # is read by ``SessionStreamFn._score_host_decode_rate`` and applies to the
+    # affinity pin only -- with affinity off (or any of order/only/ignore/sort
+    # set) there is no pin to release and the check never runs.
+    Setting(
+        key="providers.openrouter.retire_below_tps",
+        path=("providers", "openrouter", "retire_below_tps"),
+        section="openrouter",
+        label=_t(_hs.retire_below_tps_label()),
+        kind=Kind.FLOAT,
+        default=0.0,
+        help=_t(_hs.retire_below_tps_help()),
+        minimum=0.0,
+        maximum=100_000.0,
     ),
     # -- failover -----------------------------------------------------------
     Setting(
@@ -3425,7 +3517,9 @@ SETTINGS: tuple[Setting, ...] = (
     #
     # docs/design/turn-supplements.md §2.12. Defaults live beside their consumer in
     # ``supplements/policy.py``; ``_consumer_defaults()`` in tests/unit/test_settings_io.py
-    # binds the two. ``graphics`` is OFF by default until a surface can render it (§6).
+    # binds the two. ``graphics`` is ON by default (the desktop UI renders components; the
+    # evidence gate, the 0.7 classifier threshold and ``maxCostUsd`` bound the spend, see
+    # ``policy.DEFAULT_GRAPHICS``).
     Setting(
         key="supplements.enabled",
         path=("supplements", "enabled"),
@@ -3459,7 +3553,7 @@ SETTINGS: tuple[Setting, ...] = (
         section="supplements",
         label=_t(_ws.supplements_graphics_label()),
         kind=Kind.BOOL,
-        default=False,
+        default=True,
         help=_t(_ws.supplements_graphics_help()),
         choices=_bool_choices(
             _t(_ws.supplements_graphics_choice_true_description()),
@@ -4764,17 +4858,6 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=5,
         maximum=1440,
         help=_t(_ws.hub_check_interval_min_help()),
-    ),
-    Setting(
-        key="hub.merge_model",
-        path=("hub", "merge_model"),
-        section="hub",
-        label=_t(_ws.hub_merge_model_label()),
-        kind=Kind.TEXT,
-        default="",
-        placeholder=_t(_ws.hub_merge_model_placeholder()),
-        help=_t(_ws.hub_merge_model_help()),
-        empty_unsets=True,
     ),
     # -- agents ------------------------------------------------------------
     # The starter-update switch. A LITERAL default for the same reason the hub

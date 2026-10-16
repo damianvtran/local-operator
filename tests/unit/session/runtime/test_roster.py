@@ -442,29 +442,86 @@ def test_a_dead_pid_with_no_census_row_still_reads_gone(tmp_path: Path) -> None:
     assert rows[0].reclaim_refusal == reclaim.REFUSAL_GONE
 
 
-def test_the_probe_budget_is_a_deadline_and_not_a_hope() -> None:
-    """The pool must not join its QUEUE: 64 probes, 8 workers, a 0.1 s budget.
+class _ProbeBudget:
+    """Synthetic startup/submission/wait costs; never create threads or dial a port."""
 
-    ``with ThreadPoolExecutor(...)`` calls ``shutdown(wait=True)``, which waits for
-    queued work as well as running work, so the response cost
-    ``ceil(rows / PROBE_WORKERS) x timeout`` however small ``budget_s`` was — the
-    review's micro-repro of the exact shape measured 2.04 s, and QA measured 1.69 s
-    at the endpoint (review round 1, R1-4). The probe pool is now shut down WITHOUT
-    waiting and its queue is cancelled, so the budget is the deadline it is
-    documented to be.
+    def __init__(
+        self, startup_ms: int = 0, submit_ms: int = 0, answers: tuple[bool | None, ...] = ()
+    ):
+        self.ms = 0
+        self.startup_ms = startup_ms
+        self.submit_ms = submit_ms
+        self.answers = answers
+        self.submitted: list[float] = []
+        self.waits: list[float] = []
+        self.shutdowns: list[tuple[bool, bool]] = []
+
+    def now(self):
+        return self.ms / 1000
+
+    def executor(self, *, max_workers):
+        assert 0 < max_workers <= 8
+        self.ms += self.startup_ms
+        return self
+
+    def submit(self, connect, port, timeout):
+        index = len(self.submitted)
+        self.submitted.append(self.now())
+        self.ms += self.submit_ms
+        answer = self.answers[index] if index < len(self.answers) else None
+
+        def result(*, timeout):
+            self.waits.append(timeout)
+            if answer is None:
+                self.ms += round(timeout * 1000)
+                raise TimeoutError("synthetic deadline")
+            self.ms += 10
+            return answer
+
+        return SimpleNamespace(result=result)
+
+    def shutdown(self, *, wait, cancel_futures):
+        self.shutdowns.append((wait, cancel_futures))
+        assert not wait and cancel_futures, "caller must not join its probe queue"
+
+    def run(self, monkeypatch, *, budget_s=0.1, count=64):
+        monkeypatch.setattr(roster, "ThreadPoolExecutor", self.executor)
+        return roster._probe_ports(
+            {pid: 9000 + pid for pid in range(count)},
+            budget_s=budget_s,
+            workers=8,
+            connect=lambda *_args: pytest.fail("fake executor must not dial"),
+            now=self.now,
+        )
+
+
+def test_the_probe_budget_is_a_deadline_and_not_a_hope(monkeypatch):
+    """Startup AND submission consume the same budget, not merely future waits.
+
+    Main CI observed 0.696/0.754 s against an arbitrary <0.6 s assertion. An
+    injected clock discriminates the actual old bug without scheduling bets:
+    eager admission queued64 probes,61 at/after this total0.1 s deadline.
     """
-    from local_operator.session.runtime.roster import PROBE_TIMEOUT_S, _probe_ports
+    clock = _ProbeBudget(startup_ms=40, submit_ms=20)
+    answered = clock.run(monkeypatch)
+    assert clock.submitted == [0.04, 0.06, 0.08]
+    assert clock.now() == 0.1
+    assert clock.waits == []
+    assert clock.shutdowns == [(False, True)]
+    assert answered == {}, "unmeasured/unscheduled rows must stay unknown"
 
-    started = time.monotonic()
-    answered = _probe_ports(
-        {pid: 9000 + pid for pid in range(64)},
-        budget_s=0.1,
-        workers=8,
-        timeout_s=PROBE_TIMEOUT_S,
-        connect=lambda port, timeout: time.sleep(0.25) or True,
-    )
-    elapsed = time.monotonic() - started
-    assert elapsed < 0.6, elapsed
-    # The rows that never got to run are ABSENT, not False: "not measured" and
-    # "did not answer" are different answers, and only one of them is evidence.
-    assert answered == {}
+
+@pytest.mark.parametrize("budget_s,startup_ms", [(0.0, 0), (0.1, 200)])
+def test_an_exhausted_probe_budget_admits_no_jobs(monkeypatch, budget_s, startup_ms):
+    clock = _ProbeBudget(startup_ms=startup_ms)
+    assert clock.run(monkeypatch, budget_s=budget_s) == {}
+    assert clock.submitted == clock.waits == []
+    assert clock.shutdowns == [(False, True)]
+
+
+def test_probe_results_use_only_remaining_budget_and_keep_partial_verdicts(monkeypatch):
+    clock = _ProbeBudget(startup_ms=20, answers=(True, False, None, None))
+    assert clock.run(monkeypatch, count=4) == {0: True, 1: False}
+    assert clock.waits == pytest.approx([0.08, 0.07, 0.06])
+    assert clock.now() == 0.1
+    assert clock.shutdowns == [(False, True)]

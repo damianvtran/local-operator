@@ -3,7 +3,7 @@
 // The queued-ask card: the ATOMIC submit (one complete map, every question id
 // present — the queue refuses a partial one), the deliberate skip (sent as an
 // empty list, which is the contract's own spelling for "no answer"), the
-// answerable-after-deadline state, and the rule that a refusal is rendered in
+// read-only lapsed state after a deadline, and the rule that a refusal is rendered in
 // the DAEMON's own words rather than humanised here.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -130,10 +130,33 @@ describe("AskCard", () => {
 		expect(screen.getByText(/not shown in the transcript/)).toBeTruthy();
 	});
 
-	it("keeps a timed-out ask answerable, with the deadline stated", () => {
+	it("shows a timed-out ask as lapsed: the question, no answer controls, Dismiss kept", () => {
+		/* Ben's report (2026-10-15): the phone offered the options of an ask whose
+		   deadline had passed, as if the agent were still waiting on them. The
+		   agent has gone ahead without the answer, so the card reads that and
+		   offers only the one op the queue accepts on a timeout — dismiss. */
 		renderCard(ask({ status: "timed_out" }));
-		expect(screen.getByText(/you can still answer/)).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.getByText("ship the fix?")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+	});
+
+	it("keeps an OPEN ask answerable when only the phone's clock says its deadline passed", () => {
+		/* Review round 1, R3: the phone's clock may run ahead of the runtime's,
+		   and a stale `open` row from a stopped runtime arrives already re-derived
+		   to `timed_out` by the index readers on the runtime's host. So an `open`
+		   row is still live to the agent: the card keeps its controls and says the
+		   deadline has passed locally, without calling it lapsed. */
+		renderCard(ask({ status: "open", expires_at: Date.now() - 60_000 }));
+		expect(screen.getByRole("button", { name: /^yes$/ })).toBeTruthy();
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+		expect(screen.getByText("Queued — the agent is continuing; deadline passed")).toBeTruthy();
+		expect(screen.queryByText(/^Lapsed/)).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
 	});
 
 	it("offers no controls on a settled ask, and no error register on an expired one", () => {

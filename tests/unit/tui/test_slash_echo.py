@@ -121,6 +121,9 @@ ECHO_POLICY = {
     # The cascade tree IS the receipt, and there is no argument to restate.
     "failovers": False,
     "usage": False,
+    # The overlay IS the receipt (`/usage`'s rule): it replaces the transcript
+    # region and takes no argument, so nothing here reaches the model.
+    "hub": False,
     # The screen it opens IS the receipt (same rule as `/usage`); the argument
     # names a view, never words the model is told.
     "analytics": False,
@@ -169,6 +172,9 @@ ECHO_POLICY = {
     # answer, and nothing here is words the model is told — the project TOOL is
     # how the model writes project rows, while `/project` is the operator's own
     # surface over the same store.
+    # Inspection/correction of the store, like `/project`: the receipt is the answer and the
+    # arguments (IDs, revisions, JSON) are selectors the model is never told.
+    "memory": False,
     "project": False,
 }
 
@@ -232,6 +238,9 @@ PROMPT_POLICY = {
     "accounts": False,
     "failovers": False,
     "usage": False,
+    # The PAGE is the receipt and it takes no argument at all — nothing typed
+    # for an inline engage to consume (the `/settings` rule).
+    "hub": False,
     # A view selector, not a prompt: `/analytics [view]` names which screen to
     # open, so it splices-and-runs inline like `/usage` rather than reassembling.
     "analytics": False,
@@ -277,6 +286,9 @@ PROMPT_POLICY = {
     # Its argument is a subcommand word plus a project NAME — selectors, never
     # free text a model is given (`/project show payments-migration`). The
     # store, not the model, is what those words act on.
+    # Inspection/correction of the store, like `/project`: the receipt is the answer and the
+    # arguments (IDs, revisions, JSON) are selectors the model is never told.
+    "memory": False,
     "project": False,
 }
 

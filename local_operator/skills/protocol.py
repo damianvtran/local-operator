@@ -433,6 +433,20 @@ def resolve_resource_url(
         available = ", ".join(sorted(resources.keys())) or "(none)"
         raise ValueError(f"Unknown {label}: {name}\nAvailable: {available}")
 
+    return _read_resource_locked(
+        resource, parts.path, name=name, scheme=scheme, label=label, boundary=boundary
+    )
+
+
+def _read_resource_locked(
+    resource: Skill, path: str, *, name: str, scheme: str, label: str, boundary: Path | None
+) -> str:
+    """Owned native body/reference reads share the adapter commit/recovery lock.
+
+    Protocol URL validation and registry lookup have already happened. Project,
+    ecosystem and packaged resources carry no managed config root and remain
+    ordinary read-only inputs; there is no implicit home-profile inference.
+    """
     if boundary is not None:
         # READ-time canonical containment (see the docstring): the check runs
         # on the resource DIRECTORY, which the body read (file_path) and every
@@ -445,7 +459,24 @@ def resolve_resource_url(
         if base is None or not _bounded_resource(base, boundary):
             raise ValueError(f"Unknown {label}: {name}")
 
-    path = parts.path
+    from contextlib import nullcontext
+
+    context = nullcontext()
+    if resource.managed_config_dir is not None:
+        # Ordinary packaged/project reads must not import the mutable hub store
+        # into startup's cheap read path merely to obtain an empty context.
+        from local_operator.hub_sync.skill_storage import managed_skill_read
+
+        context = managed_skill_read(resource.managed_config_dir)
+    with context:
+        return _read_resource_content(
+            resource, path, name=name, scheme=scheme, label=label, boundary=boundary
+        )
+
+
+def _read_resource_content(
+    resource: Skill, path: str, *, name: str, scheme: str, label: str, boundary: Path | None
+) -> str:
     if not path or not path.strip("/"):
         body_file = resource.file_path
         if boundary is not None:

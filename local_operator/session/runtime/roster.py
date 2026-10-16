@@ -61,7 +61,7 @@ from __future__ import annotations
 import socket
 import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -239,7 +239,7 @@ def _probe_ports(
     """Probe many ports inside one wall budget. Missing pids mean "not answered".
 
     THE POOL IS SHUT DOWN WITHOUT WAITING, and that is the whole of the budget's
-    enforcement. ``with ThreadPoolExecutor(...)`` calls ``shutdown(wait=True)``,
+    wait enforcement. ``with ThreadPoolExecutor(...)`` calls ``shutdown(wait=True)``,
     which joins the QUEUED work items as well as the running ones — so a deadline
     that abandoned the waiting loop still blocked here for
     ``ceil(rows / PROBE_WORKERS) x timeout_s``, i.e. the budget was a hope on a
@@ -249,6 +249,12 @@ def _probe_ports(
     ones already inside the kernel are left to finish on their own thread — bounded
     by ``timeout_s``, off the caller's path, and the reason the futures are
     abandoned rather than joined.
+
+    Startup and admission share that same deadline: eagerly queuing every row
+    before checking it kept submitting after expiry on a slow executor. Check
+    after startup and before EACH submit, leaving unadmitted rows unknown.
+    This is a cooperative budget, not a hard real-time guarantee: one executor
+    startup/submit call (or host descheduling) cannot be preempted here.
     """
     if not ports:
         return {}
@@ -256,7 +262,11 @@ def _probe_ports(
     answered: dict[int, bool] = {}
     pool = ThreadPoolExecutor(max_workers=min(workers, len(ports)))
     try:
-        futures = {pid: pool.submit(connect, port, timeout_s) for pid, port in ports.items()}
+        futures: dict[int, Future[bool]] = {}
+        for pid, port in ports.items():
+            if deadline - now() <= 0:
+                break
+            futures[pid] = pool.submit(connect, port, timeout_s)
         for pid, future in futures.items():
             remaining = deadline - now()
             if remaining <= 0:

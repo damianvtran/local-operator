@@ -1628,9 +1628,17 @@ class _ViewerAskSession(FakeSession):
     def __init__(self) -> None:
         super().__init__()
         self.wire: list[tuple[str, str, dict[str, Any], str]] = []
+        #: The VERIFIED decision door's calls, recorded like the owner-side
+        #: double in ``test_ask_fleet``: a request must reach this op and never
+        #: the plain one.
+        self.decided: list[tuple[str, str, str]] = []
 
     async def respond_ask(self, ask_id, answers=None, *, by="unknown"):
         self.wire.append(("respond", ask_id, dict(answers or {}), by))
+        return {"ok": True}
+
+    async def bridge_decide(self, ask_id, question_id, word):
+        self.decided.append((ask_id, question_id, word))
         return {"ok": True}
 
     async def decline_ask(self, ask_id, *, by="unknown"):
@@ -1645,6 +1653,35 @@ class _ViewerAskSession(FakeSession):
 async def _drain(pilot, turns: int = 6) -> None:
     """Let the op's worker run and report: it rides a task, not the key path."""
     await _settle(pilot, turns)
+
+
+def _bridge_row(ask_id: str = "b1") -> dict[str, Any]:
+    """A queued AGENT-MESSAGES request: the carriage the decision door keys on.
+
+    The producer's ``question_id`` is what makes the row a request (the same
+    predicate ``Session._is_bridge_ask_record`` reads), and the option IDs are
+    the words the door validates against its own closed set — the drawn labels
+    never reach the wire.
+    """
+    return {
+        **_row(ask_id, "unused"),
+        "questions": [
+            {
+                "id": "bridge-bmsg_1",
+                "question": "dana@acme.example · wants your sign-off",
+                "options": [
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "deny", "label": "Deny"},
+                ],
+                "multi": False,
+                "recommended": None,
+                "secret": False,
+                "persist": False,
+                "human_required": True,
+                "question_id": "bmsg_1",
+            }
+        ],
+    }
 
 
 async def test_a_viewer_answers_a_queued_ask_through_its_async_op(enabled):
@@ -1675,6 +1712,31 @@ async def test_a_viewer_answers_a_queued_ask_through_its_async_op(enabled):
         assert app._ask_mode is True
         listing = app.query_one(AskQueueList)
         assert listing.rows[listing.index].ask_id == "a2"
+
+
+async def test_a_viewer_decides_a_bridge_request_through_its_async_op(enabled):
+    """U1 on the VIEWER holder: a paired device is a decision surface too.
+
+    The dock looks the door up on whichever session holds the ask
+    (``tui/app.py::_deliver_owner_answer``), so an ``AttachedSession`` without
+    ``bridge_decide`` left an agent-messages request undecidable from the
+    desktop — the surface the plain door's refusal copy names ("the window that
+    runs this session or a paired device"). The facet's op is ``async`` (it
+    crosses the wire), so the verdict rides the worker, and the ordinary door is
+    never used for a request.
+    """
+    session = _ViewerAskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_bridge_row("b1")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskPickerScreen).answer_current(["Approve"])
+        await _drain(pilot)
+        assert session.decided == [("b1", "bmsg_1", "approve")], session.decided
+        assert session.wire == [], session.wire
 
 
 async def test_a_viewer_refusal_reaches_the_screen_in_the_owners_words(enabled):

@@ -1,0 +1,13 @@
+{
+  "cli.exec_runtime.thinking": "· thinking…",
+  "cli.exec_runtime.tool_interrupted": "⊘ {name} interrupted",
+  "cli.exec_runtime.tool_failed": "✗ {name} failed",
+  "cli.exec_runtime.output_check_failed": "! output check failed ({format}, attempt {attempt}/{max_attempts}): {reason}",
+  "cli.exec_runtime.retry": "[dim]retry {attempt}: {error}[/dim]",
+  "cli.exec_runtime.model_fallback": "[dim]fell back to {selector}[/dim]",
+  "cli.exec_runtime.model_switched": "[dim]switched to {selector}[/dim]",
+  "cli.exec_runtime.model_returned": "[dim]back to {selector}[/dim]",
+  "cli.exec_runtime.compacting": "[dim]compacting context…[/dim]",
+  "cli.exec_runtime.error": "Error: {sentence}",
+  "cli.exec_runtime.aborted": "[red]aborted[/red]"
+}

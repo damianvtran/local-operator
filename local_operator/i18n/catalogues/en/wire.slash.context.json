@@ -1,0 +1,7 @@
+{
+  "wire.slash.hub": {
+    "role": "command description line in /help and the completion picker",
+    "tone": "terse imperative",
+    "note": "Opens Hub links: per-link subscribe and auto-push policy. No ICU arguments; no placeholders. The key lands ahead of the /hub registry entry; non-en locales carry this en text until the delta translation."
+  }
+}

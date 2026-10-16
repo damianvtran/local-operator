@@ -164,6 +164,11 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     (directory / BOOT_PROMPT_NAME).write_text(
         json.dumps({"version": 1, "text": "start here"}), encoding="utf-8"
     )
+    # The portable memory export: one of each, or the round trip tests the fixture.
+    (directory / "memory-session.jsonl").write_text(
+        json.dumps({"v": 1, "placeholder": "opaque bytes; the copy never parses it"}) + "\n",
+        encoding="utf-8",
+    )
     # THE PENDING-VOICE MARKERS, one line in the exact shape
     # ``channel_spend.write_pending_record`` emits — in the fixture for the same
     # reason every entry type is (the round trip below asserts each
@@ -230,6 +235,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
     """
     from local_operator.asks.store import ASKS_LOG_NAME
     from local_operator.fork import BOOT_PROMPT_NAME, FORK_BOUNDARY_NAME
+    from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
         GOAL_SIDECAR_NAME,
@@ -284,6 +290,10 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # ``asks.jsonl`` and ``goal.json`` above (the argument is at
         # ``sync.COPY_SET_NAMES``).
         PENDING_SIDECAR_NAME,
+        # The session-scope slice of the memory store (memory.SESSION_EXPORT_NAME): a
+        # move must carry it even when mesh memory replication is off, or the moved
+        # session loses every fact it stored (sync.COPY_SET_NAMES has the argument).
+        SESSION_EXPORT_NAME,
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping

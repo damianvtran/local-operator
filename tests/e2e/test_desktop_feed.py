@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import secrets
 import socket
@@ -605,7 +606,17 @@ class _PresenceCacheClock:
     def __init__(self, root: Path, native: Any) -> None:
         self.root = root
         self.native_code = native.__code__
-        self.now = time.monotonic()
+        # A WHOLE number of seconds, never the raw ``time.monotonic()``. The
+        # matrix measures a cache entry's age as ``now - ((now + TTL) - TTL)``,
+        # which is exactly 0 only if every addition is exact. With a fractional
+        # uptime the round trip loses a ulp and the age comes back as -1.4e-14
+        # (reproduced at uptime 252.56993219293187), failing ``0 <= age`` on a
+        # healthy cache. An integer base plus the TTL, +1 and TTL/16 steps used below
+        # are all dyadic, so the arithmetic stays exact at any magnitude.
+        # ``ceil`` (not ``int``) keeps the base at or above the real clock, so
+        # a cache entry stamped by the real clock before this patch still
+        # expires after the first logical advance.
+        self.now = float(math.ceil(time.monotonic()))
 
     def monotonic(self) -> float:
         frame = sys._getframe(1)
@@ -811,7 +822,15 @@ async def test_banner_witness_waits_for_processing_and_keeps_stale_cache_sensiti
     try:
         if mode == "native-stale-cache":
             with pytest.raises(AssertionError, match="unfocused-same: banner verdict"):
-                await _assert_window_banner_matrix(desktop_server, monkeypatch, cell_limit=3)
+                # Isolate the cache counterexample from focused-other's unrelated
+                # positive composer. Its delivery remains covered by the full
+                # healthy matrix and held-poll control; neither belongs in this
+                # negative arm's prerequisites.
+                await _assert_window_banner_matrix(
+                    desktop_server,
+                    monkeypatch,
+                    cell_names=("focused-same", "unfocused-same"),
+                )
             print("Native unexpired cached presence suppresses the owed banner: negative caught")
         else:
             # Controls exercise only their direct cells; the public test above
@@ -839,7 +858,32 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
     await _assert_window_banner_matrix(desktop_server, monkeypatch)
 
 
-async def _assert_window_banner_matrix(desktop_server, monkeypatch, *, cell_limit=None):
+@pytest.mark.asyncio
+async def test_the_stale_cache_counterexample_pair_is_healthy_without_mutation(
+    desktop_server, monkeypatch
+):
+    await _assert_window_banner_matrix(
+        desktop_server, monkeypatch, cell_names=("focused-same", "unfocused-same")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cell_names",
+    [(), ("unknown",), ("focused-same", "focused-same"), ("unfocused-same", "focused-same")],
+)
+async def test_banner_cell_selection_cannot_pass_empty_or_reorder_the_control(
+    tmp_path, monkeypatch, cell_names
+):
+    # Invalid setup must fail distinctly, never with the negative arm's matched
+    # 'unfocused-same: banner verdict' assertion or an empty successful matrix.
+    with pytest.raises(ValueError, match="invalid banner cell selection"):
+        await _assert_window_banner_matrix((tmp_path, None), monkeypatch, cell_names=cell_names)
+
+
+async def _assert_window_banner_matrix(
+    desktop_server, monkeypatch, *, cell_limit=None, cell_names=None
+):
     """QA round 1's presence matrix, re-run at the layer it was measured on.
 
     QA reported ``presence-unfocused-same`` and ``presence-hidden-same`` as FAIL:
@@ -868,8 +912,6 @@ async def _assert_window_banner_matrix(desktop_server, monkeypatch, *, cell_limi
     clock = _PresenceCacheClock(root, native_presence)
     monkeypatch.setattr(presence_module, "time", clock)
     witness = _BannerProcessingWitness(root, monkeypatch)
-    displayed = await _create(client, root, str(uuid.uuid4()))
-    other = await _create(client, root, str(uuid.uuid4()))
     hidden = {"exists": True, "focused": False, "visible": False, "minimized": False}
     cells = [
         # name, window, completion for the DISPLAYED session?, is a banner owed?
@@ -882,6 +924,27 @@ async def _assert_window_banner_matrix(desktop_server, monkeypatch, *, cell_limi
         ("no-window-same", {"exists": False}, True, True),
         ("no-window-other", {"exists": False}, False, True),
     ]
+
+    if cell_names is not None:
+        if (
+            cell_limit is not None
+            or not isinstance(cell_names, tuple)
+            or not cell_names
+            or not all(isinstance(name, str) for name in cell_names)
+        ):
+            raise ValueError("invalid banner cell selection")
+        selected = [cell for cell in cells if cell[0] in cell_names]
+        if tuple(cell[0] for cell in selected) != cell_names:
+            raise ValueError("invalid banner cell selection: unknown, duplicate or reordered names")
+    else:
+        if cell_limit is not None and (
+            type(cell_limit) is not int or not 1 <= cell_limit <= len(cells)
+        ):
+            raise ValueError("invalid banner cell selection: limit out of range")
+        selected = cells[:cell_limit]
+    assert selected  # No healthy arm may succeed without executing a cell.
+    displayed = await _create(client, root, str(uuid.uuid4()))
+    other = await _create(client, root, str(uuid.uuid4()))
 
     async with client.stream("GET", "/v1/desktop/events") as response:
         lines = response.aiter_lines()
@@ -912,7 +975,7 @@ async def _assert_window_banner_matrix(desktop_server, monkeypatch, *, cell_limi
             ]
 
         try:
-            for name, window, same, expected in cells[:cell_limit]:
+            for name, window, same, expected in selected:
                 streamed.clear()
                 beat = await client.post(
                     "/v1/desktop/presence",

@@ -151,6 +151,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops both derived files for one session id, on that session's own deletion",
     ),
+    # -- session-file index (derived cache + one confined copy) --------------------------
+    # ``_write_json``: the cache path is ``<config>/cache/session_files/<stem>.json`` where
+    # ``cache_path`` refuses any stem outside ``[A-Za-z0-9_-]{1,128}`` (no separator, no
+    # ``..``), and the temp is the same path with a pid/thread suffix. The file is DERIVED -
+    # the transcript is the truth, a deleted cache is rebuilt by the next scan.
+    (
+        "local_operator/session_files/ledger.py::_write_json",
+        "<path>.replace",
+        "Atomic pid-temp replace of one <config>/cache/session_files/<stem>.json (derived cache)",
+    ),
+    # The cleanup removes only the leaf THIS copy exclusively created, relative to its pinned
+    # generated-directory fd. The sanitized leaf cannot name a directory or transcript; even
+    # a concurrent parent swap cannot redirect the cleanup out of that pinned directory.
+    (
+        "local_operator/session_files/service.py::_copy_artifact",
+        "os.unlink",
+        "Removes a partial artifact leaf relative to its pinned generated directory fd",
+    ),
     # -- the code-request FETCH cache (1b): same derived-store argument as the
     # ledger entries above. Every path here is built from ``fetch_dir()``
     # (``<config>/cache/code_requests``) plus a sanitized host segment and a
@@ -461,6 +479,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # network-scoped catalogue — all under
     # `network/`. The ONE session-shaped path in the package is the stamp, and it
     # gets its own block below.
+    (
+        "local_operator/memory.py::MemoryStore._export",
+        "os.replace",
+        # Replaces ONE FILE: `<session dir>/memory-session.jsonl`, with the snapshot
+        # staged beside it in the same directory. It never removes or renames a
+        # directory, and the target is a fixed basename inside a session directory
+        # the store was handed; `_session_directory` additionally refuses any path
+        # that does not resolve under <config>/sessions/.
+        "Atomic replace of the single portable memory-session.jsonl file",
+    ),
+    (
+        "local_operator/memory.py::MemoryStore._export",
+        "<path>.unlink",
+        # Removes only this call's own `.memory-session.*.tmp` sidecar (a
+        # NamedTemporaryFile in the same directory), after the replace or on failure.
+        "Removes this call's own staged .tmp sidecar, never a directory",
+        2,
+    ),
+    (
+        "local_operator/memory.py::MemoryStore.connection",
+        "<path>.unlink",
+        # Removes the memory.db / -wal / -shm FILES of a store whose schema never
+        # completed on THIS call, under <config>/memory/ — a fixed-basename file set
+        # beside the database, never a directory and never anything under sessions/.
+        "Removes this call's own half-created memory.db* files under <config>/memory/",
+    ),
     (
         "local_operator/network/store.py::_stage_private",
         "os.replace",
@@ -2725,6 +2769,60 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/hub_sync/store.py::RunnerLease._try_acquire",
         "<path>.unlink",
         "Clears an EXPIRED <config_dir>/hub/.runner.lease file before retaking it",
+    ),
+    # The push outbox: one JSON file per operation under
+    # <config_dir>/hub/outbox/, beside sessions/ like the rest of the hub root.
+    # Both paths are the config dir plus the validated opaque operation id and a
+    # ``tempfile.mkstemp`` temp IN THE SAME DIRECTORY; no session id or caller
+    # input reaches either.
+    (
+        "local_operator/hub_sync/outbox.py::Outbox._atomic_write",
+        "os.replace",
+        "Atomic replace of <config_dir>/hub/outbox/<op-id>.json from a same-directory temp",
+    ),
+    (
+        "local_operator/hub_sync/outbox.py::Outbox._atomic_write",
+        "os.unlink",
+        "Clears this call's own same-directory .<op-id>.*.tmp on the error path only",
+    ),
+    # The managed-skill transaction (skill adapter): the destination is
+    # <config_dir>/skills/<validated-alias> (a sibling of sessions/), and the
+    # staged/backup trees live under <config_dir>/hub/{staging,backups} keyed by
+    # the validated opaque operation id. ``validate_name`` authenticates the
+    # alias and ``_locations`` builds every path from those pieces plus fixed
+    # names, so no call here can name a path under sessions/. The three
+    # ``apply`` replaces are the old-rename, the concurrent-edit RESTORE, and
+    # the staged->destination swap; ``_recover_one``'s replace restores a
+    # crash-gap backup and its rmtree removes ONLY the crashed transaction's own
+    # prepared staging tree.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.apply",
+        "os.replace",
+        "Old-dir rename, concurrent-edit restore and staged swap under <config_dir>/skills + hub/",
+        3,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_one",
+        "os.replace",
+        "Crash-gap restore of the backup under <config_dir>/hub/backups/",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_one",
+        "shutil.rmtree",
+        "Removes ONLY this operation's own staged tree under <config_dir>/hub/staging/",
+    ),
+    # The local transaction journal's one JSON writer. Its ONLY caller passes
+    # TransactionJournal._path(op-id): <config_dir>/hub/transactions/<validated id>.json
+    # with a same-directory mkstemp temp -- never a session-derived path.
+    (
+        "local_operator/hub_sync/transactions.py::atomic_json",
+        "os.replace",
+        "Atomic replace of <config_dir>/hub/transactions/<op-id>.json from a same-directory temp",
+    ),
+    (
+        "local_operator/hub_sync/transactions.py::atomic_json",
+        "<path>.unlink",
+        "Clears this call's own same-directory .transaction-*.tmp on the error path only",
     ),
     # -- speech-to-text temp scratch (mobile STT) ---------------------------
     # The Radient leg writes the uploaded clip into a directory THIS call

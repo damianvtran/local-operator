@@ -744,8 +744,10 @@ collapses — there was no list to return to.)
   different promise).
 - **Web (`mobile/web/src`):** session-list row chip (and the outstanding-asks row state,
   distinct from approval); header entry → **asks sheet**
-  (`components/ui/sheet.tsx`/`projects-sheet.tsx` pattern), aggregated across sessions via
-  `GET /api/asks`; multi-question form reusing `PendingCard` fields (`pending-card.tsx:131`);
+  (`components/ui/sheet.tsx`/`projects-sheet.tsx` pattern), reading the aggregate index
+  (`GET /api/asks`) and showing only the opening session's rows (amended 2026-10-15: the sheet
+  listed every session's asks; other sessions' asks stay on the session list's row chip);
+  multi-question form reusing `PendingCard` fields (`pending-card.tsx:131`);
   the card must NOT set `forceCollapsed` on todos/subagents for asks; response card in
   `tool-row.tsx`/`transcript.tsx` via the new kind (unknown-kind path degrades safely).
   Same-binary bundle ⇒ no skew for the web client.

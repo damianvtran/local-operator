@@ -882,12 +882,12 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
     names the address the caller actually typed, and every message ends with
     :data:`SCRATCHPAD_ELSEWHERE`, which is where the material belongs instead.
 
-    ``size`` is the payload's length in BYTES, and it is optional because
-    ``edit`` has none to give: an edit sees only its hunks, never the whole
-    file, so an edit is judged on the name alone — and, for the pad total, on
-    what the pad already holds rather than on what the edit would add to it.
-    ``write`` passes the encoded length — bytes and not characters, because every
-    ceiling here is about what lands on the shared disk.
+    ``size`` is the payload's length in BYTES. It is optional for an edit's
+    address/name preflight, before its hunks have been applied. Once the final
+    result is known, the edit checks its encoded length under the file lock and
+    before mutation, using the same replacement accounting as ``write``.
+    Both tools pass bytes and not characters: every ceiling here is about what
+    lands on the shared disk.
 
     READS ARE DELIBERATELY NOT GATED. Pads written before this policy are full of
     exactly these names, and their owner is the agent cleaning them up: a gate on

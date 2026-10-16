@@ -44,6 +44,13 @@ What `timeout(1)` cannot do is the third case: by then it HAS exited, so no
 spelling of it can reap anything. `setsid` does not exist on macOS, which is the
 platform this bites hardest.
 
+Node heap headroom belongs here too: whole-tree pyright OOMed at node's ~4 GB
+old-space cap under fleet load (rc=250 from its Python wrapper). Both the scoped
+runner and Makefile use this wrapper, so sizing only the Makefile leaves the
+scoped fallback to whole-tree analysis exposed. Match ci.yml's heap floor without
+lowering a larger operator value. NODE_OPTIONS is inert for non-node children,
+so passing it to every wrapped command is harmless.
+
 USAGE
 -----
     python scripts/run_bounded.py --timeout 1800 -- <command> [args…]
@@ -58,8 +65,10 @@ The command's own status; `124` when the bound fired (what `timeout(1)` reports,
 so existing callers keep reading the same code); `128 + signum` when a signal
 ended it — forwarded to the group here, or delivered to the child by someone
 else (a `kill -9`, the OOM killer, a job runner), which a shell would report the
-same way; `125` when the command could not be started at all — never 0 for a
-gate that did not run.
+same way; `137` for a measured owned-group memory breach, identified by the
+`MEMORY LIMIT EXCEEDED` diagnostic (status 137 alone also covers an external
+SIGKILL); `125` when the command could not start or its memory budget was refused
+before spawn — never 0 for a gate that did not run.
 
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
 parseable output and the suite's `-q` output is parsed too (the same rule the
@@ -70,19 +79,35 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shlex
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import IO, Sequence
+
+# This script is also called with Python -S/from outside the checkout. Load the
+# canonical stdlib-only guard from THIS script's tree, not a stale tool install
+# or another worktree's editable finder. No dependency installation is needed.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from local_operator import memory_guard  # noqa: E402
 
 #: Exit status for a fired bound. `timeout(1)` uses the same number.
 EXIT_TIMEOUT = 124
+
+#: Keep in sync with .github/workflows/ci.yml's type-check NODE_OPTIONS: both
+#: local gate spellings need the analyzer headroom, not just the Makefile recipe.
+NODE_HEAP_MB = 6144
 
 #: The command never started (missing interpreter, bad path). Distinguished from
 #: any status the command itself can produce, so a gate that did not run cannot
 #: be read as a passing gate.
 EXIT_NOT_STARTED = 125
+
+#: A measured owned-group memory breach is SIGKILL, not the timeout 124 path.
+EXIT_MEMORY = 128 + signal.SIGKILL
 
 #: How long a signalled process group gets before SIGKILL. The analyzer needs a
 #: moment to unwind; a group that ignores SIGTERM entirely must still not outlive
@@ -142,11 +167,55 @@ def _reap(
     return True
 
 
+def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
+    """Resolve a cooperative child ceiling without widening its parent grant.
+
+    Missing means canonical auto policy; zero is an explicit, disclosed disable.
+    Invalid metadata is an error, never a spelling of unlimited. This only
+    prices the owned child PG, not the wrapper+child aggregate or later setsid.
+    """
+    raw = os.environ.get(memory_guard.RESOLVED_MEMORY_MB_ENV)
+    inherited: int | None = None
+    if raw is not None:
+        if re.fullmatch(r"[0-9]+", raw) is None:
+            raise ValueError(
+                f"{memory_guard.RESOLVED_MEMORY_MB_ENV} must be nonnegative integer MiB"
+            )
+        inherited = int(raw)
+    if override_mb is not None and (type(override_mb) is not int or override_mb < 0):
+        raise ValueError("--memory-mb must be nonnegative integer MiB")
+    if inherited is not None and inherited > 0:
+        if override_mb is not None and (override_mb == 0 or override_mb > inherited):
+            raise ValueError(
+                f"--memory-mb cannot disable or widen inherited {inherited} MiB; "
+                f"choose a positive value no higher than {inherited}, or raise the "
+                "granting caller's ceiling (memory_mb on the outer bash tool call)"
+            )
+        ceiling = inherited if override_mb is None else override_mb
+        source = "inherited" if override_mb is None else "explicit, capped by inherited"
+    elif override_mb is not None:
+        ceiling = override_mb
+        source = "explicit"
+    elif inherited is not None:
+        ceiling = inherited
+        source = "inherited: guard off"
+    else:
+        budget = memory_guard.compute_budget()
+        if budget.source == "disabled":
+            raise ValueError(
+                "auto memory budget unavailable; set --memory-mb N to an explicit positive "
+                "MiB ceiling (--memory-mb 0 deliberately disables protection)"
+            )
+        return budget, "auto"
+    return memory_guard.compute_budget(override_mb=ceiling), source
+
+
 def run(
     argv: Sequence[str],
     *,
     timeout: float | None,
     grace: float,
+    memory_mb: int | None = None,
     stream: IO[str] = sys.stderr,
 ) -> int:
     """Run `argv` as a fresh process group and return its status.
@@ -158,6 +227,21 @@ def run(
     if not argv:
         stream.write("[run_bounded] no command was given\n")
         return EXIT_NOT_STARTED
+    try:
+        budget, budget_source = _memory_budget(memory_mb)
+        if budget.ceiling_mb > 0 and not hasattr(os, "killpg"):
+            raise ValueError("a child process-group memory ceiling requires POSIX process groups")
+    except ValueError as exc:
+        stream.write(f"[run_bounded] memory budget refused before spawn: {exc}\n")
+        return EXIT_NOT_STARTED
+    if budget.ceiling_mb > 0:
+        stream.write(
+            f"[run_bounded] memory budget {budget.ceiling_mb} MiB ({budget_source}); "
+            "sampled owned child group only\n"
+        )
+    else:
+        stream.write(f"[run_bounded] memory guard disabled ({budget_source}): {budget.reason}\n")
+    stream.flush()
     started = time.monotonic()
     # A signal to this wrapper has to reach the group: the child leads its own
     # session, so the terminal's SIGINT goes to the wrapper alone and an
@@ -178,9 +262,34 @@ def run(
         if pgid:
             _signal_group(pgid, signum)
 
+    child_env = os.environ.copy()
+    # Nested cooperative wrappers inherit the effective (possibly tightened)
+    # ceiling, not the original wider grant. env -i must carry it explicitly.
+    child_env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(budget.ceiling_mb)
+    node_options = child_env.get("NODE_OPTIONS", "")
+    # Match whole options after unquoting: a raw regex misses quoted heap flags
+    # and can mistake a heap-looking substring in --title's value for a flag.
+    try:
+        option_tokens = shlex.split(node_options)
+    except ValueError:
+        # Leave malformed caller text for the child to diagnose, but don't let
+        # an unmatched quote trick us into recognising a larger heap option.
+        option_tokens = []
+    heaps = [
+        match.group(1)
+        for token in option_tokens
+        if (match := re.fullmatch(r"--max[-_]old[-_]space[-_]size=(\+?\d+)", token))
+    ]
+    # V8 resolves repeated flags last-wins: append after a smaller effective
+    # value, preserving unrelated options and leaving a larger caller cap alone.
+    if not heaps or int(heaps[-1]) < NODE_HEAP_MB:
+        child_env["NODE_OPTIONS"] = (
+            f"{node_options} " if node_options else ""
+        ) + f"--max-old-space-size={NODE_HEAP_MB}"
+
     previous = {sig: signal.signal(sig, _forward) for sig in FORWARDED_SIGNALS}
     try:
-        proc = subprocess.Popen(list(argv), start_new_session=True)
+        proc = subprocess.Popen(list(argv), start_new_session=True, env=child_env)
     except OSError as exc:
         # A gate that never ran must never look green (#423's lesson).
         for sig, handler in previous.items():
@@ -198,6 +307,9 @@ def run(
 
     rc: int
     try:
+        guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
+        next_sample = started
+        unmeasured_reported = False
         deadline = None if timeout is None else started + timeout
         while True:
             status = proc.poll()
@@ -249,28 +361,60 @@ def run(
                 proc.wait()
                 rc = EXIT_TIMEOUT
                 break
+            now = time.monotonic()
+            if guard is not None and now >= next_sample:
+                sample = guard.sample_sync()
+                next_sample = now + guard.tick_s
+                if guard.should_kill(sample):
+                    stream.write(f"[run_bounded] {guard.over_budget_message(sample)}\n")
+                    stream.flush()
+                    _signal_group(pgid, signal.SIGKILL)
+                    proc.wait()
+                    rc = EXIT_MEMORY
+                    break
+                notice = guard.soft_notice(sample)
+                if notice:
+                    stream.write(f"[run_bounded] {notice} (advisory only)\n")
+                    stream.flush()
+                if sample.bytes_used is None and not unmeasured_reported:
+                    stream.write("[run_bounded] memory charge unavailable; no measured cap proof\n")
+                    stream.flush()
+                    unmeasured_reported = True
             time.sleep(_POLL_SECONDS)
+    except Exception as exc:
+        stream.write(f"[run_bounded] owned-child monitor failed: {type(exc).__name__}: {exc}\n")
+        stream.flush()
+        raise
     finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
-        # The ordinary-exit half of the defect: the leader is gone, and anything
-        # it spawned is still holding its heap. SIGKILL, because there is nothing
-        # left to negotiate with — the gate has already finished.
-        #
-        # Several passes, because a child forked in the instant the leader exited
-        # can land after the kernel resolved the previous one. Bounded and cheap:
-        # the whole sweep is a quarter of a second, against a gate that has
-        # already finished.
-        reaped = False
-        for _ in range(5):
-            reaped = _signal_group(pgid, signal.SIGKILL) or reaped
-            time.sleep(_POLL_SECONDS)
-        if reaped:
-            stream.write(
-                f"[run_bounded] reaped processes left behind in group {pgid} "
-                "after the gate exited\n"
-            )
-            stream.flush()
+        try:
+            # The ordinary-exit half of the defect: the leader is gone, and anything
+            # it spawned is still holding its heap. SIGKILL, because there is nothing
+            # left to negotiate with — the gate has already finished.
+            #
+            # Several passes, because a child forked in the instant the leader exited
+            # can land after the kernel resolved the previous one. Bounded and cheap:
+            # the whole sweep is a quarter of a second, against a gate that has
+            # already finished.
+            reaped = False
+            for _ in range(5):
+                reaped = _signal_group(pgid, signal.SIGKILL) or reaped
+                time.sleep(_POLL_SECONDS)
+            if reaped:
+                stream.write(
+                    f"[run_bounded] reaped processes left behind in group {pgid} "
+                    "after the gate exited\n"
+                )
+                stream.flush()
+
+        finally:
+            try:
+                # Also reap the leader when an unexpected monitor error, not
+                # normal poll/timeout, brought us here. Keep forwarding signals
+                # until cleanup finishes rather than reopening an orphan window.
+                proc.wait()
+            finally:
+                for sig, handler in previous.items():
+                    signal.signal(sig, handler)
 
     stream.write(
         f"[run_bounded] {os.path.basename(argv[0])} rc={rc} "
@@ -284,6 +428,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="run_bounded.py",
         description="Run a gate command in its own process group and reap the group.",
+        # The short description deliberately does not use the whole module doc;
+        # callers consulting --help still need the diagnostic that distinguishes
+        # our memory stop from another process delivering SIGKILL (same status).
+        epilog=(
+            "Exit status: child status normally; 124 on timeout; 125 on start or "
+            "budget refusal; 137 with MEMORY LIMIT EXCEEDED on a measured memory "
+            "breach. Status 137 alone can also mean external SIGKILL; inspect stderr."
+        ),
     )
     parser.add_argument(
         "--timeout",
@@ -296,6 +448,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "loaded host here and timing out a slow host is worse than waiting for "
             "it — and `make type-check BOUND_TIMEOUT=<seconds>` raises it for one "
             "run."
+        ),
+    )
+    parser.add_argument(
+        "--memory-mb",
+        type=int,
+        default=None,
+        help=(
+            "child process-group ceiling in MiB (default: bash tool's resolved budget, "
+            "otherwise auto); positive inherited budgets can only be tightened; "
+            "0 disables only without a positive inherited budget"
         ),
     )
     parser.add_argument(
@@ -316,7 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = list(args.command)
     if command[:1] == ["--"]:
         command = command[1:]
-    return run(command, timeout=args.timeout, grace=args.grace)
+    return run(command, timeout=args.timeout, grace=args.grace, memory_mb=args.memory_mb)
 
 
 if __name__ == "__main__":

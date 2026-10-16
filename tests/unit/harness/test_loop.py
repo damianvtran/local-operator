@@ -5582,6 +5582,71 @@ def _echo_model(effort: str = "high") -> ModelSpec:
     )
 
 
+def _fixed_aggregator_echo_model(monkeypatch, efforts: tuple[str, ...]) -> ModelSpec:
+    """Derive a real route from fixed offline catalogue inputs, not a live claim."""
+    from local_operator.model import configure
+    from local_operator.model.registry import ModelInfo
+
+    route = "deepseek/deepseek-v4.1-flash"
+    resolver_calls = []
+
+    def listing_effort(provider, model_id):
+        assert (provider, model_id) == ("openrouter", route)
+        return efforts
+
+    def unexpected_resolution(*args, **kwargs):
+        resolver_calls.append((args, kwargs))
+        raise AssertionError("explicit fixture metadata must not resolve a live catalogue")
+
+    # info= avoids enrichment/HTTP, but the ladder has a separate memo boundary.
+    # Pin both so another test's warm listing cannot change this capability case.
+    monkeypatch.setattr(configure, "resolve_model_info", unexpected_resolution)
+    monkeypatch.setattr(configure, "_listing_effort", listing_effort)
+    model = configure.build_model_spec(
+        "openrouter",
+        route,
+        info=ModelInfo(
+            id=route,
+            name=route,
+            description="offline catalogue fixture",
+            context_window=128_000,
+            max_tokens=8192,
+        ),
+    )
+    # The builder deliberately catches resolver exceptions and keeps going.
+    # Refusing inside the stub alone is therefore insufficient: observe calls
+    # and trip OUTSIDE that catch so a future missing info= cannot pass silently.
+    assert not resolver_calls, "explicit catalogue fixture unexpectedly resolved metadata"
+    assert model.requires_reasoning_echo is True, "derive the echo from the actual route"
+    assert model.reasoning_efforts == efforts
+    return model
+
+
+def test_fixed_aggregator_catalogue_guard_detects_omitted_info(monkeypatch):
+    """The tripwire must survive the real builder swallowing its resolver error."""
+    from local_operator.model import configure
+
+    real_builder = configure.build_model_spec
+    returned_models = []
+
+    def omit_info(hosting, model_name, *, info):
+        assert info is not None, "the helper supplied its intended offline metadata"
+        # Drop ONLY this input at the test boundary. The actual builder must
+        # catch the refusing resolver and return, before the helper detects it.
+        model = real_builder(hosting, model_name)
+        returned_models.append(model)
+        return model
+
+    monkeypatch.setattr(configure, "build_model_spec", omit_info)
+    with pytest.raises(
+        AssertionError, match="explicit catalogue fixture unexpectedly resolved metadata"
+    ):
+        _fixed_aggregator_echo_model(monkeypatch, ("none", "low", "high", "max"))
+    assert len(returned_models) == 1, "the exception must be detected AFTER builder return"
+    assert returned_models[0].requires_reasoning_echo is True
+    assert returned_models[0].reasoning_efforts == ("none", "low", "high", "max")
+
+
 def _unrecognised_thinking_route() -> ModelSpec:
     """A thinking-mode route the family table has not learned yet.
 
@@ -5888,22 +5953,15 @@ async def test_the_refusals_own_words_fill_the_echo_on_a_route_the_capability_mi
 
 
 @pytest.mark.asyncio
-async def test_the_aggregator_deepseek_route_has_no_rung_and_still_ends_the_turn():
-    """The honest reach of the recovery, on the spec production DERIVES.
+async def test_the_aggregator_deepseek_route_has_no_rung_and_still_ends_the_turn(monkeypatch):
+    """No retreat is possible when this explicit catalogue scenario lacks none.
 
-    ``openrouter/deepseek/deepseek-v4.1-flash`` is the route this change was
-    written for and ships ``('low','high','max')`` -- no ``none`` rung -- so the
-    retry cannot change the body and the turn ends after one request. What
-    protects that route is the echo DERIVATION, not this recovery. Pinned here
-    so the claim cannot drift back to "the recovery saves the aggregator": the
-    previous version of the test above asserted exactly that, on a hand-built
-    ladder production never builds.
+    The real builder still derives the aggregator's echo capability. The ladder
+    is deliberately a fixed scenario, NOT a claim that the current/live route
+    lacks none: catalogue enrichment and warm listing memos can advertise it.
     """
-    from local_operator.model.configure import build_model_spec
-
-    aggregator = build_model_spec("openrouter", "deepseek/deepseek-v4.1-flash")
-    assert aggregator.requires_reasoning_echo is True, "the echo is what saves this route"
-    assert "none" not in aggregator.reasoning_efforts, "the missing rung this test pins"
+    aggregator = _fixed_aggregator_echo_model(monkeypatch, ("low", "high", "max"))
+    assert "none" not in aggregator.reasoning_efforts, "the missing rung this case pins"
     stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
     context = LoopContext()
     events = []
@@ -5917,6 +5975,35 @@ async def test_the_aggregator_deepseek_route_has_no_rung_and_still_ends_the_turn
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
     assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_the_aggregator_deepseek_route_with_a_none_rung_can_retreat(monkeypatch):
+    """A none-advertising catalogue input enables retreat on the same real route.
+
+    This independently pins the supported none/low/high/max shape reported by
+    CI without fetching or declaring a particular live catalogue snapshot.
+    """
+    aggregator = _fixed_aggregator_echo_model(monkeypatch, ("none", "low", "high", "max"))
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(), make_config(stream, model=aggregator), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    # None is the aggregator's unseeded default, not the explicit off rung.
+    assert stream.requests[0].model.reasoning_effort != "none", "start with thinking not off"
+    assert stream.requests[-1].model.reasoning_effort == "none"
+    assert sum(isinstance(e, NoticeEvent) and "thinking disabled" in e.text for e in events) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and not end.aborted and end.error is None
 
 
 @pytest.mark.asyncio

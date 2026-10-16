@@ -830,6 +830,7 @@ class Handshake:
             session_protocol=int(self.hello.get("protocol") or self.session_protocol),
             peer_build=self.peer_build,
             peer_capabilities=self.peer_capabilities,
+            local_capabilities=list(self.capabilities),
         )
 
     @property

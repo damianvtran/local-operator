@@ -9,6 +9,8 @@ from typing import Any
 
 from local_operator.hub_sync import store as st
 
+FIXED = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
 
 def _ignore(_result: object) -> None:
     """``mutate`` wants a ``-> None`` callback; ``_apply`` returns the item for readers."""
@@ -87,7 +89,7 @@ def test_failure_classes_follow_the_table() -> None:
     st.record_failure(item, "concurrent-edit", "raced")
     assert item["attempts"] == 1  # uncounted
     st.record_failure(item, "prompt-too-long", "too big")
-    assert item["state"] == "failed" and item["auto_retry"] is False
+    assert item["state"] == "failed" and item["auto_retry"] is True  # scheduled, not retired
     st.record_failure(item, "model-unavailable", "no key")
     assert item["state"] == "available"
     delay = datetime.strptime(item["next_retry_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
@@ -257,3 +259,47 @@ def test_scrub_redacts_real_token_shapes_not_just_the_length() -> None:
     text = st.scrub(f"401 Authorization: Bearer {jwt} for key {api_key}\nretry")
     assert jwt not in text and api_key not in text
     assert "\n" not in text and "retry" in text
+
+
+def test_prompt_too_long_is_scheduled_not_retired_and_gated_by_fingerprint() -> None:
+    """A too-long request retries on a schedule, but only when its input changed."""
+    from local_operator.hub_sync import store as st
+
+    item: dict[str, Any] = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
+    st.record_failure(item, "prompt-too-long", "section too long", now=FIXED)
+    assert item["auto_retry"] is True  # NOT a human-only dead end
+    assert item["next_retry_at"] is not None  # a cheap scheduled retry
+
+    # Six failures do NOT retire it (no-forever-retirement).
+    for _ in range(6):
+        st.record_failure(item, "prompt-too-long", "still too long", now=FIXED)
+    assert item["auto_retry"] is True
+
+    item["prompt_fingerprint"] = "fp1"
+    assert st.prompt_too_long_eligible(item, "fp1") is False  # unchanged -> do not re-send
+    assert st.prompt_too_long_eligible(item, "fp2") is True  # changed -> re-arm
+
+
+def test_merge_refused_still_retires() -> None:
+    from local_operator.hub_sync import store as st
+
+    item: dict[str, Any] = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
+    st.record_failure(item, "merge-refused", "conflict", now=FIXED)
+    assert item["auto_retry"] is False
+
+
+def test_pull_and_push_due_times_are_independent() -> None:
+    from datetime import datetime, timezone
+
+    from local_operator.hub_sync import store as st
+
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    # A fresh pull does not make a stale push look serviced, or the reverse.
+    item = {"last_pulled_at": "2026-01-01T11:59:00Z", "last_pushed_at": "2026-01-01T08:00:00Z"}
+    assert st.pull_due(item, 30, now) is False
+    assert st.push_due(item, 30, now) is True
+    item = {"last_pulled_at": "2026-01-01T08:00:00Z", "last_pushed_at": "2026-01-01T11:59:00Z"}
+    assert st.pull_due(item, 30, now) is True
+    assert st.push_due(item, 30, now) is False
+    # Never serviced -> both due.
+    assert st.pull_due({}, 30, now) and st.push_due({}, 30, now)
