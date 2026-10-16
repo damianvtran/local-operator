@@ -168,5 +168,85 @@
     "role": "wake panel monitors armed-count header clause",
     "tone": "plain count",
     "note": "The '<N> monitor(s) armed' clause in the monitor section header when no armed monitor is broken. ICU plural on 'count' gives the singular '1 monitor armed' the pre-extraction code wrote by hand; {shown} is the RAW digit string, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.team_heading": {
+    "role": "org chart page title team heading",
+    "tone": "plain, factual",
+    "note": "The opening fragment of the org chart page's title row, e.g. 'team org', in bold foreground ink. {charted} is the charted team's display name from the root node's label, kept verbatim (a name, never translated). The following fragments (' · org chart', the zoom tier) are appended as separate fragments in quieter ink, so this value carries no trailing separator. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.chart_suffix": {
+    "role": "org chart page title chart suffix",
+    "tone": "plain, factual",
+    "note": "The ' · org chart' fragment after the team heading on the org chart page's title row, naming the view. The leading space-dot-space seam is INSIDE the value and load-bearing: it is the only separator between the heading and this fragment. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.zoom_clause": {
+    "role": "org chart page title zoom clause",
+    "tone": "plain, factual",
+    "note": "The ' · zoom: <tier>' fragment on the org chart page's title row, always stated so an auto-collapsed small terminal explains itself. {tier} is one of outline/standard/detailed from the tier table, kept verbatim. The leading seam is inside the value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.expanded_suffix": {
+    "role": "org chart page title expanded suffix",
+    "tone": "plain, factual",
+    "note": "The ' · expanded' fragment appended to the org chart title only while expand-all is on, stating that every node is unfolded. The leading seam is inside the value and load-bearing. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.org_chart_view.manager_legend": {
+    "role": "org chart legend manager glyph gloss",
+    "tone": "plain, factual",
+    "note": "The first entry of the org chart's legend row: the diamond glyph and the word it stands for, painted in accent ink. The glyph is part of the value because glyph and gloss are one legend entry; the remaining legend entries are scanner-blind tuple copy left for a follow-up slice. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.search_fetch_hint": {
+    "role": "search result card fetch hint",
+    "tone": "plain, instructional",
+    "note": "The closing line of an expanded search-result card, telling the operator how to get a result's full page. 'web_fetch' and 'read <url>' are tool/command syntax, kept verbatim and never translated; the capitalised 'Ask Operator' address is the pre-slice wording and is preserved exactly. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.http_blocked": {
+    "role": "fetch card confirmed-block error row",
+    "tone": "warning, factual",
+    "note": "The danger row on a fetch card whose refusal was CLASSIFIED as a bot-block: '⚠ HTTP <status> <reason> — <clause>.' {status} and {reason} are raw interpolated strings (the numeric code and its standard reason phrase), {clause} is the shared classified sentence from block_lead with NO trailing period — the period closing the row is inside this value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.http_error_page": {
+    "role": "fetch card generic HTTP error row",
+    "tone": "warning, factual",
+    "note": "The danger row on a fetch card for an UNSIGNED HTTP refusal: '⚠ HTTP <status> <reason> — error/block page, not page content.' It deliberately claims nothing about why the origin refused. {status} and {reason} are raw interpolated strings; the closing period is inside the value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.rendered_row": {
+    "role": "fetch card rendered-evidence row",
+    "tone": "plain, factual",
+    "note": "The 'Rendered: <bits>' row on a fetch card, where {bits} is the pre-joined evidence string (render method, attempt summary, line and byte counts joined with ' · ' in code). Only the 'Rendered: ' label is copy here; the bits are measurements and identifiers that stay verbatim. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.tool_card.low_quality_hint": {
+    "role": "fetch card low-quality hint",
+    "tone": "plain, instructional",
+    "note": "The hint row on a fetch card whose extraction was sparse or JS-gated, suggesting the browser for the full page. `browser` is a tool name in backticks, kept verbatim; the em dash and wording are the pre-slice bytes. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.all_archived": {
+    "role": "session picker all-archived notice",
+    "tone": "plain, factual",
+    "note": "The notice in the session picker's results pane when every conversation is archived and only the reveal toggle offers them: 'all <N> conversation(s) are archived'. The '(s)' spelling is DELIBERATE at every count — the pre-slice f-string never pluralised, so there is no ICU plural branch. {total} is a raw digit string, never grouped, so 1200 stays '1200'. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.no_match_filter": {
+    "role": "session picker no-match notice",
+    "tone": "plain, factual",
+    "note": "The notice in the session picker's results pane when the active filter matches nothing. It names the FILTER rather than the store, because archived rows may still exist behind the toggle. Bare sentence, no punctuation. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.no_session": {
+    "role": "session picker empty preview fallback",
+    "tone": "plain, factual",
+    "note": "The preview pane's fallback when no row is selected and no filter is active: 'no session'. Two words, no punctuation; with a filter active the pane instead names the query, so this only ever describes an unfiltered empty selection. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.type_to_filter": {
+    "role": "session picker filter placeholder",
+    "tone": "plain, instructional",
+    "note": "The dim placeholder in the session picker's filter row when no query has been typed, stating how the list is narrowed. It is shed before the keys when the row runs out of room. Bare phrase, no punctuation. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.showing_prefix": {
+    "role": "session picker window counter prefix",
+    "tone": "plain count",
+    "note": "The '   showing ' lead of the session picker's window counter ('showing 1–9 of 42'), drawn as a separate fragment so the numerals can carry their own ink. The THREE leading spaces and the trailing space are load-bearing separators; this differs from tui.small.picker.showing_prefix ('showing ') used by the ask/move pickers, which is why it is its own key. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.session_picker.preview_mode_key": {
+    "role": "session picker preview-mode key label",
+    "tone": "plain, factual",
+    "note": "The 'ctrl+e' key label in the session picker's footer, naming the chord that toggles the preview mode whose name follows it. A key name is syntax shown to the user, kept verbatim like tui.hub_links.hint.confirm ('ctrl+y'); it is extracted because the footer paints it as user-facing copy. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   }
 }

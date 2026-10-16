@@ -57,7 +57,7 @@ def test_catalogue_matches_the_pre_slice_golden() -> None:
     assert catalogues.load_catalogue("en", "tui.small") == GOLDEN
     # Grown slice by slice: later ratchet slices extend the same namespace, so
     # this count tracks the catalogue, not one slice's key set.
-    assert len(GOLDEN) == 34
+    assert len(GOLDEN) == 50
 
 
 def test_the_sidecar_names_role_tone_and_note_for_every_key() -> None:
