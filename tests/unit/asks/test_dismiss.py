@@ -247,23 +247,32 @@ class _StoppedProbe:
         self._session_id = SESSION
 
 
-def _park(root: Path, directory: Path, *, stopped_at: int, rows: list[dict[str, Any]]) -> None:
-    """Park the session: an index entry carrying ``stopped_at`` AND ``rows``.
+def _park(
+    root: Path,
+    directory: Path,
+    *,
+    stopped_at: int | None = None,
+    held_at: int | None = None,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Park the session: an index entry carrying a park marker AND ``rows``.
 
     Both halves matter, and so does the shape they are in. ``stopped_at`` is
     stamped by the stop path (``session/runtime/control.py:_mark_wakes_dormant``),
     which counts the HIDDEN rows a session carries — so a stopped conversation
     whose only wake IS its ask's own deadline row is the reachable state, not a
-    contrived one. The index entry is what every reader of the marker reads:
-    ``attached.session_was_stopped``, ``attention._stopped_marker`` and the
-    desktop warm guards.
+    contrived one. ``held_at`` is Aida's pause marker
+    (``aida/proactive.py``), which keeps the same schedules. The index entry is
+    what every reader of a marker reads: ``attached.session_was_stopped``,
+    ``attention._stopped_marker`` and the desktop warm guards for the first, and
+    ``wakes.store.is_held`` for either.
     """
     wakes_store.write_entry(
         root,
         SESSION,
         cwd=str(directory),
         schedules=rows,
-        preserve={"stopped_at": stopped_at},
+        preserve={"stopped_at": stopped_at} if stopped_at is not None else {"held_at": held_at},
     )
 
 
@@ -315,6 +324,37 @@ def test_a_cold_dismiss_leaves_a_parked_sessions_stop_marker_alone(tmp_path: Pat
     # reader consults is not the property the review asked about.
     probe = cast(Any, _StoppedProbe(tmp_path))
     assert _run(AttachedSession.session_was_stopped(probe)) is True
+
+
+def test_a_cold_dismiss_leaves_a_held_sessions_park_marker_alone(tmp_path: Path):
+    """THE OTHER PARK MARKER, THE SAME SKIP (agent review round 2, M-5).
+
+    ``is_held`` is ``bool(stopped_at or held_at)`` (``wakes/store.py``), so the
+    cancel's skip covers both — but round 1 pinned only ``stopped_at``, which
+    left the half Aida writes covered by reading the predicate rather than by a
+    cell. ``held_at`` is the marker her pause lever stamps and her resume clears
+    with no runtime involved, and the entry it lives in is the same entry
+    ``cancel_wake``'s empty remainder would remove: the row stays, the marker
+    stays, and no transcript write moves this conversation in /resume.
+    """
+    directory = _session(tmp_path)
+    hidden = _wake_row(store.timeout_row_id(ASK_ID), kind="ask_timeout", hidden=True)
+    _seed_wakes(directory, [hidden])
+    _park(tmp_path, directory, held_at=NOW - 60_000, rows=[hidden])
+    before = (directory / "transcript.jsonl").read_bytes()
+    mtime = (directory / "transcript.jsonl").stat().st_mtime_ns
+
+    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    assert outcome == {"ok": True}
+
+    entry = read_wake_entry(tmp_path, SESSION)
+    assert entry is not None, "the dismissal removed the entry that carried held_at"
+    assert entry["held_at"] == NOW - 60_000
+    assert wakes_store.is_held(entry) is True
+    assert [row["id"] for row in entry["schedules"]] == [store.timeout_row_id(ASK_ID)]
+    assert _wake_ids(directory) == [store.timeout_row_id(ASK_ID)]
+    assert (directory / "transcript.jsonl").read_bytes() == before
+    assert (directory / "transcript.jsonl").stat().st_mtime_ns == mtime
 
 
 def test_a_cold_dismiss_still_drops_the_wake_row_when_nothing_parks_it(tmp_path: Path):
