@@ -96,7 +96,7 @@ describe("AskRow", () => {
 			<AskRow
 				entry={entry({
 					kind: "ask_timeout",
-					text: "Timed out after 42m — the agent moved on; you can still answer (ask ask-1)",
+					text: "Timed out after 42m — the agent goes ahead without your answer (ask ask-1)",
 					details: {
 						ask_id: "ask-1",
 						status: "timed_out",
