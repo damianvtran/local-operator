@@ -1843,7 +1843,10 @@ class TestQ3BoundedDiffProjection:
         assert all(row == "" for row in out[1:])
 
     def test_a_hunk_with_one_changed_row_still_processes(self):
-        from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD, _redact_diff_detail
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
 
         rows = [
             "--- ",
@@ -1872,10 +1875,8 @@ class TestQ3BoundedDiffProjection:
 
         _, body_line = _q3_pem()
         big = (
-            "-----BEGIN "
-            + "PRIV"
-            "ATE KEY-----\n" + "\n".join([body_line] * 400) + "\n-----END "
-            + "PRIV"
+            "-----BEGIN " + "PRIV"
+            "ATE KEY-----\n" + "\n".join([body_line] * 400) + "\n-----END " + "PRIV"
             "ATE KEY-----\n"
         )
         before = big + "Middle guidance 111.\n" + big
