@@ -1133,6 +1133,37 @@ def test_a_tier_effort_is_clamped_to_the_target_ladder(tmp_path, monkeypatch):
     assert spec.reasoning_effort == "high"
 
 
+def test_an_auto_tier_effort_runs_at_the_models_own_default(tmp_path, monkeypatch):
+    """R1-3: ``effort: auto`` is the explicit spelling of "no override" (the
+    word a chain hop uses), so it resolves exactly like an omitted effort:
+    Opus 5.5's own documented default, ``medium``."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-5-5", "effort": "auto"})
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5-5")
+    assert spec.reasoning_effort == "medium"
+
+
+def test_a_caller_may_borrow_a_tiers_model_without_its_effort(tmp_path, monkeypatch):
+    """R1-2: the supplement renderer reads ``hi`` for its MODEL; it is not a
+    delegated role and its token cap counts reasoning, so it asks for the model
+    at its own default. Every other caller still gets the tier's effort."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-5-5", "effort": "max"})
+    session = make_session(tmp_path)
+
+    bare = session._resolve_subagent_model("task", "hi", apply_tier_effort=False)
+    assert bare is not None
+    assert (bare.provider, bare.model_id) == ("anthropic", "claude-opus-5-5")
+    assert bare.reasoning_effort == "medium"
+    tiered = session._resolve_subagent_model("task", "hi")
+    assert tiered is not None
+    assert tiered.reasoning_effort == "max"
+
+
 def test_a_sentinel_tier_mapping_runs_the_session_model_at_its_effort(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     write_tiers(tmp_path / "config", lo={"model": "default", "effort": "low"})

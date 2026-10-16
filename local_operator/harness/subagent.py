@@ -159,7 +159,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.config import server_own_turn_only
-from local_operator.model.effort import EFFORT_ORDER, parse_tier_mapping
+from local_operator.model.effort import TIER_EFFORTS, parse_tier_mapping
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
@@ -358,7 +358,7 @@ def malformed_tier_reason(tier: str, raw: object) -> str:
     """
     reason = f"subagents.models.{tier}={raw!r} lacks provider/model"
     if isinstance(raw, dict):
-        levels = "|".join(EFFORT_ORDER)
+        levels = "|".join(TIER_EFFORTS)
         reason += f" (a mapping takes model: <provider/model> and optional effort: {levels})"
     return reason
 
@@ -564,6 +564,20 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
         return None
     inherit = "omit 'effort' to inherit this session's model and reasoning effort"
     if not tiers:
+        # A lone tier whose value is present but unusable (``{model: ...,
+        # effort: extreme}``) also leaves no usable tier; "no tiers are
+        # configured" would send the operator looking for a missing key when
+        # the key is there and its VALUE is wrong. Same read and fallback as
+        # the configured-tiers branch below.
+        try:
+            raw = read_effort_tier_selectors().get(tier)
+        except Exception:  # noqa: BLE001 — the tier list above already survived the read
+            raw = None
+        if raw not in (None, ""):
+            return (
+                f"effort tier {tier!r} is unavailable: {malformed_tier_reason(tier, raw)}; "
+                f"{inherit}"
+            )
         return (
             f"effort tier {tier!r} is unavailable: no tiers are configured under "
             f"subagents.models; {inherit}"
