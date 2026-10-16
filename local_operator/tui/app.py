@@ -5558,6 +5558,7 @@ class OperatorApp(App[None]):
         # `session_presentation.project_settled_rows` for the contract. Default
         # empty: a projection that never re-seeds is the cold-resume case.
         self._projection_live_call_ids: set[str] = set()
+        self._projection_peer_display_roles: dict[str, str] = {}
         self._projection_skipped_live: list[Any] = []
         #: One page per USER GESTURE, not per scroll callback. Held from the
         #: first trigger until the mount's settle pass has restored the scroll
@@ -8035,11 +8036,16 @@ class OperatorApp(App[None]):
             # (`live_projection_call_ids`) so the pending scan below keeps a
             # gate-parked call `waiting` instead of the painter showing it
             # `running`.
+            replay.view.bind_work_source(getattr(session, "session_id", None))
             replay.prepare(
                 history,
                 bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
+                display_records=self._peer_display_records_for(
+                    history, session, bound=_viewport_message_budget(self.size.height)
+                ),
+                proof_transcript=getattr(session, "_transcript", None),
                 # The width the revealed view WILL have, asked of the view it
                 # replaces: both are `1fr` children of `#session-conversation`
                 # with the same stylesheet, so the on-screen view's scrollable
@@ -12550,9 +12556,52 @@ class OperatorApp(App[None]):
         ):
             self._fast_choice = False
 
+    def _peer_display_records_for(
+        self,
+        history: list[Any],
+        session: Any = None,
+        *,
+        bound: int | None = None,
+        start: int | None = None,
+    ) -> dict[str, Any] | None:
+        session = session if session is not None else self._session
+        # Derive candidates from the requested render slice, not the session's
+        # full replay. Cross-page raw dependencies use the existing file index.
+        if start is not None:
+            history = history[start:]
+        elif bound is not None and len(history) > bound:
+            history = history[_resume_tail_start(history, bound) :]
+        history = history[-4096:]
+        transcript = getattr(session, "_transcript", None)
+        if transcript is not None:
+            from local_operator.harness.peer_cycle_display import discover_records
+
+            return discover_records(transcript, history, str(getattr(session, "session_id", "")))
+        # An attached viewer reads only the owner-selected, capability-gated
+        # page metadata. A raw Message.details stamp is never authority here.
+        return getattr(
+            getattr(session, "_display_history", None), "peer_cycle_display_records", None
+        )
+
+    def _apply_peer_display_records(self, state: Any = None) -> None:
+        if state is None:
+            state = getattr(self._session, "frontend_state", None)
+        display = getattr(state, "peer_cycle_display", None)
+        if not isinstance(display, dict):
+            return
+        for record in display.get("records", ()):
+            if not isinstance(record, dict) or record.get("producer_epoch") != getattr(
+                state, "epoch", None
+            ):
+                continue  # Old persisted refs/bodies require the cold raw-source validator.
+            self._transcript_view()._quiet_groups.apply_display_record(record)
+
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
+        # Metadata can arrive without a new source row. The card-result hook
+        # below retries against actual settled seats if this update won first.
+        self._apply_peer_display_records(state)
         attention = getattr(state, "attention", None)
         if isinstance(attention, dict) and attention.get("completion_token"):
             # A new canonical result may paint before the one-second receipt
@@ -14840,8 +14889,27 @@ class OperatorApp(App[None]):
             self._transcript_view().set_quiet_head_cut(
                 self._quiet_head_cut_for(history, bound, start)
             )
+            local_transcript = getattr(session, "_transcript", None)
+            loaded_history = getattr(session, "display_history_window", None)
+            # Remote validation may use already-loaded page neighbors; local
+            # replay never asks for another whole history to join proof rows.
+            loaded_proof = (
+                loaded_history() if local_transcript is None and callable(loaded_history) else None
+            )
+            # A callable alone promises no sequence. Unknown facade responses
+            # cannot authorise proof; keep the existing loaded-window fallback.
+            proof_history = list(
+                loaded_proof[-4096:] if isinstance(loaded_proof, (list, tuple)) else history[-4096:]
+            )
             projected = project_settled_rows(
-                self, history, bound=bound, start=start, fold_width=fold_width
+                self,
+                history,
+                bound=bound,
+                start=start,
+                fold_width=fold_width,
+                display_records=self._peer_display_records_for(history, bound=bound, start=start),
+                proof_history=proof_history,
+                proof_transcript=local_transcript,
             )
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
@@ -15748,7 +15816,7 @@ class OperatorApp(App[None]):
             # (or at the view's old top) states a minimum while older pages
             # remain. `fold_quiet_group_page` only rewrites this list; the
             # insert below still owns the mount, the anchor and the lease.
-            blocks = transcript.fold_quiet_group_page(
+            blocks = transcript.prepare_owned_head_page(
                 blocks, index, head_cut=bool(self._resume_pending_head)
             )
             # Flag BEFORE the insert's settle: a click arriving while gaps
@@ -15790,6 +15858,12 @@ class OperatorApp(App[None]):
         same conversation as the tail and must be built by the same code.
         """
         collected: list[Any] = []
+        from local_operator.tui.internal_work_membership import WorkProjector
+
+        prior_work = getattr(self, "_projection_work", None)
+        # Older pages are not appends to the live tail. A fresh local context
+        # must see the page's own loaded opener, never the current tail's user.
+        self._projection_work = WorkProjector()
         self._block_sink = collected
         try:
             # The width these blocks are about to be given is NOT passed here:
@@ -15807,6 +15881,7 @@ class OperatorApp(App[None]):
             self._project_settled_rows(page)
         finally:
             self._block_sink = None
+            self._projection_work = prior_work
             # A page can end on a bang user row whose assistant lives in the
             # already-rendered tail. Leaving the flag set would open the next
             # LIVE bash card, which is not a bang receipt.
@@ -15995,6 +16070,7 @@ class OperatorApp(App[None]):
                 result_text=result_text,
                 details=details,
                 duration_s=duration_s,
+                result=result,
             )
         self._append_image_blocks(tool_result_image_blocks(getattr(result, "content", None)))
 
@@ -32406,7 +32482,7 @@ class OperatorApp(App[None]):
                 if result.is_error:
                     current_card.mark_failed(_first_line(result.text), result.text, result.details)
                 else:
-                    current_card.mark_done(result.text, result.details)
+                    current_card.mark_done(result.text, result.details, result=result)
             await persist(result)
 
         def _clear_shell_state() -> None:
@@ -37918,11 +37994,24 @@ class OperatorApp(App[None]):
         # `transcript.conversation_started`.
         block.ends_empty_state = ends_empty_state
         if self._block_sink is not None:
+            from local_operator.tui.widgets.transcript import (
+                sync_work_dormancy,
+                work_record_of_block,
+            )
+
+            block.work_view_identity = self._transcript_view().work_identity
+            projector = getattr(self, "_projection_work", None)
+            if projector is not None:
+                if self._block_sink:
+                    projector.step(work_record_of_block(self._block_sink[-1]))
+                block.internal_work_membership = projector.step(work_record_of_block(block))
+                sync_work_dormancy(block, block.internal_work_membership)
             self._block_sink.append(block)
             return
         if ends_empty_state:
             self._set_welcome_visible(False)
         transcript = self._transcript_view()
+        transcript.bind_work_source(getattr(self._session, "session_id", None))
         if pin_tail:
             transcript.pin_tail(block)
         else:
@@ -37943,6 +38032,12 @@ class OperatorApp(App[None]):
         if old.navigation_anchor_id and not block.navigation_anchor_id:
             block.navigation_anchor_id = old.navigation_anchor_id
             block.navigation_anchor_part = old.navigation_anchor_part
+        # A richer same-source projection inherits its actual seat's view, just
+        # as append stamps its destination. Unmarked replacements otherwise look
+        # foreign during ordered reconciliation and split a formerly valid run.
+        # Never overwrite explicit provenance supplied by a different source.
+        if block.work_view_identity is None:
+            block.work_view_identity = old.work_view_identity
         if self._block_sink is not None:
             try:
                 index = self._block_sink.index(old)
@@ -37999,6 +38094,11 @@ class OperatorApp(App[None]):
                 block.navigation_anchor_part = self._projection_part
             self._projection_part += 1
         block.ends_empty_state = True
+        # This is a newly projected PART of the same source seat, not a foreign
+        # page. Carry its anchor's known view before insertion re-plans the run;
+        # unlike append, the ordered insertion does not pass note_append's stamp.
+        if block.work_view_identity is None:
+            block.work_view_identity = anchor.work_view_identity
         if self._block_sink is not None:
             self._block_sink.append(block)
             return
@@ -56253,9 +56353,14 @@ class OperatorApp(App[None]):
             is_settle_only_ask,
         )
 
-        if is_hidden_tool_name(getattr(event, "tool_name", None)) or is_quiet_turn_name(
-            getattr(event, "tool_name", None)
-        ):
+        if is_quiet_turn_name(getattr(event, "tool_name", None)):
+            # Capture BEFORE the invisible result: a later callback may close
+            # only this call's finite source interval and original view owner.
+            transcript = self._transcript_view()
+            transcript.bind_work_source(getattr(self._session, "session_id", None))
+            transcript._quiet_groups.start_peer_cycle(event.tool_call_id, message.origin)
+            return
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
             return
         # THE ASK GATE's belt (design docs/design/ask-gate.md §3): the same
         # settle-only suppression the composing gate applies, because the two
@@ -56428,6 +56533,15 @@ class OperatorApp(App[None]):
         if is_quiet_turn_result(getattr(event, "result", None)):
             if card is not None:
                 self._drop_tool_card(card)
+            # S1 still paints no sentinel. The separate display-only cycle
+            # proof requires actual no_reply name/call/start and finite owner.
+            self._transcript_view()._quiet_groups.finish_peer_cycle(
+                event.tool_call_id,
+                event.tool_name,
+                event.result,
+                message.origin,
+                event_failed=event.is_error,
+            )
             self._refresh_working_activity()
             return
         # Before the early return below: a batch that just lost one of three
@@ -56495,7 +56609,13 @@ class OperatorApp(App[None]):
         elif event.is_error:
             card.mark_failed(_first_line(result_text), result_text, details, measured_s=measured_s)
         else:
-            card.mark_done(result_text, details, measured_s=measured_s)
+            card.mark_done(result_text, details, measured_s=measured_s, result=event.result)
+        if event.tool_name in {"eval", "send"}:
+            self._apply_peer_display_records()
+        if getattr(card, "internal_work_membership", None) is not None:
+            # Outcomes can turn a member into attention. Reconcile the existing
+            # source position; never feed a completed card as a second append.
+            self._transcript_view().note_quiet_source_part(card)
         # A result that carries image blocks (a `read` of a PNG, a browser
         # screenshot) shows them under the card, so the user watches the same
         # pixels the model is about to reason over. After the card settles, so
@@ -56584,7 +56704,13 @@ class OperatorApp(App[None]):
                 )
             )
         else:
-            self._append_block(PeerMessageBlock(message.body, message.sender))
+            block = PeerMessageBlock(message.body, message.sender)
+            if message.message_id:
+                # Session._emit_peer_receipt uses the persisted CustomMessage.id,
+                # not the sender or an external alias; match replay's part-zero seat.
+                block.navigation_anchor_id = message.message_id
+                block.navigation_anchor_part = 0
+            self._append_block(block)
 
     def _announce_on_splash(
         self, text: str, kind: NoticeKind, *, headline: str | None = None
@@ -58191,7 +58317,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 147
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 148
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

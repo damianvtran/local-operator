@@ -917,6 +917,7 @@ export function SessionScreen({
 				<Transcript
 					pid={sessionId}
 					entries={projection.transcript}
+					peerCycles={projection.peer_cycles === 1}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					topInset={ladderInset}

@@ -1304,7 +1304,13 @@ def cap_projection_frame(
     return data, True
 
 
-def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntry]:
+def fold_messages_to_entries(
+    history: list[AgentMessage],
+    *,
+    session_id: str | None = None,
+    peer_cycle_display_records: Any = None,
+    proof_transcript: Any = None,
+) -> list[TranscriptEntry]:
     """Fold a message history into transcript entries — THE phone's row fold.
 
     UNCAPPED and pure. Both phone surfaces come through here: the daemon's
@@ -1817,7 +1823,57 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 if entry.details.get("user_run"):
                     details["user_run"] = True
                 entry.details = details
-    return entries
+    # Negotiated closure cannot promise a full disclosure over an 8k preview.
+    # Keep the old default fold byte-shaped; only the owner-context path marks
+    # an incomplete tool body so the private exception can refuse it.
+    if session_id:
+        incomplete = {
+            message.tool_call_id
+            for message in history
+            if isinstance(message, Message)
+            and message.role == "tool"
+            and len(message.text) > TOOL_OUTPUT_TAIL_CHARS
+        }
+        for entry in entries:
+            if entry.kind == "tool" and entry.tool_call_id in incomplete:
+                entry.text_complete = False
+    from local_operator.mobile.peer_cycles import project_peer_cycles
+
+    return project_peer_cycles(
+        entries,
+        session_id=session_id,
+        records=peer_cycle_display_records,
+        history=history,
+        transcript=proof_transcript,
+        child_row=_peer_cycle_child_row,
+    )
+
+
+def _peer_cycle_child_row(child: dict[str, Any]) -> TranscriptEntry:
+    """Restore only the stored post-redaction child, with the existing live ID.
+
+    This child has no model-history tool result to fetch later. Do not apply the
+    ordinary preview's 8k clipping and then claim the disclosure is complete.
+    The existing frame-cap tier drops ALL details (including the certificate)
+    before it truncates transcript text, so an oversized frame loses proof.
+    """
+    from local_operator.harness.types import ToolResult
+
+    result = ToolResult.model_validate(child["result"])
+    arguments = child["arguments"]
+    details = _tool_row_details(arguments, result.text, result.details)
+    details["args"] = {key: str(value) for key, value in arguments.items()}
+    details["output"] = result.text
+    return TranscriptEntry(
+        id=f"tc-{child['tool_call_id']}",
+        kind="tool",
+        tool_call_id=child["tool_call_id"],
+        tool_name=child["tool_name"],
+        tool_state="done",
+        summary=_summarize_args(child["tool_name"], arguments),
+        details=details,
+        elapsed_s=result.duration_s if result.duration_s is not None else 0.0,
+    )
 
 
 class ProjectionFold:
@@ -1825,6 +1881,19 @@ class ProjectionFold:
 
     def __init__(self, projection: SessionProjection, *, queued_engine: bool = False) -> None:
         self.projection = projection
+        # Only an explicit owner-side source binding can negotiate this field;
+        # reconstructing a projection with raw details is not authentication.
+        projection.peer_cycles = None
+        from local_operator.harness.peer_cycles import PeerCycleReplay
+
+        self._peer_epoch = 0
+        self._peer_owner_epoch: str | None = None
+        self._peer_replay = PeerCycleReplay((projection.session_id, self._peer_epoch))
+        self._peer_certificates: dict[str, Any] = {}
+        self._peer_retained: list[dict[str, Any]] = []
+        self._peer_records: Any = None
+        self._peer_transcript: Any = None
+        self._peer_join_key: Any = None
         #: Whether the session this fold serves runs the queued-ask engine
         #: (design docs/design/ask-gate.md §3 row 8). ``True`` makes an ask
         #: call's rows SETTLE-ONLY: no live row while it composes or runs, one
@@ -1941,7 +2010,27 @@ class ProjectionFold:
         message so a tail full of notices cannot push the conversation's
         subject out of the seed.
         """
-        entries = fold_messages_to_entries(history)
+        from local_operator.harness.peer_cycle_display import discover_records
+
+        records = (
+            discover_records(self._peer_transcript, history[-4096:], self.projection.session_id)
+            if self._peer_transcript is not None
+            else self._peer_records
+        )
+        entries = fold_messages_to_entries(
+            history,
+            session_id=self.projection.session_id if self.projection.peer_cycles == 1 else None,
+            peer_cycle_display_records=records,
+            proof_transcript=self._peer_transcript,
+        )
+        from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
+
+        self._peer_replay._reset()
+        self._peer_certificates.clear()
+        for message in history[-4096:]:
+            closed = self._peer_replay.step(message)
+            if closed is not None:
+                remember_peer_cycle_certificate(self._peer_certificates, closed)
         # Rebuild the correlation maps from the rows just produced. Keyed off
         # the fold's output rather than maintained during it: the pure fold
         # cannot own instance state, and its row ids are stable
@@ -1965,6 +2054,12 @@ class ProjectionFold:
         self._open_message_id = None
         self._pending_user_echoes.clear()
         self.projection.transcript = self._cap_tail(entries)
+        from local_operator.mobile.peer_cycles import retained_peer_graphs
+
+        self._peer_retained = retained_peer_graphs(
+            self.projection.transcript, self.projection.session_id
+        )
+        self._peer_join_key = None
         # Prune the correlation maps to the surviving tail: a long history
         # pairs every historical tool call, and keeping ids whose rows were
         # cut is dead weight per rebind (and a stale hit if a call id were
@@ -1983,7 +2078,125 @@ class ProjectionFold:
 
     # -- events ------------------------------------------------------------
 
+    def set_peer_cycle_source(self, records: Any, *, transcript: Any, owner_epoch: str) -> None:
+        """Receive only the owner's separate frontend slot, never row details."""
+        if not isinstance(owner_epoch, str) or not owner_epoch:
+            return
+        if owner_epoch != self._peer_owner_epoch:
+            from local_operator.harness.peer_cycles import PeerCycleReplay
+
+            self._peer_owner_epoch = owner_epoch
+            self._peer_epoch += 1
+            self._peer_replay = PeerCycleReplay((self.projection.session_id, self._peer_epoch))
+            self._peer_certificates.clear()
+            self._peer_retained.clear()
+            self._peer_join_key = None
+        self._peer_records, self._peer_transcript = records, transcript
+        self._join_peer_cycles()
+
+    def _join_peer_cycles(self) -> None:
+        from local_operator.mobile.peer_cycles import project_peer_cycles
+
+        p = self.projection
+        signature = tuple(
+            (
+                row.id,
+                row.kind,
+                row.tool_call_id,
+                row.tool_name,
+                row.tool_state,
+                bool(row.error),
+                bool(row.images),
+                bool(row.videos),
+                row.text_complete,
+            )
+            for row in p.transcript
+        )
+        key = (
+            self._peer_owner_epoch,
+            getattr(self._peer_transcript, "_history_generation", None),
+            tuple(item.get("id") for item in (self._peer_records or {}).get("records", ())),
+            tuple(self._peer_certificates),
+            signature,
+        )
+        if key == self._peer_join_key:
+            return
+        self._peer_join_key = key
+        rows = project_peer_cycles(
+            p.transcript,
+            session_id=p.session_id,
+            records=self._peer_records,
+            transcript=self._peer_transcript,
+            child_row=_peer_cycle_child_row,
+            certificates=self._peer_certificates.values(),
+            retained=self._peer_retained,
+            view_epoch=self._peer_epoch,
+        )
+        from local_operator.mobile.peer_cycles import retained_peer_graphs
+
+        self._peer_retained = retained_peer_graphs(rows, p.session_id)
+        changed = rows != p.transcript or p.peer_cycles != 1
+        p.transcript = rows
+        p.peer_cycles = 1
+        if changed:
+            self._bump()
+
     def fold_event(self, event: AgentEvent) -> None:
+        self._fold_event(event)
+        if self.projection.peer_cycles != 1:
+            return
+        from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
+        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
+
+        if isinstance(event, ToolExecutionEndEvent) and (
+            not isinstance(event.result, ToolResult)
+            or len(event.result.text) > TOOL_OUTPUT_TAIL_CHARS
+        ):
+            entry_id = self._tool_rows.get(event.tool_call_id)
+            row = self._find(entry_id) if entry_id else None
+            if row is not None:
+                row.text_complete = False
+        if isinstance(event, PeerMessageDeliveredEvent):
+            # Delivery shares an event class with receiver-authored bridge
+            # cards. Only the declared peer kind (or its legacy empty default)
+            # grants ownership; a bridge is an explicit boundary and also
+            # retires any pending candidate, so a foreign delivery can never be
+            # certified against an earlier genuine peer. The typed body stays
+            # visible through the notice row below either way.
+            if event.custom_type in ("", PEER_MESSAGE_MESSAGE_TYPE):
+                if event.message_id:
+                    self.note_peer_message(
+                        event.body, sender=event.sender, message_id=event.message_id
+                    )
+                    self._peer_replay.delivered_peer(event.message_id, event.sender)
+            else:
+                self._peer_replay.reset_pending()
+                self.note_nonpeer_delivery(
+                    event.body,
+                    sender=event.sender,
+                    message_id=event.message_id,
+                    custom_type=event.custom_type,
+                )
+        elif isinstance(event, ToolExecutionEndEvent):
+            # The live stream settles a call with a typed END EVENT; the
+            # persisted ``role="tool"`` Message never reaches this fold, so the
+            # same shared replay arm is fed the result object directly. Without
+            # it no live cycle could ever close and the phone diverged from its
+            # own history replay.
+            if isinstance(event.result, ToolResult):
+                closed = self._peer_replay.step_live_result(event.result)
+                if closed is not None:
+                    remember_peer_cycle_certificate(self._peer_certificates, closed)
+        elif isinstance(event, MessageEndEvent):
+            # The typed delivery already supplied this receipt. Only ACTUAL
+            # assistant Messages feed the live replay; no fake model row.
+            if getattr(event.message, "role", None) == "assistant":
+                closed = self._peer_replay.step(event.message)
+                if closed is not None:
+                    remember_peer_cycle_certificate(self._peer_certificates, closed)
+        self._join_peer_cycles()
+
+    def _fold_event(self, event: AgentEvent) -> None:
         """Fold one live event. The dispatch is explicit if/elif rather than
         a registry so a new harness event type fails loudly here (AttributeError
         on construction import) instead of being silently dropped."""
@@ -2519,7 +2732,51 @@ class ProjectionFold:
             self._pending_user_echoes[message_id] = entry
         self._bump()
 
-    def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None) -> None:
+    def note_nonpeer_delivery(
+        self,
+        text: str,
+        *,
+        sender: dict[str, Any] | None = None,
+        message_id: str | None = None,
+        custom_type: str | None = None,
+    ) -> None:
+        """Keep a NON-peer typed delivery visible as its own boundary row.
+
+        A ``team_bridge_message`` (or any future custom kind) travels the same
+        event class as a peer delivery, but it is a receiver-authored card, not
+        peer provenance: it must never open or extend a peer cycle. Dropping it
+        entirely hid a real delivery from the phone (the observed C1-2 RED), so
+        it paints as a notice carrying its own message id, sender and ORIGINAL
+        custom kind. It is never a ``peer_message`` row, never participates in
+        proof, and any reserved ``peer_cycle`` stamp is stripped.
+
+        ``custom_type`` rides under ``custom_kind`` -- a DISPLAY key, not a
+        provenance one: only the declared peer kind grants ownership, and that
+        decision is made by the caller BEFORE this method is reached (§ the
+        ``PeerMessageDeliveredEvent`` arm). The phone tolerates detail keys it
+        does not read, so this stays additive on the wire."""
+        if cross_session_hidden():
+            return
+        if message_id and any(row.id == message_id for row in self.projection.transcript):
+            return
+        details: dict[str, Any] = {"notice_kind": "cross_session_boundary"}
+        if isinstance(sender, dict) and sender:
+            details["sender"] = dict(sender)
+        if custom_type:
+            details["custom_kind"] = _compact(custom_type, _NOTICE_CHARS)
+        self._append(
+            TranscriptEntry(
+                id=message_id or f"nonpeer-{time.time_ns()}",
+                kind="notice",
+                text=_compact(text, _NOTICE_CHARS),
+                details=details,
+            )
+        )
+        self._bump()
+
+    def note_peer_message(
+        self, text: str, *, sender: dict[str, Any] | None = None, message_id: str | None = None
+    ) -> None:
         """Optimistic echo of an inbound cross-session (`lop send`) message.
 
         Same reason as ``note_user_message``: the handle calls this the instant
@@ -2532,9 +2789,11 @@ class ProjectionFold:
             # changed on screen, so there is no frame to push. The durable
             # history keeps the message; a repaint under flag-off shows it.
             return
+        if message_id and any(row.id == message_id for row in self.projection.transcript):
+            return
         self._append(
             TranscriptEntry(
-                id=f"peer-{time.time_ns()}",
+                id=message_id or f"peer-{time.time_ns()}",
                 kind="peer_message",
                 text=text,
                 details={"sender": sender or {}},

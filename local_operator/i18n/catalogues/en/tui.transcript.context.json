@@ -55,7 +55,7 @@
     "tone": "terse advisory"
   },
   "tui.transcript.group.actions": {
-    "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+    "note": "Actions count actual tool work, never incoming receipts, quiet no_reply calls or total group members. English singular is '1 action'; other counts retain 'actions'. {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
     "role": "quiet group summary",
     "tone": "terse advisory"
   },
