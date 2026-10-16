@@ -1816,8 +1816,9 @@ def _durable_projection(
     # only source. Same rows the aggregate serves for this session, capped like
     # a live runtime's projection, with the tally counted over every row rather
     # than the cap (the live fold's contract, see ``ProjectionFold.set_asks``).
-    # Nothing worth showing leaves BOTH fields absent: ``asks_open: 0`` would
-    # claim a live, empty queue, which a stopped conversation does not have.
+    # No index entry at all leaves BOTH fields absent: ``asks_open: 0`` would
+    # claim a live, empty queue, which a stopped conversation does not have. An
+    # entry whose rows are all hidden is the other case, handled below.
     #
     # ``asks.lapsed_visible_for`` applies here too (decision D8): a stopped
     # conversation's lapsed ask leaves its screen when the window says so. Read
@@ -1837,6 +1838,16 @@ def _durable_projection(
     if ask_rows:
         outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
         fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
+    elif ask_store.read_entry(config_dir(), session_id) is not None:
+        # AN ENTRY WHOSE ROWS ARE ALL HIDDEN still installs its (empty) fold.
+        # Skipping ``set_asks`` here left this frame one version BELOW the frame
+        # a viewed screen retained when it still had rows, and
+        # ``capture_subagent_details`` re-served that retained frame as the
+        # newer one — so a window that hid every row never reached a screen the
+        # phone had already opened (QA round 1, Q1). Rows ``[]`` and a 0 tally
+        # say "nothing left to show here"; with no entry at all both fields stay
+        # absent, as before.
+        fold.set_asks([], 0)
     projection.ended = False
     projection.degraded = False
     return projection
@@ -2940,6 +2951,11 @@ class MobileDaemon:
         # The daemon's display-settings subscription (see
         # :meth:`watch_display_settings`); ``None`` until attached.
         self._display_watch_unsubscribe: Callable[[], None] | None = None
+        # The ``asks.lapsed_visible_for`` subscription (see
+        # :meth:`watch_ask_visibility`) and the repaints it has in flight, held
+        # so a task is never garbage-collected mid-fold.
+        self._ask_visibility_unsubscribe: Callable[[], None] | None = None
+        self._ask_visibility_repaints: set[asyncio.Task[None]] = set()
         # The display-state generation: bumped by the follower's clear for
         # every ``display.*`` change a running daemon sees (see
         # ``watch_display_settings``). A fold site reads it BEFORE its fold
@@ -3042,6 +3058,79 @@ class MobileDaemon:
             )
         except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
             logger.warning("display settings follower could not be attached", exc_info=True)
+
+    def watch_ask_visibility(self) -> None:
+        """Repaint open STOPPED-conversation screens when ``asks.lapsed_visible_for``
+        changes (decision D9; QA round 1, Q1/Q3).
+
+        A live session repaints itself: its runtime republishes on the change
+        (``Session._apply_config_change``). A stopped one has no runtime, so its
+        screen is a durable fold this daemon built, and nothing re-folded it on a
+        setting change — an open screen kept the old rows until it reconnected.
+        This follower re-folds each WATCHED stopped screen (a route with an SSE
+        subscriber and no live entry) through the stamped capture and pushes the
+        frame, the same path the scan uses for a session that just ended.
+        Unwatched routes need nothing: their next open folds fresh.
+
+        Called once at boot from ``service.amain`` beside
+        :meth:`watch_display_settings`, on the daemon's loop. Idempotent; a
+        watcher that cannot start leaves the old behaviour (correct on reopen).
+        Not covered, deliberately: a window EDGE passing with no setting change
+        while a stopped screen stays open (no daemon-side timer; the same gap as
+        a deadline passing there, deferred on #2465 as R6).
+        """
+        if self._ask_visibility_unsubscribe is not None:
+            return
+        try:
+            from local_operator.config_watch import process_watcher
+            from local_operator.paths import config_dir
+
+            watcher = process_watcher(config_dir())
+            watcher.start(asyncio.get_running_loop())
+
+            def _on_change(change: Any) -> None:
+                changed = getattr(change, "changed_keys", None) or ()
+                if "asks.lapsed_visible_for" not in changed:
+                    return
+                # Listener fan-out runs on the loop thread (ConfigWatcher's
+                # contract), so the subscriber table is read here unlocked and
+                # the folds hop off-loop inside the capture.
+                for session_id in list(self.table.session_subscribers):
+                    if _entry_for_session(self, session_id) is not None:
+                        continue
+                    task = asyncio.ensure_future(self._repaint_stopped_screen(session_id))
+                    self._ask_visibility_repaints.add(task)
+                    task.add_done_callback(self._ask_visibility_repaints.discard)
+
+            self._ask_visibility_unsubscribe = watcher.subscribe(_on_change)
+        except Exception:  # noqa: BLE001 — a missing follower costs a reopen, not the boot
+            logger.warning("ask visibility follower could not be attached", exc_info=True)
+
+    async def _repaint_stopped_screen(self, session_id: str) -> None:
+        """Re-fold one watched stopped screen and push the frame to its subscribers."""
+        try:
+            # The SSE route's own rule for the ended receipt (U7): a stopped
+            # screen is ended iff an ended entry for it exists.
+            ended = any(
+                candidate.ended and candidate.record.session_id == session_id
+                for candidate in self.table.entries.values()
+            )
+            projection = await self._capture_durable_projection(session_id, ended=ended)
+        except Exception:  # noqa: BLE001 — a failed repaint leaves the reopen path correct
+            logger.debug("ask visibility repaint failed for %s", session_id, exc_info=True)
+            return
+        if projection is None:
+            return
+        frame = _projection_frame(projection)
+        for queue in self.table.session_subscribers.get(session_id, set()):
+            try:
+                queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(frame)
+                except asyncio.QueueEmpty:
+                    pass
 
     # -- the relay's config channel (wave-5 slice D) -----------------------
 
