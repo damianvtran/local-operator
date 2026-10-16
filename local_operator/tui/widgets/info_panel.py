@@ -900,7 +900,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # answering" is what a stale heartbeat establishes, and "wedged"
             # both invites a diagnosis the evidence does not support and hides
             # the fact that the process is still there.
-            bits.append("not answering" if line.state == "wedged" else line.state)
+            bits.append(_t(_x.info_panel_not_answering()) if line.state == "wedged" else line.state)
         # The measurement, ahead of uptime and memory for the same reason: on
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
@@ -1638,7 +1638,7 @@ class InfoScreen(ModalScreen[None]):
 
     def _title_text(self) -> Text:
         return Text(
-            "Install info\n" + "─" * max(1, self._card_width()),
+            _t(_x.info_panel_install_info_heading()) + "─" * max(1, self._card_width()),
             no_wrap=True,
             overflow="crop",
         )
@@ -1693,7 +1693,9 @@ class InfoScreen(ModalScreen[None]):
         scroll = getattr(self, "_scroll", None)
         hint = getattr(self, "_hint", None)
         if scroll is not None and hint is not None and hint.is_mounted:
-            hint.update(self._info_hint() + (" · ↑↓ scroll" if scroll.max_scroll_y > 0 else ""))
+            hint.update(
+                self._info_hint() + (_t(_x.panels_scroll_hint()) if scroll.max_scroll_y > 0 else "")
+            )
 
     def render_lines_for_test(self) -> list[str]:
         """The report as plain strings — what a user actually reads."""

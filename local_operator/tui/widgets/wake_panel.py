@@ -460,7 +460,10 @@ class WakePanel(Container):
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append(_t(_x.wake_panel_wakes_title()), style=muted)
         header.append(" · ", style=dim)
-        header.append(f"{len(rows)} scheduled" if len(rows) != 1 else "1 scheduled", style=muted)
+        header.append(
+            _t(_x.wake_panel_scheduled_count(count=len(rows), shown=str(len(rows)))),
+            style=muted,
+        )
 
         cap, marker = self._row_window(len(rows), max(1, room) - 1, MAX_WAKE_ROWS)
         visible = rows[:cap]

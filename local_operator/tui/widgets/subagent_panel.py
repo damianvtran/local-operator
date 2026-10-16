@@ -2549,7 +2549,14 @@ class SubagentPanel(Container):
         # frame where the panel is largest and the user is most deliberately
         # trying to get back to a known shape (round 1, U1/D2). "Shrink" is
         # true of every forward step and names no destination.
-        row.append("ctrl+g to shrink" if self._expanded else "ctrl+g to expand", style=muted)
+        row.append(
+            _t(
+                _x.subagent_panel_ctrl_g_shrink()
+                if self._expanded
+                else _x.subagent_panel_ctrl_g_expand()
+            ),
+            style=muted,
+        )
         self._affordance.update(row)
 
     def predicted_rows(self) -> int:

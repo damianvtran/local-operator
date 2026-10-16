@@ -1037,7 +1037,14 @@ def display_key(value: str, *, scope: str = "app", platform: str | None = None) 
         if not token:
             continue
         if token == "primary":
-            shown.append("cmd" if plat == "darwin" else "ctrl")
+            shown.append(
+                # i18n: ignore platform keycap tokens; the sibling alias map
+                # below selects the same vocabulary via dict.get, which the
+                # scanner cannot see — extract the keycap group in one pass.
+                "cmd"
+                if plat == "darwin"
+                else "ctrl"
+            )
         elif token == "meta":
             shown.append({"darwin": "cmd", "win32": "win"}.get(plat, "super"))
         else:
