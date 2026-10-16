@@ -55,7 +55,7 @@ def _en(key: str, **params: object) -> str:
 
 def test_catalogue_matches_the_pre_slice_golden() -> None:
     assert catalogues.load_catalogue("en", "tui.small") == GOLDEN
-    assert len(GOLDEN) == 10
+    assert len(GOLDEN) == 15
 
 
 def test_the_sidecar_names_role_tone_and_note_for_every_key() -> None:

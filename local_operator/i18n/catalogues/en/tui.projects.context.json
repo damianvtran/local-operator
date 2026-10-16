@@ -288,5 +288,50 @@
     "role": "binding help",
     "tone": "plain",
     "note": "Textual binding description for existing leave action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.form.title_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's title field, shown only while the field is empty: the title is the human-readable name people read, as opposed to the reference key beside it. Lowercase fragment, not a sentence; keep it short enough for the field at narrow widths. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.key_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's key field, shown only while empty: the key is the stable reference handle everything else points at (and follows the title until edited by hand). Lowercase fragment, not a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.tags_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's tags field: it states the two accepted separators so the reader does not guess at a format the store would refuse. Lowercase fragment, not a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.team_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's team field: the single word naming what belongs in the field (a team name). One word, lowercase; keep it that short. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.owner_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's owner field: the single word naming what belongs in the field (the owning person). One word, lowercase; keep it that short. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.date_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of BOTH date fields in the project form (target date and start date): the one accepted date spelling, ISO year-month-day with zero padding. This is a FORMAT TOKEN the store parses, not prose — keep the exact YYYY-MM-DD shape and digits layout in every locale so the hint always matches what validates. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.estimate_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's estimate field: it names the default estimate unit (points; the adjacent cycle row offers the unit choices). One lowercase word matching the unit vocabulary the store accepts — if the unit words are ever translated, this must move with them. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.readback_hint": {
+    "role": "form readback row",
+    "tone": "plain, factual",
+    "note": "One row of the form's plain-text readback (the surface tests and geometry probes assert), restating a field's hint: '{label} hint: {hint}'. {label} is the field's short internal name and {hint} is the already-rendered hint text; both are kept verbatim, and the colon-space layout is part of the readback contract other assertions prefix-match on, so keep the shape. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.readback_error": {
+    "role": "form readback row",
+    "tone": "plain, factual",
+    "note": "One row of the form's plain-text readback (the surface tests and geometry probes assert), restating a field's refusal: '{label} error: {error}'. {label} is the field's short internal name and {error} is the already-rendered refusal sentence; both are kept verbatim, and tests prefix-match rows on '{label} error:', so keep the shape exactly. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   }
 }

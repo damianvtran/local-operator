@@ -56,5 +56,14 @@
   "tui.projects.binding_jump": "Open",
   "tui.projects.binding_next_section": "Next section",
   "tui.projects.binding_prev_section": "Previous section",
-  "tui.projects.binding_leave": "Back"
+  "tui.projects.binding_leave": "Back",
+  "tui.projects.form.title_placeholder": "a human-readable name",
+  "tui.projects.form.key_placeholder": "the reference handle",
+  "tui.projects.form.tags_placeholder": "comma or space separated",
+  "tui.projects.form.team_placeholder": "team",
+  "tui.projects.form.owner_placeholder": "owner",
+  "tui.projects.form.date_placeholder": "YYYY-MM-DD",
+  "tui.projects.form.estimate_placeholder": "points",
+  "tui.projects.form.readback_hint": "{label} hint: {hint}",
+  "tui.projects.form.readback_error": "{label} error: {error}"
 }

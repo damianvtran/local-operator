@@ -1,0 +1,16 @@
+{
+  "tui.projects.form.title_placeholder": "a human-readable name",
+  "tui.projects.form.key_placeholder": "the reference handle",
+  "tui.projects.form.tags_placeholder": "comma or space separated",
+  "tui.projects.form.team_placeholder": "team",
+  "tui.projects.form.owner_placeholder": "owner",
+  "tui.projects.form.date_placeholder": "YYYY-MM-DD",
+  "tui.projects.form.estimate_placeholder": "points",
+  "tui.projects.form.readback_hint": "{label} hint: {hint}",
+  "tui.projects.form.readback_error": "{label} error: {error}",
+  "tui.small.aside.title": "Aside",
+  "tui.small.aside.off_the_record": "  off the record — nothing here joins the chat",
+  "tui.small.aside.superseded": "(superseded)",
+  "tui.small.subagents.title": "Subagents",
+  "tui.small.subagents.of_scope": " of {scope}"
+}
