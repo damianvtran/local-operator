@@ -8,5 +8,10 @@
   "tui.small.picker.of_separator": " of ",
   "tui.small.session.resume_hint": "\nsession ended — resume with:\n  {hint}\n",
   "tui.small.spend.channel_not_itemised": "not itemised",
-  "tui.small.timing.no_samples": "unknown (0 samples)"
+  "tui.small.timing.no_samples": "unknown (0 samples)",
+  "tui.small.aside.title": "Aside",
+  "tui.small.aside.off_the_record": "  off the record — nothing here joins the chat",
+  "tui.small.aside.superseded": "(superseded)",
+  "tui.small.subagents.title": "Subagents",
+  "tui.small.subagents.of_scope": " of {scope}"
 }

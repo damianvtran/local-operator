@@ -41,6 +41,10 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Input, Static, TextArea
 
+# i18n: the field placeholders and readback rows below are user-facing
+# form copy; they live in tui.projects with the rest of the projects surface.
+from local_operator.i18n.keys import tui_projects as _x
+from local_operator.i18n.text import tr
 from local_operator.projects import (
     ATTRIBUTION_MAX,
     DESCRIPTION_MAX,
@@ -51,6 +55,8 @@ from local_operator.projects import (
     ProjectEdit,
 )
 from local_operator.tui.projects_render import StyleFor, _styles
+
+_t = tr("tui.projects")
 
 #: The starter text the description editor opens with on CREATE. Starter text,
 #: not a value — see the module docstring.
@@ -327,18 +333,32 @@ class ProjectsFormPage(Vertical):
         #: set the initial values (``None`` until then, which reads as clean).
         self._initial: tuple[str, ...] | None = None
 
-        self._title_input = Input(placeholder="a human-readable name", id="projects-form-title")
-        self._key_input = Input(placeholder="the reference handle", id="projects-form-key")
+        self._title_input = Input(
+            placeholder=_t(_x.form_title_placeholder()), id="projects-form-title"
+        )
+        self._key_input = Input(placeholder=_t(_x.form_key_placeholder()), id="projects-form-key")
         self._description = TextArea(id="projects-form-description")
         self._status_row = FormCycleRow(
             PROJECT_STATUSES, "planning", id="projects-form-status", style_for=style_for
         )
-        self._tags_input = Input(placeholder="comma or space separated", id="projects-form-tags")
-        self._team_input = Input(placeholder="team", id="projects-form-team")
-        self._owner_input = Input(placeholder="owner", id="projects-form-owner")
-        self._target_input = Input(placeholder="YYYY-MM-DD", id="projects-form-target")
-        self._start_input = Input(placeholder="YYYY-MM-DD", id="projects-form-start")
-        self._estimate_input = Input(placeholder="points", id="projects-form-estimate")
+        self._tags_input = Input(
+            placeholder=_t(_x.form_tags_placeholder()), id="projects-form-tags"
+        )
+        self._team_input = Input(
+            placeholder=_t(_x.form_team_placeholder()), id="projects-form-team"
+        )
+        self._owner_input = Input(
+            placeholder=_t(_x.form_owner_placeholder()), id="projects-form-owner"
+        )
+        self._target_input = Input(
+            placeholder=_t(_x.form_date_placeholder()), id="projects-form-target"
+        )
+        self._start_input = Input(
+            placeholder=_t(_x.form_date_placeholder()), id="projects-form-start"
+        )
+        self._estimate_input = Input(
+            placeholder=_t(_x.form_estimate_placeholder()), id="projects-form-estimate"
+        )
         self._unit_row = FormCycleRow(
             ESTIMATE_UNITS, "points", id="projects-form-unit", style_for=style_for
         )
@@ -893,9 +913,9 @@ class ProjectsFormPage(Vertical):
             # the readback states: a surface a test cannot assert is a surface
             # nobody can pin (P3's U6, the same reason).
             if block.hint:
-                rows.append(f"{block.field_label} hint: {block.hint}")
+                rows.append(_t(_x.form_readback_hint(label=block.field_label, hint=block.hint)))
             if block.error:
-                rows.append(f"{block.field_label} error: {block.error}")
+                rows.append(_t(_x.form_readback_error(label=block.field_label, error=block.error)))
         if self._confirm:
             rows.append(DISCARD_PROMPT)
         return rows

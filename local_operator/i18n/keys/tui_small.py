@@ -14,6 +14,18 @@ def approval_allow_verb() -> Msg:
     return Msg("tui.small.approval.allow_verb", {})
 
 
+def aside_off_the_record() -> Msg:
+    return Msg("tui.small.aside.off_the_record", {})
+
+
+def aside_superseded() -> Msg:
+    return Msg("tui.small.aside.superseded", {})
+
+
+def aside_title() -> Msg:
+    return Msg("tui.small.aside.title", {})
+
+
 def copy_code_count(*, shown: str) -> Msg:
     return Msg("tui.small.copy.code_count", {"shown": shown})
 
@@ -44,6 +56,14 @@ def session_resume_hint(*, hint: str) -> Msg:
 
 def spend_channel_not_itemised() -> Msg:
     return Msg("tui.small.spend.channel_not_itemised", {})
+
+
+def subagents_of_scope(*, scope: str) -> Msg:
+    return Msg("tui.small.subagents.of_scope", {"scope": scope})
+
+
+def subagents_title() -> Msg:
+    return Msg("tui.small.subagents.title", {})
 
 
 def timing_no_samples() -> Msg:

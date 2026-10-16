@@ -48,5 +48,30 @@
     "role": "session timing table cell",
     "tone": "plain, factual",
     "note": "The dim cell drawn in the timing table where a row has no bar because no sample was recorded (timing is None, empty, or the scale is degenerate). It must NOT read as a measured zero: an absent sample is not a fast one, which is why the words are drawn and the zero in parentheses is the literal sample count rather than a measurement — the whole string is one fixed value with no ICU arguments and no substitution. 'samples' is the plural noun for the table's unit; do not pluralise a count into it. No maxCells. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.aside.title": {
+    "role": "aside card title",
+    "tone": "plain, factual",
+    "note": "The name of the off-the-record aside card, drawn first in the card's title row in foreground ink. One short word naming the surface, not a sentence; the row truncates with an ellipsis at narrow widths. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.aside.off_the_record": {
+    "role": "aside card subtitle",
+    "tone": "plain, reassuring",
+    "note": "The contract stated beside the aside card's title: exchanges here are NOT added to the chat history. The TWO LEADING SPACES are load-bearing — this fragment is appended to the same Rich Text row as the title, so the spaces are the only gap between them — do not trim. The em dash is literal text. The one deliberate exception (forking a settled exchange into the chat) is a deliberate user act, which is why the clause says nothing HERE joins the chat. The row truncates with an ellipsis. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.aside.superseded": {
+    "role": "aside answer status marker",
+    "tone": "plain, factual",
+    "note": "Drawn dim after an aside answer that was cancelled (superseded by a newer question), so the reader knows the text above is not the live answer. The caller prefixes the card's two-space answer indent, which is layout, not copy. Parentheses are part of the marker; one short fragment, never a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagents.title": {
+    "role": "subagent panel header title",
+    "tone": "plain, factual",
+    "note": "The header word of the subagent roster panel, naming the direct child subagents listed below it. One plural noun; the header row is no-wrap and truncates with an ellipsis, and the scope suffix and hotkey hint that may follow are separate fragments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.subagents.of_scope": {
+    "role": "subagent panel header scope suffix",
+    "tone": "plain, factual",
+    "note": "The scope suffix appended to the subagent header when drilled into one child: 'Subagents of <label>', so the reader knows these rows are that child's children, not the top-level roster. {scope} is the already-truncated selected label (model-authored, kept verbatim). The LEADING SPACE is load-bearing — it is the only break within the sentence and borrows no other separator — do not trim it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   }
 }
