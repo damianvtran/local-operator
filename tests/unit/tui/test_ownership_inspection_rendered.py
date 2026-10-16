@@ -102,9 +102,7 @@ async def test_standard_ownership_help_and_receipts_real_app(
         await shot("expanded-help")
         seen: set[str] = set()
         for name, payload in REPLAYS.items():
-            card = ToolCard(
-                f"synthetic-{name}", "browser", {"action": "inspect_ownership"}
-            )
+            card = ToolCard(f"synthetic-{name}", "browser", {"action": "inspect_ownership"})
             # Full approved sanitized payloads are replayed unchanged. Do not
             # strip foreign fields here and call that a privacy producer test.
             result = builtin._text(
