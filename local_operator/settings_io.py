@@ -77,6 +77,7 @@ from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
     model_overrides,
+    normalize_base_url,
     validate_endpoint_setting,
 )
 from local_operator.ui_console.policy import (
@@ -905,6 +906,30 @@ SECTIONS: tuple[Section, ...] = (
     # Preserve the established Model landing row and short-terminal editor target.
     Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
 )
+
+
+def _validate_voice_local_stt_url(value: Any) -> None:
+    """``voice.local_stt_url``: empty (off), or an HTTP server root on LOOPBACK.
+
+    The rung uploads the operator's recorded voice to this URL, and the promise
+    of the key-free rung is that the audio never leaves the machine, so a LAN or
+    remote host is refused at the write rather than discovered as an upload.
+    The URL shape is ``normalize_base_url``'s (the local-provider rule), so the
+    two endpoint settings cannot disagree about what a server root is. The
+    cascade re-checks loopback at call time (``stt.cascade.local_stt_rung``) for
+    a hand-edited config.yml, which never passes through this funnel.
+    """
+    from urllib.parse import urlsplit
+
+    from local_operator.server.utils.static_roots import is_loopback_host
+
+    if not isinstance(value, str):
+        raise ValueError("expected a URL such as http://127.0.0.1:8000, or empty")
+    if not value.strip():
+        return
+    normalize_base_url(value)
+    if not is_loopback_host(urlsplit(value.strip()).hostname):
+        raise ValueError("the server must be on this machine: use localhost or 127.0.0.1")
 
 
 def _validate_openrouter_max_price(value: Any) -> None:
@@ -5314,6 +5339,42 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=4000,
         unit="characters",
         help=_t(_wv.max_spoken_chars_help()),
+    ),
+    # The key-free STT rung (session-voice.md R8). Empty = off; only the voice
+    # routes read it, so no other surface's transcription changes when it is set.
+    Setting(
+        key="voice.local_stt_url",
+        path=("voice", "local_stt_url"),
+        section="voice",
+        label=_t(_wv.local_stt_url_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_wv.local_stt_url_help()),
+        validate_value=_validate_voice_local_stt_url,
+        empty_unsets=True,
+    ),
+    # Which front end hears a take (R8). ``POST /v1/desktop/voice`` with a
+    # ``front_end`` writes this row; the status read reports it.
+    Setting(
+        key="voice.front_end",
+        path=("voice", "front_end"),
+        section="voice",
+        label=_t(_wv.front_end_label()),
+        kind=Kind.ENUM,
+        default="local",
+        help=_t(_wv.front_end_help()),
+        choices=(
+            Choice(
+                "local",
+                _t(_wv.front_end_choice_local_label()),
+                _t(_wv.front_end_choice_local_description()),
+            ),
+            Choice(
+                "gemini_live",
+                _t(_wv.front_end_choice_gemini_live_label()),
+                _t(_wv.front_end_choice_gemini_live_description()),
+            ),
+        ),
     ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import

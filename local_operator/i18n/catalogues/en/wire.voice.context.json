@@ -84,5 +84,117 @@
     "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
     "tone": "concise, neutral, actionable",
     "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.local_stt_url.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.local_stt_url.help": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited.",
+    "maxCells": 29
+  },
+  "wire.voice.front_end.help": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.choice.local.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.choice.local.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.choice.gemini_live.label": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.choice.gemini_live.description": {
+    "role": "Voice settings section or row in the TUI settings page and the desktop settings UI",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end_unavailable": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.live_unavailable": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.live_failed": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.local_available": {
+    "role": "Reason line beside a listening front end in GET /v1/desktop/voice front_ends[].reason, shown in the desktop voice settings",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.live_no_key": {
+    "role": "Reason line beside a listening front end in GET /v1/desktop/voice front_ends[].reason, shown in the desktop voice settings",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.front_end.live_available": {
+    "role": "Reason line beside a listening front end in GET /v1/desktop/voice front_ends[].reason, shown in the desktop voice settings",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.passing_on": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.still_working": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.on_screen_first": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.didnt_catch": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.switched": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.phrase.nothing_to_repeat": {
+    "role": "Spoken aloud by the desktop voice mode (synthesised by TTS, never shown as text); a short fixed acknowledgement or prompt",
+    "tone": "brief, plain, spoken register; no symbols, digits or abbreviations",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_text_origin": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.live_main_only": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
   }
 }
