@@ -731,6 +731,12 @@ def test_a_forced_gc_pass_does_not_kill_the_parked_child(
     assertion cannot discriminate a reverted fix on a 3.12 host. It is the CI 3.13 leg
     that flakes, and that leg is where this test does its work; the 3.12 run still
     asserts the child survives the parked window, which is a true product property.
+
+    A KILL LINE ON A PASSING RUN IS THE CLEANUP, NOT THE FLAKE. The ``finally`` block
+    SIGKILLs the parked child to tidy up, and the reaper retained by this fix correctly
+    reports that as the same ``parked pairing child <pid> killed by signal 9`` WARNING
+    this flake was diagnosed from. So under ``-rA``/``-rP``, or in a captured log from
+    a passing run, that line is expected and is not evidence of the defect.
     """
     if not hasattr(os, "waitpid"):
         pytest.skip("no zombies off POSIX — and no reaper to exercise")
@@ -745,6 +751,16 @@ def test_a_forced_gc_pass_does_not_kill_the_parked_child(
     monkeypatch.setattr(
         net_tool, "_cli_argv", lambda: [sys.executable, "-c", script]
     )  # noqa: SLF001 — patch the argv prefix, not the tool
+
+    # THE 3.14 GUARD RUNS BEFORE THE CLASS, and the order is load-bearing rather than
+    # stylistic: ``asyncio.AbstractChildWatcher`` is gone in 3.14 (as is the policy's
+    # ``set_child_watcher``), and a class statement evaluated before this guard raises
+    # ``AttributeError`` at definition time — so the skip below would never fire and
+    # the file would go red on an interpreter ``requires-python = ">=3.12"`` admits.
+    policy = asyncio.get_event_loop_policy()
+    setter = getattr(policy, "set_child_watcher", None)
+    if setter is None:  # pragma: no cover — Python 3.14 removed the policy API
+        pytest.skip("no set_child_watcher on this Python; the watcher cannot be pinned")
 
     class _NullWatcher(asyncio.AbstractChildWatcher):
         """A child watcher that REGISTERS a handler and holds nothing (the pidfd shape)."""
@@ -770,10 +786,6 @@ def test_a_forced_gc_pass_does_not_kill_the_parked_child(
         def __exit__(self, *exc: Any) -> None:
             return None
 
-    policy = asyncio.get_event_loop_policy()
-    setter = getattr(policy, "set_child_watcher", None)
-    if setter is None:  # pragma: no cover — Python 3.14 removed the policy API
-        pytest.skip("no set_child_watcher on this Python; the watcher cannot be pinned")
     previous = policy.get_child_watcher()  # noqa: SLF001
     setter(_NullWatcher())
     pid = None
