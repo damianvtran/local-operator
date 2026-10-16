@@ -41,6 +41,11 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
+
+# i18n: the roster header below is user-facing panel copy; it lives in
+# tui.small with the other small shared TUI fragments.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.costs import SubtreeComponents, subtree_components, subtree_cost
@@ -50,6 +55,8 @@ from local_operator.tui.widgets.tool_card import (
     format_duration,
     truncate_cells,
 )
+
+_t = tr("tui.small")
 
 logger = logging.getLogger(__name__)
 
@@ -2972,7 +2979,7 @@ class SubagentPanel(Container):
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         header = Text(no_wrap=True, overflow="ellipsis")
-        header.append("Subagents", style=muted)
+        header.append(_t(_x.subagents_title()), style=muted)
         if scope:
             # `Subagents of <child>`: the rows are the DIRECT CHILDREN of the
             # page you have open (``app._subagent_roster``), so a reader who
@@ -2987,7 +2994,7 @@ class SubagentPanel(Container):
             # :data:`SCOPE_CEILING` alone: the label is model-authored text and
             # `#band` is content-sized, so an unmeasured scope paints the dock
             # wider than the rows under it (see :func:`_scope_width`).
-            header.append(f" of {scope}", style=muted)
+            header.append(_t(_x.subagents_of_scope(scope=scope)), style=muted)
         if hint:
             # A GAP, not `STATS_SEAM`. That ` · ` is the separator between
             # counts, so in the summary row the hotkey genuinely is the last
