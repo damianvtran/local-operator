@@ -2807,9 +2807,7 @@ class OpenAICompatClient:
         conv_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:grok-cache:{key}"))
         return {"x-grok-conv-id": conv_id}
 
-    def _radient_correlation_headers(
-        self, request: ChatRequest, url: str
-    ) -> dict[str, str]:
+    def _radient_correlation_headers(self, request: ChatRequest, url: str) -> dict[str, str]:
         """The Radient client-correlation headers for one chat call (PR-3).
 
         WHY this lives here and not only in ``clients/radient.py``: chat does
@@ -2855,7 +2853,10 @@ class OpenAICompatClient:
             and httpx.URL(url).host != "api.radienthq.com"
         ):
             return {}
-        from local_operator.clients.radient import _correlation_headers, new_correlation_id
+        from local_operator.clients.radient import (
+            _correlation_headers,
+            new_correlation_id,
+        )
 
         return _correlation_headers(request.prompt_cache_key, new_correlation_id())
 
