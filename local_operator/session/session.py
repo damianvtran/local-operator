@@ -15703,6 +15703,10 @@ class Session:
             if store.read_field("history_generation") != replay_generation:
                 store.mutate(history_generation=replay_generation)
             store.observe_event(self, event)
+            # A nested quiet end closes display ownership only, never the
+            # model loop. Archive/publication is a normal acknowledged custom
+            # append; the raw tool result still follows its existing path.
+            await store.persist_peer_cycle_display(self._transcript)
         for handler in list(self._handlers):
             try:
                 outcome = handler(event)

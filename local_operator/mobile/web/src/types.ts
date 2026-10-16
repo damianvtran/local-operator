@@ -61,6 +61,9 @@ export type SubagentStatus =
 	| "queued";
 
 export interface TranscriptEntryDetails {
+	/** Owner-certified display context, never trusted without projection negotiation. */
+	peer_cycle?: unknown;
+	held?: boolean;
 	/* The fold serializes these in the shape the tool produced, NOT always
 	   strings: args rides through as a dict ({path, old_text, …}), diff as
 	   a list of unified-diff lines. Callers must normalize (see toLines in
@@ -435,6 +438,8 @@ export interface SpendChannels {
 }
 
 export interface SessionProjection {
+	/** Absent on old owners; raw entry metadata alone never enables this. */
+	peer_cycles?: 1;
 	attention?: CompletionAttention;
 	session_id: string;
 	pid: number;

@@ -42,8 +42,10 @@ def _en(key: str, **params: object) -> str:
 #: the new seven — instead of a superset check that would let any later draft
 #: through (review round 4, R4-3; QA Q-R5-3).
 GROUP_SLICE_KEYS: dict[str, str] = {
+    # Intentional reviewed copy delta: only the ICU singular noun changed.
+    # Preserve count/label parameters and the immutable pre-slice golden.
     "tui.transcript.group.actions": (
-        "{count, plural, one {{label} actions} other {{label} actions}}"
+        "{count, plural, one {{label} action} other {{label} actions}}"
     ),
     "tui.transcript.group.messages": "messages · {count}",
     "tui.transcript.group.reply_requested": (

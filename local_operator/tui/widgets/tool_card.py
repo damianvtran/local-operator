@@ -100,6 +100,7 @@ from rich.text import Text
 from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.harness.peer_cycles import current_peer_communication_succeeded
 from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
@@ -1519,6 +1520,8 @@ class ToolCard(ExpandableActionBlock):
         #: tick after that is taken from here.
         self._clock = clock
         self.tool_call_id = tool_call_id
+        self.internal_work_job_id: str | None = None
+        self.internal_work_job_ids: tuple[str, ...] = ()
         self.navigation_anchor_id = f"tool:{tool_call_id}"
         # tool_name is MODEL-CONTROLLED: the loop takes it from the tool call
         # itself, so a hallucinated or injected name reaches the frame. It was
@@ -1547,6 +1550,10 @@ class ToolCard(ExpandableActionBlock):
         #: and stderr and never the command. A receipt that cannot name what it
         #: is a receipt for is not auditable.
         self._args: dict[str, object] = dict(args or {})
+        # Body-free CURRENT-result provenance, not another output cache. A
+        # manually restored/painted success is UNKNOWN; only a typed end can
+        # certify communication. Reset before any reused state is published.
+        self._peer_cycle_communication_succeeded: bool | None = None
         #: The tail of the tool's output SO FAR, one entry per line, shown in
         #: the EXPANSION of a running card and dropped when the real result
         #: lands. It used to be a single collapsed-to-one-line string painted
@@ -1595,6 +1602,9 @@ class ToolCard(ExpandableActionBlock):
         # two timers for it would be two things to leak.
         self._compose_bytes: int = 0
         self._compose_facts: str = ""
+        # A planning fault may paint as error, but never certifies execution.
+        # Keep the producer verdict typed for presentation ownership adapters.
+        self.never_sent: bool = False
         self._compose_started: float | None = None
         self._clock_timer: Timer | None = None
         #: The imagegen variant's structured live fields (last snapshot), or
@@ -1769,12 +1779,28 @@ class ToolCard(ExpandableActionBlock):
         self._refresh_row()
 
     # -- lifecycle ----------------------------------------------------------
+    @property
+    def peer_cycle_communication_succeeded(self) -> bool | None:
+        return self._peer_cycle_communication_succeeded
+
+    def _set_peer_cycle_communication(self, value: bool | None) -> None:
+        previous = self._peer_cycle_communication_succeeded
+        self._peer_cycle_communication_succeeded = value
+        if previous is not value:
+            # Same existing in-place restatement as receipt corrections. A
+            # duplicate/redelivered end can change provenance while the visible
+            # word stays 'success'; relying on a repaint would leave stale proof.
+            parent = self.parent
+            if isinstance(parent, TranscriptView):
+                parent.restate_quiet_member(self)
+
     def mark_done(
         self,
         result_text: str = "",
         details: dict[str, Any] | None = None,
         *,
         measured_s: float | None = None,
+        result: Any = None,
     ) -> None:
         """Record success with elapsed duration; the row goes quiet.
 
@@ -1796,6 +1822,9 @@ class ToolCard(ExpandableActionBlock):
             # passes: the value crossed a socket, so a NaN or a negative must
             # degrade to the blank column rather than print nonsense.
             self._duration = parse_duration(measured_s)
+        self._set_peer_cycle_communication(
+            current_peer_communication_succeeded(result, self.tool_call_id)
+        )
         self._state = "success"
         self._absorb_result(result_text, details)
         self.remove_class("tool-running")
@@ -1833,6 +1862,7 @@ class ToolCard(ExpandableActionBlock):
         self._duration = self._elapsed()
         if self._duration is None:
             self._duration = parse_duration(measured_s)
+        self._set_peer_cycle_communication(None)
         self._state = "error"
         self._error = _strip_control_sequences(" ".join(error.split())) or "error"
         self._absorb_result(result_text or error, details)
@@ -1871,6 +1901,7 @@ class ToolCard(ExpandableActionBlock):
         if self._state not in ("composing", "running"):
             return
         self._settle_live()
+        self._set_peer_cycle_communication(None)
         self._state = "queued"
         # The dictation facts stay; the ``composing…`` boilerplate and its clock
         # go, because the STATUS column now names the state and the clock it
@@ -1940,6 +1971,8 @@ class ToolCard(ExpandableActionBlock):
             # with an empty payload must not erase a size a live frame already
             # measured.
             self._compose_bytes = int(argument_bytes)
+        self._set_peer_cycle_communication(None)
+        self.never_sent = True
         size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
         self._compose_facts = f"{size} composed"
         self._summary = f"never sent · {self._compose_facts}"
@@ -1967,6 +2000,7 @@ class ToolCard(ExpandableActionBlock):
     def mark_waiting(self) -> None:
         """Project a canonical pending gate without inventing execution events."""
         self._settle_live()
+        self._set_peer_cycle_communication(None)
         self._state = "waiting"
         self._duration = None
         self._error = ""
@@ -2020,6 +2054,7 @@ class ToolCard(ExpandableActionBlock):
         width where a row most needs to say what happened.
         """
         was_composing = self._state in ("composing", "queued")
+        self.never_sent = self.never_sent or was_composing
         self._settle_live()
         # The result's payload, on the arm the END EVENT drove — read exactly
         # as done and failed read it, because a payload that arrived only with
@@ -2058,6 +2093,7 @@ class ToolCard(ExpandableActionBlock):
                 self._duration = parse_duration(measured_s)
         if reason:
             self._absorb_result(reason, None)
+        self._set_peer_cycle_communication(None)
         self._state = "interrupted"
         self._interrupt_label = "cut off" if cut_off else "interrupted"
         self.remove_class("tool-running")
@@ -2153,6 +2189,7 @@ class ToolCard(ExpandableActionBlock):
         error: str = "",
         duration_s: float | None = None,
         started_at: float | None = None,
+        result: Any = None,
     ) -> None:
         """Adopt a card for a call from a PREVIOUS session, or another agent's.
 
@@ -2213,6 +2250,11 @@ class ToolCard(ExpandableActionBlock):
         ``started_at`` entirely — they are rendered from ``_duration``.
         """
         self._settle_live()
+        self._set_peer_cycle_communication(
+            current_peer_communication_succeeded(result, self.tool_call_id)
+            if state == "success"
+            else None
+        )
         self._state = state
         self._started = None
         # Replay stays blank for legacy rows, while newly persisted executions
@@ -2313,6 +2355,7 @@ class ToolCard(ExpandableActionBlock):
         if self._state not in ("composing", "running"):
             return
         entering = self._state != "composing"
+        self._set_peer_cycle_communication(None)
         self._state = "composing"
         # The name can arrive in FRAGMENTS: the first announcement fires on the
         # first piece so the row appears at once, so a provider that splits
@@ -2699,6 +2742,7 @@ class ToolCard(ExpandableActionBlock):
         # and `ite` would otherwise leave `wr` on the settled row forever, in the
         # ledger, on the icon, and in the summary built from it.
         renamed = tool_name != self.tool_name
+        self.never_sent = False
         self.tool_name = _strip_control_sequences(tool_name)
         # The duration clock RESTARTS here. `_started` was set when the row was
         # mounted, which for an adopted row is when the model began dictating —
@@ -2717,6 +2761,7 @@ class ToolCard(ExpandableActionBlock):
             self._started = monotonic_from_epoch(started_at, clock=self._clock)
         else:
             self._started = None if clockless else self._clock()
+        self._set_peer_cycle_communication(None)
         self._state = "running"
         # A row this method adopts may have been SETTLED before its call
         # started. Two routes reach here that way: a replayed row the reveal
@@ -2900,6 +2945,26 @@ class ToolCard(ExpandableActionBlock):
         # docstring for the precedence and why the finished conflict cannot
         # be an error-arm-only concern.
         self._absorb_imagegen_payload(details)
+        # Launch producers stamp the job ID themselves. A wait/hub reporting
+        # the same ID is not a new launch in the current user scope; no code,
+        # command output or nested eval body is inspected to invent one.
+        job_id = details.get("job_id") if isinstance(details, dict) else None
+        if self.tool_name in ("task", "bash", "eval"):
+            self.internal_work_job_id = (
+                job_id if isinstance(job_id, str) and job_id.strip() else None
+            )
+            jobs = details.get("jobs", ()) if isinstance(details, dict) else ()
+            self.internal_work_job_ids = (
+                tuple(
+                    job["job_id"]
+                    for job in jobs
+                    if isinstance(job, dict)
+                    and isinstance(job.get("job_id"), str)
+                    and job["job_id"].strip()
+                )
+                if isinstance(jobs, (list, tuple))
+                else ()
+            )
         self._added, self._removed = _diff_counts(details)
         # Reset per result, like the flags below and for the same reason: a card
         # written once is still rebuilt from a payload, and neither of these may
