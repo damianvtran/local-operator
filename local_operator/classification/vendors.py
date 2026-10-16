@@ -117,6 +117,7 @@ from local_operator.classification.types import (
 from local_operator.clients._http import scrub_secrets
 from local_operator.clients.radient_cost import cost_from_payload
 from local_operator.providers.registry import get_provider_definition
+from local_operator.session.channel_spend import BASIS_NOT_TRACKED
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -905,13 +906,32 @@ def _server_cost_usd(payload: Mapping[str, Any]) -> tuple[float | None, str | No
     it is reused rather than re-parsed here; ``quote`` already maps to
     ``estimated`` inside it, which is what keeps a quote from being presented as
     a charge.
+
+    TWO GUARDS THE ADAPTER'S RAW FIELDS STILL NEED
+    ----------------------------------------------
+    * The amount goes through :func:`_reported_cost`, the same guard the
+      ``usage.cost`` arm applies: a negative or non-finite ``amount_usd`` is a
+      malformed receipt, not a credit and not a figure, so it reads as unknown
+      (``None``) instead of putting ``$-2.500000`` on the operator's cost line.
+    * An ABSENT wire ``basis`` maps to the adapter's ``not_tracked``, which is
+      OUR spelling for "nothing was stated" — the wire vocabulary is
+      ``quote``/``billed``/``estimated`` (plus the subscription spelling), so
+      the server never sends it. Returning that sentinel would be truthy and
+      ``answered_record``'s ``cost_basis or BASIS_BILLED`` default would keep
+      it, dropping a genuinely billed amount into ``not_tracked_micro``. It is
+      mapped to ``None`` here so the caller's honest default applies.
     """
     parsed = cost_from_payload(payload)
     if parsed is None or parsed.amount_micro is None:
         return None, None
     # micro-USD -> USD: the adapter's integer micros divided by 1e6 (the mirror
     # of ``micro_from_amount``'s multiply), NOT a per-token conversion.
-    return parsed.amount_micro / 1_000_000, parsed.basis
+    usd = _reported_cost(parsed.amount_micro / 1_000_000)
+    if usd is None:
+        # Unusable amount: the basis describes nothing, so it goes with it.
+        return None, None
+    basis = None if parsed.basis == BASIS_NOT_TRACKED else parsed.basis
+    return usd, basis
 
 
 def _reported_cost(value: Any) -> float | None:

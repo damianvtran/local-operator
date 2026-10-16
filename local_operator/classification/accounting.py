@@ -42,8 +42,9 @@ one) records NOTHING: a row is a claim that a request was made.
 THE RULES THE ROWS KEEP (inherited from ``channel_spend``, restated where they bite)
 ===================================================================================
 
-* **Unknown is never zero.** A leg that answered without ``usage.cost`` records
-  ``amount_micro=None`` (the record's ``__post_init__`` then forces the basis to
+* **Unknown is never zero.** A leg that answered without stating an amount — neither
+  ``usage.cost`` nor a top-level ``cost`` object (Radient's route sends the latter) —
+  records ``amount_micro=None`` (the record's ``__post_init__`` then forces the basis to
   ``not_tracked``). A stated ``0`` is a statement and survives as ``0``.
 * **A failure the vendor refused is presumed unbilled** — ``status="failed"`` with no
   amount is the ledger's documented presumption and does not degrade the session's

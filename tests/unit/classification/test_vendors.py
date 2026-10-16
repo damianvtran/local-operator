@@ -434,6 +434,49 @@ async def test_a_cost_object_with_no_usable_amount_is_unknown(manager) -> None:
     assert response.cost_basis is None
 
 
+async def test_a_negative_server_amount_is_unknown_not_a_credit(manager) -> None:
+    """A malformed receipt reads as unknown; the guard is the ``usage.cost`` one.
+
+    ``-2.5`` does not describe this route's per-request charge: it is a credit or a
+    bug, and neither may reach the operator's cost line as ``$-2.500000``. The
+    top-level path therefore routes through the SAME ``_reported_cost`` guard the
+    inline path uses, and an unusable amount takes its basis with it.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "amount_usd": -2.5, "basis": "billed"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd is None
+    assert response.cost_basis is None
+
+
+async def test_a_server_amount_with_no_basis_yields_no_basis(manager) -> None:
+    """An absent wire ``basis`` is OUR ``not_tracked`` sentinel, which maps to None.
+
+    The wire vocabulary is ``quote``/``billed``/``estimated`` (plus the subscription
+    spelling); ``not_tracked`` is a harness spelling the server never sends, so it
+    means "the server stated no basis". Returning it would be truthy and defeat
+    ``answered_record``'s honest ``billed`` default, dropping a genuinely billed
+    amount into ``not_tracked_micro`` instead of the billed bucket.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response({"answers": {}, "cost": {"v": 1, "amount_usd": 0.000027}})
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd == pytest.approx(0.000027)
+    assert response.cost_basis is None
+
+
 async def test_an_unanswered_question_is_not_a_failure(manager) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return json_response({"answers": {}})

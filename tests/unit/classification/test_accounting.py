@@ -213,6 +213,51 @@ async def test_a_quoted_radient_figure_is_estimated_on_the_row(manager) -> None:
     assert combine(rows, tracked=True)["by_basis"]["estimated"] == 420
 
 
+async def test_a_server_amount_with_no_basis_is_billed_not_not_tracked(manager) -> None:
+    """An object that states an amount but no basis lands in the BILLED bucket.
+
+    The wire's absent basis maps to the adapter's ``not_tracked`` sentinel, which is
+    truthy: without the parser mapping it to ``None`` the row kept it, so a genuinely
+    billed amount fell into ``not_tracked_micro`` and the row contradicted the
+    convention this module documents for a stated figure.
+    """
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={**answer_body(cost=None), "cost": {"v": 1, "amount_usd": 0.000027}},
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.amount_micro == 27
+    assert row.billing_basis == "billed", "no stated basis defaults to today's billed"
+    assert row.cost_source == "server_reported"
+    published = combine(rows, tracked=True)
+    assert published["by_basis"]["billed"] == 27
+    assert published["by_basis"]["not_tracked_micro"] == 0
+
+
+async def test_a_negative_server_amount_records_an_unknown_row(manager) -> None:
+    """A negative wire amount is not a credit: the row records unknown, never -2_500_000."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={**answer_body(cost=None), "cost": {"v": 1, "amount_usd": -2.5}},
+        )
+
+    subject, rows = build(manager, Wire(handler))
+    await subject.recommend_resources(request())
+
+    (row,) = rows
+    assert row.amount_micro is None
+    assert row.cost_source == "none"
+    assert combine(rows, tracked=True)["knowledge"] == "unknown"
+
+
 async def test_a_vendor_stated_zero_is_a_known_zero(manager) -> None:
     wire = Wire(lambda req: httpx.Response(200, json=answer_body(cost=0.0)))
     subject, rows = build(manager, wire)
