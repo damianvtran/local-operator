@@ -720,10 +720,17 @@ async def test_a_read_only_card_offers_the_reading_keys_and_shows_the_whole_ques
 
 
 async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipped(enabled):
+    """The `↑↓ scroll` hint follows the card's OWN drawn rows (review round 3, M3).
+
+    At 80x16 the welcome block above the card is one row or two from run to run,
+    so the card sometimes drew no option at all and correctly named no arrows —
+    a pin that asserted the hint there failed about half its runs. 80x22 draws
+    an option on every run; the precondition is asserted, never assumed.
+    """
     from local_operator.tui.widgets.ask_picker import AskPickerScreen as Card
 
     app = _app(_AskSession())
-    async with app.run_test(size=(80, 16)) as pilot:
+    async with app.run_test(size=(80, 22)) as pilot:
         await _settle(pilot)
         app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
         await _settle(pilot)
@@ -733,11 +740,11 @@ async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipp
         await pilot.press("enter")
         await _settle(pilot)
         card = app.query_one(Card)
-        assert card.read_only
+        assert card.read_only and card.has_focus
+        drawn = card.visible_rows
+        assert drawn, "the card drew no option at 80x22 — the precondition moved"
+        assert len(drawn) < card.row_count, drawn
         lines = "\n".join(card.render_lines_for_test())
-        # 80x16 windows the four options to one and has no room for the
-        # position row; the arrows still scroll, so they are named.
-        assert len(card._window()) < card.row_count
         assert "↑↓ scroll" in lines, lines
     short = _app(_AskSession())
     async with short.run_test(size=(120, 40)) as pilot:
@@ -750,8 +757,108 @@ async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipp
         await pilot.press("enter")
         await _settle(pilot)
         card = short.query_one(Card)
+        assert len(card.visible_rows) == card.row_count
         lines = "\n".join(card.render_lines_for_test())
         assert "↑↓" not in lines and "^e" not in lines, lines
+
+
+async def test_an_unfocused_read_only_card_names_no_reading_keys(enabled):
+    """Review round 3, M2: `↑↓`/`^e` reach only a FOCUSED card (D13's rule).
+
+    Enter opens the card read-only; a click into the composer moves the caret
+    away, and the footer must stop naming keys the composer now takes.
+    """
+    from local_operator.tui.widgets.ask_picker import AskPickerScreen as Card
+
+    app = _app(_AskSession())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskQueueList).focus()
+        await pilot.press("enter")
+        await _settle(pilot)
+        card = app.query_one(Card)
+        assert card.has_focus
+        assert "↑↓ scroll" in "\n".join(card.render_lines_for_test())
+        app._editor().focus()
+        await _settle(pilot, 6)
+        assert not card.has_focus
+        lines = "\n".join(card.render_lines_for_test())
+        assert "↑↓" not in lines and "^e" not in lines, lines
+        assert "esc collapse" in lines, lines
+
+
+async def test_a_passive_card_that_lapses_while_the_user_types_names_no_reading_keys(
+    monkeypatch,
+):
+    """Review round 3, M2's common path: the policy's CARET_KEEP card, lapsing."""
+    from local_operator.tui.widgets.ask_picker import AskPickerScreen as Card
+    from tests.unit.tui.test_ask_open_default import _app as _policy_app
+    from tests.unit.tui.test_ask_open_default import _ask, _boot, _Conversation, _until
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    monkeypatch.setattr(ask_open_policy, "AUTO_OPEN", True)
+    row = _ask("a1", LONG_QUESTION)
+    row["questions"][0]["options"] = _long_lapsed_row()["questions"][0]["options"]
+    session = _Conversation("conv-a", [row])
+    app = _policy_app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        assert await _until(pilot, lambda: bool(app.query(Card)))
+        card = app.query_one(Card)
+        assert not card.has_focus, "the policy's card took the caret"
+        await pilot.press("h", "i")
+        session.publish([dict(row, status="timed_out")])
+        assert await _until(pilot, lambda: card.read_only)
+        await _settle(pilot, 6)
+        assert not card.has_focus
+        lines = "\n".join(card.render_lines_for_test())
+        assert "↑↓" not in lines and "^e" not in lines, lines
+
+
+async def test_the_arrows_scroll_a_read_only_card_without_wrapping(enabled):
+    """UX round 3, U15: no invisible cursor — each press moves the window or stops.
+
+    The arrows used to move the HIDDEN selection: a press inside the window
+    showed nothing, and `down` past the end wrapped to the top.
+    """
+    from local_operator.tui.widgets.ask_picker import AskPickerScreen as Card
+
+    app = _app(_AskSession())
+    async with app.run_test(size=(80, 22)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskQueueList).focus()
+        await pilot.press("enter")
+        await _settle(pilot)
+        card = app.query_one(Card)
+        first = tuple(card._window())
+        assert first and first[0] == 0, first
+        windows = [first]
+        for _ in range(card.row_count + 2):
+            await pilot.press("down")
+            await _settle(pilot)
+            windows.append(tuple(card._window()))
+        # Every press until the end shows a new window; past the end it stays.
+        assert windows[-1] == windows[-2], windows
+        assert windows[-1][-1] == card.row_count - 1, windows
+        assert all(a != b for a, b in zip(windows, windows[1:]) if a[-1] < card.row_count - 1)
+        assert all(w[0] >= v[0] for v, w in zip(windows, windows[1:])), "it wrapped"
+        await pilot.press("up")
+        await _settle(pilot)
+        assert tuple(card._window()) != windows[-1], "the first `up` showed nothing"
+        assert session_unsent(app)
+
+
+def session_unsent(app) -> bool:
+    session = app._session
+    return not (session.answered or session.declined or session.dismissed)
 
 
 async def test_a_read_only_card_drops_the_type_your_own_invitation():
