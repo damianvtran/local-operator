@@ -376,7 +376,7 @@ async def test_the_apps_own_row_text_for_a_real_silent_facade(tmp_path, monkeypa
         session = await _viewer_facade(tmp_path, quiet_for=60.0)
         app._interaction.session = session
         assert _is_viewer(session) is True, "a real bound facade must pass the viewer guard"
-        row = app._liveness_row_text(session)
+        row = app._liveness_row_text(app._interaction)
         assert row.startswith("Not answering"), row
         assert "\u00b7" in row, "STALE always carries its measured tail"
 
@@ -513,4 +513,283 @@ async def test_a_live_fork_outranks_the_liveness_term(tmp_path, monkeypatch):
 
         # And the app's own reader still classifies the owner as unanswerable --
         # this is a DISPLAY decision, not a mis-classification.
-        assert app._liveness_row_text(session).startswith("Not answering")
+        assert app._liveness_row_text(app._interaction).startswith("Not answering")
+
+
+# --------------------------------------------------------------------------
+# THE STARTUP FLASH: while a bring-up is in flight, the reader must not paint
+# its NEVER verdict over the runtime that is arriving.
+#
+# Measured on the real mount engage (a probe tick landing in the spawn phase,
+# with the band's `starting…` cue up): the false row painted ~2 s before the
+# bind landed, and nothing repainted it away until the next tick. The tests
+# below drive the app's own probe callback over the real held-engage boot
+# (`_held_startup(phase="spawn")`, the harness `test_startup_attachment` uses)
+# and over the two other forms a bring-up takes: THIS conversation's
+# paint-first attach, and a prompt whose own send is still binding.
+# --------------------------------------------------------------------------
+
+
+async def _probe_settled(app, pilot, *, timeout: float = 10.0) -> None:
+    """Let the app's OWN liveness-probe worker finish -- and nothing else.
+
+    NOT `_drain` for these states: each one deliberately HOLDS a worker (the
+    parked mount engage, a parked send), and `wait_for_complete()` waits on
+    every worker -- including the held one -- forever. Bounded, like `_drain`,
+    so a genuine regression fails instead of hanging.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(getattr(worker, "group", None) == "liveness-probe" for worker in app.workers):
+            return
+        await pilot.pause()
+        await asyncio.sleep(0.02)
+    raise AssertionError("the liveness-probe worker never settled")
+
+
+async def _eventually(pilot, predicate, *, timeout: float = 10.0) -> None:
+    """Pump until ``predicate`` holds; bounded so a regression fails, not hangs."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause()
+        await asyncio.sleep(0.02)
+    assert predicate(), "the awaited state never arrived"
+
+
+async def _cold_viewer(tmp_path):
+    """A real viewer, COLD: no dial, no stamp, not attaching.
+
+    The shape every fresh `lop` boots as, from the constructor the boot path
+    itself uses (`AttachedSession.cold`).
+    """
+    from local_operator.session.attached import AttachedSession
+    from tests.unit.tui.test_cold_slash_binds import _never
+
+    session = await AttachedSession.cold(
+        "s-cold-boot", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    assert session.is_cold and session.verified_at is None and not session.attaching
+    return session
+
+
+def _record_connection_paints(monkeypatch) -> list[str]:
+    """Every `StatusLine.update(connection=...)` string the app hands the band."""
+    from local_operator.tui.widgets.status_line import StatusLine
+
+    painted: list[str] = []
+    original = StatusLine.update
+
+    def recording(self, *args, **kwargs):
+        if "connection" in kwargs:
+            painted.append(kwargs["connection"])
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(StatusLine, "update", recording)
+    return painted
+
+
+@pytest.mark.asyncio
+async def test_a_probe_tick_during_the_mount_engage_paints_no_never_row(tmp_path, monkeypatch):
+    """AC1/AC3: the startup flash — a tick in the spawn phase paints nothing.
+
+    Every fresh `lop` boots as a COLD viewer, and the mount engage spends its
+    first phase SPAWNING the runtime: no dial is retained yet, so the reader
+    honestly classifies the viewer as NEVER -- while the band's `starting…` cue
+    is up for the very same bring-up. A tick landing in exactly that window
+    painted the verdict anyway (measured on the real app: ~2 s before the bind
+    landed) and nothing repainted it until the next tick. The call below is the
+    interval's own callback, which is what the repro drove.
+    """
+    from tests.unit.tui.test_startup_attachment import _held_startup, _until
+
+    async with _held_startup(tmp_path, monkeypatch, phase="spawn") as (
+        app,
+        pilot,
+        viewer,
+        _handle,
+        release,
+    ):
+        assert app._starting_shown, "the premise: the cue is up for the bring-up"
+        assert viewer.is_cold and viewer.verified_at is None and not viewer.attaching
+        painted = _record_connection_paints(monkeypatch)
+
+        app._liveness_probe_last = None  # as if the 5 s cadence came round
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+
+        row = getattr(app._status, "_connection", "")
+        assert row == "", f"a NEVER verdict painted over a running bring-up: {row!r}"
+        assert app._liveness_painted == "", "the gate string must agree with the empty row"
+        assert not [c for c in painted if c == LIVENESS_TEXT[OwnerLiveness.NEVER]], painted
+        band = app._status
+        assert band is not None and "starting…" in band.render_text(100).plain
+
+        # A second tick while the engage is still spawning: the row must stay
+        # empty (the false one STOOD through this second tick pre-fix).
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert getattr(app._status, "_connection", "") == ""
+        assert not [c for c in painted if c == LIVENESS_TEXT[OwnerLiveness.NEVER]], painted
+
+        # AC3, the slow-bind half: release the engage, let the bind land, tick
+        # again — and the verdict must not have painted at ANY point up to it.
+        release.set()
+        await _until(
+            pilot,
+            lambda: not viewer.is_cold
+            and not app._starting_runtime
+            and viewer.verified_at is not None,
+        )
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert not [c for c in painted if c == LIVENESS_TEXT[OwnerLiveness.NEVER]], (
+            "the false row painted somewhere between the spawn phase and the bind",
+            painted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_bring_up_that_ends_without_binding_paints_the_verdict_next_tick(
+    tmp_path, monkeypatch
+):
+    """AC2, the gate-consistency sequence: the suppression is a HOLD, not a removal.
+
+    Cold + in flight tick → nothing painted; the bring-up ends WITHOUT a bind
+    (the engage's failure arm: its `finally` clears the cue flag and no stamp
+    arrives — for this ordinary cold viewer, that is the whole of it) → the
+    next DUE tick paints the verdict, which is only possible because the
+    suppressed tick left the gate string at "".
+    """
+    from tests.unit.tui.test_startup_attachment import _held_startup
+
+    async with _held_startup(tmp_path, monkeypatch, phase="spawn") as (
+        app,
+        pilot,
+        viewer,
+        _handle,
+        _release,
+    ):
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert (
+            getattr(app._status, "_connection", "") == ""
+        ), "premise: the in-flight tick painted nothing"
+
+        # The engage's failure arm, nothing else: the worker's `finally` brings
+        # the cue flag down and no bind ever lands.
+        app._set_starting(False)
+        assert viewer.is_cold, "the premise: still unbound"
+
+        app._liveness_probe_last = None  # the cadence comes round again
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+
+        assert getattr(app._status, "_connection", "") == LIVENESS_TEXT[OwnerLiveness.NEVER]
+        assert app._liveness_painted == LIVENESS_TEXT[OwnerLiveness.NEVER]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_attach_behind_attempt_holds_the_never_row(tmp_path, monkeypatch):
+    """AC5, the paint-first form: THIS conversation's attach, still worked on.
+
+    `_attach_behind_attempt_for` installs the attempt for a viewer opened cold
+    in front of a live owner, and while it is pending/narrated the bring-up is
+    in flight — the reader must hold its verdict. A JUDGED attempt is NOT in
+    flight (its row states the outcome), so the second half fires the
+    attempt's own bound and watches the verdict paint on the next due tick:
+    the same gate-consistency rule, for the attempt form.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        session = await _cold_viewer(tmp_path)
+        session.attach_behind = True  # the paint-first marker
+        app._interaction.session = session
+
+        attempt = app._attach_behind_attempt_for(app._interaction, session)
+        assert attempt is not None and attempt.phase in ("pending", "narrated"), "premise"
+        assert not app._starting_runtime, "the form under test is the attempt alone"
+
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert getattr(app._status, "_connection", "") == ""
+        assert app._liveness_painted == ""
+        assert (
+            app._bring_up_in_flight(app._interaction) is True
+        ), "the premise, read by the one predicate"
+
+        attempt._judge()  # the attempt's own bound, fired: not answering
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+
+        assert getattr(app._status, "_connection", "") == LIVENESS_TEXT[OwnerLiveness.NEVER]
+        assert app._liveness_painted == LIVENESS_TEXT[OwnerLiveness.NEVER]
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_awaiting_its_bind_holds_the_never_row(tmp_path, monkeypatch):
+    """AC5, the send form: the prompt BINDS first, so its window is held open.
+
+    Driven through the real dispatch (`_start_turn_for` against a cold viewer —
+    the registration `_prompts_awaiting_bind` is the dispatch's own), with only
+    the transport parked, the same seam the U4 test parks. The send is then
+    CANCELLED (a real outcome: a recall or a retire cancels sends), its marker
+    pops with it, and the next due tick paints the verdict.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        session = await _cold_viewer(tmp_path)
+        app._interaction.session = session
+
+        async def parked_prompt(self, *_args, **_kwargs):
+            await asyncio.Event().wait()  # never returns; the test cancels it
+
+        monkeypatch.setattr(type(session), "prompt", parked_prompt)
+        app._start_turn_for(app._interaction, "sent while cold")
+        await _eventually(pilot, lambda: bool(app._prompts_awaiting_bind))
+        assert app._starting_shown, "the send must hold the cue until its bind returns"
+
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert getattr(app._status, "_connection", "") == ""
+        assert app._liveness_painted == ""
+        assert (
+            app._bring_up_in_flight(app._interaction) is True
+        ), "the premise, read by the one predicate"
+
+        # The send is cancelled — the worker's `finally` pops its marker.
+        turns = [
+            worker
+            for worker in app.workers
+            if worker.group == app._interaction.worker_group("turns")
+        ]
+        assert turns, "the send worker must be up"
+        for worker in turns:
+            worker.cancel()
+        await _eventually(pilot, lambda: not app._prompts_awaiting_bind)
+        await _eventually(pilot, lambda: not app._interaction.active_workers)
+
+        app._liveness_probe_last = None
+        app._probe_foreground_liveness()
+        await _probe_settled(app, pilot)
+        assert getattr(app._status, "_connection", "") == LIVENESS_TEXT[OwnerLiveness.NEVER]
+        assert app._liveness_painted == LIVENESS_TEXT[OwnerLiveness.NEVER]
