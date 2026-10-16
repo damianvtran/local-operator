@@ -682,9 +682,16 @@ class ModelPicker(Static):
                 if value is not None:
                     clauses[0].append(f"{label} {'yes' if value else 'no'}")
             if row.reasoning_efforts is not None:
-                clauses[1].append("effort " + ("/".join(row.reasoning_efforts) or "none"))
+                clauses[1].append(
+                    _t(
+                        copy.model_picker_effort(
+                            value="/".join(row.reasoning_efforts)
+                            or _t(copy.model_picker_none_word())
+                        )
+                    )
+                )
             if row.reasoning_default_effort:
-                clauses[1].append("default " + row.reasoning_default_effort)
+                clauses[1].append(_t(copy.model_picker_default(value=row.reasoning_default_effort)))
             if row.modalities:
                 # ``in``/``out``, not ``input``/``output``: the canonical
                 # six-rung Muse line measured 74 cells, and the picker's content
@@ -701,7 +708,7 @@ class ModelPicker(Static):
             if row.family:
                 clauses[2].append(row.family)
             if row.release_date:
-                clauses[2].append("released " + row.release_date)
+                clauses[2].append(_t(copy.model_picker_released(value=row.release_date)))
         # Rich Text escapes provider-controlled labels; cell clipping keeps
         # native detail optionality from widening the picker at narrow sizes.
         rendered = []
@@ -974,7 +981,13 @@ class ModelPicker(Static):
                 # exactly one of them.
                 bits.append(_partial_keyword_row(partial))
             else:
-                bits.append("no matching models" if query else "no models available")
+                bits.append(
+                    _t(
+                        copy.model_picker_no_matching_models()
+                        if query
+                        else copy.model_picker_no_models_available()
+                    )
+                )
         elif total > end - start:
             # The bare digits the pre-extraction f-string printed: `shown` and
             # `total` are typed str, NOT {x, number}/`#`, because grouping them

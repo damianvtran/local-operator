@@ -770,7 +770,7 @@ class NetworkScreen(ModalScreen[None]):
         """
         width = max(1, self._card_width())
         text = Text(
-            "Mesh networks\n" + "─" * width,
+            _t(_x.network_panel_mesh_networks_heading()) + "─" * width,
             no_wrap=True,
             overflow="crop",
         )

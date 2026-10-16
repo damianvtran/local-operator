@@ -3,7 +3,18 @@
 # Every entry is a [path, reason] pair; the reason is REQUIRED and must say
 # what category of literal the file legitimately carries (commands/flags/
 # identifiers, dev logs, tool names, --json keys/event types, model-facing
-# prompts, code snippets/paths). `scripts/i18n/check.py` refuses the file —
+# prompts, code snippets/paths, platform keycap display vocabulary).
+#
+# Keycaps are a CLASS decision, not a pending TODO: `Option`/`Command`/
+# `Control` and `cmd`/`ctrl`/`win`/`super` are allowlisted for the eight
+# in-scope locales, because none of them needs a different macOS modifier
+# name and half-translating a keycap vocabulary is a regression. Extract the
+# group only when an in-scope locale requires it, and then as the WHOLE set
+# (the display map and the alias map together, with the `dict.get` path made
+# scanner-visible first) — never one branch at a time. Sites carry this via
+# `# i18n: ignore` with the same reason, e.g. `local_operator/keymap.py`.
+#
+# `scripts/i18n/check.py` refuses the file —
 # and its unit test fails — when a reason is missing or empty, because an
 # unreasoned exemption is how a scanner gets allowlisted into uselessness
 # (RFC §10 risk 3). The list is PRUNED at P5: an entry is removed when its

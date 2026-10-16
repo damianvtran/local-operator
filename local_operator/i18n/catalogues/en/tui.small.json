@@ -68,5 +68,21 @@
   "tui.small.network_panel.trust_field": "trust {trust}",
   "tui.small.network_panel.installed_row": "  installed:  {value}\n",
   "tui.small.network_panel.identity_row": "  identity:   {identity}\n",
-  "tui.small.network_panel.relay_running": "  relay:      running, pid {pid} — {state}\n"
+  "tui.small.network_panel.relay_running": "  relay:      running, pid {pid} — {state}\n",
+  "tui.small.approval.decision_allowed": "allowed ",
+  "tui.small.approval.decision_denied": "denied ",
+  "tui.small.info_panel.not_answering": "not answering",
+  "tui.small.info_panel.install_info_heading": "Install info\n",
+  "tui.small.panels.scroll_hint": " · ↑↓ scroll",
+  "tui.small.model_picker.effort": "effort {value}",
+  "tui.small.model_picker.none_word": "none",
+  "tui.small.model_picker.default": "default {value}",
+  "tui.small.model_picker.released": "released {value}",
+  "tui.small.model_picker.no_matching_models": "no matching models",
+  "tui.small.model_picker.no_models_available": "no models available",
+  "tui.small.network_panel.mesh_networks_heading": "Mesh networks\n",
+  "tui.small.session_panel.diagnostics_heading": "Session diagnostics\n",
+  "tui.small.subagent_panel.ctrl_g_shrink": "ctrl+g to shrink",
+  "tui.small.subagent_panel.ctrl_g_expand": "ctrl+g to expand",
+  "tui.small.wake_panel.scheduled_count": "{count, plural, one {1 scheduled} other {{shown} scheduled}}"
 }

@@ -1037,7 +1037,19 @@ def display_key(value: str, *, scope: str = "app", platform: str | None = None) 
         if not token:
             continue
         if token == "primary":
-            shown.append("cmd" if plat == "darwin" else "ctrl")
+            shown.append(
+                # i18n: ignore platform keycap identifiers/display words; the
+                # sibling alias and display maps below select the same
+                # vocabulary via dict.get, which the scanner cannot see, so
+                # extracting only this branch would split one vocabulary across
+                # two mechanisms. Allowlisted for the eight in-scope locales
+                # (none needs a different macOS modifier name, and
+                # half-translating keycaps is a regression); extract the WHOLE
+                # group only when an in-scope locale requires it.
+                "cmd"
+                if plat == "darwin"
+                else "ctrl"
+            )
         elif token == "meta":
             shown.append({"darwin": "cmd", "win32": "win"}.get(plat, "super"))
         else:
