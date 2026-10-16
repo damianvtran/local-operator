@@ -167,6 +167,8 @@ def test_non_memory_message_byte_identity():
 )
 def test_an_id_shaped_memory_read_argument_is_redacted_before_retention(path):
     kept, raw, masked = retained_arguments("read", {"path": path})
-    assert masked is True
+    # ``raw`` is the None-able second half of the pair: a masked call always returns
+    # the redacted JSON spelling, which is the copy the assertion below pins.
+    assert masked is True and raw is not None
     assert kept == {"memory_arguments_redacted": True, "path": "memory://"}
     assert json.loads(raw) == kept
