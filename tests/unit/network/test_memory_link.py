@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from local_operator.memory import MemoryIdentity, MemoryStore
+from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore
 from local_operator.network import audit, identity, memory, wire
 from tests.unit.network.test_mcpdefs_link import _bind_and_start, _set_peer_endpoints
 from tests.unit.network.test_relay_e2e import _pair, serve_shaped_relay
@@ -178,8 +178,9 @@ def test_sender_withholds_by_id_and_receiver_refuses_without_secret_residue(devi
         timeout=5,
     )
     assert reply["op"] == "error"
-    # The receiver guard refuses the whole payload before field-level parsing,
-    # so the sentence names no operation and certainly not the rejected value.
+    # The receiver refuses at the op level: validate_op → validate_fact applies the
+    # free-text guard to the fact body, so the sentence names the op REFERENCE (its
+    # id) and certainly not the rejected value itself.
     assert "Sensitive value refused" in reply["message"]
     assert bad not in json.dumps(reply)
     with right.connection() as db:
@@ -249,6 +250,65 @@ def test_scope_filter_reenable_resends_old_rows_without_cursor_loss(devices, mon
     enable(a)
     assert memory.push_to_peer(a, b.identity.device_id)["ok"]
     assert right.search("team", "team")
+
+
+def test_iban_shaped_origin_syncs_but_a_secret_body_is_still_refused(tmp_path):
+    """The mesh push path is structural-vs-fact, same as a local write.
+
+    R1: an install whose minted device id is IBAN/mod-97-shaped could write
+    locally (after the put-path fix) yet still could not sync — the receiver's
+    blanket ``guard(payload)`` scanned the STRUCTURAL origin as if it were user
+    text. ``receive`` is the handler's push entrypoint, so it is exercised
+    directly with a payload built from a real op, not a hand-written stub.
+    """
+    import hashlib
+    import types
+
+    from local_operator.memory import _dump
+
+    iban_shaped = "d_cd474787b1adaa67f8cb5934196c4834"
+    sender = MemoryStore(tmp_path / "sender", MemoryIdentity("s", "t", "a"), origin=iban_shaped)
+    item = sender.put("global", {"title": "Host", "body": "staging host is stage-2 docs/h.md"})
+    with sender.connection() as db:
+        op = json.loads(
+            db.execute("SELECT data FROM ops WHERE op_id=?", (item["version"],)).fetchone()[0]
+        )
+    assert op["origin_device"] == iban_shaped
+
+    def payload(operation):
+        return {
+            "v": 1,
+            "generation": 0,
+            "scopes": ["global"],
+            "after": {iban_shaped: operation["seq"]},
+            "ops": [operation],
+            "skips": [],
+            "proofs": [],
+        }
+
+    # A real op whose structural origin is IBAN-shaped now syncs end to end.
+    receiver = types.SimpleNamespace(root=tmp_path / "receiver")
+    result = memory.receive(receiver, iban_shaped, payload(op), ["global"], {iban_shaped})
+    assert result["phase"] == "push" and result["changed"] == 1, result
+    landed = MemoryStore(tmp_path / "receiver", MemoryIdentity("s", "t", "a"))
+    assert landed.search("stage-2")
+
+    # The structural exemption must not weaken the fact guard: a real secret in a
+    # synced body is refused, exactly as an admitted local write is. Built by
+    # bypassing the store boundary, so it is NOT an admitted write.
+    secret = "passport number AB1234567"
+    poisoned = dict(op, entity_id="0123456789abcdef0123456789abcdef")
+    poisoned["fact"] = dict(op["fact"], body=secret)
+    poisoned["body_sha"] = hashlib.sha256(_dump(poisoned["fact"]).encode()).hexdigest()
+    with pytest.raises(MemoryError, match="Sensitive value refused"):
+        memory.receive(
+            types.SimpleNamespace(root=tmp_path / "receiver2"),
+            iban_shaped,
+            payload(poisoned),
+            ["global"],
+            {iban_shaped},
+        )
+    print("MESH IBAN-shaped origin syncs; real secret in synced body still refused PASS")
 
 
 def test_old_peer_skips_before_memory_frame(devices, monkeypatch):
