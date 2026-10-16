@@ -61,6 +61,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
+from local_operator.harness.rows import user_row_text
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -4164,9 +4165,29 @@ class ServingSessionHandle(SessionHandle):
         would leave the session named after the greeting), fire at most once,
         and run the call as a background task so the title arrives ALONGSIDE
         the turn rather than after it.
+
+        ``text`` is the SENT message, and for a ``$skill`` invocation that is
+        the EXPANDED payload rather than the line the user typed: expansion is
+        the CLIENT's duty (a desktop renders ``skills.invoke.render_invocation``'s
+        payload itself, in ``local-operator-ui``'s ``skill-invocation.ts``), so
+        the harness never sees the typed line on its own. Naming from the
+        payload titles the conversation "The user invoked the `research`
+        skill…" and puts the whole SKILL.md body in the list row — the defect
+        ``docs/design/history-fold-convergence.md`` row D8 calls out.
+
+        Collapsed HERE rather than at the one call site today, because this is
+        the gate every naming path on this handle passes through: the
+        provisional label below, the opener stashed for a route-edge retry and
+        the generation prompt then cannot disagree about what the user said.
+        It is the same rule the TUI applies by handing its own submit the typed
+        line (``tui/app.py`` ``named = typed or text``), read back out of the
+        payload's own ``invocation`` attribute rather than out of a second
+        store, so the two surfaces title the same conversation the same way.
+        A message that is not a payload comes back unchanged.
         """
         from local_operator.session import naming
 
+        text = user_row_text(text)
         if self._name_requested or naming.is_low_signal(text):
             return
         if getattr(self._session, "conversation_name", ""):

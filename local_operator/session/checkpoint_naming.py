@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from local_operator.harness.rows import user_row_text
 from local_operator.session import transcript_index
 
 # Borrowed, not re-implemented: these are the thinking-envelope and
@@ -285,6 +286,15 @@ def build_turn_digest(index: "transcript_index.TranscriptIndex", turn: int) -> s
     two stored strings (same content, same digest, same hash), which is what
     makes the cache's hash-comparison meaningful across processes and
     restarts.
+
+    The user half is RENDERED through :func:`harness.rows.user_row_text`, and
+    the stored doc is not: a rail checkpoint is named from the same text the
+    rail's hover card shows, so a ``$skill`` turn — whose stored user text is
+    the expanded payload, header and all — was named "User: The user invoked
+    the `research` skill…" with the ``_USER_TEXT_BUDGET`` spent on the skill's
+    prose instead of the request. Deterministic, so the digest stays a pure
+    function of the stored strings and the hash keeps meaning the same thing
+    in every process.
     """
     user = next(
         (c for c in index.checkpoints if c.kind == transcript_index.KIND_USER and c.turn == turn),
@@ -300,7 +310,7 @@ def build_turn_digest(index: "transcript_index.TranscriptIndex", turn: int) -> s
     )
     if user is None or completion is None:
         return None
-    user_text = _condense(user.text)
+    user_text = _condense(user_row_text(user.text))
     answer_text = _condense(completion.text)
     if not user_text and not answer_text:
         # Nothing to name: a turn whose rows carried no text at all. Do not
