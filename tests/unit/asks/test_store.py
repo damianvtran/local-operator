@@ -715,3 +715,47 @@ def test_a_revision_cannot_smuggle_attachments_in() -> None:
     }
     (record,) = store.fold([_queued(), _answered(at=1_500_000), revised], now=1_600_000)
     assert "attachments" not in record
+
+
+def _stale_open_entry(root: Path, session_id: str, now: int) -> None:
+    """An index entry still saying ``open`` one minute past its deadline — what a
+    runtime stopped before the deadline leaves behind (it never wrote the fold
+    again)."""
+    (root / store.SESSIONS_DIRNAME / session_id).mkdir(parents=True)
+    store.write_entry(
+        root,
+        session_id,
+        cwd="/tmp/w",
+        asks=[
+            {
+                "ask_id": "stale-1",
+                "created_at": now - 600_000,
+                "expires_at": now - 60_000,
+                "timeout_s": 540,
+                "urgent": False,
+                "status": store.STATUS_OPEN,
+                "delivered": False,
+                "questions": [],
+            }
+        ],
+    )
+
+
+def test_a_stale_open_row_past_its_deadline_reads_timed_out_from_every_index_reader(
+    tmp_path: Path,
+) -> None:
+    """The index holds the status as last WRITTEN; the readers judge it at ``now``.
+
+    Without the re-derivation the phone showed a lapsed ask with no control (the
+    queue would accept a dismiss — it folds the log to ``timed_out`` — but the
+    surface read the index's stale ``open``), the legacy mirror painted it as a
+    live card, and every count called it waiting.
+    """
+    now = int(time.time() * 1000)
+    _stale_open_entry(tmp_path, "s-stale", now)
+    assert [row["status"] for row in store.session_asks(tmp_path, "s-stale", now=now)] == [
+        store.STATUS_TIMED_OUT
+    ]
+    assert [row["status"] for row in store.index_asks(tmp_path, now=now)] == [
+        store.STATUS_TIMED_OUT
+    ]
