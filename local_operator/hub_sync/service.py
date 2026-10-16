@@ -784,13 +784,32 @@ def _write_agent(ctx: HubSyncContext, c: chk.ItemCheck, merged: Mapping[str, Any
 
 
 def _write_team(ctx: HubSyncContext, c: chk.ItemCheck, report: ItemMergeReport) -> None:
-    from local_operator.teams import TeamEditFields, TeamMember
+    from local_operator.teams import TeamEditFields, TeamMember, find_member
 
     changed = {r.field: r.merged for r in report.fields if r.outcome == "merged"}
     payload: dict[str, Any] = {}
     for key, value in changed.items():
         if key == "members":
-            payload[key] = [TeamMember(**slot) for slot in value]  # type: ignore[union-attr]
+            # The merged roster is the HUB's shape -- ``{role, kind, count}``
+            # (:func:`hub_sync.provenance.normalize_roster`) -- so rebuilding the
+            # members from it would silently WIPE every local ``tier``/``effort``
+            # the operator had pinned: the merge touched the roster, the
+            # overrides never ride the wire, and nothing else would put them
+            # back. Copy them onto the surviving slots by ``(kind, role)``, first
+            # match, the same lookup a launch resolves with.
+            current = ctx.teams().get_team(c.local_id)
+            rebuilt = []
+            for slot in value or []:
+                member = TeamMember(**slot)
+                stored = find_member(
+                    getattr(current, "members", None), member.role, kind=member.kind
+                )
+                if stored is not None and not stored.is_default():
+                    member = member.model_copy(
+                        update={"tier": stored.tier, "effort": stored.effort}
+                    )
+                rebuilt.append(member)
+            payload[key] = rebuilt
         else:
             payload[key] = value
 

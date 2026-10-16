@@ -2488,18 +2488,68 @@ class SubagentComms:
         owns = getattr(record.job_ref, "owns_model", None)
         return owns if isinstance(owns, bool) else record.owns_model
 
-    def _role_pinned(self, record: _ChildRecord) -> bool:
-        """Whether ``record``'s role profile carries a tier pin.
+    def _record_target(self, record: _ChildRecord) -> Any:
+        """The launch target ``record`` was born under, rebuilt LENIENTLY.
+
+        One derivation for the three readers below, because the roster a member
+        override lives on comes out of the same carried launch in all of them
+        (``LaunchTarget.roster``: the team whose ``team.yml`` names this slot).
+        ``None`` means "cannot say" -- an evicted team, a broken profile, a
+        record too old to carry its team -- and every caller reads that as "no
+        pin" rather than as a reason to fail. These all run inside a
+        DESCENDANT's resume, where refusing would strand work that exists.
+        """
+        from local_operator.harness.subagent import resolve_launch_target
+
+        try:
+            return resolve_launch_target(
+                record.agent_role or "task",
+                self._session,
+                carried=self._carried_launch(record),
+            )
+        except Exception:  # noqa: BLE001 — an unreadable launch is "no pin"
+            logger.debug("could not rebuild the target for %s", record.job_id, exc_info=True)
+            return None
+
+    @staticmethod
+    def _target_kwargs(target: Any, role: str) -> dict[str, Any]:
+        """The roster arguments for a resolution, or none when there is no target.
+
+        Empty rather than "roster=None, slot_kind='agent'" on purpose: a record
+        whose target cannot be rebuilt must resolve EXACTLY as it did before
+        the roster existed (the row pin alone), not as "a launch with no
+        roster" -- which would be a silent behaviour change for a legacy row.
+        """
+        if target is None:
+            return {}
+        from local_operator.harness.subagent import team_slot_name
+
+        is_team = bool(getattr(target, "is_team_launch", False))
+        return {
+            "roster": getattr(target, "roster", None),
+            "slot_kind": "team" if is_team else "agent",
+            "slot_role": team_slot_name(role, is_team),
+        }
+
+    def _record_pinned(self, record: _ChildRecord) -> bool:
+        """Whether ``record``'s role OR its roster slot chooses its model.
 
         Resolved leniently, like :meth:`_owned_model`: a broken pin here only
         means the walk cannot use it, never that a descendant's resume fails.
+        The roster half matters because a ``TeamMember`` override is a pin that
+        the role profile knows nothing about, and missing it broke the chain
+        for an override-pinned ancestor exactly as the legacy role pin did
+        (review round 3, M2).
         """
         role = record.agent_role
         resolve = getattr(self._session, "_resolve_subagent_model", None)
         if not role or role == "task" or not callable(resolve):
             return False
         try:
-            return isinstance(resolve(role, None), ModelSpec)
+            return isinstance(
+                resolve(role, None, **self._target_kwargs(self._record_target(record), role)),
+                ModelSpec,
+            )
         except Exception:  # noqa: BLE001 — an unreadable profile is "no pin"
             return False
 
@@ -2510,13 +2560,19 @@ class SubagentComms:
         Lenient, unlike the resume's own strict resolution: this is a
         DESCENDANT's resume, and an ancestor's broken tier should not block it
         while the model that ancestor actually ran on is still on record.
+
+        The ROSTER rides along, or a descendant of an override-pinned manager
+        would inherit that manager's ROW pin instead of the model the override
+        gave it -- the same pin, read from the wrong layer.
         """
+        role = record.agent_role or "task"
         resolve = getattr(self._session, "_resolve_subagent_model", None)
         if callable(resolve):
             try:
                 resolved = resolve(
-                    record.agent_role or "task",
+                    role,
                     record.effort or None,
+                    **self._target_kwargs(self._record_target(record), role),
                     **(
                         {"model": record.model_selector}
                         if record.model_selector is not None
@@ -2573,7 +2629,7 @@ class SubagentComms:
             # the flag says. Only a record with no flag and no pin of either kind
             # is genuinely unknown (review round 3, M2: a legacy role-pinned
             # manager broke the chain).
-            if owns is None and (ancestor.effort or self._role_pinned(ancestor)):
+            if owns is None and (ancestor.effort or self._record_pinned(ancestor)):
                 owns = True
             if owns is None:
                 break
@@ -3126,7 +3182,16 @@ class SubagentComms:
         # a tier must still be able to resume its child on the parent's model,
         # so a missing resolver degrades instead of raising.
         model_spec: ModelSpec | None = None
-        resolve = getattr(self._session, "_resolve_subagent_model", None)
+        selection_source: str | None = None
+        # Prefer the SELECTION entry point, which also says which layer chose the
+        # model: the receipt an operator reads must not call a roster override
+        # "role" on a resume while a fresh launch of the same child says "team".
+        selection = getattr(self._session, "_resolve_subagent_selection", None)
+        resolve = (
+            selection
+            if callable(selection)
+            else getattr(self._session, "_resolve_subagent_model", None)
+        )
         if callable(resolve):
             # Strict, exactly like the first launch: a tier that broke between
             # launch and resume must fail the resume with the reason, not
@@ -3140,14 +3205,27 @@ class SubagentComms:
             try:
                 # The role the child RUNS as: a ``team:pod`` lead is pod's
                 # manager, whose tier the first launch priced (BEN-7-D1).
-                resolved = resolve(
+                # ``_target_kwargs`` keys on ``agent`` (the RECORDED
+                # ``team:<name>`` token) rather than ``target.role``, because a
+                # nested-team override lives on the SLOT (`team:pod`), not on
+                # the manager role the target resolved to.
+                outcome = resolve(
                     target.role,
                     effort,
                     strict=True,
+                    **self._target_kwargs(target, agent),
                     **({"model": selector} if selector is not None else {}),
                 )
             except (SubagentModelUnavailable, ValueError) as exc:
                 return None, f"cannot resume {record.label}: {exc}"
+            if callable(selection):
+                # The selection entry point answers ``(spec, source)``; a reduced
+                # host's ``_resolve_subagent_model`` answers the spec alone, and
+                # ``getattr`` erases both, so the pair is named here.
+                resolved, source = cast("tuple[ModelSpec | None, str]", outcome)
+                selection_source = source
+            else:
+                resolved = cast("ModelSpec | None", outcome)
             if isinstance(resolved, ModelSpec):
                 model_spec = resolved
         inherited: ModelSpec | None = None
@@ -3164,6 +3242,7 @@ class SubagentComms:
             agent=agent,
             effort=effort,
             model_selector=selector,
+            selection_source=selection_source,
             restricted=record.restricted,
             inherited_model=inherited,
             target=target,

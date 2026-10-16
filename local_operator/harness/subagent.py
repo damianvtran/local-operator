@@ -125,7 +125,7 @@ import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
 
 from local_operator.agent_profiles import (
     READ_ONLY_NETWORK_TOOLS,
@@ -159,7 +159,15 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.config import server_own_turn_only
-from local_operator.model.effort import TIER_EFFORTS, parse_tier_mapping
+
+# Re-exported from the leaf module: ``teams.py`` validates ``TeamMember.tier``
+# against it and must not import this module, while every reader here keeps the
+# same import site.
+from local_operator.model.effort import (
+    CANONICAL_EFFORT_TIERS,
+    TIER_EFFORTS,
+    parse_tier_mapping,
+)
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
@@ -187,30 +195,12 @@ class SubagentModelUnavailable(RuntimeError):
         self.reason = reason
 
 
-#: The tier names the harness supports, in the order they are presented.
-#:
-#: This is the WHOLE set, not merely a presentation order over a free mapping:
-#: :func:`read_effort_tier_selectors` drops every other key in
-#: ``values.subagents.models``, so a hand-added ``xl:`` is inert everywhere
-#: (schema, tool-argument validation, launch) rather than honoured by some
-#: consumers and not others.
-#:
-#: Narrowing to the registry set is what keeps ADVERTISED == REBUILDABLE.
-#: These are the only keys ``lop config edit`` and the ``/settings`` page can
-#: write (``settings_io`` accepts registered keys only), and — the reason this
-#: is a correctness boundary rather than a preference — the only ones the
-#: config watcher's per-registry-key diff can report. A tier outside the set
-#: would be read and advertised, but editing it produces no ``changed_keys``
-#: entry, so ``Session._rebuild_effort_tier_tools`` never fires: the schema
-#: would promise a tier whose edits the live re-render could not reach until
-#: the next session. Widening this tuple therefore means registering the key
-#: in ``settings_io.SETTINGS`` in the same change, which is what makes the
-#: watcher see it.
-#:
-#: The order is load-bearing too: the schema rides in the prompt-cache prefix,
-#: so it follows this tuple rather than YAML key order, and a reordering edit
-#: to ``config.yml`` cannot move the enum.
-CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
+# ``CANONICAL_EFFORT_TIERS`` is imported above from ``local_operator.model.effort``
+# rather than defined here. The value and its long rationale (why the set is
+# closed, and why widening it means touching ``settings_io.SETTINGS``) moved to
+# that leaf module because ``teams.TeamMember.tier`` now validates against it and
+# the data layer must not import this 3.5k-line harness module. Nothing else here
+# changes: the name still resolves at ``local_operator.harness.subagent``.
 
 #: The one tier VALUE that means "this tier is CONFIGURED, and it runs on
 #: whatever model the launching session is on": ``subagents.models.hi: default``.
@@ -346,6 +336,166 @@ def read_effort_tier_targets() -> dict[str, tuple[Any, str | None]]:
         parsed = parse_tier_mapping(value)
         targets[tier] = parsed if parsed is not None else (value, None)
     return targets
+
+
+@dataclass(frozen=True)
+class MemberModelResolution:
+    """Which model and reasoning depth ONE roster slot resolves to (design §4).
+
+    The single answer LAUNCH, RESUME and the desktop ``/effective`` read share,
+    so a surface that DISPLAYS what a member will run on cannot disagree with
+    the launch that actually runs it — the schema-vs-launch drift this repo has
+    already paid for once. Pure: it reads config and the agent registry, builds
+    no ``ModelSpec``, and touches no session state.
+
+    ``selector`` is the TIER's model selector (``provider/model``), the
+    ``default`` sentinel ("run it on the launching session's model"), or ``None``
+    (no tier anywhere — inherit). ``unavailable`` is ``""`` exactly when the
+    tier is usable; otherwise it is the refusal text a strict launch raises.
+    """
+
+    tier: str | None
+    #: WHICH layer chose the tier. ``launch`` is a caller's ``effort=`` argument,
+    #: ``team`` a ``TeamMember.tier``, ``row`` the role's own ``effort:`` tag.
+    tier_source: Literal["launch", "team", "row", "none"]
+    selector: Any
+    #: The requested REASONING effort, unclamped — the ladder belongs to the
+    #: resolved spec. ``auto`` means "the model's own default" (which is NOT the
+    #: same as unset: unset falls through to the tier's map effort instead).
+    effort: str | None
+    effort_source: Literal["team", "tier", "model_default"]
+    unavailable: str = ""
+    #: Whether ``unavailable`` is the ORDINARY case -- a tier nothing is
+    #: configured at -- rather than a malformed or unreadable value. The lenient
+    #: caller (session naming) is silent about the first: a session with no
+    #: ``subagents.models`` at all names itself on the parent's model by design.
+    unavailable_quiet: bool = False
+
+    @property
+    def decided_by_team(self) -> bool:
+        """Whether a ``TeamMember`` field decided the tier or the depth.
+
+        What ``model_selection_source`` reports as ``team``.
+        """
+        return self.tier_source == "team" or self.effort_source == "team"
+
+
+def resolve_member_model(
+    role: str,
+    *,
+    roster: Any = None,
+    slot_kind: str = "agent",
+    slot_role: str | None = None,
+    launch_tier: str | None = None,
+    agent_registry: Any = None,
+    tier_targets: Mapping[str, tuple[Any, str | None]] | None = None,
+) -> MemberModelResolution:
+    """Resolve ``role``'s model tier and reasoning effort from every layer.
+
+    Precedence, and the two fields fall through INDEPENDENTLY (an ``effort``
+    override alone keeps whatever model the tier below it chose):
+
+    * **tier** — the caller's ``launch_tier`` → the roster slot's ``tier`` → the
+      role's own ``effort:`` tag (``resolve_profile``, the same read the launch
+      used before this) → none.
+    * **effort** — the roster slot's ``effort`` → the chosen tier's
+      ``{model, effort}`` mapping → the model's own default.
+
+    ``slot_role`` is the roster SLOT's name when it differs from the role the
+    child runs as: a ``team:pod`` launch runs as pod's manager, while the
+    override that moved it is stored on the ``team:pod`` slot of the PARENT's
+    roster (see :func:`team_slot_name`). Lookup is casefolded, first match.
+
+    Configured-ness is deliberately NOT checked at write time — config moves
+    independently of teams — but it IS checked here, so a display surface can
+    say "tier hi is not configured" before a launch fails on it. The refusal
+    TEXT is the launch's own (:func:`malformed_tier_reason`), because two
+    spellings of one fault is how the two surfaces start disagreeing.
+    """
+    from local_operator.teams import find_member
+
+    slot = find_member(getattr(roster, "members", None), slot_role or role, kind=slot_kind)
+    member_tier = getattr(slot, "tier", None)
+    member_effort = getattr(slot, "effort", None)
+
+    if launch_tier:
+        tier: str | None = str(launch_tier).strip().lower()
+        tier_source: Literal["launch", "team", "row", "none"] = "launch"
+    elif member_tier:
+        tier, tier_source = str(member_tier), "team"
+    else:
+        row_tier = _row_effort_tier(role, agent_registry)
+        tier, tier_source = (row_tier, "row") if row_tier else (None, "none")
+
+    selector: Any = None
+    tier_effort: str | None = None
+    unavailable = ""
+    unavailable_quiet = False
+    if tier is not None:
+        targets = read_effort_tier_targets() if tier_targets is None else tier_targets
+        raw_selector, tier_effort = targets.get(tier, (None, None))
+        if raw_selector is not None and not isinstance(raw_selector, str):
+            unavailable = malformed_tier_reason(tier, raw_selector)
+        elif is_inherit_tier_sentinel(raw_selector):
+            selector = INHERIT_TIER_SENTINEL
+        elif not raw_selector:
+            unavailable = f"no model configured at subagents.models.{tier}"
+            unavailable_quiet = True
+        else:
+            provider, _, model_id = str(raw_selector).partition("/")
+            if not provider or not model_id:
+                unavailable = f"subagents.models.{tier}={raw_selector!r} lacks provider/model"
+            else:
+                selector = str(raw_selector)
+
+    if member_effort:
+        effort: str | None = str(member_effort)
+        effort_source: Literal["team", "tier", "model_default"] = "team"
+    elif tier_effort:
+        effort = str(tier_effort)
+        effort_source = "tier"
+    else:
+        effort = None
+        effort_source = "model_default"
+
+    return MemberModelResolution(
+        tier=tier,
+        tier_source=tier_source,
+        selector=selector,
+        effort=effort,
+        effort_source=effort_source,
+        unavailable=unavailable,
+        unavailable_quiet=unavailable_quiet,
+    )
+
+
+def _row_effort_tier(role: str, agent_registry: Any) -> str | None:
+    """The tier a ROLE's own profile pins, or ``None`` when it pins none.
+
+    The same read :meth:`Session._resolve_subagent_model` has always done, and
+    the reason this moved behind one function: the resolver has to know the row
+    tier before it can decide whether a roster override came FIRST, and a second
+    copy of the read is how the two would come apart.
+
+    It RAISES when the registry cannot be read, and that is deliberate rather
+    than sloppy: "the registry could not be read" and "no role of that name" are
+    different facts, and collapsing them is the silent substitution the strict
+    launch path exists to refuse (a broken registry used to fall through to a
+    packaged seed, which carries no operator pin, and the child then inherited
+    the parent's model with no trace). The CALLER decides what that means — the
+    launch refuses, the session-naming path warns and carries on.
+    """
+    if not role or role == "task":
+        return None
+    from local_operator.agent_profiles import resolve_profile
+
+    refresh = getattr(agent_registry, "refresh_now", None)
+    if callable(refresh):
+        # Fresh per launch, not up to a refresh interval stale: an operator who
+        # pins a role between two spawns must be obeyed by the next one.
+        refresh()
+    profile = resolve_profile(role, registry=agent_registry, strict_registry=True)
+    return str(profile.effort) if profile is not None and profile.effort else None
 
 
 def malformed_tier_reason(tier: str, raw: object) -> str:
@@ -891,6 +1041,33 @@ class LaunchTarget:
     depth: int
     reports_to: str
     is_team_launch: bool
+    #: The team whose ``team.yml`` NAMES this slot -- the PARENT's active team,
+    #: which is where a member override is looked up. Not ``team``: a
+    #: ``team:pod`` launch has ``team`` = pod (the roster the child carries),
+    #: while the override that moved it lives on pod's slot in the PARENT's
+    #: roster. Derived, never persisted: a resume re-derives it from the carried
+    #: ``team_lineage`` (see ``resolve_launch_target``), so an edited override
+    #: reaches the resumed child rather than being frozen at its birth.
+    #: ``None`` when the launch has no roster at all (no active team).
+    roster: Any = None
+
+
+def team_slot_name(agent: str, is_team_launch: bool) -> str | None:
+    """The roster SLOT a launching ``agent`` token names, for a team slot.
+
+    A ``team:pod`` launch resolves its ROLE to pod's manager (that is what the
+    child runs as), but the override belongs to the slot that NAMED it -- pod
+    -- so the member lookup needs the slot's own name. ``None`` for an agent
+    slot, whose role IS its slot name. ``agent`` may be the bare roster name
+    (a team slot addressed without the prefix) and may differ in case from the
+    stored slot, which is why the lookup that consumes this casefolds.
+    """
+    if not is_team_launch:
+        return None
+    token = (agent or "").strip()
+    if token.lower().startswith(TEAM_LAUNCH_PREFIX):
+        token = token[len(TEAM_LAUNCH_PREFIX) :].strip()
+    return token or None
 
 
 @dataclass(frozen=True)
@@ -1040,6 +1217,7 @@ def resolve_launch_target(
             depth=carried.depth,
             reports_to=carried.reports_to or TOP_SESSION_REPORTS_TO,
             is_team_launch=bool(sub_name),
+            roster=_carried_roster(parent_session, carried, bool(sub_name), team),
         )
 
     depth = _session_depth(parent_session) + 1
@@ -1081,7 +1259,59 @@ def resolve_launch_target(
         depth=depth,
         reports_to=_parent_reports_to(parent_session),
         is_team_launch=bool(sub_name),
+        # BOTH branches: the override lives on the slot that named this launch,
+        # and that slot is on the PARENT's roster -- which for a ``team:pod``
+        # launch is not ``team`` (pod). One value, so an agent slot and a
+        # nested-team slot resolve against the same roster.
+        roster=parent_team,
     )
+
+
+def _carried_roster(
+    parent_session: "Session", carried: CarriedLaunch, is_team_launch: bool, team: Any
+) -> Any:
+    """The roster a RESUMED launch reads its member override from.
+
+    Derived from the carried lineage rather than persisted, because a resume
+    must FOLLOW an override edited since the child was born (the documented
+    resume rule). Every session's last lineage id IS its ``active_team``
+    (``run_subagent`` stamps ``child.active_team = target.team``), so an AGENT
+    child -- whose lineage its birth did not extend -- was named by the team it
+    ran under, while a TEAM child's lineage gained the sub-team's id at birth,
+    putting the roster that named it one entry below. No new record field:
+    ``team_lineage`` already rides the snapshot.
+
+    ``None`` (no roster to consult) for a depth-1 team child, whose parent had
+    no team, and for a registry the session does not expose.
+    """
+    if not is_team_launch:
+        # Read the roster that named this slot FRESH from the registry, not the
+        # session's attached ``active_team`` object: a resume is documented to
+        # follow an override edited since the child last ran (comms.py resume),
+        # and the attached object is a snapshot from ``attach_team`` time that
+        # nothing re-reads -- using it would freeze the overrides at the child's
+        # birth. The registry read is the same one ``update_team`` writes
+        # through, so a same-process edit is visible immediately.
+        if carried.team_name:
+            try:
+                fresh = lookup_team(parent_session, carried.team_name)
+            except Exception:  # noqa: BLE001 — fall back to the carried object
+                logger.debug("could not re-read roster %r", carried.team_name, exc_info=True)
+                fresh = None
+            if fresh is not None:
+                return fresh
+        return team
+    lineage = tuple(carried.team_lineage)
+    if len(lineage) < 2:
+        return None
+    registry = getattr(parent_session, "team_registry", None)
+    if registry is None:
+        return None
+    try:
+        return registry.get_team(str(lineage[-2]))
+    except Exception:  # noqa: BLE001 — an unreadable ancestor roster is "no roster"
+        logger.debug("could not read the roster above %s", lineage[-1], exc_info=True)
+        return None
 
 
 def _lineage_names(session: "Session", lineage: tuple[str, ...]) -> list[str]:
@@ -1110,6 +1340,7 @@ def run_subagent(
     agent: str = "task",
     effort: str | None = None,
     model_selector: str | None = None,
+    selection_source: str | None = None,
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
     target: LaunchTarget | None = None,
@@ -1219,7 +1450,14 @@ def run_subagent(
         # runner never rewrites this one (see ``AsyncJob.owns_model``).
         job.owns_model = model_spec is not None
         job.model_selector = model_selector
-        job.model_selection_source = (
+        # The caller's own answer wins when it has one, because only the caller
+        # can see a ROSTER: a ``TeamMember`` override decides a child's model
+        # without appearing anywhere in these arguments, and the expression
+        # below would file it as ``role`` or ``parent`` -- naming the wrong layer
+        # on the receipt an operator reads to check who chose what. The
+        # expression is kept for every other caller (a direct ``run_subagent``,
+        # the comms resume) and produces the same values it always has.
+        job.model_selection_source = selection_source or (
             "explicit_inherit"
             if model_selector == "inherit"
             else (
