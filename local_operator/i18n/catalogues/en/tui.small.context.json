@@ -4,6 +4,16 @@
     "tone": "plain, instructional",
     "note": "The live approval card's verb, shown after the tool name so the row reads 'allow <tool>'. The message IS the verb: it has zero ICU arguments and is appended to a Rich Text row that then supplies the target, so the value's TRAILING SPACE is load-bearing — do not trim it. No maxCells: the card's own scored ladder sheds clauses by width rather than capping this word. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   },
+  "tui.small.copy.code_count": {
+    "role": "copy-picker message hint count",
+    "tone": "plain count",
+    "note": "The code-block tally in a /copy message hint, e.g. '3 code' appended after the line count and joined with ' · '. The pre-extraction f-string used the bare word 'code' at EVERY count including 1 ('1 code'), so this key deliberately has NO plural branch — adding one would change bytes. {shown} is str(code_count), a raw digit string: a number/plural '#' slot would group 1200 as '1,200' where the original printed '1200'. No maxCells: the hint is right-aligned and the label truncates beside it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy.quote_count": {
+    "role": "copy-picker message hint count",
+    "tone": "plain count",
+    "note": "The quote-block tally in a /copy message hint, e.g. '2 quote' appended after the line count and joined with ' · '. The pre-extraction f-string used the bare word 'quote' at EVERY count including 1 ('1 quote'), so this key deliberately has NO plural branch — adding one would change bytes. {shown} is str(quote_count), a raw digit string: a number/plural '#' slot would group 1200 as '1,200' where the original printed '1200'. No maxCells: the hint is right-aligned and the label truncates beside it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
   "tui.small.draft.attachment_count": {
     "role": "restored-draft clause",
     "tone": "plain count",
@@ -13,6 +23,16 @@
     "role": "picker footer position counter",
     "tone": "plain count",
     "note": "The catalogue-position summary in the /model footer, e.g. '14 of 300' — the visible window's size against the full match count, drawn only when the window cannot show the whole list. {shown} and {total} are RAW digit strings, exactly as the pre-extraction f-string printed them; both are typed as plain args (not {x, number}/plural) because grouping them into '1,200 of 3,000' would be a visible change the catalogue slice must not smuggle in, matching tui.analytics.totals.calls_meta's raw-count convention. The footer joins this with ' · ' separators in code, so the value carries no separator. No maxCells: the footer is fitted by the picker's clause-fit pass. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.picker.showing_prefix": {
+    "role": "picker window counter prefix",
+    "tone": "plain, factual",
+    "note": "The word opening the 'showing 1–9 of 42' window counter shared by the ask and move pickers, drawn as a separate Rich Text fragment so the numerals can carry a brighter style than the grammar. The TRAILING SPACE is load-bearing — it is the only separator before the span fragment — so do not trim it. The full phrase is assembled in code from this prefix, the span, tui.small.picker.of_separator and the total, preserving each fragment's style. No maxCells: the ask picker drops this word first when the row cannot fit. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.picker.of_separator": {
+    "role": "picker window counter separator",
+    "tone": "plain, factual",
+    "note": "The ' of ' between the visible span and the total in the 'showing 1–9 of 42' window counter shared by the ask and move pickers, drawn as a separate Rich Text fragment so the numerals can carry a brighter style than the grammar. BOTH spaces are load-bearing — they are the only separators around the span/total fragments — so do not trim them. No maxCells: the ask picker drops the 'showing' prefix first when the row cannot fit, never this separator. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   },
   "tui.small.session.resume_hint": {
     "role": "post-exit scrollback line",

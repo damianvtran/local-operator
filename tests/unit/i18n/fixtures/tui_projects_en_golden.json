@@ -17,6 +17,8 @@
   "tui.projects.send.binding_move": "Move",
   "tui.projects.send.binding_choose": "Choose",
   "tui.projects.send.binding_close": "Close",
+  "tui.projects.detail.no_text": "(no text in this entry)",
+  "tui.projects.detail.no_description": "no description yet",
   "tui.projects.title": "projects",
   "tui.projects.new_project": " · new project",
   "tui.projects.active_view": " · {view}",

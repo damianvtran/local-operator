@@ -122,6 +122,14 @@ def binding_zoom_out() -> Msg:
     return Msg("tui.projects.binding_zoom_out", {})
 
 
+def detail_no_description() -> Msg:
+    return Msg("tui.projects.detail.no_description", {})
+
+
+def detail_no_text() -> Msg:
+    return Msg("tui.projects.detail.no_text", {})
+
+
 def new_project() -> Msg:
     return Msg("tui.projects.new_project", {})
 
