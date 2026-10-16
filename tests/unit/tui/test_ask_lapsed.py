@@ -596,3 +596,235 @@ async def test_a_fleet_row_lapsing_on_screen_becomes_read_only(enabled):
         by = {row.ask_id: row for row in app._ask_fleet_rows}
         assert by["b1"].lapsed and not by["b1"].answerable
         assert by["b2"].answerable
+
+
+# -- round 2 remediation ------------------------------------------------------
+
+
+async def _fleet_op_held(monkeypatch, isolated_index):
+    """A fleet engage parked mid-dial, plus the records the two pins read."""
+    import asyncio
+
+    from tests.unit.tui.test_ask_fleet import _FakeAttachClient
+    from tests.unit.tui.test_ask_fleet import _row as fleet_row
+    from tests.unit.tui.test_ask_fleet import _seed
+
+    hold = asyncio.Event()
+    engages: list[Any] = []
+    cancelled: list[Any] = []
+    record: dict[str, Any] = {}
+
+    async def _fake(config_dir, session_id, work, **kwargs):
+        engages.append(getattr(work, "ask_id", None))
+        try:
+            await hold.wait()
+        except asyncio.CancelledError:
+            cancelled.append(getattr(work, "ask_id", None))
+            raise
+        return _FakeAttachClient(record), "detail"
+
+    monkeypatch.setattr("local_operator.mobile.attach_client.engage_session_client", _fake)
+    _seed(isolated_index, "s-other", [fleet_row("b1")])
+    return hold, engages, cancelled, fleet_row
+
+
+async def test_a_fleet_ops_guard_survives_collapse_and_a_session_snapshot(
+    enabled, monkeypatch, tmp_path
+):
+    """Review round 2, M1: only a session-scope `x` mark is swept by a snapshot.
+
+    The fleet worker owns its own mark for the whole engage window; a sweep that
+    cleared it once the fleet rows were dropped let a reopened list send again,
+    and the exclusive worker group CANCELLED the first engage (round 2's F2).
+    """
+    from local_operator.tui.widgets.ask_queue import SCOPE_FLEET
+
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+    hold, engages, cancelled, fleet_row = await _fleet_op_held(monkeypatch, tmp_path)
+    app = _app(_AskSession())
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        app._ask_fleet_rows = ask_rows([fleet_row("b1", session_id="s-other")])
+        app._ask_scope = SCOPE_FLEET
+        app._mount_ask_list(scope=SCOPE_FLEET)
+        await _settle(pilot)
+        listing = app._ask_list
+        assert listing is not None
+        app._run_fleet_ask_op(listing.rows[0], "respond", answers={"q1": ["Yes"]})
+        await _settle(pilot)
+        app._collapse_asks()
+        app._sync_ask_surface(ask_rows([]))
+        await _settle(pilot)
+        assert "b1" in app._ask_in_flight, "the engage is mid-dial but its guard is gone"
+        # The door again: the index still holds b1, and the row comes back marked.
+        app._ask_fleet_rows = ask_rows([fleet_row("b1", session_id="s-other")])
+        app._ask_scope = SCOPE_FLEET
+        app._mount_ask_list(scope=SCOPE_FLEET)
+        await _settle(pilot)
+        listing = app._ask_list
+        assert listing is not None and listing.in_flight("b1")
+        app._run_fleet_ask_op(listing.rows[0], "respond", answers={"q1": ["No"]})
+        await _settle(pilot)
+        hold.set()
+        await _settle(pilot, 8)
+        assert engages == ["b1"] and cancelled == [], (engages, cancelled)
+
+
+LONG_QUESTION = (
+    "Before the cutover tonight, should the stale-row migration drop the rows outright, "
+    "or backfill them from the audit log first so history survives?"
+)
+
+
+def _long_lapsed_row() -> dict[str, Any]:
+    row = _row("a1", LONG_QUESTION, status="timed_out")
+    row["questions"][0]["options"] = [
+        {"label": "Drop the rows", "description": "fast; nothing reads the column today"},
+        {
+            "label": "Backfill from the audit log",
+            "description": "slower; keeps every row's history",
+        },
+        {"label": "Ask the data team", "description": "they own the audit log retention"},
+    ]
+    return row
+
+
+async def test_a_read_only_card_offers_the_reading_keys_and_shows_the_whole_question(enabled):
+    """UX round 2, U9: the explicit look must reach the whole question.
+
+    `^e` and the arrows only READ, so D10 is untouched; they are offered where they
+    do something, and `ctrl+e` works because the footer names it.
+    """
+    app = _app(_AskSession())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows([_long_lapsed_row(), _row("a2", "Which tier?", status="timed_out")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskQueueList).focus()
+        await pilot.press("enter")
+        await _settle(pilot)
+        card = app.query_one(AskPickerScreen)
+        assert card.read_only
+        lines = "\n".join(card.render_lines_for_test())
+        assert "history survives?" not in lines, "fixture no longer clips the question"
+        assert "^e more" in lines, lines
+        assert "esc collapse" in lines, lines
+        await pilot.press("ctrl+e")
+        await _settle(pilot)
+        lines = "\n".join(card.render_lines_for_test())
+        assert "history survives?" in lines, lines
+
+
+async def test_a_read_only_card_names_the_arrows_only_when_the_options_are_clipped(enabled):
+    from local_operator.tui.widgets.ask_picker import AskPickerScreen as Card
+
+    app = _app(_AskSession())
+    async with app.run_test(size=(80, 16)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_long_lapsed_row()]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.query_one(AskQueueList).focus()
+        await pilot.press("enter")
+        await _settle(pilot)
+        card = app.query_one(Card)
+        assert card.read_only
+        lines = "\n".join(card.render_lines_for_test())
+        if "showing" in lines:
+            assert "↑↓ scroll" in lines, lines
+        else:
+            assert "↑↓" not in lines, lines
+    short = _app(_AskSession())
+    async with short.run_test(size=(120, 40)) as pilot:
+        await _settle(pilot)
+        short._sync_ask_surface(ask_rows([_row("a2", "Which tier?", status="timed_out")]))
+        await _settle(pilot)
+        short._expand_asks()
+        await _settle(pilot)
+        short.query_one(AskQueueList).focus()
+        await pilot.press("enter")
+        await _settle(pilot)
+        card = short.query_one(Card)
+        lines = "\n".join(card.render_lines_for_test())
+        assert "↑↓" not in lines and "^e" not in lines, lines
+
+
+async def test_a_read_only_card_drops_the_type_your_own_invitation():
+    """Design round 2, D8: `Other (type your own)` invites typing the card refuses."""
+    from local_operator.tui.widgets.ask_picker import OTHER_LABEL
+
+    row = ask_rows([_row("a1", "Deploy now?", status="timed_out")])[0]
+    questions = OperatorApp._drawable_questions(None, row)  # type: ignore[arg-type]
+    card = AskPickerScreen(questions, lambda _a: None)
+    card.set_read_only()
+    lines = "\n".join(card.render_lines_for_test())
+    assert OTHER_LABEL not in lines and "type your own" not in lines, lines
+    assert "Other" in lines
+
+
+async def test_enter_view_fits_the_header_at_eighty_columns():
+    """UX round 2, U10: the explicit look is discoverable at the default width."""
+    rows = ask_rows(
+        [_row("t1", "Old one?", status="timed_out"), _row("t2", "Older?", status="timed_out")]
+    )
+    listing = AskQueueList(rows)
+    header = listing.header_text(80)
+    assert "x dismiss" in header and "view" in header, header
+
+
+async def test_the_bar_keeps_its_chevron_and_whole_clauses_down_to_fifty_columns(enabled):
+    """Design round 2, D6: shed whole clauses, never cells, and never the chevron."""
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.ask_queue import ASK_BAR_CHEVRON_COLLAPSED
+
+    app = _app(_AskSession())
+    for width in (50, 54, 58, 62):
+        async with app.run_test(size=(width, 24)) as pilot:
+            await _settle(pilot)
+            app._sync_ask_surface(
+                ask_rows(
+                    [
+                        _row("a1", "Deploy now?"),
+                        _row("a2", "Which tier?"),
+                        dict(_row("a3", "Rotate the key?"), urgent=True),
+                        _row("t1", "Old one?", status="timed_out"),
+                    ]
+                )
+            )
+            await _settle(pilot)
+            bar = app.query_one(AskBar)
+            plain = bar.render().plain
+            # Within the bar's own width: anything past it is cropped by the
+            # painter, and the chevron is what went (design round 2, D6).
+            assert cell_len(plain) <= bar.size.width, (width, plain)
+            plain = plain.rstrip()
+            assert plain.endswith(ASK_BAR_CHEVRON_COLLAPSED), (width, plain)
+            assert "timed out" in plain, (width, plain)
+            assert (
+                not plain.rstrip(ASK_BAR_CHEVRON_COLLAPSED)
+                .rstrip()
+                .endswith(("question", "timed", "·"))
+            ), (width, plain)
+        app = _app(_AskSession())
+
+
+async def test_the_chevron_is_muted_with_the_bar_when_nothing_is_answerable(enabled):
+    """UX round 2, U14: one cell of accent on a bar that says nothing is owed."""
+    from local_operator.tui import theme as theme_mod
+
+    app = _app(_AskSession())
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("t1", "Old one?", status="timed_out")]))
+        await _settle(pilot)
+        painted = app.query_one(AskBar).render()
+        last = max(painted.spans, key=lambda span: span.end)
+        color = getattr(last.style, "color", None)
+        accent = str(theme_mod.semantic_color("accent")).lower()
+        assert str(getattr(color, "name", "")).lower() != accent, last.style

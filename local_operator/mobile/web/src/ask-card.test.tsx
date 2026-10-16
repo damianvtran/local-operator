@@ -145,7 +145,7 @@ describe("AskCard", () => {
 		const header = screen.getByRole("button", { name: /Timed out/ });
 		expect(header.getAttribute("aria-expanded")).toBe("false");
 		expect(header.textContent).toContain("ship the fix?");
-		expect(screen.queryByText("Timed out — the agent goes ahead without your answer")).toBeNull();
+		expect(screen.queryByText(/the agent goes ahead without your answer/)).toBeNull();
 		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
 		/* Mounting it takes no focus: a lapsed ask never claims the user (D12). */
@@ -162,14 +162,17 @@ describe("AskCard", () => {
 		expect(
 			screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded"),
 		).toBe("true");
-		expect(screen.getByText("Timed out — the agent goes ahead without your answer")).toBeTruthy();
+		/* UX round 2, U13: the badge already says "Timed out" one line above, so
+		   the body starts at what that means rather than repeating the word. */
+		expect(screen.getByText("the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.queryByText(/^Timed out —/)).toBeNull();
 		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
-		/* UX U7: the question is stated once, on the header — the body does not
-		   repeat a single-question ask's text under it. */
+		/* UX U7: the question is stated once. Expanded, the header carries only
+		   the badge and the body states the question in full. */
 		expect(screen.getAllByText("ship the fix?").length).toBe(1);
 	});
 
