@@ -5127,7 +5127,10 @@ class QuietGroupTracker:
             own = self._boundary_member_index(list(bar._members))
             if own >= 0:
                 self._release_splitter(bar, own)
-        if replacing:
+        if group is not None and not focus_refusal:
+            # Written as the explicit pair rather than as `replacing`: a boolean
+            # variable does not narrow `group` for the type checker, and the
+            # whole-tree pyright gate is fail-closed on exactly that error.
             self._form(span, group, partial, reader_open=reader_open)
         # Reconnect to the ACTUAL tail, formed or refused, touched or not:
         # `_last_record` becomes the true last source row and an untouched live
