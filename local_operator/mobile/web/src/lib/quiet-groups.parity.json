@@ -1,7 +1,7 @@
 {
 	"_": "THE SHARED QUIET-GROUP PARITY FIXTURE (quiet-turn design §5, rev 2). This file is the ONE definition's cross-client contract: the UI's `quietGroupsOf`/`quietGroupOfSegment` (turn-collapse-model.ts) are checked against it by scripts/turn-collapse-model.test.mjs today, and the native, relay-web and TUI group slices COPY this file and check their own derivation against the same cases, the way local-operator's `format.parity.json` and `spend-context.parity.json` pin a formatter across surfaces. A group is client-derived: there is no wire kind and no capability flag, so this fixture - not a schema - is what keeps the clients from drifting apart in silence.",
 	"vocabulary": "Rows are records in the UI's `TranscriptRecord` vocabulary, carrying only the fields the group definition reads: `kind` plus (`ts`, `id`) and, per kind, `text` (user/wake/assistant/notice/custom), `body`+`sender` (peer; missing sender fields fall back to the identity ladder), `customType`+`level` (custom), `toolName`+`phase`+`isError` (tool), `complete` (notice). A client with a different record type maps these onto its own shape; the DERIVATION is the shared thing.",
-	"shape": "Each case's `expected` is what the group entry point returns: for cases with a `span` (`[from, to]` indexes into `rows`, plus optional `spanHeadLoaded`/`open`), `quietGroupOfSegment(records, span, options)`; otherwise the whole-array `quietGroupsOf(records)`. Timestamps are ms epoch, copied verbatim into `firstTs`/`lastTs`.",
+	"shape": "Each case's `expected` is what the group entry point returns: for cases with a `span` (`[from, to]` indexes into `rows`, plus optional `spanHeadLoaded`/`open`), `quietGroupOfSegment(records, span, options)`; otherwise the whole-array `quietGroupsOf(records)`. Timestamps are ms epoch, copied verbatim into `firstTs`/`lastTs`. Each expected group ALSO carries `clauseFacts`: the ordered summary-clause identifiers with their counts (`count:`, `actions:`, `reply_requested:`, `steered:`), derived by the shared rule rather than rendered text, so a surface still owns its own words. The facts are pinned BECAUSE the clause set is derived per surface: while each surface owned its own conditions, one group read `messages · 2 · 3 actions` on the desktop and bare `messages · 2` on the relay, and nothing caught it - the fixture pinned counts but no clause. `actions` is stated whenever it is NONZERO (no mixed-work threshold), and a workless group states no actions clause.",
 	"generatedBy": "authored by hand for local-operator-ui S2 (quiet-turn slice), 2026-10-10; every case is also exercised through the shipped plan in scripts/turn-collapse-model.test.mjs.",
 	"cases": [
 		{
@@ -72,7 +72,11 @@
 					"actions": 2,
 					"failed": 1,
 					"open": true,
-					"rowIds": ["p1", "t1", "q1", "p2", "t2", "q2"]
+					"rowIds": ["p1", "t1", "q1", "p2", "t2", "q2"],
+					"clauseFacts": [
+						"count:2",
+						"actions:2"
+					]
 				}
 			]
 		},
@@ -150,7 +154,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": false,
-					"rowIds": ["p1", "p2"]
+					"rowIds": ["p1", "p2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				},
 				{
 					"key": "qg:p4",
@@ -167,7 +174,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["p4", "p5"]
+					"rowIds": ["p4", "p5"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -209,7 +219,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": false,
-					"rowIds": ["p1", "p2"]
+					"rowIds": ["p1", "p2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -264,7 +277,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": false,
-					"rowIds": ["p1", "p2"]
+					"rowIds": ["p1", "p2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				},
 				{
 					"key": "qg:p4",
@@ -281,7 +297,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["p4", "p5"]
+					"rowIds": ["p4", "p5"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -315,7 +334,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["p1", "w2"]
+					"rowIds": ["p1", "w2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -410,7 +432,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
+					"rowIds": ["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+					"clauseFacts": [
+						"count:7"
+					]
 				}
 			]
 		},
@@ -472,7 +497,11 @@
 				"actions": 2,
 				"failed": 0,
 				"open": true,
-				"rowIds": ["p1", "t1", "q1", "p2", "t2", "q2"]
+				"rowIds": ["p1", "t1", "q1", "p2", "t2", "q2"],
+				"clauseFacts": [
+					"count:2+",
+					"actions:2"
+				]
 			}
 		},
 		{
@@ -557,7 +586,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": false,
-					"rowIds": ["p1", "p2"]
+					"rowIds": ["p1", "p2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				},
 				{
 					"key": "qg:p4",
@@ -574,7 +606,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["p4", "p5"]
+					"rowIds": ["p4", "p5"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -605,7 +640,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["w1", "w2"]
+					"rowIds": ["w1", "w2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -640,7 +678,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["x1", "x2"]
+					"rowIds": ["x1", "x2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		},
@@ -675,7 +716,10 @@
 					"actions": 0,
 					"failed": 0,
 					"open": true,
-					"rowIds": ["j1", "j2"]
+					"rowIds": ["j1", "j2"],
+					"clauseFacts": [
+						"count:2"
+					]
 				}
 			]
 		}
