@@ -37,10 +37,11 @@ nonsecret personal/user knowledge in **global** memory, across sessions. Recall 
 `memory(op="recall", text="Elara location")`. Both operations are bound to global;
 there is **no scope argument**. Old scope-bearing calls are refused, never stripped
 or reinterpreted. This is a declared personal-only convenience with a bounded shape
-check: a tracker reference, a named commit, a CI/release status verb or a `next step`
-phrase is refused with a redirect to `memory://session`. It is a narrow locator
-filter — it cannot judge arbitrary prose, and it is not a guarantee that a model
-will always choose the right tool.
+check: a `#N`/`!N` tracker reference next to a work word, a `commit`/`sha`/`head` hex,
+a CI/release status verb, or a `next step`/`HOLD` tied to a work word is refused with a
+redirect to `memory://session`. It is a bounded locator filter, not a classifier — prose
+work text with no locator, or a hyphenated key like `LOH-13`, still passes, and it is not
+a guarantee that a model will always choose the right tool.
 
 Work state and checkpoints use `memory://session`; intentionally shared work uses
 `memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.

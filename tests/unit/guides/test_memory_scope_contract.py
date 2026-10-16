@@ -45,7 +45,7 @@ def test_personal_helper_and_existing_privacy_limits_remain_explicit() -> None:
     # LOH-25: the helper gained a bounded SHAPE refusal, so the old absolute
     # "not a content classifier" claim is retired for an honest, bounded one.
     assert "not a content classifier" not in body
-    assert "narrow locator" in body
+    assert "bounded locator filter" in body
     assert "memory://session" in body
     assert "Existing session rows are not promoted or rewritten." in body
     assert "Explicit role allowlists are never widened" in body
