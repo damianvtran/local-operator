@@ -65,9 +65,10 @@ async def _settle(pilot, turns: int = 3) -> None:
 # -- the store's one predicate ------------------------------------------------
 
 
-async def test_the_lapsed_set_is_timed_out_alone_and_a_subset_of_outstanding():
-    """D10: ``is_lapsed`` sits beside ``is_outstanding`` and never widens the tally."""
-    assert store.LAPSED_STATUSES <= store.OUTSTANDING_STATUSES
+async def test_the_lapsed_set_is_timed_out_alone_and_disjoint_from_outstanding():
+    """D10, #2388: a lapsed ask is settled by its deadline — shown, dismissible,
+    and never counted in the outstanding tally."""
+    assert store.LAPSED_STATUSES.isdisjoint(store.OUTSTANDING_STATUSES)
     assert store.is_lapsed(store.STATUS_TIMED_OUT)
     for status in (
         store.STATUS_OPEN,

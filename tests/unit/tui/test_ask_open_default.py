@@ -99,7 +99,7 @@ def _wire(rows: Sequence[dict[str, Any]] | None) -> dict[str, Any]:
     """
     if rows is None:
         return {"asks": None, "asks_open": None}
-    outstanding = sum(1 for row in rows if row["status"] in ("open", "timed_out"))
+    outstanding = sum(1 for row in rows if row["status"] == "open")
     return {"asks": list(rows) or None, "asks_open": outstanding}
 
 
