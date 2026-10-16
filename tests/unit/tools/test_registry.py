@@ -534,15 +534,8 @@ def test_diff_details_carries_a_rendered_diff_and_honours_the_cap() -> None:
 def _pem_block(line: str, *, prefix: str = "") -> str:
     """A synthetic PRIVATE KEY armour block built from a repeated body line."""
     return (
-        prefix
-        + "-----BEGIN "
-        + "PRIV"
-        "ATE KEY-----\n"
-        + line
-        + "\n"
-        + line
-        + "\n-----END "
-        + "PRIV"
+        prefix + "-----BEGIN " + "PRIV"
+        "ATE KEY-----\n" + line + "\n" + line + "\n-----END " + "PRIV"
         "ATE KEY-----\n"
     )
 
@@ -566,17 +559,17 @@ class TestDiffDetailsKeepsPemBlocksWhole:
 
     def _classes(self, rows: list[str]) -> str:
         return "".join(
-            "@"
-            if row[:1] == "@"
-            else (
-                "H"
-                if row[1:].startswith("-----BEGIN")
+            (
+                "@"
+                if row[:1] == "@"
                 else (
-                    "E"
-                    if row[1:].startswith("-----END")
-                    else "B"
-                    if row[1:].startswith(self.LINE[:8])
-                    else "o"
+                    "H"
+                    if row[1:].startswith("-----BEGIN")
+                    else (
+                        "E"
+                        if row[1:].startswith("-----END")
+                        else "B" if row[1:].startswith(self.LINE[:8]) else "o"
+                    )
                 )
             )
             for row in rows
@@ -598,15 +591,11 @@ class TestDiffDetailsKeepsPemBlocksWhole:
     def test_deep_body_edit_whose_framing_falls_outside_the_context(self) -> None:
         body = "\n".join([self.LINE] * 12)
         before = (
-            "-----BEGIN "
-            + "PRIV"
-            "ATE KEY-----\n" + body + "\n-----END "
-            + "PRIV"
-            "ATE KEY-----\n"
+            "-----BEGIN " + "PRIV" "ATE KEY-----\n" + body + "\n-----END " + "PRIV" "ATE KEY-----\n"
         )
         six = "\n".join([self.LINE] * 6)
         replacement = self.LINE * 4
-        after = before.replace(six, six[:-len(self.LINE)] + replacement, 1)
+        after = before.replace(six, six[: -len(self.LINE)] + replacement, 1)
         rows = self._details(before, after)
         classes = self._classes(rows)
         assert classes.count("H") == 1 and classes.count("E") == 1
@@ -644,16 +633,8 @@ class TestDiffDetailsKeepsPemBlocksWhole:
     def test_truncated_header_without_end_is_not_widened(self) -> None:
         import difflib
 
-        before = (
-            "-----BEGIN "
-            + "PRIV"
-            "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 111.\n"
-        )
-        after = (
-            "-----BEGIN "
-            + "PRIV"
-            "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 222.\n"
-        )
+        before = "-----BEGIN " + "PRIV" "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 111.\n"
+        after = "-----BEGIN " + "PRIV" "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 222.\n"
         expected = list(
             difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
         )
@@ -670,12 +651,8 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         # A pathological block cannot escape the stored cap: widening happens
         # BEFORE the cap, and the truncation marker is what the seam refuses on.
         huge_before = (
-            "-----BEGIN "
-            + "PRIV"
-            "ATE KEY-----\n"
-            + "\n".join([self.LINE] * 400)
-            + "\n-----END "
-            + "PRIV"
+            "-----BEGIN " + "PRIV"
+            "ATE KEY-----\n" + "\n".join([self.LINE] * 400) + "\n-----END " + "PRIV"
             "ATE KEY-----\n"
         )
         huge_after = huge_before.replace(
@@ -724,11 +701,7 @@ class TestDiffDetailsKeepsPemBlocksWhole:
 
         body = "\n".join([self.LINE] * 400)
         big = (
-            "-----BEGIN "
-            + "PRIV"
-            "ATE KEY-----\n" + body + "\n-----END "
-            + "PRIV"
-            "ATE KEY-----\n"
+            "-----BEGIN " + "PRIV" "ATE KEY-----\n" + body + "\n-----END " + "PRIV" "ATE KEY-----\n"
         )
         before = big + "Middle guidance 111.\n" + big
         after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)

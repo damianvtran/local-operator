@@ -10332,9 +10332,7 @@ def _keep_pem_blocks_whole(
             # the consumer withholds it. Never publish a split block.
             return diff[:2] + ["…"]
         out.append(
-            _format_hunk_header(
-                old_start, old_end - old_start, new_start, new_end - new_start
-            )
+            _format_hunk_header(old_start, old_end - old_start, new_start, new_end - new_start)
         )
         out.extend(rendered)
     return out
@@ -10441,7 +10439,7 @@ def _cover_end(start: int, end: int, blocks: Sequence[tuple[int, int]]) -> int:
 
 
 def _merge_touching(
-    hunks: Sequence[tuple[int, int, int, int, list[str]]]
+    hunks: Sequence[tuple[int, int, int, int, list[str]]],
 ) -> list[tuple[int, int, int, int, list[str]]]:
     """Merge hunks whose widened slices now meet, in source order.
 
@@ -10481,11 +10479,7 @@ def _render_groups(
     rows: list[str] = []
     for group in groups:
         first, last = group[0], group[-1]
-        rows.append(
-            _format_hunk_header(
-                first[1], last[2] - first[1], first[3], last[4] - first[3]
-            )
-        )
+        rows.append(_format_hunk_header(first[1], last[2] - first[1], first[3], last[4] - first[3]))
         for tag, old_from, old_to, new_from, new_to in group:
             if tag == "equal":
                 rows.extend(" " + line for line in before_lines[old_from:old_to])
