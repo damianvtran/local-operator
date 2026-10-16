@@ -1145,11 +1145,13 @@ def backfill_session_origins(
         # head of the message — but a brief whose BODY embeds a skill payload
         # collapses to that payload's typed line and its ``[role: x]``
         # preamble is no longer the text matched below, so the directory would
-        # not be stamped as a subagent. No brief embeds one today (a delegated
-        # brief is prose plus ``[role: x]``), and the stamp is idempotent and
-        # re-derived on a later sweep, so this is recorded rather than
-        # special-cased: reading the RAW opener here instead would give this
-        # one reader a second definition of "the opener".
+        # not be stamped as a subagent. That miss STICKS rather than healing on
+        # a later sweep: the ``else`` arm below writes ``origin-scan.json`` and
+        # the loop above skips every directory carrying one. No brief embeds a
+        # payload today (a delegated brief is prose plus ``[role: x]``), so
+        # this is recorded rather than special-cased: reading the RAW opener
+        # here instead would give this one reader a second definition of "the
+        # opener".
         if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1
