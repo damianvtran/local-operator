@@ -1638,7 +1638,7 @@ class TuiSessionHandle(SessionHandle):
         ends in ``_sync_pending``, so the mirrored card (design §4) is refreshed
         by the same call that changed the ask list, and the repaint the phone
         sees is the one carrying it. The count is the runtime's outstanding tally
-        (open + timed-out-and-answerable), passed through verbatim.
+        (open asks; a timed-out one is settled, #2388), passed through verbatim.
         """
         try:
             self._fold.set_asks(list(rows) if rows is not None else None, outstanding_count)

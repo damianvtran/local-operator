@@ -1274,7 +1274,7 @@ class ServingSessionHandle(SessionHandle):
         Called by ``Session.publish_ask_state`` (which the queue drives on every
         enqueue/answer/decline/dismiss/reconcile) so the phone projection carries
         the new asks WITHOUT waiting for the next unrelated refresh. The count is
-        the session's OUTSTANDING tally (open + timed-out-and-answerable), passed
+        the session's OUTSTANDING tally (open asks; timed-out ones are settled), passed
         through rather than re-derived here. The legacy card is re-fronted by the
         same call, because ``_publish_pending_gate``
         reads the fold's ``pending`` — which now falls back to the head open

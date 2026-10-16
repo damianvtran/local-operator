@@ -912,8 +912,8 @@ class QueuedAskHarness:
             row.answers = answers
             row.answered_by = {"surface": "phone"}
         open_rows = [row for row in (self.projection.asks or []) if row.status == store.STATUS_OPEN]
-        # The tallies the phone renders come from the OUTSTANDING set (open +
-        # timed-out-and-answerable), which is the rule the real wire publishes —
+        # The tallies the phone renders come from the OUTSTANDING set (open
+        # asks; a timed-out one is settled, #2388), the rule the real wire publishes —
         # a fixture that counted ``open`` here would capture evidence for a
         # count the runtime no longer produces. The legacy MIRROR card is still
         # the head OPEN ask only, so the two are taken from different sets on

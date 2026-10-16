@@ -650,20 +650,6 @@ def test_a_timed_out_ask_is_settled_but_still_injects_its_notice():
     assert not store.is_outstanding("")
 
 
-def test_outstanding_asks_and_pending_asks_are_one_set_by_construction():
-    """``pending_asks`` (notice owed) delegates to the outstanding set.
-
-    They coincide because an ask owes its timeout notice exactly while it is
-    outstanding; a second spelling of either rule is what produced the wrong
-    wire tally, so there is only one.
-    """
-    events = [_queued(at=BASE, timeout_s=3600)]
-    (record,) = store.fold(events, BASE + 3_600_001)
-    assert record["status"] == store.STATUS_TIMED_OUT
-    assert [row["ask_id"] for row in store.outstanding_asks([record])] == ["a-1"]
-    assert store.pending_asks([record]) == store.outstanding_asks([record])
-
-
 def test_open_asks_is_the_cap_set_and_a_timed_out_ask_holds_no_slot():
     """The cap counts OPEN asks only, and so does the outstanding set (#2388).
 
