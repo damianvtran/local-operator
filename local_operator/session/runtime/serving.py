@@ -6830,14 +6830,23 @@ class ServingSessionHandle(SessionHandle):
         return await complete(messages, **fields)
 
     @_on_session_loop
-    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
-        """Fork a viewer's aside exchange into the durable conversation."""
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> AckDetail:
+        """Fork a viewer's aside exchange into the durable conversation.
+
+        ``adopt_state`` rides the ack (decision D4) so the caller can tell a
+        pair written now from one QUEUED for the turn's safe boundary; a
+        session that answers ``None`` (an older one, a test double) applied it.
+        """
         from local_operator.harness.types import Message
 
         parsed = [Message.model_validate(message) for message in messages]
-        await self._session.adopt_aside(parsed)
+        state = await self._session.adopt_aside(parsed) or "applied"
         self._notify()
-        return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+        if state == "queued":
+            detail = f"queued {len(parsed) // 2} aside exchange(s) for the end of this turn"
+        else:
+            detail = f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+        return AckDetail(detail, {}, {"adopt_state": state})
 
     @_on_session_loop
     async def recall_steer(self, command_id: str) -> str:

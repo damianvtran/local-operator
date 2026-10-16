@@ -489,35 +489,278 @@ async def test_adopt_aside_writes_to_both_the_context_and_the_transcript(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_adopt_aside_is_refused_mid_turn(tmp_path) -> None:
-    """The loop owns the message list then; a splice makes it unsendable."""
+async def test_adopt_aside_mid_turn_is_queued_and_lands_at_the_boundary(tmp_path) -> None:
+    """D1/D4: a mid-turn adopt QUEUES — nothing is spliced into the live list.
+
+    The loop owns the message list while ``_is_streaming``; a splice there is
+    unsendable. The pair waits on the shell FIFO and lands at the boundary
+    flush, announced by a ``history_delta`` carrying exactly the pair.
+    """
+    from local_operator.harness.types import HistoryDeltaEvent
+
     session = make_session(tmp_path, RecordingStream())
+    events: list[object] = []
+    session.subscribe(events.append)
+    pair = [Message.user("why?"), Message.assistant("because.")]
+    await session._turn_lock.acquire()
     session._is_streaming = True
+    try:
+        assert await session.adopt_aside(pair) == "queued"
+        assert session._context.messages == []
+        assert session._transcript.entries() == []
+        assert not [e for e in events if isinstance(e, HistoryDeltaEvent)]
+    finally:
+        session._is_streaming = False
+        await session._flush_shell_records()
+        session._turn_lock.release()
 
-    with pytest.raises(RuntimeError, match="while a turn is running"):
-        await session.adopt_aside([Message.user("why?")])
-
-    assert session._context.messages == []
-    assert session._transcript.entries() == []
+    assert session._pending_shell_records == []
+    assert [m.id for m in session._context.messages] == [m.id for m in pair]
+    assert [m.id for m in session._transcript.build_llm_history()] == [m.id for m in pair]
+    deltas = [e for e in events if isinstance(e, HistoryDeltaEvent)]
+    assert len(deltas) == 1
+    assert [m.id for m in deltas[0].messages] == [m.id for m in pair]
+    assert deltas[0].reset is False
     await session.dispose()
 
 
 @pytest.mark.asyncio
-async def test_adopt_aside_is_refused_while_the_turn_lock_is_held(tmp_path) -> None:
+async def test_adopt_aside_while_only_the_turn_lock_is_held_is_queued(tmp_path) -> None:
     """``_is_streaming`` alone is the half ``prompt()`` documents as insufficient.
 
     The lock is held across the whole pipeline, including a post-compaction
-    auto-continuation, where ``_is_streaming`` is already False. A fork landing
-    in that gap would be swept into a continuation the user never saw.
+    auto-continuation, where ``_is_streaming`` is already False. The pair waits
+    for the pipeline's own ``finally`` flush instead of being swept into it.
     """
     session = make_session(tmp_path, RecordingStream())
+    pair = [Message.user("why?"), Message.assistant("because.")]
     await session._turn_lock.acquire()
     try:
-        with pytest.raises(RuntimeError, match="while a turn is running"):
-            await session.adopt_aside([Message.user("why?")])
+        assert await session.adopt_aside(pair) == "queued"
+        assert session._context.messages == []
+        assert session._transcript.entries() == []
     finally:
+        await session._flush_shell_records()
         session._turn_lock.release()
+    assert [m.id for m in session._context.messages] == [m.id for m in pair]
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_adopt_onto_an_open_tool_batch_is_refused_loudly(tmp_path) -> None:
+    """D3 backstop: an idle write onto unanswered calls raises and writes NOTHING."""
+    from local_operator.session.errors import AsideAdoptRefused
+
+    session = make_session(tmp_path, RecordingStream())
+    call = ToolCall(id="c1", name="bash", arguments={})
+    open_batch = Message(role="assistant", content=[TextContent(text="running")], tool_calls=[call])
+    session._context.messages.extend([Message.user("go"), open_batch])
+    before = list(session._context.messages)
+
+    with pytest.raises(AsideAdoptRefused) as refused:
+        await session.adopt_aside([Message.user("why?"), Message.assistant("because.")])
+
+    assert refused.value.reason == "open_tool_batch"
+    assert refused.value.code == "aside_adopt_refused"
+    assert session._context.messages == before
+    assert session._transcript.entries() == []
+    assert session._pending_shell_records == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_adopt_on_a_closed_session_is_refused_loudly(tmp_path) -> None:
+    """Nothing will ever flush the queue of a disposed session, so queueing would lie."""
+    from local_operator.session.errors import AsideAdoptRefused
+
+    session = make_session(tmp_path, RecordingStream())
+    await session.dispose()
+    with pytest.raises(AsideAdoptRefused) as refused:
+        await session.adopt_aside([Message.user("why?"), Message.assistant("because.")])
+    assert refused.value.reason == "session_closed"
+    assert session._pending_shell_records == []
+
+
+@pytest.mark.asyncio
+async def test_shell_receipts_and_adopts_flush_in_arrival_order(tmp_path) -> None:
+    """D1: ONE FIFO — a bang receipt and an aside land in the order they arrived."""
+    session = make_session(tmp_path, RecordingStream())
+    first = ToolResult(tool_call_id="shell-1", tool_name="bash", content=[TextContent(text="1")])
+    second = ToolResult(tool_call_id="shell-2", tool_name="bash", content=[TextContent(text="2")])
+    pair = [Message.user("why?"), Message.assistant("because.")]
+    await session._turn_lock.acquire()
+    session._is_streaming = True
+    try:
+        await session.record_shell("echo one", first)
+        assert await session.adopt_aside(pair) == "queued"
+        await session.record_shell("echo two", second)
+        assert len(session._pending_shell_records) == 3
+    finally:
+        session._is_streaming = False
+        await session._flush_shell_records()
+        session._turn_lock.release()
+
+    texts = [m.text for m in session._context.messages if isinstance(m, Message)]
+    assert texts.index("! echo one") < texts.index("why?") < texts.index("! echo two")
+    assert texts.index("why?") + 1 == texts.index("because.")
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_retried_adopt_is_deduplicated_queued_and_durable(tmp_path) -> None:
+    """D2: a client that lost the ack and re-sends must not land the pair twice."""
+    session = make_session(tmp_path, RecordingStream())
+    pair = [Message.user("why?"), Message.assistant("because.")]
+    await session._turn_lock.acquire()
+    try:
+        assert await session.adopt_aside(pair) == "queued"
+        assert await session.adopt_aside(pair) == "queued"
+        assert len(session._pending_shell_records) == 1
+    finally:
+        await session._flush_shell_records()
+        session._turn_lock.release()
+
+    assert await session.adopt_aside(pair) == "applied"
+    assert len(session._context.messages) == 2
+    assert len(session._transcript.entries()) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_flushes_a_queued_adopt(tmp_path) -> None:
+    """D2: the queue is in memory, so dispose is the last boundary and flushes it."""
+    session = make_session(tmp_path, RecordingStream())
+    pair = [Message.user("why?"), Message.assistant("because.")]
+    session._is_streaming = True
+    assert await session.adopt_aside(pair) == "queued"
+    session._is_streaming = False
+
+    await session.dispose()
+
+    replayed = Transcript(tmp_path / "sess").build_llm_history()
+    assert [m.id for m in replayed if isinstance(m, Message)] == [m.id for m in pair]
+
+
+@pytest.mark.asyncio
+async def test_a_held_adopt_does_not_block_the_receipts_behind_it(tmp_path, caplog) -> None:
+    """D7: an open batch at a boundary SKIPS the adoption, never splices it, and
+    lets the bang receipt behind it persist exactly as it did before the queue.
+
+    The hold warns ONCE (review R7), however many boundaries re-try it.
+    """
+    session = make_session(tmp_path, RecordingStream())
+    pair = [Message.user("why?"), Message.assistant("because.")]
+    receipt = ToolResult(tool_call_id="shell-9", tool_name="bash", content=[TextContent(text="9")])
+    call = ToolCall(id="c1", name="bash", arguments={})
+    open_batch = Message(role="assistant", content=[TextContent(text="running")], tool_calls=[call])
+    session._context.messages.extend([Message.user("go"), open_batch])
+    session._is_streaming = True
+    assert await session.adopt_aside(pair) == "queued"
+    session._is_streaming = False
+
+    # Two boundaries with the batch still open: held both times, warned once.
+    with caplog.at_level("WARNING", logger="local_operator.session.session"):
+        await session._flush_shell_records()
+        await session._flush_shell_records()
+    held = [r for r in caplog.records if "held back" in r.getMessage()]
+    assert len(held) == 1 and pair[-1].id in held[0].getMessage()
+    assert not session._transcript.has_entry(pair[-1].id)
+
+    # A receipt queued BEHIND the held adoption is not blocked by it.
+    session._is_streaming = True
+    await session.record_shell("echo nine", receipt)
+    session._is_streaming = False
+    assert [type(q).__name__ for q in session._pending_shell_records] == [
+        "_PendingAdoption",
+        "tuple",
+    ]
+    await session._flush_shell_records()
+    assert session._transcript.has_entry("shell:shell-9:result")
+    # Skipped at that pass (its index came before the receipt), never spliced.
+    assert [type(q).__name__ for q in session._pending_shell_records] == ["_PendingAdoption"]
+    assert all(getattr(m, "id", None) != pair[0].id for m in session._context.messages)
+
+    # The receipt's own call/result pair now ends the list, so the tail rule
+    # reads it closed and the next boundary lands the pair after it.
+    await session._flush_shell_records()
+    assert session._transcript.has_entry(pair[-1].id)
+    assert session._pending_shell_records == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_adopt_still_held_at_dispose_is_reported_loudly(tmp_path, caplog) -> None:
+    """The one case that cannot defer: dispose is the last boundary.
+
+    An adopt held back by an open batch at dispose will never land, so it is an
+    ERROR in the log, an error notice on the event stream, and a durable
+    session-incident row a reconnecting frontend can read (review R6).
+    """
+    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+    from local_operator.harness.types import NoticeEvent
+
+    session = make_session(tmp_path, RecordingStream())
+    events: list[object] = []
+    session.subscribe(events.append)
+    pair = [Message.user("why?"), Message.assistant("because.")]
+    call = ToolCall(id="c1", name="bash", arguments={})
+    open_batch = Message(role="assistant", content=[TextContent(text="running")], tool_calls=[call])
+    session._context.messages.extend([Message.user("go"), open_batch])
+    session._is_streaming = True
+    assert await session.adopt_aside(pair) == "queued"
+    session._is_streaming = False
+
+    with caplog.at_level("ERROR", logger="local_operator.session.session"):
+        await session.dispose()
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR" and pair[-1].id in r.getMessage()]
+    assert errors, caplog.text
+    notices = [e for e in events if isinstance(e, NoticeEvent) and e.kind == "error"]
+    assert len(notices) == 1 and "1 aside(s)" in notices[0].text
+    reopened = Transcript(tmp_path / "sess")
+    assert not reopened.has_entry(pair[-1].id)
+    incidents = [
+        e
+        for e in reopened.entries()
+        if e.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(incidents) == 1
+    assert pair[-1].id in str(incidents[0].payload.get("details", {}).get("text", ""))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_receipt_write_is_reported_at_dispose(tmp_path, caplog) -> None:
+    """D7: nothing leaves the queue without a write or a report — receipts too."""
+    from local_operator.harness.types import NoticeEvent
+
+    session = make_session(tmp_path, RecordingStream())
+    events: list[object] = []
+    session.subscribe(events.append)
+    receipt = ToolResult(tool_call_id="shell-7", tool_name="bash", content=[TextContent(text="7")])
+
+    async def failing(command: str, result: ToolResult) -> None:
+        raise OSError("disk full")
+
+    session._persist_shell_record = failing  # type: ignore[method-assign]
+    await session._turn_lock.acquire()
+    await session.record_shell("echo seven", receipt)  # queued: the lock is held
+    session._turn_lock.release()
+
+    with caplog.at_level("ERROR", logger="local_operator.session.session"):
+        await session.dispose()
+
+    assert any("shell-7" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+    notices = [e for e in events if isinstance(e, NoticeEvent) and e.kind == "error"]
+    assert len(notices) == 1 and "1 shell command record(s)" in notices[0].text
+    # The durable half (review R2-3): the incident row names the receipt too.
+    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+
+    rows = [
+        str(e.payload.get("details", {}).get("text", ""))
+        for e in Transcript(tmp_path / "sess").entries()
+        if e.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(rows) == 1 and "shell-7" in rows[0], rows
 
 
 @pytest.mark.asyncio
@@ -730,3 +973,71 @@ def test_wrap_aside_turns_wraps_a_leading_whitespace_variant_of_the_wrapper() ->
     wrapped = wrap_aside_turns([already])
 
     assert wrapped[0].text.count("<aside>") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_adopt_never_lands_the_first_pair_twice(tmp_path) -> None:
+    """Review R2-2: dedupe is PER MESSAGE across the queue and the transcript.
+
+    An aside continuation re-sends the whole exchange with a new tail. Both
+    orders are pinned: pair 1 still QUEUED when the continuation arrives, and
+    pair 1 already LANDED. Either way exactly one Q1/A1 is written, with Q2/A2
+    after them.
+    """
+    for landed_first in (False, True):
+        session = make_session(tmp_path / f"landed-{landed_first}", RecordingStream())
+        q1, a1 = Message.user("Q1"), Message.assistant("A1")
+        q2, a2 = Message.user("Q2"), Message.assistant("A2")
+        await session._turn_lock.acquire()
+        try:
+            assert await session.adopt_aside([q1, a1]) == "queued"
+            if landed_first:
+                await session._flush_shell_records()
+                assert session._transcript.has_entry(a1.id)
+            assert await session.adopt_aside([q1, a1, q2, a2]) == "queued"
+            await session._flush_shell_records()
+        finally:
+            session._turn_lock.release()
+
+        ids = [e.id for e in session._transcript.entries()]
+        assert ids == [q1.id, a1.id, q2.id, a2.id], (landed_first, ids)
+        assert [m.id for m in session._context.messages] == [q1.id, a1.id, q2.id, a2.id]
+        # And a third re-send of the same exchange is a no-op answered "applied".
+        assert await session.adopt_aside([q1, a1, q2, a2]) == "applied"
+        assert [e.id for e in session._transcript.entries()] == ids
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_continuation_writes_only_the_new_pair(tmp_path) -> None:
+    """The immediate-write path filters per message too (R2-2)."""
+    session = make_session(tmp_path, RecordingStream())
+    q1, a1 = Message.user("Q1"), Message.assistant("A1")
+    q2, a2 = Message.user("Q2"), Message.assistant("A2")
+    assert await session.adopt_aside([q1, a1]) == "applied"
+    assert await session.adopt_aside([q1, a1, q2, a2]) == "applied"
+    assert [e.id for e in session._transcript.entries()] == [q1.id, a1.id, q2.id, a2.id]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_half_known_pair_is_refused_rather_than_landed(tmp_path) -> None:
+    """Pair-safe: never land an answer whose question was dropped as known."""
+    from local_operator.session.errors import AsideAdoptRefused
+
+    session = make_session(tmp_path, RecordingStream())
+    q1, a1 = Message.user("Q1"), Message.assistant("A1")
+    assert await session.adopt_aside([q1, a1]) == "applied"
+    before = [e.id for e in session._transcript.entries()]
+
+    # Q1 known, its answer new: a half pair.
+    with pytest.raises(AsideAdoptRefused):
+        await session.adopt_aside([q1, Message.assistant("a different answer")])
+    # An odd tail and an exchange that starts with an answer are refused too.
+    with pytest.raises(AsideAdoptRefused):
+        await session.adopt_aside([q1, a1, Message.user("dangling")])
+    with pytest.raises(AsideAdoptRefused):
+        await session.adopt_aside([Message.assistant("A"), Message.user("Q")])
+
+    assert [e.id for e in session._transcript.entries()] == before
+    await session.dispose()
