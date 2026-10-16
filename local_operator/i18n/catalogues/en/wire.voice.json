@@ -1,0 +1,16 @@
+{
+  "wire.voice.title": "Voice mode",
+  "wire.voice.description": "Talk to one conversation at a time with push-to-talk. That conversation's own agent answers, and its last reply is read aloud. Read on the next spoken reply.",
+  "wire.voice.max_spoken_chars.label": "longest spoken reply",
+  "wire.voice.max_spoken_chars.help": "Replies longer than this many characters are cut at a sentence and end with \"The rest is on screen.\" Code blocks and links are never read aloud.",
+  "wire.voice.not_enabled": "Voice mode is not on for this conversation. Turn it on for this conversation first.",
+  "wire.voice.unavailable": "This device cannot speak aloud: {reason}",
+  "wire.voice.unknown_session": "There is no conversation with id {session_id}.",
+  "wire.voice.unknown_source": "There is nothing to read aloud for that reference.",
+  "wire.voice.stt_unavailable": "This device cannot transcribe speech: {reason} Type the message instead.",
+  "wire.voice.invalid_request": "Send exactly one of a recording or a text message.",
+  "wire.voice.unsupported_audio": "That recording format is not supported. Use WAV, WebM, Ogg or MP4.",
+  "wire.voice.upload_too_large": "That recording is too large. Keep it under {limit_mib} MiB.",
+  "wire.voice.empty_transcript": "Nothing was heard in that recording, so nothing was sent.",
+  "wire.voice.store_busy": "Something else on this device is changing voice mode. Try again in a moment."
+}

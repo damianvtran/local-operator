@@ -25,6 +25,7 @@
     "local_operator/server/routes/desktop_quota.py",
     "local_operator/server/routes/desktop_radient.py",
     "local_operator/server/routes/desktop_sessions.py",
+    "local_operator/server/routes/desktop_voice.py",
     "local_operator/server/routes/jobs.py",
     "local_operator/server/routes/schedules.py",
     "local_operator/server/routes/speech.py",

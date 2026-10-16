@@ -67,6 +67,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Per-session voice mode: its route refusals and its settings section
+        # (English-only, own namespace so the audited sources stay untouched).
+        "wire.voice",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

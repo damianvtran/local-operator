@@ -44,6 +44,7 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   **Taken:** the utterance is admitted through the same admission path as `POST /v1/desktop/sessions/{id}/messages` (desktop_sessions.py:3688).
   - It is sent as `input_mode="dictated"` with `input_path=<AudioPath>`.
   - It is sent as `mode="steer"` when the session is streaming, else `mode="prompt"` (Prompt.mode, desktop_sessions.py:1151).
+  - *Amendment (slice 1, 2026-10-16):* `/messages` itself takes `mode` from its client; the server-side rule this reuses is `admit_receipt_request`'s (desktop_sessions.py:554): steer while `is_streaming`, else prompt. A pending gate is not a separate term: a parked approval sits inside a streaming turn, so it already steers, and the steer is queued until the gate settles (`tests/unit/voice/test_steer_during_approval.py`). The utterance calls the `/messages` handler itself rather than a copy of it.
   - Tools run in the session as usual and render on screen as usual.
   **Rejected:** a separate voice context. It would fork the conversation the operator wants to keep.
   **Owner:** coder.
@@ -75,6 +76,7 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   - TTS (`tts/cascade.py`, order Radient→ElevenLabs→OpenAI): add `provider_tts_gemini`, then `local_tts_system` (macOS `say`, key-free, zero download).
   - Gemini uses the existing `google` provider key `GOOGLE_AI_STUDIO_API_KEY` (registry.py:659-666) via `/login google`. ElevenLabs is already rung 2 in both cascades.
   - Keys stay only in the encrypted store.
+  - *Amendment (slice 1, 2026-10-16):* `local_tts_system` is OPT-IN per caller (`include_local=True`), used only by the voice routes. As an always-on rung it would turn `/v1/tts/paths` servable on every Mac with a token the UI's closed list does not know, and hand the mp3 `/v1/tools/speech` WAV bytes, since `say` cannot write mp3. `GET /v1/desktop/voice` reports `tts.path = local_tts_system` when that is the rung the voice routes will use.
   **Rejected:**
   - Inserting Gemini first. That would re-route every existing dictation user.
   - A new VoiceProvider interface. It would sit beside cascades that already own credential probing, fall-forward and spend.
