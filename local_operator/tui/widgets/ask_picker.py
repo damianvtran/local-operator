@@ -975,7 +975,40 @@ class AskPickerScreen(Container):
 
     def action_move(self, delta: int) -> None:
         """Arrow/vi movement WRAPS: a discrete, deliberate keypress."""
+        if self._read_only:
+            self._scroll_read_only(delta)
+            return
         self._move_to((self.state.selected + delta) % self.row_count)
+
+    def _scroll_read_only(self, delta: int) -> None:
+        """``↑↓`` on a READ-ONLY card: move the WINDOW one row, clamped at the ends.
+
+        The answer card moves a selection and the window follows it, but a
+        read-only card draws no selection (D10), so that left the arrows moving
+        an invisible cursor: a press inside the window changed nothing on screen
+        and `down` past the end wrapped to the top (#2481 UX round 3, U15). Here
+        every press scrolls by one row or, at an end, stops — the documented
+        exception for a list that is the whole surface (AGENTS.md "Wrapping vs
+        clamping"). The hidden selection follows the window's TOP row, so
+        ``ctrl+e`` reveals the row the reader is looking at.
+        """
+        layout = self._layout()
+        lsbr = layout.line_start_by_row
+        body = layout.body_line_budget
+        window = self._window(layout)
+        if not lsbr or body <= 0 or not window:
+            return
+        max_off = max(0, lsbr[-1] - body)
+        top = window[0]
+        if delta > 0:
+            offset = min(lsbr[min(top + 1, self.row_count - 1)], max_off)
+        else:
+            offset = lsbr[max(0, top - 1)] if self._offset <= lsbr[top] else lsbr[top]
+        if offset == self._offset:
+            return
+        self._offset = offset
+        self.state.selected = self._window(layout)[0]
+        self._repaint()
 
     def action_page(self, delta: int) -> None:
         """PageUp/PageDown move the cursor a page and let the window follow.
@@ -1293,10 +1326,16 @@ class AskPickerScreen(Container):
     # the event so one gesture does not also scroll the transcript behind.
     def on_mouse_scroll_down(self, event) -> None:  # type: ignore[no-untyped-def]
         event.stop()
+        if self._read_only:
+            self._scroll_read_only(1)  # the window, not an invisible cursor (U15)
+            return
         self._move_to(min(self.row_count - 1, self.state.selected + 1))
 
     def on_mouse_scroll_up(self, event) -> None:  # type: ignore[no-untyped-def]
         event.stop()
+        if self._read_only:
+            self._scroll_read_only(-1)
+            return
         self._move_to(max(0, self.state.selected - 1))
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -3578,13 +3617,18 @@ class AskPickerScreen(Container):
             # question's `decline`: Escape here declines nothing.
             hints = []
             ladder = []
+            # FOCUSED only (#2481 review round 3, M2): the composer takes `↑↓`
+            # and `ctrl+e` while it holds the caret, so naming them over a card
+            # that does not is D13's lie again. Unfocused, `esc` alone — the one
+            # key the app routes from anywhere.
+            #
             # Windowed by the DRAWN rows, not by the position row: a short card
             # windows its options without room for `showing 1–1 of 4`, and the
             # arrows still scroll there (measured at 80x16).
-            if self.visible_rows and len(self._window()) < self.row_count:
+            if self.has_focus and self.visible_rows and len(self._window()) < self.row_count:
                 hints.append(("↑↓", "scroll"))
                 ladder.append("↑↓")
-            reveal = self._reveal_hint()
+            reveal = self._reveal_hint() if self.has_focus else None
             if reveal is not None:
                 hints.append(reveal)
                 ladder.append(REVEAL_HINT_KEY)
