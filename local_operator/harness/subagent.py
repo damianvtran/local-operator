@@ -138,7 +138,7 @@ from local_operator.harness.intent import (
     batch_activity,
     tool_activity,
 )
-from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
+from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY, effort_fallback_clause
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -1099,6 +1099,47 @@ def _lineage_names(session: "Session", lineage: tuple[str, ...]) -> list[str]:
     return names
 
 
+def _requested_effort(spec: ModelSpec | None) -> str | None:
+    """The reasoning LEVEL this pin asked for, or ``None`` when none was chosen.
+
+    The effort half of the registration stamp beside
+    ``AsyncJob.requested_model_label``. A ``{model, effort}`` tier (#2428) — and
+    the team-member ``effort`` layer that lands the same way — reaches the
+    harness as a resolved ``ModelSpec`` whose ``reasoning_effort`` a fallback
+    hop is free to clamp away (``failover.spec_for_target`` keeps the level only
+    where the target's ladder accepts it). Without this stamp the level the
+    launch chose survives in no field of the job row, so the completion receipt
+    and the parent notice have nothing to compare the fallback's level against
+    and the drop stays silent — the trade-off the design note accepts on
+    condition that the receipt names it.
+
+    "Asked for" is read as DIVERGENCE from the model's own default, because that
+    is the only difference the spec still carries once it exists. A
+    bare-selector tier, an explicit ``model=`` pick and the inherit sentinel all
+    resolve to a spec sitting ON ``reasoning_default_effort`` — the field whose
+    docstring is exactly "what ``/effort auto`` restores, as distinct from
+    ``reasoning_effort``, which is what is selected right now" — so nothing was
+    asked for and ``None`` is the honest answer rather than the target's own
+    rung dressed up as a request.
+
+    EXTENSION POINT (PR A, team members): the ``tier``/``effort`` pair resolves
+    into this same spec field, so an override is covered without a second stamp.
+    A team ``effort: auto`` deliberately yields ``None`` here — it MEANS the
+    model's own default, so there is no level to lose. What this cannot see is a
+    level the resolver applied that happens to equal the target's own default:
+    ``_with_tier_effort`` returns the spec untouched there, erasing the
+    distinction. Widen this signature (pass the resolution's SOURCE in and stamp
+    whatever it says was requested) rather than teaching a reader to guess.
+    """
+    if spec is None:
+        return None
+    level = str(spec.reasoning_effort or "").strip()
+    if not level:
+        return None
+    default = str(spec.reasoning_default_effort or "").strip()
+    return None if level == default else level
+
+
 def run_subagent(
     label: str,
     prompt: str,
@@ -1238,6 +1279,15 @@ def run_subagent(
         job.requested_model_label = (
             f"{model_spec.provider}/{model_spec.model_id}" if model_spec is not None else None
         )
+        # The same rule for the LEVEL the pin asked for, and the same never-
+        # rewritten guarantee: a fallback hop clamps the requested effort away
+        # (``failover.spec_for_target``) and only this stamp survives to compare
+        # against, so the receipt can name the drop instead of asserting a pin
+        # that quietly got shallower as well as substituted.
+        # ``_requested_effort`` holds what "asked for" means and where PR A's
+        # team-member source joins in; it reads the RESOLVED spec because the
+        # caller has already applied the tier's ``{model, effort}`` (#2428).
+        job.requested_effort = _requested_effort(model_spec)
         jobs_manager._notify_roster_change()
     # Same reason: the parent must be able to address a child that is parked
     # behind the capacity gate (messages to it buffer until it starts), so the
@@ -1869,7 +1919,14 @@ def _display_model_name(selector: str) -> str:
 
 
 def _pinned_fallback_notice(
-    label: str, role: str, requested: str, effective: str, reason: str
+    label: str,
+    role: str,
+    requested: str,
+    effective: str,
+    reason: str,
+    *,
+    requested_effort: str | None = None,
+    actual_effort: str | None = None,
 ) -> str:
     """The notice a pinned child's fallback shows on the PARENT's stream.
 
@@ -1882,6 +1939,18 @@ def _pinned_fallback_notice(
     surface unchanged; an absent reason leaves the sentence without a cause
     clause rather than inventing one.
 
+    A FIFTH fact when it applies: the reasoning level. A model swap can also
+    cost depth — the target keeps the requested effort only where its own
+    ladder accepts it and otherwise runs at its default
+    (``failover.spec_for_target``), so a pin launched at ``xhigh`` can land on a
+    model thinking at nothing in particular. That is a quieter loss than the
+    model swap and lands on the same row, which is why the design note requires
+    the drop be named rather than discovered. The clause appears only when the
+    two levels DIFFER (``jobs.effort_fallback_clause``), so a hop that kept the
+    level adds nothing, and it
+    sits between the model pair and the cause clause in both this sentence and
+    the durable completion row, so the reader sees one relation in one order.
+
     The two models are stated in the PRODUCT's vocabulary — resolved display
     names where naming can vouch for one, else the selector — and as an
     ``A → B`` pair, the same relation spelling the band's badge uses, rather
@@ -1891,14 +1960,18 @@ def _pinned_fallback_notice(
     (``transcript.wrap_cells``): with a plain-space join the pair still split
     (`…Sonnet 5.5 →` / `DeepSeek Flash…`) at exactly the widths this fix
     exists for. The pair reads identically in every renderer and copies as
-    visible spaces; the rest of the sentence wraps as prose.
+    visible spaces; the rest of the sentence wraps as prose. The effort clause
+    is deliberately NOT joined that way: its two halves are single words of a
+    closed vocabulary, so a wrap inside it cannot split a display name from its
+    partner and misread as a false pairing.
     """
     role_clause = f" ({role})" if role else ""
     cause = f" — {reason.strip()}" if reason.strip() else ""
+    effort = effort_fallback_clause(requested_effort, actual_effort)
     pin = _display_model_name(requested).replace(" ", "\u00a0")
     running = _display_model_name(effective).replace(" ", "\u00a0")
     pair = f"{pin}\u00a0→\u00a0{running}"
-    return f"subagent '{label}'{role_clause} pinned {pair}{cause}."
+    return f"subagent '{label}'{role_clause} pinned {pair}{effort}{cause}."
 
 
 def _make_relay(
@@ -2123,11 +2196,23 @@ def _make_relay(
                 # again. An unpinned child (``requested`` empty) inherits the
                 # parent's routing and carries none of this by design.
                 requested = str(getattr(job, "requested_model_label", "") or "")
+                # The effort half of the same disclosure, read from the
+                # registration stamp. Kept BESIDE the model comparison rather
+                # than inside it: a fallback may keep the level it was given
+                # (the target's ladder accepts it) and still be a substitution,
+                # and the two clauses are then not both true.
+                requested_effort = getattr(job, "requested_effort", None)
                 if getattr(job, "owns_model", None) is True and requested:
                     if event.is_fallback and effective != requested:
                         was = bool(getattr(job, "model_fallback", False))
                         job.model_fallback = True
                         job.model_fallback_reason = str(event.reason or "")
+                        # The level the fallback IS on, straight off the edge
+                        # that moved the child: ``None`` means the target model
+                        # exposes no effort knob, which the renderers spell
+                        # ``model default``. Recorded on every hop of the
+                        # episode, so the completed row names the LAST one.
+                        job.model_fallback_effort = event.effort
                         if not was:
                             # ONE notice per fallback EPISODE. A later hop to
                             # another fallback updates the row's label (and so
@@ -2142,6 +2227,8 @@ def _make_relay(
                                         requested,
                                         effective,
                                         str(event.reason or ""),
+                                        requested_effort=requested_effort,
+                                        actual_effort=event.effort,
                                     ),
                                     kind="warning",
                                     headline=f"'{label}' fell back to {effective}",
@@ -2153,6 +2240,10 @@ def _make_relay(
                         # claim a substitution that has ended.
                         job.model_fallback = False
                         job.model_fallback_reason = ""
+                        # Cleared with the flag, never left to be read as "this
+                        # fallback runs at its model's default": after a
+                        # recovery there is no fallback effort to name at all.
+                        job.model_fallback_effort = None
                 jobs_manager._notify_roster_change()
         elif isinstance(event, AgentEndEvent):
             if event.error:
