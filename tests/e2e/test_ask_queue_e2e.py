@@ -418,6 +418,7 @@ async def test_a_multi_question_ask_is_answered_atomically(
         with bounded(BOUND_S, "a multi-question ask answered atomically"):
             await session.prompt("go")
             (ask_id,) = _ask_ids(session.transcript.directory)
+            requests_before_answer = len(stream.requests)
             outcome = session.respond_ask(ask_id, {"q0": ["a"], "q1": ["c"]}, by="terminal")
             assert outcome["ok"] is True
             await session.reconcile_asks()
@@ -428,6 +429,13 @@ async def test_a_multi_question_ask_is_answered_atomically(
             )
             record = session.ask_queue().find(ask_id)
             assert record["answers"] == {"q0": ["a"], "q1": ["c"]}
+            # A durable row precedes the spawned delivery turn's provider call.
+            # Wait on that consumer boundary before inspecting its request;
+            # otherwise this can inspect the previous queued-ask receipt instead.
+            await _wait_until(
+                lambda: len(stream.requests) > requests_before_answer,
+                what="the provider request consuming both answers",
+            )
             # The model read both, from ONE row.
             last = stream.requests[-1]
             text = "\n".join((message.text or "") for message in last.messages)

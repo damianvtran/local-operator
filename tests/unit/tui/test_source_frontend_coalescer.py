@@ -16,6 +16,7 @@ pilot, so ``call_later`` is the real Textual scheduler rather than a stand-in.
 from __future__ import annotations
 
 import os
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -175,28 +176,34 @@ async def test_a_refused_schedule_does_not_latch_the_source_deaf() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_retired_source_still_clears_its_bit_and_acts_on_nothing() -> None:
+async def test_a_retired_source_still_clears_its_bit_and_acts_on_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Retirement is decided by the real callback, and the bit is not its casualty."""
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     wired = _ViewerSource("child-0")
-    releases: list[object] = []
+    # Other app workers (including goal re-arm) can legitimately start here.
+    # Observe the release action itself, not every coroutine sent to run_worker;
+    # the latter mistakes unrelated startup work for releasing this source.
+    release = AsyncMock()
+    monkeypatch.setattr(app, "_release_sidebar_source", release)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         app._watch_source_frontend(wired.source)
-        app.run_worker = _recording(releases)  # type: ignore[method-assign]
         wired.source.retired = True
         app._sidebar_sources["child-0"] = wired.source
 
         wired.deliver(3)
         await pilot.pause()
 
-        assert not releases, "a retired source was handed to the release worker"
+        release.assert_not_called()
         assert wired.source.frontend_change_scheduled is False
 
         wired.deliver(1)
         await pilot.pause()
-        assert not releases
+        release.assert_not_called()
+        assert wired.source.frontend_change_scheduled is False
 
 
 @pytest.mark.asyncio
