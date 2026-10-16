@@ -27999,7 +27999,7 @@ class OperatorApp(App[None]):
                 failed = str(exc) or "the dismissal could not be recorded."
                 logger.warning("could not record a fleet dismissal", exc_info=True)
             else:
-                failed = str(exc) or "the answer could not be delivered"
+                failed = str(exc) or "the answer could not be delivered."
                 logger.warning("could not deliver a fleet answer", exc_info=True)
         finally:
             self._mark_ask_in_flight(row.ask_id, False)
