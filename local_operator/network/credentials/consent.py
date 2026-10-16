@@ -145,8 +145,8 @@ class ConsentDocument:
         store.safe_component(owner_device)
         self.network_id = network_id
         self.owner_device = owner_device
-        self.root = root
-        self.path = placement.placement_path(network_id, root).with_name("consent.json")
+        self.root = placement._config_root(root)
+        self.path = placement.placement_path(network_id, self.root).with_name("consent.json")
         if self.path.parent.is_symlink() or self.path.is_symlink():
             refuse("consent_path_invalid")
 
@@ -154,7 +154,9 @@ class ConsentDocument:
     def locked(self) -> Iterator[None]:
         placement.credentials_dir_for(self.network_id, self.root)
         with store._write_lock(self.path):
-            with placement._cross_process_lock(self.path.with_name(".consent.lock")):
+            with placement._cross_process_lock(
+                self.path.with_name(".consent.lock"), root=self.root
+            ):
                 yield
 
     def load(self) -> dict[str, Any]:

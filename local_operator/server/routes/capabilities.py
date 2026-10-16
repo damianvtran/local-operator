@@ -8,7 +8,7 @@ RFC §2.5). Everything else is a build fact.
 
 from fastapi import APIRouter
 
-from local_operator.i18n.resolve import resolve_language
+from local_operator.i18n.resolve import locale_direction, resolve_language
 from local_operator.server.desktop import desktop_posture
 from local_operator.server.features import feature_flags
 from local_operator.server.models.schemas import CRUDResponse
@@ -23,6 +23,9 @@ async def capabilities():
     # `references` import (with the startup-cost reasoning the guard in
     # `tests/unit/test_import_graph.py` enforces) moved there with it. The route
     # stays the HTTP face of the same function.
+    # Resolve once: a live config edit between two reads must not pair one
+    # locale's copy with another's direction. Held preferences remain en/ltr.
+    language = resolve_language()
     return CRUDResponse(
         status=200,
         message="Backend capabilities retrieved.",
@@ -45,6 +48,10 @@ async def capabilities():
             # shipped locales. Resolved per call so a config edit reaches the
             # client's next read without a restart; "en" until a translation
             # wave passes audit and widens the shipped set (§6).
-            "language": resolve_language(),
+            "language": language,
+            # Additive negotiation metadata; older clients keep reading the
+            # existing language field. This is text direction, not a claim that
+            # every client implements RTL layout or that Urdu is eligible.
+            "language_direction": locale_direction(language),
         },
     )

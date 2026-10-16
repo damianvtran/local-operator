@@ -325,6 +325,7 @@ def request(
 
 
 def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+    root = placement._config_root(root)
     source = approvals.load_record(approval_id, root=root)
     if source.get("state") == approvals.STATE_CONNECTED:
         raise MeshRefusal(
@@ -390,7 +391,7 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
         authority.locked(),
         journal.locked(),
         store._write_lock(store.record_path(data["network_id"], root)),
-        placement._document_lock(projection_path),
+        placement._document_lock(projection_path, root=root),
     ):
         admitted = consent._admitted(approval_id, run.run_id, root)
         fresh = _subject(

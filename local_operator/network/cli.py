@@ -3461,6 +3461,15 @@ _JOIN_BLOCK_KEYS = (
     "local_only",
 )
 
+#: The ``_JoinAttempt.stage`` values at which a failure is a WIRE failure — the steps
+#: whose death is a genuine peer-side stop, so the parked writer may publish
+#: ``pairing_stopped`` for it. ``ready_send`` (writing the ready frame) and
+#: ``result_read`` (reading the admission) are both wire operations; ``persist`` is the
+#: LOCAL write after the admission is read, whose failure must keep its I/O class
+#: instead of being relabelled a peer-side stop. Spelled positively, so a stage inserted
+#: between the wire ones cannot silently fall outside a negated check.
+_JOIN_WIRE_STAGES = frozenset({"ready_send", "result_read"})
+
 
 @dataclass
 class _JoinAttempt:
@@ -3477,9 +3486,11 @@ class _JoinAttempt:
 
     host: str
     #: ``dial`` -> ``hello`` -> ``challenge`` -> ``auth`` -> ``welcome`` ->
-    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read``; the
-    #: statement boundary last ENTERED, so a failure names the step that was in
-    #: progress rather than the last step that finished.
+    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read`` ->
+    #: ``persist``; the statement boundary last ENTERED, so a failure names the step
+    #: that was in progress rather than the last step that finished. ``persist`` marks
+    #: the LOCAL write after the admission is read, which keeps a disk fault out of the
+    #: wire-failure clause it shares a ``try`` with.
     stage: str = "dial"
     #: The local failure class (``invite``/``dial``/``handshake``/``refused``/
     #: ``link_crypto``/``peer_closed``/``timeout``/``io``) and its finer token
@@ -4355,6 +4366,13 @@ def _finish_pairing(
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
     shares = [str(key) for key in (answer.get("shares") or [])]
+    # THE WIRE READ IS DONE; what follows is LOCAL persistence. Advancing the stage past
+    # ``result_read`` is what lets ``_park_join``'s transport clause tell a death ON THE
+    # WIRE (a transport ``pairing_stopped``) from a LOCAL write failure — an ``OSError``
+    # out of ``_persist_join`` below must keep its own class in the attempt record, not
+    # be relabelled a peer-side stop (review round 1, F2).
+    if attempt is not None:
+        attempt.stage = "persist"
     record = _persist_join(
         answer,
         envelope,
@@ -4459,6 +4477,20 @@ _STALE_RELAY_SHARES_SENTENCE = (
 _JOIN_UNANSWERED_SENTENCE = (
     "nobody confirmed the pairing in time, so it was abandoned and nothing was joined. "
     "The invite is untouched: start again with `lop network join @<token-file> --park --json`."
+)
+
+#: What a parked ceremony says when it STOPPED without reporting — a transport death
+#: during the finish (on the WIRE stages, not a local write), not an unanswered window
+#: and not a refusal the inviter sent. ONE OWNER because two sites have to say it: the
+#: parker that catches its own transport failure during the finish (``_park_join``), and
+#: the answering side that observes a parker which died with its row still
+#: ``awaiting_confirmation`` (``_await_join_result`` — the SIGKILL case the parker cannot
+#: cover for itself). The sentence is the honest one either way: the ceremony is gone,
+#: nothing was sent that could be a pairing, and the invite was not spent.
+_JOIN_STOPPED_SENTENCE = (
+    "the parked ceremony stopped before it reported back, so nothing was joined and "
+    "the invite is untouched. Start again with `lop network join @<token-file> "
+    "--park --json`."
 )
 
 
@@ -4617,7 +4649,7 @@ def _park_join(
     """
     import os
 
-    from local_operator.network import types
+    from local_operator.network import types, wire
     from local_operator.network.types import JoinParkUnanswered, MeshRefusal
 
     invite_mod = helpers["invite_mod"]
@@ -4727,6 +4759,39 @@ def _park_join(
             message=refusal.sentence,
         )
         raise
+    except (wire.LinkCryptoError, OSError, TimeoutError):
+        # A TRANSPORT DEATH DURING THE RESULT READ. Without this the exception escapes
+        # to ``_join_one``'s own transport clause, which records the ATTEMPT but has no
+        # ``pending`` in scope — so the parked row stayed ``awaiting_confirmation`` with
+        # a dead holder, and the answering invocation read that as "nothing was joined"
+        # over a ceremony that stopped for a reason. This is the WRITER half (the reader
+        # half in ``_await_join_result`` covers a parker killed before it could run
+        # this). ``pending`` IS in scope here, so no signature changes.
+        #
+        # GATED ON THE STAGE, on purpose: this clause wraps the WHOLE ``_finish_pairing``,
+        # which also does the LOCAL ``_persist_join`` write. A local ``OSError`` from that
+        # write must NOT be reported as a peer-side stop ("the parked ceremony stopped …
+        # the invite is untouched") — it is an I/O fault, and it keeps its own class in
+        # the attempt record via the outer handler (review round 1, F2).
+        #
+        # THE SET IS THE WIRE STAGES, spelled OUT rather than as "not persist":
+        # ``_finish_pairing`` sends the ready frame at ``ready_send`` and reads the
+        # admission at ``result_read`` — BOTH are wire operations whose death is a genuine
+        # peer-side stop — and advances to ``persist`` only after the admission is read
+        # (review round 2, M1: gating on ``result_read`` alone silently dropped the
+        # ready-send death). Naming the wire stages positively means a future stage
+        # inserted between them cannot silently re-open the hole by falling outside a
+        # negated check; it would have to be added here deliberately.
+        if attempt is not None and attempt.stage in _JOIN_WIRE_STAGES:
+            store.clear_join_answer(envelope.invite_id)
+            _parked_outcome(
+                pending,
+                status="refused",
+                store=store,
+                error_code="pairing_stopped",
+                message=_JOIN_STOPPED_SENTENCE,
+            )
+        raise
     store.clear_join_answer(envelope.invite_id)
     _parked_outcome(
         pending,
@@ -4806,12 +4871,11 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
         store.clear_pending_join(chosen.invite_id)
         store.clear_join_answer(chosen.invite_id)
         if outcome is None:
-            raise MeshRefusal(
-                "pairing_abandoned",
-                "the pairing process stopped before it reported back, so nothing was joined and "
-                "the invite is untouched. Start again with `lop network join @<token-file> "
-                "--park --json`.",
-            )
+            # The record itself was gone by the time the parker was observed dead
+            # (``_await_join_result`` publishes a terminal outcome when the row is
+            # still there). The ceremony never reported, so say that truthfully —
+            # one sentence, owned by ``_JOIN_STOPPED_SENTENCE``.
+            raise MeshRefusal("pairing_stopped", _JOIN_STOPPED_SENTENCE)
         if outcome.status == "joined":
             return _emit(args, dict(outcome.result), list(outcome.result_lines))
         raise MeshRefusal(
@@ -4893,12 +4957,30 @@ def _await_join_result(pending: Any, store: Any) -> Any:
             # The parker publishes its outcome BEFORE exiting. It can finish
             # between our awaiting-confirmation read and this liveness probe,
             # so death alone cannot distinguish abandonment from a completed
-            # ceremony. Re-read once after observing death; an absent or still
-            # awaiting row remains abandoned, never an invented success.
+            # ceremony. Re-read once after observing death.
             final = store.pending_join(pending.invite_id)
-            if final is not None and final.status != "awaiting_confirmation":
+            if final is None:
+                # The record went with the ceremony: there is nothing left to read
+                # and nothing truthful to publish. That is the true abandonment.
+                return None
+            if final.status != "awaiting_confirmation":
                 return final
-            return None
+            # THE PARKER DIED WITHOUT PUBLISHING A TERMINAL OUTCOME. This happens when
+            # the child is killed outright (a SIGKILL leaves it no chance to write) or
+            # when a transport death escaped the parker's own publication. The row is
+            # the only channel the answering invocation has, so leaving it
+            # ``awaiting_confirmation`` with a dead holder is exactly the silent death
+            # that reported "nothing was joined" over a ceremony that did in fact
+            # stop for a reason. PUBLISH THE TRUTH HERE, on the reader side, which is
+            # the one side that survives a child that could not run its own writer.
+            _parked_outcome(
+                final,
+                status="refused",
+                store=store,
+                error_code="pairing_stopped",
+                message=_JOIN_STOPPED_SENTENCE,
+            )
+            return final
         time.sleep(0.2)
     return None
 

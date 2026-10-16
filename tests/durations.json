@@ -167,6 +167,7 @@
   "tests/unit/harness/test_wake.py": 1.0,
   "tests/unit/harness/test_wake_types_split.py": 1.0,
   "tests/unit/i18n/test_headless_print_slice.py": 1.055,
+  "tests/unit/i18n/test_mechanism_metadata.py": 1.0,
   "tests/unit/i18n/test_status_display_prototype.py": 1.0,
   "tests/unit/info/test_collect.py": 1.0,
   "tests/unit/info/test_model.py": 1.0,
