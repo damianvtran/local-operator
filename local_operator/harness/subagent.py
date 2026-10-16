@@ -159,6 +159,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.config import server_own_turn_only
+from local_operator.model.effort import TIER_EFFORTS, parse_tier_mapping
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
@@ -308,17 +309,58 @@ def read_effort_tier_selectors() -> dict[str, Any]:
     Raises whatever the config read raises; callers decide whether that is a
     reason (launch) or nothing (schema).
     """
+    return {tier: selector for tier, (selector, _effort) in read_effort_tier_targets().items()}
+
+
+def read_effort_tier_targets() -> dict[str, tuple[Any, str | None]]:
+    """``{tier: (selector, reasoning effort)}`` — the tier read with its depth.
+
+    A tier is either a bare ``provider/model`` selector (effort ``None``: the
+    child runs at that model's own default, the only behaviour before #2428)
+    or a ``{model, effort}`` mapping, the shape a fallback-chain hop already
+    uses (:func:`local_operator.model.effort.parse_tier_mapping`). A
+    well-formed mapping is normalised to its stripped selector here, so every
+    consumer of :func:`read_effort_tier_selectors` — the schema, the
+    tool-argument refusal, the launch — sees one string per tier whichever
+    form the operator wrote, and the tier MEANING (which model) is unchanged.
+    A mapping that does not parse is passed through raw, exactly like any
+    other non-string value, so it reaches the same named refusal.
+
+    The effort is NOT clamped here: the ladder belongs to the resolved
+    ``ModelSpec`` (the ``default`` sentinel resolves only at launch), so the
+    launch path clamps against it, as ``failover.spec_for_target`` does.
+    """
     from local_operator.config import ConfigManager
 
     raw = ConfigManager(config_dir()).get_config_value("subagents", None)
     models = raw.get("models") if isinstance(raw, dict) else None
     if not isinstance(models, dict):
         return {}
-    return {
-        tier: selector.strip() if isinstance(selector, str) else selector
-        for tier, selector in models.items()
-        if tier in CANONICAL_EFFORT_TIERS
-    }
+    targets: dict[str, tuple[Any, str | None]] = {}
+    for tier, value in models.items():
+        if tier not in CANONICAL_EFFORT_TIERS:
+            continue
+        if isinstance(value, str):
+            targets[tier] = (value.strip(), None)
+            continue
+        parsed = parse_tier_mapping(value)
+        targets[tier] = parsed if parsed is not None else (value, None)
+    return targets
+
+
+def malformed_tier_reason(tier: str, raw: object) -> str:
+    """The one refusal text for a present-but-unusable tier value.
+
+    Shared by the launch path and :func:`effort_tier_rejection` so the two
+    surfaces keep classifying a value identically ("lacks provider/model").
+    A MAPPING additionally names the accepted shape, because "lacks
+    provider/model" alone is misleading for ``{model: ..., effort: extreme}``.
+    """
+    reason = f"subagents.models.{tier}={raw!r} lacks provider/model"
+    if isinstance(raw, dict):
+        levels = "|".join(TIER_EFFORTS)
+        reason += f" (a mapping takes model: <provider/model> and optional effort: {levels})"
+    return reason
 
 
 #: Whose choice a subagent's model is, as ``values.subagents.model_choice``
@@ -522,6 +564,20 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
         return None
     inherit = "omit 'effort' to inherit this session's model and reasoning effort"
     if not tiers:
+        # A lone tier whose value is present but unusable (``{model: ...,
+        # effort: extreme}``) also leaves no usable tier; "no tiers are
+        # configured" would send the operator looking for a missing key when
+        # the key is there and its VALUE is wrong. Same read and fallback as
+        # the configured-tiers branch below.
+        try:
+            raw = read_effort_tier_selectors().get(tier)
+        except Exception:  # noqa: BLE001 — the tier list above already survived the read
+            raw = None
+        if raw not in (None, ""):
+            return (
+                f"effort tier {tier!r} is unavailable: {malformed_tier_reason(tier, raw)}; "
+                f"{inherit}"
+            )
         return (
             f"effort tier {tier!r} is unavailable: no tiers are configured under "
             f"subagents.models; {inherit}"
@@ -534,7 +590,7 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
     # but unusable, so an operator who set ``lo: gpt-5`` (no provider) learns
     # that the KEY is there and the VALUE is wrong, not that it is missing.
     why = (
-        f"subagents.models.{tier}={raw!r} lacks provider/model"
+        malformed_tier_reason(tier, raw)
         if raw not in (None, "")
         else f"not configured at subagents.models.{tier}"
     )

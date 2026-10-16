@@ -1051,3 +1051,40 @@ async def test_inherit_is_a_synonym_for_omission_in_both_modes(config_dir, tmp_p
     assert not named.is_error, named.text
     assert named.text == omitted.text
     assert "job:r:None" in named.text, "the sentinel must reach the launcher as no tier at all"
+
+
+def test_a_tier_mapping_is_advertised_by_its_model(config_dir) -> None:
+    """#2428: a ``{model, effort}`` tier is the same TIER (which model) with a
+    depth attached, so every consumer of the shared reader sees its selector —
+    the schema advertises it and the tool-argument refusal accepts it."""
+    write_tiers(config_dir, {"hi": {"model": "anthropic/claude-opus-5-5", "effort": "high"}})
+    assert read_effort_tier_selectors() == {"hi": "anthropic/claude-opus-5-5"}
+    assert configured_effort_tiers() == {"hi": "anthropic/claude-opus-5-5"}
+    assert effort_tier_rejection("hi") is None
+
+
+def test_a_malformed_tier_mapping_names_the_accepted_shape(config_dir) -> None:
+    write_tiers(
+        config_dir,
+        {"lo": "openai/gpt-5-mini", "hi": {"model": "anthropic/claude-opus-5-5", "effort": "max!"}},
+    )
+    assert configured_effort_tiers() == {"lo": "openai/gpt-5-mini"}
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None
+    assert "lacks provider/model" in rejection
+    assert "a mapping takes model:" in rejection
+
+
+def test_a_lone_malformed_tier_is_named_not_reported_missing(config_dir) -> None:
+    """QA Q1: the only tier present but unusable leaves NO usable tier, yet the
+    key is there — "no tiers are configured" would send the operator hunting
+    for a missing key. The value is named, with the shape it should take."""
+    write_tiers(config_dir, {"hi": {"model": "anthropic/claude-opus-5-5", "effort": "extreme"}})
+    assert configured_effort_tiers() == {}
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None
+    assert "lacks provider/model" in rejection
+    assert "a mapping takes" in rejection
+    assert "auto|none|" in rejection
+    assert "no tiers are configured" not in rejection
+    assert "omit 'effort' to inherit" in rejection

@@ -927,7 +927,10 @@ class SupplementRunner:
         resolve_tier = getattr(self._session, "_resolve_subagent_model", None)
         if callable(resolve_tier):
             try:
-                tier = resolve_tier("task", "hi")
+                # The tier's MODEL only: this is not a delegated role, and its
+                # per-turn token cap counts reasoning, so a ``hi`` tier's
+                # ``max`` effort must not ride along (#2428).
+                tier = resolve_tier("task", "hi", apply_tier_effort=False)
             except Exception:  # noqa: BLE001 -- a bad tier is not a failed job
                 logger.debug("supplements: hi tier could not be resolved", exc_info=True)
         return generator.resolve_design_model(
