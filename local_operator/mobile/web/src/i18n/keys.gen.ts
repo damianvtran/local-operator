@@ -553,9 +553,6 @@ export type MessageParams = {
   "wire.settings.hub_auto_update_teams.label": undefined;
   "wire.settings.hub_check_interval_min.help": undefined;
   "wire.settings.hub_check_interval_min.label": undefined;
-  "wire.settings.hub_merge_model.help": undefined;
-  "wire.settings.hub_merge_model.label": undefined;
-  "wire.settings.hub_merge_model.placeholder": undefined;
   "wire.settings.keymap.description": undefined;
   "wire.settings.keymap.title": undefined;
   "wire.settings.language.help": undefined;
