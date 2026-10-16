@@ -22,7 +22,7 @@ device-id or UUID reference that collides with nothing is admitted at the plan g
 today and after; those are the CONTROLS below, and they are why this file pins both
 classes rather than only the failing one.
 
-Measured at the seam over the 38-row corpus below, executed on the base tree and on this
+Measured at the seam over the 40-row corpus below, executed on the base tree and on this
 one from the SAME file: the corpus digest is identical on both sides (retention's own
 answers do not move), and the plan gate's verdict flips on exactly the six admitted-
 reference rows — a colliding id in a read's ``q`` (with and without a raw JSON carrier,
@@ -80,9 +80,17 @@ PROSE_FACT = {"title": "Host", "body": "staging host is stage-2"}
 
 #: The PLAN GATE's refusal, verbatim. A control asserts EQUALITY against this rather than
 #: a substring, because byte-identity to today is the claim: the tool layer words its own
-#: refusal differently ("Store it with lop secret and keep only its NAME here"), and that
-#: difference is exactly how a seam refusal is told apart from a tool that ran.
+#: refusal differently, and that difference is exactly how a seam refusal is told apart
+#: from a tool that ran.
 PLAN_GATE_REFUSAL = "Sensitive value refused. Use lop secret; memory may hold its NAME only."
+#: The ``memory`` tool's OWN refusal, verbatim and MEASURED at this head — the second
+#: wording a recall can come back with, and the one `#2524` removes. Pinned so the recall
+#: test can tell "refused by the tool" from both "refused by the seam" (the constant
+#: above) and "answered" (the bank's JSON); see that test for the merge-order note.
+TOOL_RECALL_REFUSAL = (
+    "Store it with lop secret and keep only its NAME here (e.g. 'uses secret GITHUB_TOKEN'); "
+    "never the value."
+)
 
 
 class _ScriptedStream:
@@ -190,7 +198,11 @@ class _Run:
 
 
 async def _run_one_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, args: dict[str, Any]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    args: dict[str, Any],
+    raw: str | None = None,
 ) -> _Run:
     """One call through a real Session, real tools and an isolated memory store.
 
@@ -201,8 +213,14 @@ async def _run_one_call(
     Each (name, args) pair gets its OWN store and transcript: several of the tests below
     drive more than one call in a row, and a shared root would let a second session read
     the first one's rows (two rows for one call id) and answer from two seeded facts.
+
+    ``raw`` overrides the streamed wire JSON, which is otherwise ``json.dumps(args)``.
+    The wire spelling is a SEPARATE carrier of the same call, and a hand-written one is
+    the only way to express a document ``json.dumps`` cannot emit at all — a duplicate
+    key, which :func:`test_a_raw_carrier_the_round_trip_cannot_carry_is_still_refused`
+    needs and which `#2524`'s corpus could not construct either.
     """
-    key = hashlib.sha256(f"{name}|{json.dumps(args, sort_keys=True, default=str)}".encode())
+    key = hashlib.sha256(f"{name}|{json.dumps(args, sort_keys=True, default=str)}|{raw}".encode())
     cfg = tmp_path / key.hexdigest()[:12] / "cfg"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
     context = ToolContext(
@@ -220,7 +238,7 @@ async def _run_one_call(
 
     session = Session(
         model=MODEL,
-        stream_fn=_ScriptedStream(name, json.dumps(args)),
+        stream_fn=_ScriptedStream(name, json.dumps(args) if raw is None else raw),
         tools=[build_memory_tool(), build_read_tool(), build_write_tool()],
         transcript=Transcript(cfg / "sessions" / "plan-gate"),
         system_blocks_provider=lambda: ["stable"],
@@ -277,14 +295,29 @@ async def test_a_colliding_reference_recall_reaches_the_executor(tmp_path, monke
 
     ``#2524``'s tool change is the other half of THIS path (the tool guards its own
     argument dict before it validates), so what the plan gate owes here is the dispatch
-    itself: the call must reach the tool instead of a synthetic refusal. This assertion
-    is therefore on the seam — one start, no synthetic row — and it holds with and
-    without ``#2524`` stacked; the run that carries the store's own answer for the
-    recall is recorded in the pull request over the stacked tree.
+    itself: the call must reach the tool instead of a synthetic refusal.
+
+    NIT-5: "one start, not synthetic" is asserted together with the OUTCOME, so this test
+    tells the three possible endings apart rather than only "the seam did not refuse it".
+    The seam's own sentence means the refusal never left the plan gate; the TOOL's own
+    sentence (`TOOL_RECALL_REFUSAL`) means the call reached the tool and the tool refused
+    it; the bank's JSON means the tool answered. MEASURED at this head (no `#2524`): the
+    middle branch — the tool's wording, which the PR body records verbatim — so the
+    `#2524` dependency is visible in the suite and not only in prose. When `#2524` lands
+    the third branch is the live one; the last assertion is then the one to flip.
     """
     run = await _run_one_call(tmp_path, monkeypatch, "memory", {"op": "recall", "text": DEVICE_ID})
     assert len(run.starts) == 1, run.result_text
     assert not run.synthetic, run.result_text
+    assert PLAN_GATE_REFUSAL not in run.result_text, run.result_text
+    answered = run.result_text.lstrip().startswith("{")
+    refused_at_the_tool = TOOL_RECALL_REFUSAL in run.result_text
+    assert answered or refused_at_the_tool, run.result_text
+    assert refused_at_the_tool and not answered, (
+        "#2524 is still open: the recall reaches the TOOL and the tool's own refusal, "
+        "not the seam's, is what comes back (flip this once #2524 merges)",
+        run.result_text,
+    )
 
 
 # -- session-level negative controls -----------------------------------------
@@ -309,6 +342,37 @@ async def test_a_secret_in_the_same_position_is_still_refused(tmp_path, monkeypa
             run.result_text,
         )
         assert run.row["tool_name"] == name
+
+
+@pytest.mark.asyncio
+async def test_a_raw_carrier_the_round_trip_cannot_carry_is_still_refused(tmp_path, monkeypatch):
+    """A DUPLICATE KEY in the wire JSON keeps the refusal the ORIGINAL raw produces.
+
+    The streamed raw is masked by decoding it and re-serializing the decoded object,
+    while the executor still dispatches the ORIGINAL ``call.raw_arguments`` — so a
+    spelling that round trip cannot carry across is content the guard stops seeing.
+    ``json.loads`` keeps the LAST duplicate key and drops the earlier value, and here
+    the DROPPED value is the card: MEASURED on the pre-fix head of this branch, this
+    exact call RAN — ``tool_execution_start: 1``, ``synthetic: False``, answer ``[]`` —
+    where passing the raw straight to the guard (the base tree, and this head now)
+    refuses it with the plan gate's own sentence. ``json.dumps`` cannot emit a duplicate
+    key at all, so no carrier built with it can express this case: the raw below is
+    spelled by hand, and the decoded argument dict is exactly what the round trip
+    produces (``raw: "true"``), which is all the evasion needs — ``read`` accepts
+    ``raw``, so nothing downstream refuses it either.
+    """
+    raw = '{"path": "memory://global?q=' + DEVICE_ID + '", "raw": "' + CARD + '", "raw": "true"}'
+    run = await _run_one_call(
+        tmp_path,
+        monkeypatch,
+        "read",
+        {"path": f"memory://global?q={DEVICE_ID}", "raw": "true"},
+        raw=raw,
+    )
+    assert len(run.starts) == 0, run.result_text
+    assert run.synthetic, run.result_text
+    assert run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    assert run.row["tool_name"] == "read"
 
 
 @pytest.mark.asyncio
@@ -518,6 +582,23 @@ _RETENTION_CORPUS: list[tuple[str, Any, str | None, bool]] = [
         json.dumps({"path": f"memory://global?q={DEVICE_ID}"}),
         False,
     ),
+    # a carrier the decode -> encode round trip cannot CARRY: a duplicate key drops its
+    # EARLIER value from the only copy the guard would see, while the executor keeps the
+    # original raw. The verdict must therefore stay True on both sides (row 1's card is
+    # the dropped value, row 2's the surviving one) — which is the assertion that fails
+    # if the raw masking ever re-serializes a document it cannot prove lossless.
+    (
+        "read",
+        {"path": f"memory://global?q={DEVICE_ID}", "raw": "true"},
+        '{"path": "memory://global?q=' + DEVICE_ID + '", "raw": "' + CARD + '", "raw": "true"}',
+        False,
+    ),
+    (
+        "read",
+        {"path": f"memory://global?q={DEVICE_ID}", "raw": CARD},
+        '{"path": "memory://global?q=' + DEVICE_ID + '", "raw": "true", "raw": "' + CARD + '"}',
+        False,
+    ),
     ("read", {"path": f"memory://global?q={DEVICE_ID}&"}, None, False),
     (
         "read",
@@ -540,7 +621,10 @@ _RETENTION_CORPUS: list[tuple[str, Any, str | None, bool]] = [
 #: executing the corpus against the base tree and against this one. They agree — this is
 #: that digest, and the corpus runs on both sides from the same file, so a change to what
 #: retention RETAINS (rather than to which copy it is asked about) moves this pin.
-_RETENTION_DIGEST = "d9a3a5a4ee92ca1f6a5ab275afdd21ad9675fce09b66559026ae2949d498e6d6"
+#: Re-measured for the 40-row corpus (the two duplicate-key rows are appended): base tree
+#: ``b0bd40404`` and this head agree, which is what ``memory_privacy`` being untouched
+#: means — the two carriers' raws are decoded by the SAME code on both sides.
+_RETENTION_DIGEST = "9491d7cd6234109de5d670e7cf17f6088753f625ed38fff3dd23bfae1d4255d0"
 
 
 def _retention_rows() -> list[list[Any]]:
