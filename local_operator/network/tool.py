@@ -723,8 +723,12 @@ def _reap_when_it_exits(pid: int) -> None:
         if not ended:
             return
         clean = os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-        # Named, never discarded: the level carries the judgement so a routine exit is
-        # not filed beside a real early death.
+        # Named, never discarded. THE LEVEL IS A JUDGEMENT MARKER, not a guarantee of
+        # emission: the tool path installs no handler, so in a tool process this INFO
+        # is filtered by the root level (the CLI's REPL pins root to WARNING) and only
+        # the WARNING — the load-bearing non-clean arm — is sure to surface. A reader
+        # of a log that DOES carry INFO (a host that configured one) still gets the
+        # clean-exit fact instead of silence.
         logger.log(
             logging.INFO if clean else logging.WARNING,
             "parked pairing child %d %s",

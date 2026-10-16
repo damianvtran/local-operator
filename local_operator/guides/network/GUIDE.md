@@ -1326,7 +1326,10 @@ the code alone: a receipt is not a success); `2` a usage error, including `--pri
 together with `--json` and `--force` without `--stop`; `3` a human decision is
 required and did not arrive — a parked pair (`join --park`) whose window closed with
 nobody answering, reported as `pairing_unanswered`. Nothing is joined in that case,
-the invite is untouched, and the ceremony is not resumed: park a new one.
+the invite is untouched, and the ceremony is not resumed: park a new one. Phase two
+reports the two ways a parked ceremony can be gone instead: `pairing_stopped` when its
+holder stopped before it reported back (nothing was joined, the invite is untouched),
+and `pairing_abandoned` when the holder is gone with no recorded outcome.
 
 **Commands.**
 

@@ -441,18 +441,16 @@ def test_a_pairing_outcome_published_between_read_and_exit_probe_is_preserved(
     assert outcome.error_code == ("declined" if status == "refused" else "")
 
 
-@pytest.mark.parametrize("removed", [True])
 def test_a_dead_pairing_without_a_published_outcome_is_still_abandoned(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, removed: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The record GONE is the true abandonment: nothing is left to read or publish.
 
-    The former ``removed=False`` arm of this parametrisation asserted ``None`` for a
-    record that was still there and still ``awaiting_confirmation`` — which is exactly
-    the silent-death bug (a dead holder whose row never went terminal). That case is
-    now covered, from the truthful side, by
-    ``test_a_parker_that_died_unpublished_leaves_a_terminal_outcome`` below; the
-    assertion that survives here is the one that was always right.
+    The briefer, single-parameter form of this case (a constant ``removed=True``
+    parametrization) was folded into the body; the ``removed=False`` arm it once had
+    asserted ``None`` for a live row, which was the silent-death bug itself. That case
+    is now covered from the truthful side by
+    ``test_a_parker_that_died_unpublished_leaves_a_terminal_outcome`` below.
     """
     pending = _pending_result_fixture(monkeypatch, tmp_path)
 
@@ -535,6 +533,12 @@ def test_the_parker_publishes_when_its_own_finish_is_cut_by_the_link(
     server_a, server_b, host, port = devices
     _record, minted = _minted(server_a)
 
+    # A REAL attempt record, left at ``result_read`` as the real parker leaves it before
+    # the wire read: the fix is gated on that stage, so a synthetic attempt at the wrong
+    # stage would not exercise it.
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+    attempt.stage = "result_read"
+
     def _cut_by_the_link(**_kwargs: Any) -> Any:
         raise wire.LinkCryptoError("the result read failed authentication", kind="auth")
 
@@ -565,6 +569,7 @@ def test_the_parker_publishes_when_its_own_finish_is_cut_by_the_link(
             advertised=[],
             handshake=None,
             offer_view={"state": "absent", "items": []},
+            attempt=attempt,
             helpers={
                 "invite_mod": invite_mod,
                 "pair_timeout_seconds": pair_timeout_seconds,
@@ -578,3 +583,65 @@ def test_the_parker_publishes_when_its_own_finish_is_cut_by_the_link(
     assert row.error_code == "pairing_stopped"
     assert row.message == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
     assert row.pid == 0, "a terminal outcome must zero the pid it reports"
+
+
+def test_a_local_disk_fault_is_not_relabelled_a_peer_side_stop(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: the writer clause must NOT claim "invite is untouched" over a local fault.
+
+    ``_finish_pairing`` advances the attempt to ``persist`` once the admission is read,
+    so an ``OSError`` from the LOCAL ``_persist_join`` write reaches the same ``try`` but
+    a different stage. The parker must leave that row alone (the outer handler records
+    the attempt) rather than publish ``pairing_stopped`` with the wire-death sentence.
+    """
+    server_a, server_b, host, port = devices
+    _record, minted = _minted(server_a)
+
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+    # ``persist``: the read succeeded and the LOCAL write is what failed.
+    attempt.stage = "persist"
+
+    def _disk_full(**_kwargs: Any) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(net_cli, "_finish_pairing", _disk_full)
+    monkeypatch.setattr(
+        net_cli,
+        "_await_join_answer",
+        lambda invite_id, _window, _store: types.JoinAnswer(
+            invite_id=invite_id, decision="admit", code="123456", answered_by="harness"
+        ),
+    )
+
+    with pytest.raises(OSError):
+        net_cli._park_join(  # noqa: SLF001 — the CLI's own parker
+            args=_park_args(name=server_b.identity.name),
+            store=store,
+            envelope=minted.envelope,
+            result=Namespace(sas="123456"),
+            fingerprint="synthetic-fingerprint",
+            sock=None,
+            codec=None,
+            reader=None,
+            host=f"{host}:{port}",
+            identity=server_b.identity,
+            advertised=[],
+            handshake=None,
+            offer_view={"state": "absent", "items": []},
+            attempt=attempt,
+            helpers={
+                "invite_mod": invite_mod,
+                "pair_timeout_seconds": pair_timeout_seconds,
+                "pair_abort_frame": pair_abort_frame,
+            },
+        )
+
+    row = store.pending_join(minted.envelope.invite_id)
+    assert row is not None
+    assert row.status == "awaiting_confirmation", (
+        "a local disk fault was reported as a peer-side stop: "
+        f"status={row.status!r} code={row.error_code!r}"
+    )
+    assert row.error_code == ""

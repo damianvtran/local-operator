@@ -3477,9 +3477,11 @@ class _JoinAttempt:
 
     host: str
     #: ``dial`` -> ``hello`` -> ``challenge`` -> ``auth`` -> ``welcome`` ->
-    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read``; the
-    #: statement boundary last ENTERED, so a failure names the step that was in
-    #: progress rather than the last step that finished.
+    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read`` ->
+    #: ``persist``; the statement boundary last ENTERED, so a failure names the step
+    #: that was in progress rather than the last step that finished. ``persist`` marks
+    #: the LOCAL write after the admission is read, which keeps a disk fault out of the
+    #: wire-failure clause it shares a ``try`` with.
     stage: str = "dial"
     #: The local failure class (``invite``/``dial``/``handshake``/``refused``/
     #: ``link_crypto``/``peer_closed``/``timeout``/``io``) and its finer token
@@ -4355,6 +4357,13 @@ def _finish_pairing(
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
     shares = [str(key) for key in (answer.get("shares") or [])]
+    # THE WIRE READ IS DONE; what follows is LOCAL persistence. Advancing the stage past
+    # ``result_read`` is what lets ``_park_join``'s transport clause tell a death ON THE
+    # WIRE (a transport ``pairing_stopped``) from a LOCAL write failure — an ``OSError``
+    # out of ``_persist_join`` below must keep its own class in the attempt record, not
+    # be relabelled a peer-side stop (review round 1, F2).
+    if attempt is not None:
+        attempt.stage = "persist"
     record = _persist_join(
         answer,
         envelope,
@@ -4742,21 +4751,30 @@ def _park_join(
         )
         raise
     except (wire.LinkCryptoError, OSError, TimeoutError):
-        # A TRANSPORT DEATH DURING THE FINISH. Without this the exception escapes to
-        # ``_join_one``'s own transport clause, which records the ATTEMPT but has no
-        # ``pending`` in scope — so the parked row stayed ``awaiting_confirmation``
-        # with a dead holder, and the answering invocation read that as "nothing was
-        # joined" over a ceremony that stopped for a reason. This is the WRITER half
-        # (the reader half in ``_await_join_result`` covers a parker killed before it
-        # could run this). ``pending`` IS in scope here, so no signature changes.
-        store.clear_join_answer(envelope.invite_id)
-        _parked_outcome(
-            pending,
-            status="refused",
-            store=store,
-            error_code="pairing_stopped",
-            message=_JOIN_STOPPED_SENTENCE,
-        )
+        # A TRANSPORT DEATH DURING THE RESULT READ. Without this the exception escapes
+        # to ``_join_one``'s own transport clause, which records the ATTEMPT but has no
+        # ``pending`` in scope — so the parked row stayed ``awaiting_confirmation`` with
+        # a dead holder, and the answering invocation read that as "nothing was joined"
+        # over a ceremony that stopped for a reason. This is the WRITER half (the reader
+        # half in ``_await_join_result`` covers a parker killed before it could run
+        # this). ``pending`` IS in scope here, so no signature changes.
+        #
+        # GATED ON THE STAGE, on purpose: this clause wraps the WHOLE ``_finish_pairing``,
+        # which also does the LOCAL ``_persist_join`` write. A local ``OSError`` from that
+        # write must NOT be reported as a peer-side stop ("the parked ceremony stopped …
+        # the invite is untouched") — it is an I/O fault, and it keeps its own class in
+        # the attempt record via the outer handler (review round 1, F2). ``_finish_pairing``
+        # advances the stage to ``persist`` once the admission is read, so
+        # ``result_read`` is true only for a failure in the wire read itself.
+        if attempt is not None and attempt.stage == "result_read":
+            store.clear_join_answer(envelope.invite_id)
+            _parked_outcome(
+                pending,
+                status="refused",
+                store=store,
+                error_code="pairing_stopped",
+                message=_JOIN_STOPPED_SENTENCE,
+            )
         raise
     store.clear_join_answer(envelope.invite_id)
     _parked_outcome(
