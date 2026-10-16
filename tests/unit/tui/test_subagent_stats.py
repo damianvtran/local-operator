@@ -1231,6 +1231,7 @@ async def test_a_relayed_event_costs_no_repaint_until_the_next_tick() -> None:
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
@@ -1333,6 +1334,7 @@ async def test_an_overgrown_panel_charges_the_rail_padding_to_its_ceiling() -> N
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(60, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
