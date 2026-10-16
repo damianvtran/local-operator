@@ -39,8 +39,10 @@ import pytest
 from local_operator.session import catalog
 from local_operator.session.catalog import (
     CATALOGUE_SORT_ACTIVITY,
+    CatalogueScope,
     catalogue_page,
     decode_cursor,
+    encode_cursor,
     load_catalog,
 )
 from local_operator.session.creation import ensure_session_created_at
@@ -152,6 +154,37 @@ class TestTheDefaultOrderIsUntouched:
         assert decoded.order == catalog.CURSOR_ORDER_RANK
         assert len(decoded.key) == 4
 
+    def test_the_rank_tokens_are_byte_for_byte_what_version_one_shipped(
+        self, tmp_path: Path
+    ) -> None:
+        """The compatibility promise as BYTES, not as shape (review round 1, m1).
+
+        The shape assertions above pin the order and the slot count; a future
+        encoder edit could still move the wire format with the suite green, and
+        the promise this change makes is byte-for-byte: a token an older build
+        minted must keep resolving, and a token a newer build mints for the rank
+        order must keep resolving in an older build. Each constant below was
+        derived by running the PRE-CHANGE encoder (``encode_cursor`` at the
+        merge base) over the same key and confirming the current encoder's
+        output is identical -- frozen here so the next format edit cannot pass
+        by re-deriving anything.
+        """
+        assert (
+            encode_cursor(None, (2, 0, -1000.5, "abc"))
+            == "eyJrIjpbMiwwLDEwMDAuNSwiYWJjIl0sInMiOm51bGwsInYiOjF9"
+        )
+        assert (
+            encode_cursor(CatalogueScope("team", "lopdev"), (1, 1, -2000.0, "abcdefabcdef"))
+            == "eyJrIjpbMSwxLDIwMDAuMCwiYWJjZGVmYWJjZGVmIl0sInMiOlsidGVhbSIsImxvcGRldiJdLCJ2IjoxfQ"
+        )
+        # A store-shaped birth: the float that made the reviewer's battery
+        # interesting (an int-typed birth is the only divergent input, and it
+        # is unreachable -- ``session_created_at`` coerces to float).
+        assert (
+            encode_cursor(None, (6, 2, -1792186133.9529011, "5cf0b415bd88"))
+            == "eyJrIjpbNiwyLDE3OTIxODYxMzMuOTUyOTAxMSwiNWNmMGI0MTViZDg4Il0sInMiOm51bGwsInYiOjF9"
+        )
+
 
 class TestTheActivityHead:
     """``sort=activity``: active rows first, then newest-activity-first."""
@@ -252,11 +285,15 @@ class TestActivityCursors:
                 created=1_000.0 + index,
                 stamp=1_000.0 + (index * 7) % 23,  # a shuffled activity clock
             )
-        expected = [
-            entry.id
-            for entry in load_catalog(tmp_path, limit=200)
-            if True  # every row is cold here; order still differs from birth
-        ]
+        # The store's own reader as the INDEPENDENT half (review round 1, n1):
+        # the walk below is compared against one big activity page, which shares
+        # the sort under test -- self-consistency; this pins that the same 23
+        # rows are what the catalogue carries at all, read through ``load_catalog``
+        # (the rank reader), so nothing can pass by agreeing with itself about a
+        # set that never existed.
+        assert {entry.id for entry in load_catalog(tmp_path, limit=200)} == {
+            f"row{index:09d}" for index in range(23)
+        }
         big = catalogue_page(tmp_path, limit=200, sort=CATALOGUE_SORT_ACTIVITY)
         expected = [entry.id for entry in big.entries]
         assert len(expected) == 23
