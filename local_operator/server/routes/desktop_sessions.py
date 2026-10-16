@@ -108,6 +108,7 @@ from local_operator.session.attention import (
     SupersededCompletionToken,
 )
 from local_operator.session.catalog import (
+    CATALOGUE_SORTS,
     SCOPE_KINDS,
     SCOPE_NAME_MAX_LENGTH,
     CatalogueScope,
@@ -2305,6 +2306,32 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     return CatalogueScope(kind, name)
 
 
+def _requested_sort(sort: str) -> str:
+    """The order a request asked for, or ``""`` for the rank order.
+
+    REFUSES BY NAME, the same rule :func:`_requested_scope` states: a client
+    that sent an order this build does not know gets an answer naming the field
+    and the accepted values. That answer is load-bearing here rather than
+    courteous -- the framework IGNORES a query parameter a handler does not
+    declare, so an unknown ``sort`` answered silently would be served the rank
+    order the client did not ask for, and the caller could not tell a working
+    new feature from an old backend.
+
+    An EMPTY STRING IS ABSENCE, matching the scope parameters' own rule: ``""``
+    is what a client sends for "the default order", and it is exactly the
+    answer every pre-existing caller gets.
+    """
+    value = sort.strip()
+    if value and value not in CATALOGUE_SORTS:
+        raise HTTPException(
+            422,
+            _wd.sort_unknown(sorts=", ".join(CATALOGUE_SORTS)).envelope(
+                code="sort_unknown"
+            ),
+        )
+    return value
+
+
 async def _delegated_cleanup_notice(request: Request) -> dict[str, Any] | None:
     """The one-time "delegated sessions were cleaned up" notice as a READ-ONLY peek.
 
@@ -2373,6 +2400,16 @@ async def list_sessions(
     scope_kind: str = Query(default=""),
     scope_name: str = Query(default=""),
     cursor: str = Query(default=""),
+    # THE ORDER THE PAGE IS READ IN. Absent means the rank order -- byte for
+    # byte the answer that existed before this parameter -- and "activity" is
+    # the desktop sidebar's own head order (rows that need the reader first,
+    # then everything else newest-activity-first), which is what keeps a
+    # reader's recent conversations inside the first page on a store whose
+    # cold population a wake band would otherwise fill. Declared as a plain
+    # string and refused BY NAME below (``_requested_sort``), the same rule
+    # ``_requested_scope`` states: an unknown value must be told, not silently
+    # answered with a different ordering.
+    sort: str = Query(default=""),
     # THE CENSUS IS OPT-IN, and its POPULATION is fixed: visible sessions that are
     # NOT ARCHIVED (``ScopeCounts``' own docstring carries the reasoning -- every
     # default list in the app hides archived rows, and a badge inflated by rows
@@ -2384,6 +2421,7 @@ async def list_sessions(
     # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
     # cannot be answered by anything the store says.
     scope = _requested_scope(scope_kind, scope_name)
+    requested_sort = _requested_sort(sort)
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
@@ -2408,6 +2446,7 @@ async def list_sessions(
             scope=scope,
             cursor=cursor or None,
             with_counts=with_counts,
+            sort=requested_sort,
         )
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
         # DECIDED, not left open: concatenated on the wire rather than published

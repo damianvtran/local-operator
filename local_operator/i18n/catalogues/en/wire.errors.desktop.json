@@ -52,6 +52,7 @@
   "wire.errors.desktop.scope_kind_unknown": "scope_kind must be one of {kinds}.",
   "wire.errors.desktop.scope_name_required": "scope_name is required when scope_kind is given.",
   "wire.errors.desktop.scope_name_too_long": "scope_name must be at most {max_length} characters.",
+  "wire.errors.desktop.sort_unknown": "sort must be one of {sorts}.",
   "wire.errors.desktop.session_copy_terminal_only": "{flag} works only in the terminal; the /session view shows the ID",
   "wire.errors.desktop.session_files_artifact_missing": "The stored copy of this file is no longer on this device, so it cannot be saved.",
   "wire.errors.desktop.session_files_bad_cursor": "That page cursor was not issued for this request. Start again from the first page.",

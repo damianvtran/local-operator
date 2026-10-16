@@ -225,6 +225,10 @@ def scope_name_too_long(*, max_length: str) -> Msg:
     return Msg("wire.errors.desktop.scope_name_too_long", {"max_length": max_length})
 
 
+def sort_unknown(*, sorts: str) -> Msg:
+    return Msg("wire.errors.desktop.sort_unknown", {"sorts": sorts})
+
+
 def session_copy_terminal_only(*, flag: str) -> Msg:
     return Msg("wire.errors.desktop.session_copy_terminal_only", {"flag": flag})
 
