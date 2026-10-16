@@ -462,3 +462,52 @@ async def test_the_recall_exemption_covers_the_read_query_value_alone(recall_con
         recall_context,
     )
     assert payload.is_error and "Sensitive value refused" in str(payload.content)
+
+
+@pytest.mark.asyncio
+async def test_a_read_path_whose_query_does_not_parse_keeps_the_letter_of_its_refusal(
+    recall_context,
+):
+    """Classifying the q value must not change WHICH refusal a read reports.
+
+    ``parse_url`` parses its query with ``strict_parsing=True``, which raises
+    ``ValueError`` for a field with no "=" (a trailing ``&``). Treating that as "not a
+    reference" leaves the caller's own guard — which refuses an id-shaped path — to
+    speak first, so the message and its order are the ones this input produced before
+    the recall exemption existed. ``execute_memory`` maps a bare ``ValueError`` to a
+    generic request error instead, which would have moved the guard behind it.
+    """
+    id_shaped = await execute_memory(
+        "r", "read", {"path": f"memory://global?q={DEVICE_ID}&"}, recall_context
+    )
+    assert id_shaped.is_error and "Sensitive value refused" in str(id_shaped.content)
+    # Not id-shaped: the guard admits it and parse_url still owns the refusal.
+    prose = await execute_memory(
+        "p", "read", {"path": "memory://global?q=staging host&"}, recall_context
+    )
+    assert prose.is_error
+    assert "Invalid memory request or unavailable store" in str(prose.content)
+
+
+@pytest.mark.asyncio
+async def test_a_tokens_parameter_is_refused_by_a_rule_that_predates_this_change(
+    recall_context,
+):
+    """Documents PRE-EXISTING behaviour; this is not the recall fix's [redacted].
+
+    A whitespace-free path carrying ``tokens=`` is refused by the path-like-token arm
+    (``memory.py`` extracts path-like tokens and asks ``is_sensitive``; the name match
+    answers ``token-or-secret-name``), and it refuses a non-id query identically — on
+    the base too, before any exemption. The exemption removes one value and stops at
+    ``&``, so it never reaches this parameter; ``limit=`` is unaffected. Pinned so the
+    residual cannot drift silently.
+    """
+    limited = await execute_memory(
+        "l", "read", {"path": f"memory://global?q={DEVICE_ID}&limit=5"}, recall_context
+    )
+    assert not limited.is_error, str(limited.content)
+    for query in (DEVICE_ID, "stage2"):
+        refused = await execute_memory(
+            "t", "read", {"path": f"memory://global?q={query}&tokens=50"}, recall_context
+        )
+        assert refused.is_error and "Sensitive path refused" in str(refused.content)

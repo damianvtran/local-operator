@@ -402,8 +402,10 @@ def safe_segment(value: Any, *, structural: bool = False) -> str:
 _REFERENCE_SHAPES = (
     # network.identity.device_id_for: "d_" + sha256(DEVICE_ID_DOMAIN + key).hexdigest()[:32].
     re.compile(r"d_[0-9a-f]{32}"),
-    # memory._id(): the canonical UUIDv7 string minted for entity and operation ids —
-    # the SCOPE/ID the CLI prints and the version=REV a read accepts.
+    # memory._id(): the canonical UUID string minted for entity and operation ids —
+    # the SCOPE/ID the CLI prints and the version=REV a read accepts. The store mints
+    # UUIDv7, but this guard is shape-based and pins no version/variant nibble, so any
+    # canonical UUID spelling matches.
     re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
 )
 
@@ -421,10 +423,12 @@ def structural_reference(value: Any) -> bool:
     The admitted set is exactly the two shapes above, each justified by the function
     that mints it. A shape with no such source is not a reference here: a bare 64-hex
     ``body_sha`` digest is spelled ``[0-9a-f]{64}`` at its validation, but it is an
-    integrity value over the operation payload the store compares, never a handle any
-    surface hands back, and the free-text guard already admits it. This is a READ-side
-    classification only; a WRITE keeps the guard, because storing a value is not the
-    same act as looking one up.
+    integrity value over the operation payload the store compares, never a *lookup*
+    handle — it does ride op records (``memory_capture.py`` computes one per captured
+    op) and no code path searches by it, since ``search()`` takes no body-hash input —
+    and the free-text guard already admits it. This is a READ-side classification only;
+    a WRITE keeps the guard, because storing a value is not the same act as looking one
+    up.
     """
     return isinstance(value, str) and any(shape.fullmatch(value) for shape in _REFERENCE_SHAPES)
 
