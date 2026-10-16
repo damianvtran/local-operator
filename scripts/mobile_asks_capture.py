@@ -37,14 +37,18 @@ WHAT EACH FRAME IS FOR (design §5.0/§5.3, R7):
   the session's asks in the index, and its sheet showing the timed-out ask as
   lapsed — dismiss, no options. ``-ended-bar`` is the screen before the tap,
   and shows the sheet did not open by itself over a queue of lapsed asks: the
-  quiet "1 lapsed question" entry, dim rather than accent.
+  quiet "1 question timed out" entry, dim rather than accent.
+* ``-ended-open`` — the same lapsed card after the user taps its ``Timed out``
+  header open (decision D11): the card arrives COLLAPSED behind that badge, and
+  the read-only body — the lapsed line, the question, Dismiss — is one explicit
+  tap away. ``-ended`` is the collapsed state.
 * ``-stale-bar`` / ``-stale`` — a STOPPED conversation whose index row still
   says ``open`` past its deadline: the relay re-derives it to ``timed_out``, so
   the same quiet entry, and a lapsed card WITH Dismiss.
 * ``-sheet`` is the MIXED sheet: open asks beside the lapsed ``qa-deadline``,
   with the title counting only the open ones as questions.
 * ``-sheet`` also carries the LAPSED card (``qa-deadline``, timed out): the
-  question read-only under "Lapsed — the agent took its default and moved on",
+  question read-only under "Timed out — the agent goes ahead without your answer",
   with dismiss and no options.
 * ``-loading``  — the read in flight (the fetch is stalled for the frame, so the
   state is reproducible rather than a timing race).
@@ -242,6 +246,27 @@ STALL_AGGREGATE = """
     return real(input, init);
   };
   return "stalled";
+})()
+"""
+
+#: Tap the first lapsed card's collapsed header open (D11). Returns whether a
+#: header was found; ``LAPSED_EXPANDED`` reads the result AFTER React has
+#: re-rendered (read in the same tick as the click, it reports the old value).
+EXPAND_LAPSED = """
+(() => {
+    const card = document.querySelector('[data-testid="ask-card"][data-ask-status="timed_out"]');
+    const header = card && card.querySelector('button[aria-expanded]');
+    if (!header) return false;
+    header.click();
+    return true;
+})()
+"""
+
+LAPSED_EXPANDED = """
+(() => {
+    const card = document.querySelector('[data-testid="ask-card"][data-ask-status="timed_out"]');
+    const header = card && card.querySelector('button[aria-expanded]');
+    return header ? header.getAttribute('aria-expanded') : null;
 })()
 """
 
@@ -447,6 +472,14 @@ def main() -> None:
             time.sleep(0.6)
             page.shot(outdir / f"{label}-{vp}-ended.png")
             report[f"{vp}-ended"].update(json.loads(page.js(SHEET_PROBE)))
+            # 2b2'. The collapsed lapsed card OPENED by the user (D11). A tap on the
+            #       disclosure header the card carries; a build without the collapse
+            #       has no such header and the frame repeats `-ended`, which is what
+            #       `expanded` records.
+            report[f"{vp}-ended-open"] = {"tapped": page.js(EXPAND_LAPSED)}
+            time.sleep(0.6)
+            report[f"{vp}-ended-open"]["expanded"] = page.js(LAPSED_EXPANDED)
+            page.shot(outdir / f"{label}-{vp}-ended-open.png")
 
             # 2b3. A STALE `open` past its deadline on a stopped conversation (review
             #      round 1, R1; QA Q1): re-derived on the runtime's host to

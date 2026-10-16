@@ -639,7 +639,7 @@ def _queued_ask_projection() -> SessionProjection:
                 id="q-3",
                 kind="ask_timeout",
                 text=(
-                    "Timed out after 4m — the agent moved on; you can still answer "
+                    "Timed out after 4m — the agent goes ahead without your answer "
                     "(ask qa-deadline)"
                 ),
                 details={
@@ -652,8 +652,7 @@ def _queued_ask_projection() -> SessionProjection:
                         "[Ask timed out] No reply to ask qa-deadline arrived within 4m "
                         "(asked 15m ago). The deadline passed — does the answer still "
                         "hold?\nProceed without it: use your recommended option or best "
-                        "judgment and state the assumption in your report. The ask stays "
-                        "open for the user; if they answer later you will be told."
+                        "judgment and state the assumption in your report."
                     ),
                 },
             ),

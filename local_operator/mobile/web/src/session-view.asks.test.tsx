@@ -258,7 +258,7 @@ describe("SessionScreen and queued asks", () => {
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
-		const entry = screen.getByRole("button", { name: "queued asks in this session (1 lapsed)" });
+		const entry = screen.getByRole("button", { name: "queued asks in this session (1 timed out)" });
 		expect(entry.textContent).toBe("? 1");
 		expect(entry.className).not.toMatch(/text-accent/);
 		expect(screen.queryByRole("button", { name: /waiting/ })).toBeNull();

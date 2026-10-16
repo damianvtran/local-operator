@@ -123,7 +123,10 @@ def test_the_notice_reports_the_wait_and_tells_the_model_to_proceed():
     assert text.startswith("[Ask timed out]")
     assert "1h" in text
     assert "Proceed without it" in text
-    assert "if they answer later you will be told" in text
+    # D10: no surface offers a late answer any more, so the notice no longer
+    # promises the model one.
+    assert "answer later" not in text
+    assert "stays open for the user" not in text
     # Never "the user denied": nobody denied anything, the window closed.
     assert "denied" not in text
 
@@ -154,6 +157,8 @@ def test_a_secret_notice_names_the_key_and_never_quotes_the_prompt():
     assert "API_KEY" in text
     assert "sk-live-abc123" not in text
     assert "was not provided" in text
+    assert "answer later" not in text
+    assert "stays open for the user" not in text
 
 
 def test_a_bridge_notice_names_the_request_and_keeps_the_untrusted_clause() -> None:
