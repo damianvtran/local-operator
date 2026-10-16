@@ -42,15 +42,24 @@ V7, A HARD RULE: THIS MODULE NEVER ANSWERS A GATE. It has no import of, and no
 call to, ``answer_gate`` or the ``/answers`` handler. The operator approves on
 screen through the existing presence-gated card.
 
-V13: NO UTTERANCE WHILE AN APPROVAL IS PENDING. A steer is not an answer, but it
-is not harmless either: an INTERRUPTIBLE tool's card (``bash``) is cancelled by
-a steer ("Tool call skipped: interrupted by steering."), so a word heard at the
-card would make the card vanish. The utterance route therefore refuses with
-409 ``approval_pending`` while the slot session has a pending approval gate,
-for the text door and for audio alike, and audio is refused BEFORE STT runs so
-nothing is spent. ``tests/unit/server/test_desktop_voice.py`` pins the static
-absence; ``tests/unit/voice/test_utterance_during_approval.py`` pins the refusal
-against a real runtime with the card still parked.
+V13: NO UTTERANCE WHILE A CARD IS PENDING. A steer is not an answer, but it is
+not harmless either: an INTERRUPTIBLE tool's card (``bash``'s approval, and a
+BLOCKING ask under ``LOP_ASK_NONBLOCKING=0``) is cancelled by a steer ("Tool call
+skipped: interrupted by steering."), so a word heard at the card would make it
+vanish. The utterance route therefore refuses with 409 ``approval_pending``
+while the slot session has ANY pending card, for the text door and for audio
+alike, and audio is refused BEFORE STT runs so nothing is spent. A queued ask
+(the default) parks no card, so it never refuses.
+
+KNOWN RACE, ACCEPTED: the check reads the facade, and the steer is a separate
+owner op. A card that parks between the two (milliseconds; reproduced at 1-4 ms)
+is not seen, and the steer cancels it, exactly as a typed steer would today.
+Nothing is approved and the tool does not run. Closing it needs an owner-side
+"refuse if a card is pending" flag carried through six layers plus a capability
+flag (design V13), so it is deferred; the race is pinned, not hidden, by
+``tests/unit/voice/test_utterance_during_approval.py``.
+``tests/unit/server/test_desktop_voice.py`` pins the static absence of any
+answer path.
 
 THE SERVER DECIDES WHAT IS SPOKEN (V8). ``/speech`` takes a source reference,
 never text: a message id resolved from the session's own durable journal, or the
@@ -427,7 +436,7 @@ async def voice_utterance(
         raise _refuse(422, "invalid_voice_request", _wv.invalid_request())
     require_slot(_config_dir(request), session_id)
     # V13, before STT: a refused recording must cost nothing.
-    if await _approval_pending(request, session_id):
+    if await _card_pending(request, session_id):
         raise _refuse(409, "approval_pending", _wv.approval_pending())
 
     if file is not None:
@@ -441,7 +450,7 @@ async def voice_utterance(
         )
         # STT takes seconds, and a card can park inside them. The money is spent
         # by now; the card is not, so check again before the steer can cancel it.
-        if await _approval_pending(request, session_id):
+        if await _card_pending(request, session_id):
             raise _refuse(409, "approval_pending", _wv.approval_pending())
     else:
         spoken, path = text or "", None
@@ -457,8 +466,11 @@ async def voice_utterance(
     )
 
 
-async def _approval_pending(request: Request, session_id: str) -> bool:
-    """V13: does the session have an approval card parked right now?
+async def _card_pending(request: Request, session_id: str) -> bool:
+    """V13: does the session have a card (an approval, or a blocking ask) parked now?
+
+    Every pending card counts, not only approvals: a blocking ask is as
+    interruptible as ``bash`` and a steer withdraws it the same way.
 
     Read through the CONTROL door for ``_streaming``'s reason: a cold read-door
     answer would report a parked card as absent. A facade whose frontend state
@@ -472,7 +484,7 @@ async def _approval_pending(request: Request, session_id: str) -> bool:
                 gate = remote.pending_gate if remote is not None else None
             except RuntimeError:
                 gate = None
-    return gate is not None and getattr(gate, "kind", "") == "approval"
+    return gate is not None
 
 
 def _validation_reason(exc: ValidationError) -> str:

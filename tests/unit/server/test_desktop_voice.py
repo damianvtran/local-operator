@@ -585,17 +585,24 @@ async def test_an_utterance_during_a_pending_approval_is_refused(rig: Any, monke
         assert response.status_code == 409, response.text
         detail = response.json()["detail"]
         assert detail["code"] == "approval_pending"
-        assert detail["text"] == "Answer the approval on screen first."
+        assert detail["text"] == "Answer the question or approval on screen first."
     assert stt_calls == [], "a refused recording was transcribed"
     assert rig.spend == [], "a refused recording was billed"
     assert remote.admissions == [], "the utterance reached the owner"
     assert remote.gate_answers == [], "an utterance reached answer_gate"
     assert remote.pending_gate is not None
 
-    # An ASK is not an approval: a steer does not cancel it, so it is not refused.
+    # N4: a BLOCKING ask's card (``LOP_ASK_NONBLOCKING=0``) is interruptible too,
+    # so it is refused the same way. A queued ask parks no card at all.
     remote.pending_gate = SimpleNamespace(request_id="ask-1", kind="ask", title="", detail="")
     asked = await _utter(rig, SESSION_A, "the blue one")
-    assert asked.status_code == 200, asked.text
+    assert asked.status_code == 409, asked.text
+    assert asked.json()["detail"]["code"] == "approval_pending"
+    assert remote.admissions == []
+    # And with no card at all, the same words are an ordinary steer.
+    remote.pending_gate = None
+    free = await _utter(rig, SESSION_A, "the blue one")
+    assert free.status_code == 200, free.text
     assert remote.admissions[-1]["steer"] is True
 
 
@@ -667,6 +674,45 @@ async def test_deleting_the_slot_holder_clears_the_slot(rig: Any) -> None:
         "DELETE", f"/v1/desktop/sessions/{SESSION_A}", json={"confirmed": True}
     )
     assert other.status_code == 200, other.text
+    current = voice_slot.read_slot(rig.root)
+    assert current is not None and current.session_id == SESSION_B
+
+
+@pytest.mark.asyncio
+async def test_a_delete_never_creates_voice_state_when_voice_was_never_used(rig: Any) -> None:
+    """N3: the hook reads first, so a machine with no voice gets no ``voice/`` dir."""
+    assert not (rig.root / "voice").exists()
+    response = await rig.client.request(
+        "DELETE", f"/v1/desktop/sessions/{SESSION_A}", json={"confirmed": True}
+    )
+    assert response.status_code == 200, response.text
+    assert not (rig.root / "voice").exists(), sorted(p.name for p in rig.root.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_a_delete_does_not_wait_on_a_slot_lock_another_process_holds(rig: Any) -> None:
+    """N3: deleting a NON-holder must not stall behind the slot lock (up to 5 s)."""
+    import fcntl
+    import os
+    import time
+
+    await _enable(rig, SESSION_B)
+    lock_path = rig.root / "voice" / voice_slot.LOCK_NAME
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    # flock is per open file description, so this fd contends with the route's
+    # own open exactly as another process's would.
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        started = time.monotonic()
+        response = await rig.client.request(
+            "DELETE", f"/v1/desktop/sessions/{SESSION_A}", json={"confirmed": True}
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert response.status_code == 200, response.text
+    assert elapsed < voice_slot.LOCK_WAIT_S / 2, f"the delete waited {elapsed:.2f}s on the lock"
     current = voice_slot.read_slot(rig.root)
     assert current is not None and current.session_id == SESSION_B
 

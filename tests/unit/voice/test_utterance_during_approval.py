@@ -117,10 +117,9 @@ class OnePool:
         return False
 
 
-@pytest.mark.asyncio
-async def test_an_utterance_at_a_parked_bash_card_is_refused_and_the_card_survives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@contextlib.asynccontextmanager
+async def _parked_bash_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Voice enabled, ``[bash:1]`` admitted through the voice door, its card parked."""
     config = tmp_path / "config"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -223,45 +222,130 @@ async def test_an_utterance_at_a_parked_bash_card_is_refused_and_the_card_surviv
             rows_before = _user_rows(directory)
             assert rows_before == ["[bash:1] list files"]
 
-            text_door = await client.post(
-                "/v1/desktop/voice/utterance",
-                data={"session_id": SESSION, "request_id": str(uuid.uuid4()), "text": "yes"},
+            yield SimpleNamespace(
+                client=client,
+                handle=handle,
+                remote=remote,
+                session=session,
+                directory=directory,
+                card=card,
+                gate_future=gate_future,
+                rows_before=rows_before,
+                stt_calls=stt_calls,
             )
-            recording = await client.post(
-                "/v1/desktop/voice/utterance",
-                data={"session_id": SESSION, "request_id": str(uuid.uuid4())},
-                files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
-            )
-            for response in (text_door, recording):
-                assert response.status_code == 409, response.text
-                detail = response.json()["detail"]
-                assert detail["code"] == "approval_pending"
-                assert detail["text"] == "Answer the approval on screen first."
-            for _ in range(50):
-                await asyncio.sleep(0)
-
-            # The card survived: same request, future unresolved, nothing admitted,
-            # nothing transcribed, and the tool has not been skipped.
-            pending = handle._fold.projection.pending
-            assert pending is not None and pending.request_id == card.request_id
-            assert not gate_future.done(), "the refused utterance settled the card"
-            assert _user_rows(directory) == rows_before
-            assert stt_calls == []
-            transcript = (directory / "transcript.jsonl").read_text(encoding="utf-8")
-            assert "interrupted by steering" not in transcript
-
-            # Settled on screen (the /answers path), voice is accepted again.
-            await handle.approval_answer(card.request_id, False, False)
-            await _until(lambda: not session.is_streaming)
-            await _until(lambda: remote.pending_gate is None and not remote.is_streaming)
-            after = await client.post(
-                "/v1/desktop/voice/utterance",
-                data={"session_id": SESSION, "request_id": str(uuid.uuid4()), "text": "thanks"},
-            )
-            assert after.status_code == 200, after.text
-            await _until(lambda: "thanks" in _user_rows(directory))
-            assert gate_future.result() is False
     finally:
         await remote.dispose()
         server.close()
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_utterance_at_a_parked_bash_card_is_refused_and_the_card_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _parked_bash_card(tmp_path, monkeypatch) as rig:
+        client, handle, remote, session = rig.client, rig.handle, rig.remote, rig.session
+        directory, card, gate_future = rig.directory, rig.card, rig.gate_future
+        rows_before, stt_calls = rig.rows_before, rig.stt_calls
+        text_door = await client.post(
+            "/v1/desktop/voice/utterance",
+            data={"session_id": SESSION, "request_id": str(uuid.uuid4()), "text": "yes"},
+        )
+        recording = await client.post(
+            "/v1/desktop/voice/utterance",
+            data={"session_id": SESSION, "request_id": str(uuid.uuid4())},
+            files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+        )
+        for response in (text_door, recording):
+            assert response.status_code == 409, response.text
+            detail = response.json()["detail"]
+            assert detail["code"] == "approval_pending"
+            assert detail["text"] == "Answer the question or approval on screen first."
+        for _ in range(50):
+            await asyncio.sleep(0)
+
+        # The card survived: same request, future unresolved, nothing admitted,
+        # nothing transcribed, and the tool has not been skipped.
+        pending = handle._fold.projection.pending
+        assert pending is not None and pending.request_id == card.request_id
+        assert not gate_future.done(), "the refused utterance settled the card"
+        assert _user_rows(directory) == rows_before
+        assert stt_calls == []
+        transcript = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+        assert "interrupted by steering" not in transcript
+
+        # Settled on screen (the /answers path), voice is accepted again.
+        await handle.approval_answer(card.request_id, False, False)
+        await _until(lambda: not session.is_streaming)
+        await _until(lambda: remote.pending_gate is None and not remote.is_streaming)
+        after = await client.post(
+            "/v1/desktop/voice/utterance",
+            data={"session_id": SESSION, "request_id": str(uuid.uuid4()), "text": "thanks"},
+        )
+        assert after.status_code == 200, after.text
+        await _until(lambda: "thanks" in _user_rows(directory))
+        assert gate_future.result() is False
+
+
+@pytest.mark.asyncio
+async def test_the_known_race_admits_a_steer_but_never_approves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """V13's accepted race, pinned: the check said "no card" while a card was parked.
+
+    The route's check and the owner's admission are separate steps, so a card
+    that parks between them (milliseconds) is not seen; a typed steer has the
+    same window. This forces the check to miss (the reviewer's probe) and pins
+    what then happens.
+
+    MUST NEVER CHANGE: nothing is approved and the tool does not run. The gate
+    never resolves to True (today its future is cancelled: the card is withdrawn,
+    not answered), and no bash process is started.
+
+    CURRENT BEHAVIOUR, ALLOWED TO IMPROVE: the steer is admitted and the
+    interruptible card is skipped ("Tool call skipped: interrupted by
+    steering."). An owner-side "refuse if an approval is pending" check would
+    turn this into a 409; when that lands, flip the admission and skip
+    assertions below and keep the safety ones.
+    """
+
+    async def check_misses(*_: Any, **__: Any) -> bool:
+        return False
+
+    async with _parked_bash_card(tmp_path, monkeypatch) as rig:
+        ran: list[Any] = []
+        original = asyncio.create_subprocess_shell
+        original_exec = asyncio.create_subprocess_exec
+
+        async def spy_shell(cmd: Any, *args: Any, **kwargs: Any):
+            ran.append(cmd)
+            return await original(cmd, *args, **kwargs)
+
+        async def spy_exec(program: Any, *args: Any, **kwargs: Any):
+            ran.append((program, *args))
+            return await original_exec(program, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_shell", spy_shell)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+        monkeypatch.setattr(desktop_voice, "_card_pending", check_misses)
+
+        response = await rig.client.post(
+            "/v1/desktop/voice/utterance",
+            data={"session_id": SESSION, "request_id": str(uuid.uuid4()), "text": "yes"},
+        )
+        await _until(lambda: not rig.session.is_streaming)
+        transcript = (rig.directory / "transcript.jsonl").read_text(encoding="utf-8")
+
+        # MUST NEVER CHANGE: the card settled without approval and bash never ran.
+        # The steer CANCELS the gate's future (the card is withdrawn, not
+        # answered); a result of True is the one outcome that would be an approval.
+        assert rig.gate_future.done()
+        assert rig.gate_future.cancelled() or rig.gate_future.result() is not True
+        assert not any("sleep 1" in str(call) for call in ran), ran
+        assert "exit code: 0" not in transcript
+
+        # CURRENT BEHAVIOUR (allowed to improve to a 409 approval_pending).
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["admission"]["detail"] == "steering queued"
+        assert "interrupted by steering" in transcript
+        assert _user_rows(rig.directory) == ["[bash:1] list files", "yes"]
