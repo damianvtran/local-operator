@@ -53,13 +53,13 @@ describe("askStateLine", () => {
 		);
 	});
 
-	it("states a timed-out ask as lapsed: the agent goes ahead without the answer", () => {
+	it("states a timed-out ask in Ben's word: the agent goes ahead without the answer", () => {
 		/* Ben's report (2026-10-15): "you can still answer" invited an answer to a
 		   question the agent had already gone ahead without. The wording holds for
 		   every timeout notice, including a secret ask's, which has no default
 		   (design round 1, D3). */
 		const line = askStateLine(ask({ status: "timed_out" }), 1);
-		expect(line.text).toBe("Lapsed — the agent goes ahead without your answer");
+		expect(line.text).toBe("Timed out — the agent goes ahead without your answer");
 		expect(line.tone).toBe("gone");
 	});
 

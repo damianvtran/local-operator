@@ -371,7 +371,6 @@ from local_operator.tui.widgets.ask_queue import (
     SCOPE_FLEET,
     SCOPE_SESSION,
     STATUS_OPEN,
-    STATUS_TIMED_OUT,
     AskBar,
     AskQueueList,
     AskRow,
@@ -5817,9 +5816,9 @@ class OperatorApp(App[None]):
         #: disagree about which channel Enter is aimed at.
         self._ask_mode: bool = False
         #: The wire's asks, flattened, as of the last snapshot — SETTLED ROWS
-        #: INCLUDED since design §4: the list filters them, the bar and the
-        #: sidebar mark read `_open_ask_rows()` so a settled row never inflates a
-        #: count of what is still owed.
+        #: INCLUDED since design §4: the list filters them, and the bar and the
+        #: sidebar mark (`_fleet_marks`) count ANSWERABLE rows only, so neither a
+        #: settled nor a timed-out row inflates a count of what is still owed.
         self._ask_rows: list[AskRow] = []
         #: Which queue the ONE expanded list is reading: this conversation's, or
         #: every conversation's. Set by the DOOR the user came through — the bar
@@ -5854,6 +5853,13 @@ class OperatorApp(App[None]):
         #: a second Enter could spawn a second worker and CANCEL the first one
         #: mid-engage. Every mount seeds the widget from this set.
         self._ask_in_flight: set[str] = set()
+        #: The subset of `_ask_in_flight` a SESSION-scope `x` set (`_dismiss_ask`).
+        #: Only these are cleared by the snapshot that drops their row: a FLEET
+        #: op owns its mark for the whole engage window and clears it itself in
+        #: `_fleet_ask_worker` — a snapshot sweep that inferred ownership from
+        #: which rows were loaded cleared it after a collapse, and a reopened
+        #: list then CANCELLED the engage (#2481 review round 2, M1).
+        self._ask_dismiss_in_flight: set[str] = set()
         #: ``session_id -> title`` from the session catalogue, for the fleet
         #: list's row handles (round 2: U8/U6). A fleet row names the
         #: conversation it belongs to, and the catalogue's title is the name
@@ -26646,7 +26652,7 @@ class OperatorApp(App[None]):
 
         ``open_count``/``truncated`` are the WIRE's own tally and its marker
         (``asks_open``/``asks_truncated``, design §4): the list header states the
-        backend's number and withholds the waiting/moved-on split when the frame
+        backend's number and withholds the pending/settled split when the frame
         is a prefix of the queue (amendment A6), so the fold's two extra facts
         have to reach the surface that prints them.
 
@@ -26693,6 +26699,11 @@ class OperatorApp(App[None]):
             # cleared HERE rather than left to go stale on a switch flipped
             # mid-session.
             self._ask_rows = []
+            # A session `x` mark rides only on `_ask_rows`; with the rows gone no
+            # snapshot would ever sweep it (#2481 review round 3, m2).
+            for ask_id in list(self._ask_dismiss_in_flight):
+                self._mark_ask_in_flight(ask_id, False)
+            self._ask_dismiss_in_flight.clear()
             self._retire_ask_secret_refusal()
             self._ask_fleet_rows = []
             self._ask_marks = {}
@@ -26704,6 +26715,13 @@ class OperatorApp(App[None]):
             self._paint_sidebar_asks()
             return
         self._ask_rows = list(rows)
+        # A session-scope `x` holds its row in flight until the frame drops it
+        # (`_dismiss_ask`); THIS is that frame. Only those marks are swept here —
+        # never a fleet op's, which `_fleet_ask_worker` ends itself (M1).
+        present_ids = {row.ask_id for row in self._ask_rows}
+        for ask_id in [i for i in self._ask_dismiss_in_flight if i not in present_ids]:
+            self._ask_dismiss_in_flight.discard(ask_id)
+            self._mark_ask_in_flight(ask_id, False)
         self._refresh_ask_secret_notice()
         #: The wire's OWN tally and its truncation marker, kept beside the rows so
         #: the list can be MOUNTED with them: a list built from the current
@@ -26770,6 +26788,12 @@ class OperatorApp(App[None]):
             row = next((item for item in active_rows if item.ask_id == self._ask_mounted_id), None)
             if row is not None:
                 self._ask_card.set_title(self._ask_card_title(row))
+                if row.lapsed:
+                    # D10: the ask lapsed UNDER the open card. It stays on screen
+                    # (yanking it would take the surface from under someone
+                    # typing) but stops taking answers; Esc returns to the list,
+                    # where the row now reads `timed out`.
+                    self._ask_card.set_read_only()
         if self._ask_mounted_id is not None and not any(
             row.ask_id == self._ask_mounted_id for row in active_rows
         ):
@@ -26821,11 +26845,16 @@ class OperatorApp(App[None]):
         if not decider.awaiting(conversation):
             return
         answerable = self._open_ask_rows()
+        # LAPSED rows are named to the reading but never counted as pending (D12):
+        # the wire's tally includes them, so leaving them out would read a
+        # lapsed-only queue as a dropped row and wait instead of settling.
+        lapsed = sum(1 for row in self._ask_rows if row.lapsed)
         reading = read_queue(
             published=len(self._ask_rows),
             outstanding_created_ms=[row.created_at for row in answerable],
             tally=self._ask_open_count,
             opened_at_ms=decider.opened_at_ms,
+            lapsed=lapsed,
         )
         settling = (
             self._swapping_session
@@ -26842,7 +26871,7 @@ class OperatorApp(App[None]):
             outstanding_ids=(
                 [row.ask_id for row in answerable]
                 if names_every_outstanding(
-                    tally=self._ask_open_count, named_outstanding=len(answerable)
+                    tally=self._ask_open_count, named_outstanding=len(answerable) + lapsed
                 )
                 else None
             ),
@@ -26909,7 +26938,7 @@ class OperatorApp(App[None]):
         return int(time.time() * 1000)
 
     def _open_ask_rows(self) -> list[AskRow]:
-        """The rows still waiting on the user: open, or timed out and answerable.
+        """The rows still waiting on the user: open, and not lapsed (D10).
 
         NOT ``late``, and that is round 1's D6/U3 fix in the second place it
         had to be made: a late answer is an ANSWER (the agent was told, one
@@ -27010,7 +27039,11 @@ class OperatorApp(App[None]):
         """
         marks = dict(self._ask_marks if index is None else index)
         session_id = str(getattr(getattr(self, "_session", None), "session_id", "") or "")
-        live = len(self._open_ask_rows())
+        # ANSWERABLE rows only (#2481 design D3 / UX U2), the same predicate
+        # `_read_fleet_asks` applies to the index and the desktop's marks apply
+        # (local-operator-ui #1116): the `?` mark says "you owe an answer here",
+        # and a timed-out ask owes nothing. The session's own bar still opens it.
+        live = sum(1 for row in self._ask_rows if row.answerable)
         if session_id and live:
             marks[session_id] = max(live, int(marks.get(session_id, 0)))
         return marks
@@ -27075,9 +27108,15 @@ class OperatorApp(App[None]):
         # fleet list uses (``_load_fleet_asks``) — so a mark or ``asks: N`` never
         # counts a row the list it opens will not show (``asks.lapsed_visible_for``,
         # decision D8; review round 1, R1-1).
+        #
+        # ANSWERABLE rows only (#2481 design D3): a lapsed ask owes no answer, so
+        # it puts no `?` in the sidebar. ``index_asks`` has already re-derived a
+        # stopped runtime's ``open`` past its deadline to ``timed_out`` against ONE
+        # stamp for the whole read, so ``is_lapsed`` on its rows is the whole rule.
         root = config_dir()
         for row in store.index_asks(root, lapsed_visible_ms=lapsed_visible_ms(root)):
-            if store.is_outstanding(row.get("status")):
+            status = row.get("status")
+            if store.is_outstanding(status) and not store.is_lapsed(status):
                 session_id = str(row.get("session_id") or "")
                 counts[session_id] = counts.get(session_id, 0) + 1
                 total += 1
@@ -27231,13 +27270,17 @@ class OperatorApp(App[None]):
         Two counts, deliberately: ``count`` is what the user still OWES (the OPEN
         asks — "3 questions waiting" must not include one the agent already
         gave up on), while ``present`` is whether there is anything to open at
-        all. A queue of nothing but timed-out asks is still ANSWERABLE (§5's
-        copy says so on every surface), so hiding the bar on ``count == 0``
-        would make those asks unreachable from the terminal; the bar stays and
-        its copy changes instead.
+        all. A queue of nothing but timed-out asks owes nothing (they are
+        read-only since D10), but their ``x`` dismiss lives behind the bar, so
+        hiding it on ``count == 0`` would make them unreachable from the
+        terminal; the bar stays and its copy changes instead.
         """
         answerable = self._open_ask_rows()
         waiting = [row for row in answerable if row.status == STATUS_OPEN]
+        # LAPSED asks keep the bar up (Dismiss lives behind it, D10) and are named
+        # by the chip's "N asks timed out" clause; they owe nothing, so they are
+        # neither the head question nor counted as waiting.
+        lapsed = [row for row in self._ask_rows if row.lapsed]
         self._ask_bar.set_state(
             count=len(waiting),
             head=self._ask_head_text(answerable),
@@ -27249,8 +27292,8 @@ class OperatorApp(App[None]):
             # describe). Counted over what the user still OWES, the same set
             # `count` is taken from.
             urgent_count=len([row for row in waiting if row.urgent]),
-            present=bool(answerable),
-            timed_out=len(answerable) - len(waiting),
+            present=bool(answerable) or bool(lapsed),
+            timed_out=len(lapsed),
         )
 
     def _sync_ask_tick(self) -> None:
@@ -27293,6 +27336,52 @@ class OperatorApp(App[None]):
             self._ask_tick = None
 
     def _on_ask_tick(self) -> None:
+        self._lapse_fleet_rows()
+        self._repaint_ask_countdown()
+
+    def _lapse_fleet_rows(self) -> None:
+        """Turn FLEET rows whose deadline passed on screen into lapsed rows (review m3).
+
+        The session scope re-derives on every frontend snapshot; the fleet's rows
+        are an index read taken when the door opened, and the index only says
+        ``timed_out`` when it is READ (``asks.store._shown_rows``). So a fleet
+        row left on screen past its deadline kept offering an answer — against
+        D10's "read-only on every surface". The tick applies the same re-derive
+        the store does, on a copy, and a mounted card follows it.
+        """
+        from dataclasses import replace
+
+        if not self._ask_fleet_rows:
+            return
+        now = self._ask_now_ms()
+        changed = False
+        rows: list[AskRow] = []
+        for row in self._ask_fleet_rows:
+            if row.status == "open" and row.expires_at and row.expires_at <= now:
+                row = replace(row, status="timed_out")
+                changed = True
+            rows.append(row)
+        if not changed:
+            return
+        self._ask_fleet_rows = rows
+        if self._ask_list is not None and self._ask_scope == SCOPE_FLEET:
+            self._ask_list.set_rows(
+                rows,
+                now_ms=now,
+                open_count=self._ask_fleet_open_count,
+                truncated=self._ask_fleet_truncated,
+            )
+        if (
+            self._ask_scope == SCOPE_FLEET
+            and self._ask_card is not None
+            and self._ask_mounted_id is not None
+        ):
+            mounted = next((r for r in rows if r.ask_id == self._ask_mounted_id), None)
+            if mounted is not None and mounted.lapsed:
+                self._ask_card.set_title(self._ask_card_title(mounted))
+                self._ask_card.set_read_only()
+
+    def _repaint_ask_countdown(self) -> None:
         """Repaint the countdown-bearing surface from the current clock.
 
         Only the LIST paints a deadline (``expiry_text``), so only the list is
@@ -27942,7 +28031,16 @@ class OperatorApp(App[None]):
             exit_hint=("esc", "collapse"),
             caret=caret,
         )
+        if row.lapsed:
+            # Enter or a click on a lapsed list row opens it READ-ONLY (#2481 UX
+            # U1): the explicit look at the whole question and its options, with
+            # nothing to send (D10).
+            card.set_read_only()
         draft = self._ask_drafts.pop(row.ask_id, None)
+        if row.lapsed:
+            # A draft is half an answer; restoring it would paint text into a card
+            # that will never send it (UX U6).
+            draft = None
         self._ask_card = card
         self._ask_mounted_id = row.ask_id
         self._ask_from_list = from_list
@@ -27990,20 +28088,21 @@ class OperatorApp(App[None]):
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
         bridge = _is_bridge_ask_row(row)
-        if row.status == STATUS_TIMED_OUT:
+        if row.lapsed:
+            # D10: a lapsed card is READ-ONLY, so the title stops promising that an
+            # answer still lands. The words are the shared lapsed line (the
+            # transcript receipt in ``harness/rows.ask_timeout_notice`` and the
+            # phone's card say the same thing).
             if bridge:
                 # D2: a carriage's ask is not this user's own agent. The
                 # timeout line says the same true thing; only the SUBJECT
                 # changes, so a reader is not told their own agent asked when
                 # the request came from another member's.
                 return (
-                    f"{ASK_MARKER} this request timed out — the sender moved on; "
-                    "your answer still reaches them"
+                    f"{ASK_MARKER} this request timed out — the sender goes ahead "
+                    "without your answer"
                 )
-            return (
-                f"{ASK_MARKER} this ask timed out — the agent moved on; "
-                "your answer still reaches it"
-            )
+            return f"{ASK_MARKER} this ask timed out — the agent goes ahead without your answer"
         if bridge:
             # A cross-member request: the answer travels back to the requester,
             # so "the agent asked" (this user's own) is the wrong subject.
@@ -28170,7 +28269,9 @@ class OperatorApp(App[None]):
         outcome: Any = reader(ask_id, by="terminal")
         self._handle_ask_outcome(outcome, toast=True)
 
-    def _handle_ask_outcome(self, outcome: Any, *, toast: bool) -> None:
+    def _handle_ask_outcome(
+        self, outcome: Any, *, toast: bool, clear_in_flight: str | None = None
+    ) -> None:
         """Report a queued-ask op's verdict, whether it arrived sync or on the wire.
 
         The three ops the surfaces drive are read off whichever session holds
@@ -28188,26 +28289,38 @@ class OperatorApp(App[None]):
         """
         if inspect.isawaitable(outcome):
             self.run_worker(
-                self._await_ask_outcome(outcome, toast=toast),
+                self._await_ask_outcome(outcome, toast=toast, clear_in_flight=clear_in_flight),
                 exclusive=False,
                 exit_on_error=False,
             )
             return
-        self._ask_refusal(outcome, toast=toast)
+        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight)
 
-    async def _await_ask_outcome(self, pending: Any, *, toast: bool) -> None:
+    async def _await_ask_outcome(
+        self, pending: Any, *, toast: bool, clear_in_flight: str | None = None
+    ) -> None:
         """Await a viewer's ask op and report it in the owner's words."""
         try:
             outcome = await pending
         except Exception as exc:  # noqa: BLE001 — a dead transport is not a lost answer
             logger.warning("a queued-ask op failed on the wire", exc_info=True)
             outcome = {"ok": False, "error": str(exc) or "the ask was refused"}
-        self._ask_refusal(outcome, toast=toast)
+        self._ask_refusal(outcome, toast=toast, clear_in_flight=clear_in_flight)
 
-    def _ask_refusal(self, outcome: Any, *, toast: bool) -> None:
-        """The one place a refused ask op becomes words on screen."""
+    def _ask_refusal(
+        self, outcome: Any, *, toast: bool, clear_in_flight: str | None = None
+    ) -> None:
+        """The one place a refused ask op becomes words on screen.
+
+        ``clear_in_flight`` ends a gesture's in-flight mark on a REFUSAL only: an
+        accepted op keeps it until the snapshot that drops the row, so the row
+        never flickers back to live between the reply and the frame.
+        """
         if outcome.get("ok"):
             return
+        if clear_in_flight:
+            self._ask_dismiss_in_flight.discard(clear_in_flight)
+            self._mark_ask_in_flight(clear_in_flight, False)
         text = str(outcome.get("error") or "the ask was refused")
         if toast:
             self._ask_gesture_refusal(text)
@@ -28238,8 +28351,17 @@ class OperatorApp(App[None]):
         reader: Any = getattr(session, "dismiss_ask", None)
         if not callable(reader):
             return
+        if ask_id in self._ask_in_flight:
+            return
+        # Acknowledge `x` AT ONCE (#2481 round 1): the row is marked in flight —
+        # the same `…` mark and second-press guard a fleet answer uses — until the
+        # frame that drops it lands, or a refusal clears it. Before this, a
+        # viewer's dismiss crossed the wire with nothing on screen saying the key
+        # had landed. Snapshots clear it when the row leaves (`_sync_ask_surface`).
+        self._ask_dismiss_in_flight.add(ask_id)
+        self._mark_ask_in_flight(ask_id, True)
         outcome: Any = reader(ask_id, by="terminal")
-        self._handle_ask_outcome(outcome, toast=True)
+        self._handle_ask_outcome(outcome, toast=True, clear_in_flight=ask_id)
 
     def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
         """A click or Enter on the minimized bar: expand, or collapse if already up."""

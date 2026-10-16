@@ -170,7 +170,7 @@ export function AsksSheet({
 
 	   ONLY OFFERED QUESTIONS ARE WAITING (design round 1, D1), the dock's and the
 	   header's rule: a lapsed question is shown read-only, so "asks · 1 question"
-	   above a card reading Lapsed stated a live decision one element above the
+	   above a card reading Timed out stated a live decision one element above the
 	   card that says there is none. A lapsed-only sheet is titled for what it
 	   holds.
 
@@ -186,7 +186,7 @@ export function AsksSheet({
 		waiting > 0
 			? `asks · ${waiting} question${waiting === 1 ? "" : "s"}`
 			: lapsed > 0
-				? `asks · ${lapsed} lapsed`
+				? `asks · ${lapsed} timed out`
 				: "asks";
 
 	return (
