@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -72,6 +73,8 @@ from local_operator.tools.builtin import (
     _validation_error,
     spill_truncate,
 )
+
+logger = logging.getLogger(__name__)
 
 _TOOL = "network"
 
@@ -658,6 +661,27 @@ async def _reap(process: asyncio.subprocess.Process, *, grace: float = 5.0) -> N
         await process.wait()
 
 
+def _describe_child_exit(status: int) -> str:
+    """A wait-status as a named outcome: how the child ENDED, in words.
+
+    WHY THIS EXISTS. The reaper used to call ``os.waitpid(pid, 0)`` and throw the
+    status away, so a parked ceremony that died EARLY — the exact failure this file's
+    sibling fix addresses — left no trace of HOW it ended: a clean exit, an error
+    code and a signal were indistinguishable, and the one fact that would name the
+    cause was the one discarded. This turns the status into a sentence the reaper can
+    log, so a future death is named rather than silently collected.
+
+    Returns ``""`` when the wait reported neither an exit nor a signal
+    (``WIFSTOPPED``/``WIFCONTINUED``), which cannot happen for a reaped child but is
+    the honest answer rather than an invented one.
+    """
+    if os.WIFSIGNALED(status):
+        return f"killed by signal {os.WTERMSIG(status)}"
+    if os.WIFEXITED(status):
+        return f"exited with status {os.WEXITSTATUS(status)}"
+    return ""
+
+
 def _reap_when_it_exits(pid: int) -> None:
     """Reap a DETACHED child from a thread, because this call's loop will be gone.
 
@@ -669,6 +693,14 @@ def _reap_when_it_exits(pid: int) -> None:
     made a liveness probe answer "alive" for a process that had finished (agent review
     round 1, code finding 1). A blocking ``os.waitpid`` on ONE pid, in one daemon
     thread, is that waiter: it returns the moment this child exits, whenever that is.
+
+    THE EXIT STATUS IS KEPT, not discarded (the flaky-sweep fix): a clean exit and an
+    early signal are what tell a future reader whether the ceremony finished or died,
+    and ``_describe_child_exit`` names which. It is logged rather than stored because
+    the durable per-attempt record is the CHILD's own (``store.save_join_attempt``,
+    written by the CLI it runs), and a parent that wrote after it would clobber a
+    richer record with a poorer one. A non-clean end is a WARNING; a clean one is INFO,
+    so an ordinary ceremony does not read as a fault.
 
     ``os.waitpid`` exists on POSIX only, and so do zombies — the capability check is
     the guard rather than a platform name. On a host that runs the tool inside a
@@ -682,11 +714,23 @@ def _reap_when_it_exits(pid: int) -> None:
 
     def wait() -> None:
         try:
-            os.waitpid(pid, 0)
+            _reaped_pid, status = os.waitpid(pid, 0)
         except (ChildProcessError, OSError):
             # Somebody else reaped it first (an alive loop's watcher), or it was never
             # ours: either way the process table is already consistent.
-            pass
+            return
+        ended = _describe_child_exit(status)
+        if not ended:
+            return
+        clean = os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        # Named, never discarded: the level carries the judgement so a routine exit is
+        # not filed beside a real early death.
+        logger.log(
+            logging.INFO if clean else logging.WARNING,
+            "parked pairing child %d %s",
+            pid,
+            ended,
+        )
 
     threading.Thread(target=wait, name="network-park-reap", daemon=True).start()
 
