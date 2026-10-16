@@ -28,9 +28,14 @@ cache the implementation used to build them.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import subprocess
+import sys
+import uuid
 from collections import Counter
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +52,7 @@ from local_operator.session.catalog import (
     load_catalog,
 )
 from local_operator.session.creation import ensure_session_created_at
+from local_operator.wakes.store import write_entry
 
 
 def _session(
@@ -339,6 +345,310 @@ class TestTheWalkIsTotalAndUnique:
         # is; every page after it is the scope's own continuation and nothing
         # else, however far down the pin is.
         assert surpluses == [[], []], surpluses
+
+
+def _unread(root: Path, session_id: str, kind: str = "complete") -> None:
+    """Give a session an unread completion, through the real attention store.
+
+    The tier-1 population the live store was full of, and the reason a busy row
+    sank below the cut: unread completions outrank work in progress, so they are
+    what fills a page above it. They are ALSO the sharpest negative -- a row that
+    ranks above a running one, and is deliberately not in
+    ``RUNNING_STATUS_CODES`` -- so a rule that appended them too would fail on
+    the page assertions rather than pass quietly.
+    """
+    from local_operator.session.attention import AttentionStore
+
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", str(uuid.uuid4()), "done", kind
+    )
+
+
+@contextlib.contextmanager
+def _live_pid() -> Iterator[int]:
+    """One real, live pid, for the one session that needs a registry record.
+
+    Spawned rather than invented for the reason ``test_desktop_feed``'s
+    ``_extra_live_pid`` gives: ``classify`` reads pid liveness, so a fabricated
+    number is live-looking only until the machine answers for it. Records are
+    keyed by PID (``run/mobile/<pid>.json``), which is why each record needs its
+    own -- a second publish under the same pid OVERWRITES the first, and one test
+    below needs two live rows at once.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()
+
+
+def _publish(
+    root: Path,
+    session_id: str,
+    *,
+    pid: int,
+    busy: bool = False,
+    detached: bool = True,
+) -> None:
+    """One discovery record, written through the real writer.
+
+    ``busy`` is the flag a runtime stamps while a turn runs and ``detached`` is
+    cleared when a terminal attaches, so these two are the WHOLE of what
+    :func:`~local_operator.session.catalog.live_state_from_flags` reads -- the
+    rows are made busy, idle and attached by the real producer rather than by a
+    hand-built ``live_state`` string.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    registry.publish(
+        SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id=session_id,
+            conversation_name="a conversation",
+            cwd=str(root),
+            model_label="mock",
+            control_port=1,
+            control_key="0" * 64,
+            busy=busy,
+            detached=detached,
+        ),
+        root,
+    )
+
+
+def _status_of(root: Path, session_ids: Sequence[str]) -> dict[str, str]:
+    """The wire status CODE each of ``session_ids`` carries, read back through
+    the catalogue with a page wide enough to hold the whole store.
+
+    The negatives are asserted this way rather than inferred from the ids the
+    page appended: a fixture that stopped producing the shape it claims would
+    otherwise leave the assertion below true for the wrong reason.
+    """
+    page = catalogue_page(root, limit=50)
+    by_id = {entry.id: entry.status_code for entry in page.entries}
+    return {session_id: by_id[session_id] for session_id in session_ids}
+
+
+class TestARunningRowRidesTheFirstPage:
+    """Every RUNNING row below the cut is appended to the page the client paints.
+
+    THE REPORTED CASE, measured on the operator's store (2026-10-16): the head
+    request is 50 rows, the store held 46 unread completions, and a live turn sat
+    at rank 51 -- so the app never held the row and the section that exists to
+    show work in progress showed the completions instead.
+
+    THE RANKING IS NOT THE BUG AND IS NOT TOUCHED HERE. ``session_category``
+    (``session/creation.py``) says "completed outcomes outrank work in progress"
+    deliberately, and moving a busy row above the completions would reorder the
+    TUI's picker and the mobile relay for the sake of one surface's page bound.
+    What is wrong is a PAGE that can lose a running row: the client cannot ask
+    again for a row it does not know exists, and it cannot derive one either --
+    ``counts.active`` counts unread completions (52 against 5 busy on that store),
+    so the running set is not in the answer it already has. The catalogue appends
+    the rows instead, the same way it already keeps pins resolvable, and these
+    tests pin both halves: which rows ride, and which deliberately do not.
+    """
+
+    def test_a_busy_row_ranked_below_the_cut_rides_the_first_page(self, tmp_path: Path) -> None:
+        """The reported shape: more unread completions than the page holds, and a
+        live turn older than every one of them."""
+        for index in range(4):
+            session_id = f"chat{index:08d}"
+            _session(tmp_path, session_id, created=5_000.0 + index, stamp=5_000.0 + index)
+            _unread(tmp_path, session_id)
+        busy = "busy00000001"
+        _session(tmp_path, busy, created=1_000.0, stamp=1_000.0)
+
+        with _live_pid() as pid:
+            _publish(tmp_path, busy, pid=pid, busy=True)
+            page = catalogue_page(tmp_path, limit=3)
+
+        assert [entry.id for entry in page.entries[:3]] == [
+            "chat00000003",
+            "chat00000002",
+            "chat00000001",
+        ], "the page itself is the ranking's own window, unchanged"
+        assert [entry.id for entry in page.entries[3:]] == [
+            busy
+        ], "a running row below the cut is appended to the first page"
+        assert page.next_cursor is not None, "the store held more than the page"
+        # THE CURSOR IS STILL THE PAGE'S. It is minted from the last page row
+        # before the extras are appended, so the walk resumes where the page
+        # ended -- the busy row is reached again in its OWN place (below).
+        position = decode_cursor(page.next_cursor)
+        assert position is not None
+        assert position.key == page.entries[2].rank
+
+    def test_the_running_extras_ride_the_first_page_only(self, tmp_path: Path) -> None:
+        """One append, not one per page -- the pin rule, for the same reason.
+
+        Built from ``ranked[limit:]``, an extra appended on EVERY page of a walk
+        would arrive once per page that still ranked below it, so a walk's
+        surplus would grow with the row's distance down the listing. The row's
+        OWN later position is untouched: a client's row union is id-keyed and the
+        design already sanctions "a pinned row may additionally be in the head".
+        """
+        for index in range(2):
+            session_id = f"chat{index:08d}"
+            _session(tmp_path, session_id, created=5_000.0 + index, stamp=5_000.0 + index)
+            _unread(tmp_path, session_id)
+        busy = "busy00000001"
+        _session(tmp_path, busy, created=1_000.0, stamp=1_000.0)
+
+        with _live_pid() as pid:
+            _publish(tmp_path, busy, pid=pid, busy=True)
+            first = catalogue_page(tmp_path, limit=2)
+
+            assert [entry.id for entry in first.entries] == ["chat00000001", "chat00000000", busy]
+
+            walked = [entry.id for entry in first.entries[:2]]
+            cursor: str | None = first.next_cursor
+            while cursor is not None:
+                page = catalogue_page(tmp_path, cursor=cursor, limit=2)
+                assert page.entries[2:] == [], "a later page carries no extra"
+                walked += [entry.id for entry in page.entries]
+                cursor = page.next_cursor
+
+        assert walked.count(busy) == 1, walked
+
+    def test_a_scoped_page_carries_its_own_running_rows_and_no_other_groups(
+        self, tmp_path: Path
+    ) -> None:
+        """The guarantee is per SCOPE, and ``ranked`` is already scope-filtered --
+        so the rows that ride are the group's own, and another group's running row
+        is not dragged in under this group's name."""
+        for index in range(3):
+            session_id = f"lop{index:08d}"
+            _session(
+                tmp_path,
+                session_id,
+                team="lopdev",
+                created=5_000.0 + index,
+                stamp=5_000.0 + index,
+            )
+            _unread(tmp_path, session_id)
+        mine = "lopbusy00001"
+        _session(tmp_path, mine, team="lopdev", created=1_000.0, stamp=1_000.0)
+        theirs = "othbusy00001"
+        _session(tmp_path, theirs, team="otherteam", created=1_000.0, stamp=1_000.0)
+
+        with _live_pid() as mine_pid, _live_pid() as their_pid:
+            _publish(tmp_path, mine, pid=mine_pid, busy=True)
+            _publish(tmp_path, theirs, pid=their_pid, busy=True)
+            page = catalogue_page(tmp_path, scope=CatalogueScope("team", "lopdev"), limit=2)
+
+        assert [entry.id for entry in page.entries] == [
+            "lop00000002",
+            "lop00000001",
+            mine,
+        ], "the scope's own page, plus its own running row"
+        assert theirs not in {
+            entry.id for entry in page.entries
+        }, "another team's running row is not this page's business"
+
+    def test_the_rows_that_are_not_running_stay_behind_the_expander(self, tmp_path: Path) -> None:
+        """THE NEGATIVES, and each one is a row that could plausibly have been
+        swept in: ``idle`` and ``attached`` are LIVE but are not work in progress
+        (tier 5, and the UI files both under Today -- a resident terminal dragged
+        onto the page is the noise this predicate's exclusions exist for),
+        ``interrupted`` is a finished outcome, and ``scheduled`` is a wake.
+        """
+        for index in range(2):
+            session_id = f"chat{index:08d}"
+            _session(tmp_path, session_id, created=5_000.0 + index, stamp=5_000.0 + index)
+            _unread(tmp_path, session_id)
+        resident, watched, cutoff, later = (
+            "resident0001",
+            "watched00001",
+            "cutoff000001",
+            "later0000001",
+        )
+        for session_id in (resident, watched, cutoff, later):
+            _session(tmp_path, session_id, created=1_000.0, stamp=1_000.0)
+        _unread(tmp_path, cutoff, kind="interrupted")
+        write_entry(
+            tmp_path,
+            later,
+            cwd=str(tmp_path),
+            schedules=[{"id": "w1", "message": "later", "next_due_at": 9_999_999_999_999}],
+        )
+
+        with _live_pid() as resident_pid, _live_pid() as watched_pid:
+            _publish(tmp_path, resident, pid=resident_pid, detached=True)
+            _publish(tmp_path, watched, pid=watched_pid, detached=False)
+            page = catalogue_page(tmp_path, limit=2)
+            # The predicate is asserted where the rows CARRY it, so a change to
+            # the set and a change to the row's own derivation both fail here.
+            statuses = _status_of(tmp_path, (resident, watched, cutoff, later))
+
+        assert [entry.id for entry in page.entries] == ["chat00000001", "chat00000000"]
+
+        # The four shapes really were the shapes this test claims, read back
+        # through the same catalogue rather than assumed from the fixtures.
+        assert statuses == {
+            resident: "idle",
+            watched: "attached",
+            cutoff: "interrupted",
+            later: "scheduled",
+        }
+
+    def test_a_pinned_running_row_is_appended_once(self, tmp_path: Path) -> None:
+        """BOTH ARMS MATCH, and the row is still appended once: the extras are a
+        comprehension over ``ranked[limit:]`` that keeps a row on either
+        predicate, not two lists appended one after the other."""
+        _session(tmp_path, "chat00000000", created=5_000.0, stamp=5_000.0)
+        _unread(tmp_path, "chat00000000")
+        busy = "busy00000001"
+        _session(tmp_path, busy, created=1_000.0, stamp=1_000.0)
+
+        with _live_pid() as pid:
+            _publish(tmp_path, busy, pid=pid, busy=True)
+            page = catalogue_page(tmp_path, limit=1, pinned_off_page=[busy])
+
+        assert [entry.id for entry in page.entries] == ["chat00000000", busy]
+
+    def test_a_running_row_inside_the_page_is_not_appended_again(self, tmp_path: Path) -> None:
+        """The other side of the dedupe: a running row the PAGE carries is not an
+        extra too, so the wire answer never lists one id twice -- a client that
+        renders the concatenation without a union would draw it twice."""
+        _session(tmp_path, "chat00000000", created=1_000.0, stamp=1_000.0)
+        _unread(tmp_path, "chat00000000")
+        busy = "busy00000001"
+        _session(tmp_path, busy, created=5_000.0, stamp=5_000.0)
+
+        with _live_pid() as pid:
+            _publish(tmp_path, busy, pid=pid, busy=True)
+            page = catalogue_page(tmp_path, limit=2)
+
+        ids = [entry.id for entry in page.entries]
+        assert ids == ["chat00000000", busy]
+        assert len(set(ids)) == len(ids)
+
+    def test_the_running_set_is_the_renderers_set(self) -> None:
+        """THE PARITY TEST, and the whole reason the constant is a constant.
+
+        The literal below is local-operator-ui's ``RUNNING_CODES``
+        (``src/renderer/src/features/chat/chat-list-sections.ts``), which reads
+        the same wire field this does (``status.code``). The UI is another
+        repository, so the parity cannot be an import: it is a comparison, and
+        this is where the comparison happens. The negative half matters as much
+        as the positive one -- the decision record rejects ``idle``/``attached``
+        (live, but not work in progress) and the stored outcomes, and a set that
+        grew them back would move rows the renderer still files under Today.
+        """
+        assert catalog.RUNNING_STATUS_CODES == {
+            "approval",
+            "answer",
+            "busy",
+            "wedged",
+            "delegating",
+        }
+        assert catalog.RUNNING_STATUS_CODES.isdisjoint(
+            {"idle", "attached", "interrupted", "scheduled", "dormant", "complete", "recent"}
+        )
 
 
 class TestAnUnusableCursorIsNotAnError:
