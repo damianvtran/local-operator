@@ -29,7 +29,14 @@ def bind_owner_peer_cycles(
     The callback is marshalled to the same owner loop as ordinary fold events.
     """
     store = getattr(session, "_frontend_state_store", None)
-    if loop is None or store is None or not hasattr(store, "subscribe_threadsafe"):
+    # The INTERNAL entry point: this observer is not a viewer, and must not
+    # flip ``has_subscribers``. A viewer-less runtime otherwise started writing
+    # the turn-end checkpoint a truly unattended one skips; that row carried a
+    # raw transcript row id as ``history_cursor`` and broke the durable-journal
+    # invariant the desktop ask-images e2e pins (see the store's
+    # ``_internal_subscribers``).
+    subscribe_internal = getattr(store, "subscribe_internal_threadsafe", None)
+    if loop is None or store is None or subscribe_internal is None:
         return lambda: None
     closed = False
     context: dict[str, Any] = {"records": None, "epoch": None}
@@ -61,7 +68,7 @@ def bind_owner_peer_cycles(
         if not closed and not loop.is_closed():
             loop.call_soon_threadsafe(apply, update)
 
-    subscription = store.subscribe_threadsafe(enqueue)
+    subscription = subscribe_internal(enqueue)
     snapshot = subscription.sync.snapshot
     if snapshot.session_id != fold.projection.session_id or not hasattr(
         snapshot, "peer_cycle_display"
