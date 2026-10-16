@@ -10,7 +10,7 @@ not a separate voice model with its own personality. "Aida only first" is droppe
 
 ## Decisions
 
-- **V1 — Topology.**
+- **V1 — Topology.** *(SUPERSEDED BY R1 (pending): R1 is PROPOSED and awaits the operator; until it is accepted, V1 stands. Relay record 2026-10-16.)*
   **Taken:** a pipeline. Push-to-talk audio goes to the lop server, which runs STT and admits the transcript as an ordinary prompt to the enabled session. When the turn ends, the server synthesises that session's final assistant message, and the renderer plays it.
   **Rejected:**
   - (b) Gemini Live as a front end. It is a second model that decides what to say and when to delegate. That is the "own personality" the operator ruled out. The ACP POC also measured 4 of 6 hand-offs correct with a small front-end model. A native-audio model cannot be held to reading text verbatim.
@@ -125,6 +125,108 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   **Rejected:** publishing `_logical_generation`. It is cleared at `agent_end`, so the post-end refresh fell back to the raw counter and a live update still said N+1.
   **Owner:** coder (backend counter), UI (the guards).
 
+## Relay front end (R1–R13)
+
+*Added 2026-10-16 from the architect's relay record. The R rows replace V1 and change V2, V9, V10, V11 and V12 as each row says; every V row not named stays in force. R1 and R4 are PROPOSED and await the operator (R4: who speaks replies; and the order of slices A and B), so nothing built so far depends on them.*
+
+The relay is a FRONT END bolted onto the slice-1 pipeline, not a replacement for it. Slice 1 already does the back half: the one-session slot (V3), the utterance door (V5), take-to-turn binding (V14/V15), exact reply speech by source reference (V8) and no approval by voice (V7/V13). The live model's only new job is to HEAR a take and decide RELAY or CONTROL.
+
+- **R1 — Topology (replaces V1).** **PROPOSED — pending operator decision.**
+  **Proposed:** a pluggable front end hears one push-to-talk take and classifies it. A RELAY take's words enter through `POST /v1/desktop/voice/utterance`. A CONTROL take is handled by the client. The session does the work, and replies are recited exactly through `/voice/speech`.
+  **Why:** the operator's request, with V1's objection removed by R4.
+  **Overturned by:** R13's measurement favouring the model's own voice for content (not expected).
+  **Owner:** manager.
+- **R2 — Who owns what (changes V2).**
+  **Taken:**
+  - Electron main owns the Live WebSocket (`src/main/voice-live.ts`).
+  - The lop server holds the Google key and mints a single-use, config-locked ephemeral token (`POST /v1/desktop/voice/live-token`, `voice/live_token.py`, the body built in `voice/live_config.py`).
+  - The renderer owns the mic and playback and streams PCM16 at 16 kHz to main over IPC (32 KB/s).
+  - The token never crosses IPC, the rule desktop-stream.ts:12-13 already sets for the bearer. The route refuses a browser-shaped caller (`Sec-Fetch-Site` present) with 403 `live_main_only`.
+  **Rejected:**
+  - The renderer owning the socket: its CSP deliberately has no ws/wss (index.html:20-26,42), and the token would sit in the renderer.
+  - The lop server owning it: no bidirectional audio transport exists (only SSE plus request/response media, desktop-media.ts:177-210), so it would add a transport and a hop.
+  - A sidecar: one more lifecycle, no gain.
+  **Commits us to:** a main-side socket client, and a token mint per Live session (one minute to open, thirty to use).
+  **Overturned by:** a requirement for voice on mobile web. The server would then own the socket.
+  **Owner:** coder.
+- **R3 — Inbound words: the transcript is authoritative.**
+  **Taken:** admitted text is the provider's own `inputTranscription` for the take (activityStart..activityEnd), not the model's tool argument. The tool's `text` is the fallback when the transcript is empty, and a drift metric otherwise. Provenance is recorded as the message's `input_path` through `/utterance`'s `text_origin`: `gemini_live_transcript` | `gemini_live_tool_arg`, or the STT rung for a recording. The local front end uses server STT.
+  **Rejected:** admitting the tool argument. It is model output, so it is paraphrase-prone; a transcript is recognition output. The admitted text shows on screen as the user's message, so recognition errors are visible.
+  **Commits us to:** a closed `text_origin` set (anything else is 422 `invalid_voice_request`), refused alongside a recording.
+  **Overturned by:** `inputTranscription` arriving after the tool call, or missing, on 3.8 Live (unverified). R3 then degrades to the tool argument; if more than 5% of takes need the fallback, show the admitted text for a 2 s cancel window before sending.
+  **Owner:** coder.
+- **R4 — Outbound speech: exact recitation, model voice muted.** **PROPOSED — pending operator decision.**
+  **Proposed:** session replies, gate announcements and asks are spoken ONLY by `/voice/speech {source}` (V8): server-resolved text → `speakable.clean/cap` → the TTS cascade. The Live model's audio output is discarded by main, and its tool responses use `scheduling: SILENT`. Session text is never sent to the Live model, so it has no content to paraphrase. Google's docs make the same split: TTS "is tailored for … exact text recitation", while Live is for "unstructured" audio.
+  **Residual:** none for content. The remaining risks are a misheard take (R3) and a wrong RELAY/CONTROL call (R6).
+  **Owner:** reviewer (checks that no path speaks free text or reaches `answer_gate`).
+  *Built so far without depending on R4:* the system instruction and tool list live as data in `voice/live_config.py`, so an R4 change is a data edit there plus its pinned test.
+- **R5 — Filler and phrases: a closed catalogue, triggered by the client.**
+  **Taken:** a new `/speech` source, `{kind: "phrase", key}`, with keys from `wire.voice.phrase.*` only:
+  - `passing_on` (on a 200);
+  - `still_working` (every 20 s while a take is owed, at most 3);
+  - `on_screen_first` (on 409 `approval_pending`);
+  - `didnt_catch` (empty transcript);
+  - `switched` (slot change);
+  - `nothing_to_repeat`.
+  The server renders the catalogue sentence; an unknown key is 404 `unknown_source`, so the source cannot carry free text. Audio is cached per TTS path on enable, so an ack costs no synthesis time.
+  **Rejected:** model-authored filler, which would be the "own personality" channel again.
+  **Commits us to:** the six keys as the contract; a new phrase is a catalogue key plus a contract change.
+  **Overturned by:** R13 passing (slice C), which could let the model voice short acks.
+  **Owner:** coder.
+- **R6 — Controls never reach the session.**
+  **Taken:** the closed set is `stop_speaking` (also any PTT press), `repeat_last` (replays cached bytes), `louder` and `softer`.
+  - Gemini reports them through the `voice_control` tool.
+  - The local front end matches a whole-utterance grammar in `voice/controls.py`, exact phrases only, so "stop the build" relays. `/utterance` with `controls=1` answers `control: action` and `admission: null`; nothing is admitted and no receipt is written.
+  - Everything else is relayed. If no tool call arrives 3 s after activityEnd, the transcript is relayed.
+  **Rejected:** keyword or prefix matching, which would turn a sentence for the agent into a client action; aborting a session turn by voice (a misheard "stop" would kill tool work), so aborting stays on screen.
+  **Commits us to:** controls being said plainly.
+  **Overturned by:** measured false-relay rates on real takes that the exact grammar cannot fix.
+  **Owner:** coder.
+- **R7 — Approvals and asks (keeps V7/V13).**
+  **Taken:** the Live tool schema has no gate or answer tool, and the schema is locked into the token (R2). "Yes" is relayed like any take, gets 409 `approval_pending`, and the client speaks `on_screen_first`. Gates are announced through the existing `{kind: "gate"}`. Spoken deny and ask answers stay deferred (V7 §1). `tests/unit/voice/test_live_token.py` pins the tool set to exactly `relay_to_session` and `voice_control`.
+  **Rejected:** any spoken answer path.
+  **Commits us to:** approval on screen only.
+  **Overturned by:** the V7 §1 deferral being lifted for spoken deny.
+  **Owner:** reviewer.
+- **R8 — Providers.**
+  **Taken:**
+  - `front_end` ∈ {`local`, `gemini_live`}, with `elevenlabs` later, behind one main-side interface: `start(take) / audio(chunk) / end() → {relay, transcript, toolText} | {control}`. It is not a cascade rung: V9's cascades stay STT/TTS only. Chosen on enable (`front_end`, 409 `front_end_unavailable` when unavailable) and persisted as `voice.front_end`.
+  - The key-free STT rung is `local_stt_loopback`: the existing OpenAI client with `base_url` (stt/clients.py), pointed at a loopback OpenAI-compatible `/v1/audio/transcriptions` (`voice.local_stt_url`, empty = off; loopback hosts only, checked at write and at call time). It is opt-in like `include_local` for TTS: only the voice routes pass it, so `/v1/stt/paths` is unchanged. It is walked after the credentialed rungs, sends a placeholder bearer (never a stored key), and pins the model `mlx-community/parakeet-tdt-0.6b-v3`. lop gains no dependency.
+  **Rejected:** the Qwen rig as a dev or QA path. It is dev-exploratory only: it relayed 4/6 (README:135), which breaks ⅓ of turns.
+  **Commits us to:** the operator starting a local server (`mlx_audio.server`) for the key-free path.
+  **Overturned by:** a bundled in-process STT model.
+  **Owner:** coder.
+- **R9 — The Live session is disposable.**
+  **Taken:** it holds no session context (R4), so it is disposable: connect on the first PTT press, close after 5 min idle, use sessionResumption plus slidingWindow compression across the ~10 min connection resets, and mint a fresh token at the 30 min expiry. A slot switch retargets the relay without reconnecting. The token is `uses: 1`; resuming does not count as a use (API reference, `AuthToken.uses`).
+  **Rejected:** a long-lived session carrying context.
+  **Commits us to:** a reconnect path in main.
+  **Overturned by:** R4 being decided so the model must carry session content.
+  **Owner:** coder.
+- **R10 — Input mode (keeps V12).**
+  **Taken:** push-to-talk in every front end. Gemini runs with `automaticActivityDetection.disabled` and manual activityStart/End. The mic is closed while replies play, so there is no echo self-relay. Hands-free (VAD, echo cancellation, barge-in) is deferred.
+  **Rejected:** server-side activity detection in v1.
+  **Commits us to:** the client sending activity signals.
+  **Overturned by:** hands-free (slice D).
+  **Owner:** coder.
+- **R11 — The slice-1 pipeline is kept** as the `local` front end: the key-free path and the fallback.
+  **Taken:** nothing falls back silently from `gemini_live` to `local`; the indicator names the active front end. `local` is always listed available (its text door needs no STT rung); its reason is the STT state.
+  **Rejected:** silent fallback, which would hide where the operator's speech went.
+  **Commits us to:** an explicit front-end chip in the UI.
+  **Overturned by:** nothing planned.
+  **Owner:** coder.
+- **R12 — Data disclosure.**
+  **Taken:** on the free tier Google may use inputs and human reviewers may read them (Gemini API terms, "Unpaid Services"). Under R4 only the operator's own speech goes to Google, never session output. Enabling `gemini_live` shows that sentence once. A Gemini TTS rung (slice C) would send reply text too, so it is opt-in and disclosed.
+  **Rejected:** enabling Live without the disclosure.
+  **Commits us to:** a one-time disclosure in the UI.
+  **Overturned by:** a paid-tier key with different terms.
+  **Owner:** manager.
+- **R13 — Unmuting model acks is a measured experiment, not a default.**
+  **Taken:** slice C may let the model voice its own short ack, with `outputAudioTranscription` checked against the phrase set (≤6 words, no digits or paths) and logged as `voice.drift`. Keep it only if 0 of ≥30 scripted takes produce a self-answer.
+  **Rejected:** unmuting by default.
+  **Commits us to:** the output transcription being enabled in the locked setup (it is, in `voice/live_config.py`).
+  **Overturned by:** the experiment failing (then acks stay R5 phrases).
+  **Owner:** manager.
+
 ## Frozen contract (backend ↔ UI)
 
 Feature key: `features.voice: 1` (features.py). Everything below is gated on it.
@@ -150,6 +252,16 @@ Every route uses `require_desktop`.
 - Machine feed `/v1/desktop/events`: frame `type: "voice"`, `{active}`, on every slot change.
 - The turn trigger stays on the existing per-session stream. The renderer speaks the last assistant `message_end` before `agent_end`, for a turn it admitted, deduped by message id across `after_seq` replays. It speaks a gate when `pending_gate.kind == "approval"` appears.
 - Both STT and TTS calls go through `emit_voice_spend` with the session id.
+
+### Relay additions (R2, R3, R5, R6, R8)
+
+- `GET /v1/desktop/voice` adds `front_ends: [{id: "local" | "gemini_live", available, reason}]` and `settings.front_end`.
+- `POST /v1/desktop/voice` `{op: "enable", session_id, front_end?}`. 409 `front_end_unavailable` (the slot and setting do not move). An enable without `front_end` keeps the configured one.
+- `POST /v1/desktop/voice/utterance` adds optional `text_origin` ∈ {`gemini_live_transcript`, `gemini_live_tool_arg`} (with `text` only; recorded as `input_path`) and `controls=1` (the local grammar). The 200 adds `control: action | null`. A control take has `admission: null`, and nothing is admitted or journalled.
+- `POST /v1/desktop/voice/speech` source adds `{kind: "phrase", key}` with `key` ∈ {`passing_on`, `still_working`, `on_screen_first`, `didnt_catch`, `switched`, `nothing_to_repeat`}. An unknown key returns 404 `unknown_source`, so free text stays impossible.
+- `POST /v1/desktop/voice/live-token` (Electron main only; a browser-shaped caller gets 403 `live_main_only`): 200 `{token, expires_at, new_session_expires_at, model}`. 409 `live_unavailable` when no Google AI Studio key is stored (`lop login google` rows, the stored `GOOGLE_AI_STUDIO_API_KEY`, or the exported variable); 502 `live_failed` when Google refuses or cannot be reached. The locked setup (model, system instruction, tools, AUDIO, input and output transcription, resumption, sliding window, manual activity) is built only in `voice/live_config.py` and never logged.
+- Live tools (behavior `NON_BLOCKING`; the client's response is always `{status}` with `SILENT` scheduling): `relay_to_session {text}` and `voice_control {action: "stop_speaking" | "repeat_last" | "louder" | "softer"}`.
+- Settings: `voice.local_stt_url` (default `""` = off; loopback only) and `voice.front_end` (default `local`).
 
 ## File plan
 
