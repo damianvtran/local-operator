@@ -33,8 +33,10 @@ WHAT EACH FRAME IS FOR (design §5.0/§5.3, R7):
   the card, from the single-winner race.
 * ``-scoped``   — the sheet opened from a conversation whose aggregate row set
   includes other conversations' asks: only its own row is listed.
-* ``-ended``    — the sheet opened from an ENDED conversation: its row carries
-  the "has ended — answering will reopen it" strip before the tap.
+* ``-ended``    — an ENDED (stopped) conversation's own screen: the dock, from
+  the session's asks in the index, and its sheet showing the timed-out ask as
+  lapsed — dismiss, no options. ``-ended-bar`` is the screen before the tap,
+  and shows the sheet did not open by itself over a queue of lapsed asks.
 * ``-sheet`` also carries the LAPSED card (``qa-deadline``, timed out): the
   question read-only under "Lapsed — the agent took its default and moved on",
   with dismiss and no options.
@@ -418,15 +420,24 @@ def main() -> None:
             page.shot(outdir / f"{label}-{vp}-scoped.png")
             report[f"{vp}-scoped"] = json.loads(page.js(SHEET_PROBE))
 
-            # 2b2. The ENDED conversation's sentence (design round 1, D6/D8), stated
-            #      BEFORE the tap — now from the ended conversation's OWN sheet, since
-            #      the sheet no longer lists another conversation's rows. The card is
-            #      dragged into the panel's viewport so the sentence is on screen.
+            # 2b2. A STOPPED conversation's OWN asks (decision D4): its screen is the
+            #      relay's durable projection, which now carries the session's asks
+            #      from the index — the dock is there, the sheet opens from it, and the
+            #      timed-out ask is lapsed. The bar frame comes first and records
+            #      whether the sheet opened by itself (it must not: nothing in a queue
+            #      of lapsed asks can be answered).
             page.goto(f"{base}/#/s/asks-ended")
-            time.sleep(1.5)
-            page.js(TAP_ROW)
+            time.sleep(2.5)
+            # Its own key, because the summary prints a dock row OR an autoOpened
+            # row per key, and this frame's point is the second one.
+            report[f"{vp}-ended-settle"] = {
+                "autoOpened": page.js("document.querySelector('[role=\"dialog\"]') !== null")
+            }
+            report[f"{vp}-ended-bar"] = json.loads(page.js(BAR_PROBE))
+            page.shot(outdir / f"{label}-{vp}-ended-bar.png")
+            report[f"{vp}-ended"] = {"tap": page.js(TAP_ROW)}
             time.sleep(1.2)
-            report[f"{vp}-ended"] = {"drag": scroll_to_card(page, "en-mine")}
+            report[f"{vp}-ended"]["drag"] = scroll_to_card(page, "en-mine")
             time.sleep(0.6)
             page.shot(outdir / f"{label}-{vp}-ended.png")
             report[f"{vp}-ended"].update(json.loads(page.js(SHEET_PROBE)))

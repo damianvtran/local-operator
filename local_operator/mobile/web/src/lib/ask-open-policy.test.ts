@@ -50,8 +50,9 @@ const row = (ask_id: string, status = "open") => ({ ask_id, status });
 describe("readQueue — what ONE frame says about the queue", () => {
 	it("calls a named answerable ask PENDING (clause 2)", () => {
 		expect(readQueue([row("a1")], 1)).toBe("pending");
-		// A timed-out ask is still answerable, so it is still pending.
-		expect(readQueue([row("a1", "timed_out")], 1)).toBe("pending");
+		// A timed-out ask BESIDE an open one: the open one is what makes it pending.
+		// (A timed-out ask alone is lapsed — see the lapsed-queue case below.)
+		expect(readQueue([row("a1", "timed_out"), row("a2")], 2)).toBe("pending");
 	});
 
 	it("calls an explicit zero tally EMPTY, and only an explicit one (clause 1)", () => {

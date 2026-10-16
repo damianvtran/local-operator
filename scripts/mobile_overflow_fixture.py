@@ -33,7 +33,7 @@ Three sessions, each one shaped to isolate one surface:
   why the dim's cost to that glyph went unmeasured until round 2.
 * ``asks`` — the QUEUED-ASK surface (design
   ``docs/design/ask-nonblocking.md`` §5.3): five queued asks covering open (one
-  multi-question head), addressed, and TIMED-OUT-and-still-answerable, plus two
+  multi-question head), addressed, and TIMED-OUT (shown lapsed, read-only), plus two
   settled ones; the transcript carries an ``ask_response`` and an
   ``ask_timeout`` row; and the legacy single-slot mirror is published beside
   them so a client drawing the ask twice would show it here. The asks are also
@@ -994,6 +994,12 @@ def _ended_ask_projection() -> SessionProjection:
     showing a sheet at all. A dedicated session keeps both frames true; the
     `-ended` frame opens this conversation's OWN sheet, since the sheet no longer
     lists another conversation's rows.
+
+    WHY ITS ASK IS TIMED OUT (decision D4, 2026-10-15). It is the shape of Ben's
+    report: a conversation stopped, its ask past the deadline. The screen of a
+    stopped conversation is the relay's durable projection, which now carries the
+    session's asks from the index — so this frame shows the dock, the sheet
+    opened from it, and the lapsed card with Dismiss and no options.
     """
     projection = SessionProjection(
         session_id="asks-ended",
@@ -1007,8 +1013,9 @@ def _ended_ask_projection() -> SessionProjection:
     projection.asks = [
         _ask(
             "en-mine",
-            created_s=-45,
-            expires_in_s=855,
+            created_s=-900,
+            expires_in_s=-300,
+            status="timed_out",
             questions=[
                 _question(
                     "em1",
@@ -1366,6 +1373,13 @@ def _asks_stacked_projection() -> SessionProjection:
 #: for cannot be framed with the flag alone.
 ENDED_SESSIONS = {"asks-ended"}
 
+#: Sessions seeded with a durable transcript. The ended ones need it (above), and
+#: so does ``asks-foreign``: the aggregate marks a row ``durable`` only when its
+#: session directory carries ``transcript.jsonl``, and a row neither durable nor
+#: live is shown as a conversation that no longer exists — which is what the
+#: ``-scoped`` frame showed for the one row it exists to show.
+DURABLE_SESSIONS = ENDED_SESSIONS | {"asks-foreign"}
+
 
 def _write_opening_turn(session_dir: Path, text: str) -> None:
     """One user turn in ``transcript.jsonl``, in the store's own line shape.
@@ -1409,7 +1423,7 @@ def seed_ask_index(projections: list[SessionProjection]) -> None:
     for projection in projections:
         directory = sessions / projection.session_id
         directory.mkdir(parents=True, exist_ok=True)
-        if projection.session_id in ENDED_SESSIONS:
+        if projection.session_id in DURABLE_SESSIONS:
             _write_opening_turn(directory, "Ask me the second one too.")
         rows = [row.to_json() for row in (projection.asks or [])]
         write_entry(root, projection.session_id, cwd="/synthetic", asks=rows)

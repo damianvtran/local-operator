@@ -1807,6 +1807,23 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             todos=fold._todo_phases(raw_todos),
         )
         projection.subagents.append(row)
+    # A STOPPED CONVERSATION'S ASKS, from the index that outlives its runtime.
+    # The phone's asks sheet lists only the conversation it was opened from, so
+    # this screen is the one place a stopped conversation's asks can appear —
+    # and with no runtime folding them, the derived index (``asks/store``) is the
+    # only source. Same rows the aggregate serves for this session, capped like
+    # a live runtime's projection, with the tally counted over every row rather
+    # than the cap (the live fold's contract, see ``ProjectionFold.set_asks``).
+    # Nothing worth showing leaves BOTH fields absent: ``asks_open: 0`` would
+    # claim a live, empty queue, which a stopped conversation does not have.
+    from local_operator.asks import store as ask_store
+    from local_operator.asks.policy import PROJECTION_CAP
+    from local_operator.paths import config_dir
+
+    ask_rows = ask_store.session_asks(config_dir(), session_id)
+    if ask_rows:
+        outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
+        fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
     projection.ended = False
     projection.degraded = False
     return projection
