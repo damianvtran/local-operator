@@ -154,7 +154,21 @@ def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
     result inside a genuine user/tool interval. Generic INFO notices never
     acquire that authority. The hash-pinned standalone corpus supplies none.
     """
-    if record.work is not None:
+    # The work arm ADMITS what the base vocabulary cannot classify (a delivered
+    # job result inside a genuine user/tool interval) and never re-classifies a
+    # row the base already knows. A receipt kind keeps its base family: the
+    # internal-work view calls a hub STEER a boundary because it demands
+    # attention, and reading that role here turned the steer into a run
+    # SPLITTER on a row that the fold has always been able to hide, breaking
+    # the ordering/prefix runs (test_hub_message ordered-repair, seated-picture
+    # and human-prefix cases). The role belongs to the membership view, not to
+    # this fold's boundary rule.
+    if record.work is not None and record.kind not in (
+        "peer",
+        "hub",
+        "wake",
+        "monitor",
+    ):
         if record.work.role != "receipt":
             return None
         if record.work.family in ("peer", "hub"):
@@ -192,7 +206,15 @@ def group_splitter_of(record: QuietGroupRecord) -> bool:
     would miss: an empty or still-streaming assistant row, and this surface's
     ``inside`` kind (an image a folded tool row produced).
     """
-    if record.work is not None:
+    # Same gate as `quiet_family_of`: the work arm speaks only for rows the
+    # base vocabulary does not classify, so a receipt kind keeps its base
+    # reading (not a splitter) whatever the membership view calls its role.
+    if record.work is not None and record.kind not in (
+        "peer",
+        "hub",
+        "wake",
+        "monitor",
+    ):
         return record.work.role == "boundary"
     if record.kind in ("tool", "peer", "hub", "wake", "monitor", "inside"):
         return False

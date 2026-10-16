@@ -5977,6 +5977,17 @@ class FrontendStateStore:
         self._peer_display_fold: Any = None
         self._peer_display_pending: list[dict[str, Any]] = []
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
+        #: Callbacks that OBSERVE publications for the harness's own bookkeeping
+        #: (the phone display fold) without being a VIEWER. ``has_subscribers``
+        #: is read as "is a frontend attached", and it gates work that exists
+        #: FOR a frontend: the turn-end checkpoint write and the per-token fold.
+        #: An internal observer must not flip it. Symptom it caused: a headless
+        #: runtime whose only "subscriber" was the display observer wrote a
+        #: turn-end checkpoint a viewer-less runtime otherwise skips, and that
+        #: row embedded a raw transcript row id as ``history_cursor`` — the
+        #: durable-journal invariant the desktop ask-images e2e pins.
+        self._internal_subscribers: set[Callable[[FrontendUpdate], None]] = set()
+        self._viewer_count = 0
         #: Guards the ONE O(1) critical section that makes registration and
         #: publication a single step across threads: a publish assigns ``_state``
         #: and takes its subscriber list (``_install``); a subscribe appends
@@ -6308,7 +6319,13 @@ class FrontendStateStore:
 
     @property
     def has_subscribers(self) -> bool:
-        return bool(self._subscribers)
+        """Whether a FRONTEND is attached.
+
+        Internal observers (see ``_internal_subscribers``) receive publications
+        but are not viewers, so they must not make an unobserved runtime look
+        attended: that would turn on work reserved for an attached frontend.
+        """
+        return self._viewer_count > 0
 
     def _freeze_for_install(self, state: FrontendSessionState) -> FrontendSessionState:
         """The frozen object an install publishes. Call OUTSIDE ``_publish_lock``.
@@ -6985,9 +7002,28 @@ class FrontendStateStore:
         """
         return self._join(callback)
 
-    def _join(self, callback: Callable[[FrontendUpdate], None]) -> FrontendSubscription:
+    def subscribe_internal_threadsafe(
+        self, callback: Callable[[FrontendUpdate], None]
+    ) -> FrontendSubscription:
+        """``subscribe_threadsafe`` for the harness's OWN observer.
+
+        Same admit path and the same publications, but the joiner is not a
+        VIEWER: ``has_subscribers`` stays False while it is the only one, so an
+        unattended runtime does not start doing viewer-only work (the turn-end
+        checkpoint write). Used by the phone display fold, which must keep
+        observing publications without making a headless session look attended.
+        """
+        return self._join(callback, internal=True)
+
+    def _join(
+        self, callback: Callable[[FrontendUpdate], None], *, internal: bool = False
+    ) -> FrontendSubscription:
         with self._publish_lock:
             self._subscribers.append(callback)
+            if internal:
+                self._internal_subscribers.add(callback)
+            else:
+                self._viewer_count += 1
             state_ref = self._state
         state = self._public_state(state_ref)
         sync = FrontendSync(
@@ -7003,6 +7039,11 @@ class FrontendStateStore:
                     self._subscribers.remove(callback)
                 except ValueError:
                     pass
+                else:
+                    if internal:
+                        self._internal_subscribers.discard(callback)
+                    else:
+                        self._viewer_count = max(0, self._viewer_count - 1)
 
         return FrontendSubscription(sync=sync, unsubscribe=unsubscribe)
 
