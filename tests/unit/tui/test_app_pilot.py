@@ -13432,14 +13432,14 @@ async def test_the_aside_copy_key_writes_nothing_to_the_session() -> None:
 
 @pytest.mark.asyncio
 async def test_the_aside_copy_key_works_while_the_answer_is_still_streaming() -> None:
-    """Streaming is when the key matters MOST, because `^f` is refused there.
+    """Streaming is when the key matters MOST, because `^f` has nothing to keep.
 
-    `_aside_can_fork` returns False while the session streams — splicing a
-    message into a live batch produces a request no provider accepts. That is a
-    constraint on WRITING to the session, and copying does not write, so this
-    path must stay open. Routing the payload through `fork_messages()` would
-    have failed exactly here: it is gated on `AsideTurn.forkable`, which needs
-    `state == "done"`, so mid-stream it returns an empty list.
+    While the aside's own answer is still streaming the card holds no settled
+    exchange, so `_aside_can_fork` is False (`fork_messages()` is gated on
+    `AsideTurn.forkable`, which needs `state == "done"`) — whether or not the
+    MAIN session is mid-turn, since a mid-turn fork now queues (decision D5).
+    Copying does not need a settled exchange, so this path must stay open;
+    routing its payload through `fork_messages()` would have failed exactly here.
     """
     from tests.unit.tui.test_aside import AsideSession
 
@@ -13454,7 +13454,7 @@ async def test_the_aside_copy_key_works_while_the_answer_is_still_streaming() ->
         panel.append_answer(generation, "PARTIAL-TEXT so far")
         await pilot.pause()
         assert panel.turns[-1].state == "running"
-        assert app._aside_can_fork() is False, "precondition: ^f is refused here"
+        assert app._aside_can_fork() is False, "precondition: nothing settled to fork"
 
         app._clipboard = ""
         await pilot.press("ctrl+r")

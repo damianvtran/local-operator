@@ -857,11 +857,25 @@ class ForkRefused(ValueError):
 #: accept, and nothing repairs it afterwards.
 ASIDE_ADOPT_REFUSAL_SENTENCES: dict[str, str] = {
     "session_closed": "this conversation has closed; the aside was not added",
+    # D10: names what actually clears the state. The tail stays open after a
+    # turn that was cut off without an abort, and only the NEXT turn closes it,
+    # so "wait for the turn" would send the user to wait for nothing.
     "open_tool_batch": (
-        "the conversation is in the middle of a tool call; "
-        "add the aside once the current turn finishes"
+        "the conversation stopped in the middle of a tool call, so the aside was not "
+        "added; send a message to continue the conversation, then add the aside"
+    ),
+    # D9: an owner runtime from before the queue refuses a mid-turn adopt with a
+    # plain RuntimeError; the desktop route maps that frozen sentence to this.
+    "turn_running": (
+        "This conversation is busy, and the version it's running can't queue an "
+        "aside. Add it when the reply finishes."
     ),
 }
+
+#: The exact refusal an owner from before the queued adopt raises mid-turn
+#: (frozen in every released build that predates it). D9 matches on it, and ONLY
+#: on it, to tell that version-skew refusal from a real owner outage.
+LEGACY_ASIDE_ADOPT_BUSY = "cannot adopt an aside while a turn is running"
 
 
 class AsideAdoptRefused(ValueError):
@@ -871,9 +885,10 @@ class AsideAdoptRefused(ValueError):
     :attr:`reason` token from :data:`ASIDE_ADOPT_REFUSAL_SENTENCES`. A busy
     session is NOT a refusal any more — :meth:`Session.adopt_aside` queues the
     pair and lands it at the turn's safe boundary — so the reasons left are the
-    two states where deferring would be a lie: the session has closed (nothing
-    will ever flush the queue), or the live list ends in an open tool batch on
-    the immediate-write path (writing would build an unsendable request).
+    states where deferring would be a lie: the session has closed (nothing will
+    ever flush the queue), the live list ends in an open tool batch on the
+    immediate-write path (writing would build an unsendable request), or the
+    owner is an older build that cannot queue at all (``turn_running``, D9).
 
     Typed so it never reaches a desktop client as the owner's plain
     ``RuntimeError``, which the control plane reads as a 503 "runtime

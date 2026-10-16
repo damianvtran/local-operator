@@ -642,12 +642,11 @@ async def test_dispose_flushes_a_queued_adopt(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_boundary_with_an_open_batch_holds_the_adopt_and_order(tmp_path, caplog) -> None:
-    """The backstop at a FLUSH boundary defers, never splices, and keeps FIFO order.
+async def test_a_held_adopt_does_not_block_the_receipts_behind_it(tmp_path, caplog) -> None:
+    """D7: an open batch at a boundary SKIPS the adoption, never splices it, and
+    lets the bang receipt behind it persist exactly as it did before the queue.
 
-    A raise here would come out of the pipeline's ``finally``; holding the head
-    (and the receipt queued behind it) for the next boundary is still deferral.
-    The warning names the exchange so the hold is traceable.
+    The hold warns ONCE (review R7), however many boundaries re-try it.
     """
     session = make_session(tmp_path, RecordingStream())
     pair = [Message.user("why?"), Message.assistant("because.")]
@@ -657,26 +656,34 @@ async def test_a_boundary_with_an_open_batch_holds_the_adopt_and_order(tmp_path,
     session._context.messages.extend([Message.user("go"), open_batch])
     session._is_streaming = True
     assert await session.adopt_aside(pair) == "queued"
-    await session.record_shell("echo nine", receipt)
     session._is_streaming = False
 
+    # Two boundaries with the batch still open: held both times, warned once.
     with caplog.at_level("WARNING", logger="local_operator.session.session"):
         await session._flush_shell_records()
+        await session._flush_shell_records()
+    held = [r for r in caplog.records if "held back" in r.getMessage()]
+    assert len(held) == 1 and pair[-1].id in held[0].getMessage()
+    assert not session._transcript.has_entry(pair[-1].id)
 
-    assert pair[-1].id in caplog.text
-    assert len(session._pending_shell_records) == 2
-    assert session._context.messages[-1] is open_batch
-    assert session._transcript.entries() == []
-
-    # The batch closes; the next boundary lands both, in arrival order.
-    session._context.messages.append(
-        Message.tool_result(
-            ToolResult(tool_call_id="c1", tool_name="bash", content=[TextContent(text="ok")])
-        )
-    )
+    # A receipt queued BEHIND the held adoption is not blocked by it.
+    session._is_streaming = True
+    await session.record_shell("echo nine", receipt)
+    session._is_streaming = False
+    assert [type(q).__name__ for q in session._pending_shell_records] == [
+        "_PendingAdoption",
+        "tuple",
+    ]
     await session._flush_shell_records()
-    texts = [m.text for m in session._context.messages if isinstance(m, Message)]
-    assert texts.index("why?") < texts.index("! echo nine")
+    assert session._transcript.has_entry("shell:shell-9:result")
+    # Skipped at that pass (its index came before the receipt), never spliced.
+    assert [type(q).__name__ for q in session._pending_shell_records] == ["_PendingAdoption"]
+    assert all(getattr(m, "id", None) != pair[0].id for m in session._context.messages)
+
+    # The receipt's own call/result pair now ends the list, so the tail rule
+    # reads it closed and the next boundary lands the pair after it.
+    await session._flush_shell_records()
+    assert session._transcript.has_entry(pair[-1].id)
     assert session._pending_shell_records == []
     await session.dispose()
 
@@ -686,8 +693,10 @@ async def test_an_adopt_still_held_at_dispose_is_reported_loudly(tmp_path, caplo
     """The one case that cannot defer: dispose is the last boundary.
 
     An adopt held back by an open batch at dispose will never land, so it is an
-    ERROR in the log and an error notice on the event stream, never a silence.
+    ERROR in the log, an error notice on the event stream, and a durable
+    session-incident row a reconnecting frontend can read (review R6).
     """
+    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
     from local_operator.harness.types import NoticeEvent
 
     session = make_session(tmp_path, RecordingStream())
@@ -707,8 +716,42 @@ async def test_an_adopt_still_held_at_dispose_is_reported_loudly(tmp_path, caplo
     errors = [r for r in caplog.records if r.levelname == "ERROR" and pair[-1].id in r.getMessage()]
     assert errors, caplog.text
     notices = [e for e in events if isinstance(e, NoticeEvent) and e.kind == "error"]
-    assert len(notices) == 1 and "aside" in notices[0].text
-    assert not Transcript(tmp_path / "sess").has_entry(pair[-1].id)
+    assert len(notices) == 1 and "1 aside(s)" in notices[0].text
+    reopened = Transcript(tmp_path / "sess")
+    assert not reopened.has_entry(pair[-1].id)
+    incidents = [
+        e
+        for e in reopened.entries()
+        if e.payload.get("custom_type") == SESSION_INCIDENT_MESSAGE_TYPE
+    ]
+    assert len(incidents) == 1
+    assert pair[-1].id in str(incidents[0].payload.get("details", {}).get("text", ""))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_receipt_write_is_reported_at_dispose(tmp_path, caplog) -> None:
+    """D7: nothing leaves the queue without a write or a report — receipts too."""
+    from local_operator.harness.types import NoticeEvent
+
+    session = make_session(tmp_path, RecordingStream())
+    events: list[object] = []
+    session.subscribe(events.append)
+    receipt = ToolResult(tool_call_id="shell-7", tool_name="bash", content=[TextContent(text="7")])
+
+    async def failing(command: str, result: ToolResult) -> None:
+        raise OSError("disk full")
+
+    session._persist_shell_record = failing  # type: ignore[method-assign]
+    await session._turn_lock.acquire()
+    await session.record_shell("echo seven", receipt)  # queued: the lock is held
+    session._turn_lock.release()
+
+    with caplog.at_level("ERROR", logger="local_operator.session.session"):
+        await session.dispose()
+
+    assert any("shell-7" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+    notices = [e for e in events if isinstance(e, NoticeEvent) and e.kind == "error"]
+    assert len(notices) == 1 and "1 shell command record(s)" in notices[0].text
 
 
 @pytest.mark.asyncio
