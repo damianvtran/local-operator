@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,15 @@ from local_operator.memory import (
     guard,
     parse_url,
     safe_segment,
+    structural_reference,
     valid_memory_tool_arguments,
 )
 from local_operator.paths import config_dir
+
+#: The one ``q`` parameter of a read URL, matched at a parameter boundary so that only
+#: its VALUE is ever left out of the text the free-text guards inspect — never the
+#: scheme, the scope or another parameter.
+_QUERY_VALUE = re.compile(r"(?<=[?&])q=[^&]*")
 
 
 def store_for(context: ToolContext | None) -> MemoryStore:
@@ -41,11 +48,53 @@ def store_for(context: ToolContext | None) -> MemoryStore:
     )
 
 
+def _recall_reference(name: str, path: Any) -> str | None:
+    """The read call's ``q`` VALUE when it IS a structural reference, else ``None``.
+
+    The ONE exemption the agent read path has, and only ever a read: ``_run`` guards
+    its whole argument dict, so the q value was refused here before the store saw it,
+    and a benign identifier lookup failed on both layers. Every other argument of the
+    same call — and the same value on a write or an edit, where a value is being
+    STORED rather than looked up — keeps the refusal it has today.
+
+    A path that does not parse is left to the caller's own ``parse_url``, which refuses
+    it in the same order as before this exemption existed: ``ValueError`` here means
+    only "not classifiable as a reference", so the caller's guard still speaks first.
+    """
+    if name != "read" or not isinstance(path, str):
+        return None
+    try:
+        _, _, query = parse_url(path.strip())
+    except (MemoryError, ValueError):
+        # ValueError: ``parse_url`` parses its query with strict_parsing=True, which
+        # rejects a field with no "=". Both are that same refusal by the caller's own
+        # parser — catching them here keeps the guard ahead of it, as it was before.
+        return None
+    value = query.get("q")
+    return value if structural_reference(value) else None
+
+
+def _guarded_path(path: str) -> str:
+    """``path`` with its exempt recall-query value left out of the guard's text.
+
+    Only the exempt VALUE is removed — the parameter itself stays, empty, so every
+    other character of the call (scheme, scope, entity, any other parameter) still
+    reaches ``guard``/``guard_encoded`` unchanged. The value needs no placeholder: it
+    was classified as a minted reference, so there is nothing in it to inspect.
+    """
+    return _QUERY_VALUE.sub("q=", path, count=1)
+
+
 def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     from local_operator.memory_privacy import guard_encoded
 
-    guard(args)
-    guard_encoded(args)
+    # Both guards below inspect the whole argument dict, so the single exemption this
+    # path has is applied to the dict they receive rather than to the call. See
+    # _recall_reference for why it exists and what it covers.
+    reference = _recall_reference(name, args.get("path"))
+    guarded = args if reference is None else {**args, "path": _guarded_path(args["path"])}
+    guard(guarded)
+    guard_encoded(guarded)
     allowed = {"path", "i", "raw"} if name == "read" else {"path", "i", "content"}
     if name == "edit":
         allowed = {"path", "i", "old_text", "new_text", "edits", "replace_all", "anchor_line"}
@@ -54,7 +103,9 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
             "Unsupported memory argument; file ranges and filesystem controls do not apply."
         )
     scope, entity, query = parse_url(args["path"].strip())
-    guard_encoded(query)
+    # The parsed query carries the same single exemption, on its value: the q value is
+    # emptied and no other key of this call is affected.
+    guard_encoded(query if reference is None else {**query, "q": ""})
     for key in ("version", "cursor"):
         if query.get(key):
             safe_segment(query[key])

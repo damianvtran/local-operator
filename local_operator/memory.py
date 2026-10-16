@@ -393,6 +393,46 @@ def safe_segment(value: Any, *, structural: bool = False) -> str:
     return value
 
 
+#: The shapes a value may legitimately BE as a structural REFERENCE, each one cited at
+#: the source that mints it. A reference is not prose, so the free-text guard is the
+#: wrong question to ask of one: its hex runs can satisfy the IBAN/mod-97 or card/Luhn
+#: shape BY CHANCE — that collision refused every put on an install whose device id
+#: happened to pass mod-97 (the write path fixed it through ``safe_segment``), and its
+#: read-side twin refused every recall whose QUERY was such an id.
+_REFERENCE_SHAPES = (
+    # network.identity.device_id_for: "d_" + sha256(DEVICE_ID_DOMAIN + key).hexdigest()[:32].
+    re.compile(r"d_[0-9a-f]{32}"),
+    # memory._id(): the canonical UUID string minted for entity and operation ids —
+    # the SCOPE/ID the CLI prints and the version=REV a read accepts. The store mints
+    # UUIDv7, but this guard is shape-based and pins no version/variant nibble, so any
+    # canonical UUID spelling matches.
+    re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+)
+
+
+def structural_reference(value: Any) -> bool:
+    """True iff ``value`` IS exactly one minted structural reference, nothing else.
+
+    A recall query is a READ and may legitimately BE an identifier this codebase mints
+    and hands back (a device id, or an entity/operation id) rather than user prose, so
+    ``guard()``'s store-oriented refusal — keep only the NAME — is the wrong verdict for
+    it. Callers skip the free-text guard for a value this admits, and for that value
+    alone: the match is a FULL match, so a secret-shaped token inside prose, a labelled
+    value and any multi-token string are not references and keep the guard.
+
+    The admitted set is exactly the two shapes above, each justified by the function
+    that mints it. A shape with no such source is not a reference here: a bare 64-hex
+    ``body_sha`` digest is spelled ``[0-9a-f]{64}`` at its validation, but it is an
+    integrity value over the operation payload the store compares, never a *lookup*
+    handle — it does ride op records (``memory_capture.py`` computes one per captured
+    op) and no code path searches by it, since ``search()`` takes no body-hash input —
+    and the free-text guard already admits it. This is a READ-side classification only;
+    a WRITE keeps the guard, because storing a value is not the same act as looking one
+    up.
+    """
+    return isinstance(value, str) and any(shape.fullmatch(value) for shape in _REFERENCE_SHAPES)
+
+
 def guard(value: Any, *, opaque: bool = False) -> None:
     """Inspect every string, including metadata and wire-only fields, without echo.
 
@@ -1505,7 +1545,16 @@ class MemoryStore:
         limit: int = 10,
         suggest: bool = False,
     ) -> list[dict[str, Any]]:
-        guard(query)
+        # ``guard`` is the free-text STORE guard: its own message asks for the value to
+        # be kept as a secret NAME. A recall query is a READ and may legitimately BE a
+        # minted structural reference (see structural_reference), so running the store
+        # guard over it refused a benign identifier lookup with store-oriented advice.
+        # Prose takes the guard below, exactly as before. Nothing is weakened off this
+        # call site: search() persists nothing, and the journal/provider-payload copy of
+        # the same arguments is guarded independently by memory_privacy.retained_arguments,
+        # which fails closed — an admitted query spelling is still never retained.
+        if not structural_reference(query):
+            guard(query)
         if (
             not isinstance(query, str)
             or len(query) > 2048
