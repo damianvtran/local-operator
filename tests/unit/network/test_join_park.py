@@ -49,6 +49,7 @@ from local_operator.network.handshake import (
     Credential,
     Handshake,
     pair_abort_frame,
+    pair_ready_frame,
     pair_timeout_seconds,
     sas_matches,
 )
@@ -441,16 +442,371 @@ def test_a_pairing_outcome_published_between_read_and_exit_probe_is_preserved(
     assert outcome.error_code == ("declined" if status == "refused" else "")
 
 
-@pytest.mark.parametrize("removed", [False, True])
 def test_a_dead_pairing_without_a_published_outcome_is_still_abandoned(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, removed: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The record GONE is the true abandonment: nothing is left to read or publish.
+
+    The briefer, single-parameter form of this case (a constant ``removed=True``
+    parametrization) was folded into the body; the ``removed=False`` arm it once had
+    asserted ``None`` for a live row, which was the silent-death bug itself. That case
+    is now covered from the truthful side by
+    ``test_a_parker_that_died_unpublished_leaves_a_terminal_outcome`` below.
+    """
     pending = _pending_result_fixture(monkeypatch, tmp_path)
 
     def dead_without_outcome(_pid: int) -> bool:
-        if removed:
-            store.clear_pending_join(pending.invite_id)
+        store.clear_pending_join(pending.invite_id)
         return False
 
     monkeypatch.setattr(net_cli, "_process_alive", dead_without_outcome)
     assert net_cli._await_join_result(pending, store) is None
+
+
+def test_a_parker_that_died_unpublished_leaves_a_terminal_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RED-first: a dead parker with a still-awaiting row must publish the TRUTH.
+
+    THE FLAKE (main run 38841686162, 1 of ~3-in-45): a parked ceremony whose child
+    died during ``result_read`` without publishing a terminal row left the record
+    ``awaiting_confirmation`` with a dead pid, so ``_await_join_result`` returned
+    ``None`` and the answering invocation reported "nothing was joined" over a
+    ceremony that had in fact stopped. A SIGKILLed parker cannot run its own writer,
+    so the fix has to be READER-side: the observer publishes the terminal outcome.
+
+    A synthetic record is the controlled boundary here (as in the sibling race test):
+    a real ``SIGKILL`` of a live parker mid-``result_read`` is not reproducible on
+    demand, and ``_parked_outcome`` / ``_await_join_result`` are the real functions
+    against the real disk store.
+    """
+    pending = _pending_result_fixture(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(net_cli, "_process_alive", lambda _pid: False)
+    outcome = net_cli._await_join_result(pending, store)
+
+    # NOT ``None``: the ceremony is reported, not invented as abandoned.
+    assert outcome is not None, "a dead parker with a live row was read as abandonment"
+    assert outcome.status == "refused"
+    assert outcome.error_code == "pairing_stopped"
+    assert outcome.message == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
+    assert outcome.pid == 0, "a terminal outcome must zero the pid it reports"
+    # DURABLE: the row on disk is terminal too, so no later reader finds it lingering.
+    stored = store.pending_join(pending.invite_id)
+    assert stored is not None and stored.status == "refused"
+    assert stored.error_code == "pairing_stopped"
+
+
+def test_answering_a_vanished_parker_says_what_happened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The answering invocation must carry the stopped sentence, not a bare abandonment.
+
+    This is the phase-two half of the flake: when the parked record is gone entirely
+    by the time the reader looks, ``_answer_parked_join`` is the surface the person
+    sees, and it has to name the stop rather than the generic "nothing was joined".
+    """
+    pending = _pending_result_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(net_cli, "_live_parked_joins", lambda _store: [pending])
+    monkeypatch.setattr(net_cli, "_await_join_result", lambda _pending, _store: None)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        net_cli._answer_parked_join(_confirm_args(pending.sas), pending.sas)  # noqa: SLF001
+    assert refused.value.code == "pairing_stopped"
+    assert refused.value.sentence == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
+
+
+def test_the_parker_publishes_when_its_own_finish_is_cut_by_the_link(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The WRITER half: a parker whose own ``result_read`` dies publishes the truth.
+
+    The reader-side fix cannot cover a death the parker LIVES through and could have
+    reported — that is this path. ``_finish_pairing`` raises the transport error the
+    flake names (``wire.LinkCryptoError``), and the parked row must go TERMINAL with
+    ``pairing_stopped`` rather than linger ``awaiting_confirmation``. ``_park_join`` is
+    called directly with the real disk store and a pre-written answer (so it proceeds
+    straight to the finish); the socket/codec/reader are controlled boundaries, which
+    is the qualification: the subject is the parker's own catch-and-publish, not the
+    wire.
+    """
+    server_a, server_b, host, port = devices
+    _record, minted = _minted(server_a)
+
+    # A REAL attempt record, left at ``result_read`` as the real parker leaves it before
+    # the wire read: the fix is gated on that stage, so a synthetic attempt at the wrong
+    # stage would not exercise it.
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+    attempt.stage = "result_read"
+
+    def _cut_by_the_link(**_kwargs: Any) -> Any:
+        raise wire.LinkCryptoError("the result read failed authentication", kind="auth")
+
+    monkeypatch.setattr(net_cli, "_finish_pairing", _cut_by_the_link)
+    # The park CLEARS any pre-written answer before it waits, so the answer is supplied
+    # through the wait itself: a controlled boundary for the human step, which is not
+    # what this test is about. It returns the admit answer that reaches the finish.
+    monkeypatch.setattr(
+        net_cli,
+        "_await_join_answer",
+        lambda invite_id, _window, _store: types.JoinAnswer(
+            invite_id=invite_id, decision="admit", code="123456", answered_by="harness"
+        ),
+    )
+
+    with pytest.raises(wire.LinkCryptoError):
+        net_cli._park_join(  # noqa: SLF001 — the CLI's own parker
+            args=_park_args(name=server_b.identity.name),
+            store=store,
+            envelope=minted.envelope,
+            result=Namespace(sas="123456"),
+            fingerprint="synthetic-fingerprint",
+            sock=None,
+            codec=None,
+            reader=None,
+            host=f"{host}:{port}",
+            identity=server_b.identity,
+            advertised=[],
+            handshake=None,
+            offer_view={"state": "absent", "items": []},
+            attempt=attempt,
+            helpers={
+                "invite_mod": invite_mod,
+                "pair_timeout_seconds": pair_timeout_seconds,
+                "pair_abort_frame": pair_abort_frame,
+            },
+        )
+
+    row = store.pending_join(minted.envelope.invite_id)
+    assert row is not None, "the parked record went with the ceremony without an outcome"
+    assert row.status == "refused"
+    assert row.error_code == "pairing_stopped"
+    assert row.message == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
+    assert row.pid == 0, "a terminal outcome must zero the pid it reports"
+
+
+def test_a_local_disk_fault_is_not_relabelled_a_peer_side_stop(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: the writer clause must NOT claim "invite is untouched" over a local fault.
+
+    ``_finish_pairing`` advances the attempt to ``persist`` once the admission is read,
+    so an ``OSError`` from the LOCAL ``_persist_join`` write reaches the same ``try`` but
+    a different stage. The parker must leave that row alone (the outer handler records
+    the attempt) rather than publish ``pairing_stopped`` with the wire-death sentence.
+    """
+    server_a, server_b, host, port = devices
+    _record, minted = _minted(server_a)
+
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+    # ``persist``: the read succeeded and the LOCAL write is what failed.
+    attempt.stage = "persist"
+
+    def _disk_full(**_kwargs: Any) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(net_cli, "_finish_pairing", _disk_full)
+    monkeypatch.setattr(
+        net_cli,
+        "_await_join_answer",
+        lambda invite_id, _window, _store: types.JoinAnswer(
+            invite_id=invite_id, decision="admit", code="123456", answered_by="harness"
+        ),
+    )
+
+    with pytest.raises(OSError):
+        net_cli._park_join(  # noqa: SLF001 — the CLI's own parker
+            args=_park_args(name=server_b.identity.name),
+            store=store,
+            envelope=minted.envelope,
+            result=Namespace(sas="123456"),
+            fingerprint="synthetic-fingerprint",
+            sock=None,
+            codec=None,
+            reader=None,
+            host=f"{host}:{port}",
+            identity=server_b.identity,
+            advertised=[],
+            handshake=None,
+            offer_view={"state": "absent", "items": []},
+            attempt=attempt,
+            helpers={
+                "invite_mod": invite_mod,
+                "pair_timeout_seconds": pair_timeout_seconds,
+                "pair_abort_frame": pair_abort_frame,
+            },
+        )
+
+    row = store.pending_join(minted.envelope.invite_id)
+    assert row is not None
+    assert row.status == "awaiting_confirmation", (
+        "a local disk fault was reported as a peer-side stop: "
+        f"status={row.status!r} code={row.error_code!r}"
+    )
+    assert row.error_code == ""
+
+
+class _BrokenReadySock:
+    """A socket whose ready-frame write fails the way a peer close does."""
+
+    def sendall(self, payload: bytes) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+class _StubSock:
+    """A socket that swallows the ready frame, for a finish that should succeed.
+
+    These three stubs are LOCAL rather than imported from ``test_pair_offer`` (which
+    has its own copies) because ``test_pair_offer`` imports from THIS module — an
+    import here would be a circular import. Kept identical in shape so the two cannot
+    drift in behaviour.
+    """
+
+    def sendall(self, payload: bytes) -> None:
+        return None
+
+
+class _StubCodec:
+    """A codec that opens the frames the test queues, in order."""
+
+    def __init__(self, frames: list[dict[str, Any]]) -> None:
+        self.frames = list(frames)
+
+    def open(self, payload: Any) -> dict[str, Any]:
+        return self.frames.pop(0)
+
+    def seal(self, frame: dict[str, Any]) -> bytes:
+        return b"sealed"
+
+
+class _StubReader:
+    """A reader that yields the payloads the test queues, in order."""
+
+    def __init__(self, payloads: list[Any]) -> None:
+        self.payloads = list(payloads)
+
+    def read_record_payload(self, deadline: float) -> Any:
+        return self.payloads.pop(0)
+
+
+def test_a_ready_frame_send_death_publishes_too(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1: a WIRE death while SENDING the ready frame is a peer-side stop, and publishes.
+
+    Driven through the REAL ``_finish_pairing`` (no stub), so the stage the gate reads is
+    the one the real code sets: ``_finish_pairing`` marks ``ready_send``, then writes the
+    ready frame — a wire operation — *before* it can reach ``result_read``. A gate that
+    accepted only ``result_read`` silently dropped this ordering (review round 2, M1),
+    leaving the non-terminal row this PR exists to remove. It now publishes, and the same
+    cell doubles as the M2 real-progression assertion: the recorded stage must be
+    ``ready_send``, set by the real code rather than pinned by the test.
+    """
+    server_a, server_b, host, port = devices
+    _record, minted = _minted(server_a)
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+    monkeypatch.setattr(
+        net_cli,
+        "_await_join_answer",
+        lambda invite_id, _window, _store: types.JoinAnswer(
+            invite_id=invite_id, decision="admit", code="123456", answered_by="harness"
+        ),
+    )
+
+    with pytest.raises(BrokenPipeError):
+        net_cli._park_join(  # noqa: SLF001 — the CLI's own parker
+            args=_park_args(name=server_b.identity.name),
+            store=store,
+            envelope=minted.envelope,
+            result=Namespace(sas="123456"),
+            fingerprint="synthetic-fingerprint",
+            sock=_BrokenReadySock(),
+            codec=_StubCodec([]),
+            reader=_StubReader([]),
+            host=f"{host}:{port}",
+            identity=server_b.identity,
+            advertised=[],
+            handshake=None,
+            offer_view={"state": "absent", "items": []},
+            attempt=attempt,
+            helpers={
+                "invite_mod": invite_mod,
+                "pair_timeout_seconds": pair_timeout_seconds,
+                "pair_abort_frame": pair_abort_frame,
+                "pair_ready_frame": pair_ready_frame,
+            },
+        )
+
+    # M2: the stage is the REAL code's, not a pin — this is the precondition the gate
+    # rests on, and the fact a mis-placed gate hides.
+    assert attempt.stage == "ready_send"
+    row = store.pending_join(minted.envelope.invite_id)
+    assert row is not None
+    assert row.status == "refused", (
+        "a wire death while sending the ready frame left the row non-terminal: "
+        f"status={row.status!r}"
+    )
+    assert row.error_code == "pairing_stopped"
+    assert row.pid == 0
+
+
+def test_a_real_finish_advances_the_stage_past_the_wire(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2: the REAL ``_finish_pairing`` advances ``result_read`` -> ``persist``.
+
+    The gate's whole precondition is that ``persist`` is set only AFTER the admission
+    frame is read, so a wire failure stays a wire stage while a local write failure does
+    not. Both round-2 guard tests hand-pin the stage, so that transition was never
+    asserted; this cell drives a real successful finish (real codec open of a real admit
+    frame, real persistence into the isolated store) and reads the recorded stage.
+    """
+    server_a, server_b, host, port = devices
+    record, minted = _minted(server_a)
+    record = store.load(record.network_id, server_a.root)
+    attempt = net_cli._JoinAttempt(host=f"{host}:{port}")  # noqa: SLF001
+
+    from local_operator.network.handshake import pair_result_frame
+
+    admit = pair_result_frame(
+        req=1,
+        admit=True,
+        network={
+            "network_id": record.network_id,
+            "name": record.name,
+            "epoch": record.epoch,
+        },
+        member={"device_id": server_b.identity.device_id, "name": server_b.identity.name},
+        members=[],
+        material=store.load_secrets(record.network_id, server_a.root).secret,
+        shares=[],
+    )
+    net_cli._finish_pairing(  # noqa: SLF001 — the joining half of the ceremony
+        typed="123456",
+        sock=_StubSock(),
+        codec=_StubCodec([admit]),
+        reader=_StubReader([b"admit"]),
+        envelope=minted.envelope,
+        host=f"{host}:{port}",
+        identity=server_b.identity,
+        store=store,
+        handshake=Namespace(peer_endpoints=[]),
+        advertised=[],
+        fingerprint="AAAA-BBBB-CCCC-DDDD",
+        offer_view={"state": "absent", "items": []},
+        attempt=attempt,
+        helpers={
+            "invite_mod": invite_mod,
+            "pair_timeout_seconds": pair_timeout_seconds,
+            "pair_ready_frame": pair_ready_frame,
+        },
+    )
+
+    assert attempt.stage == "persist", (
+        "the real finish did not advance the stage past the wire read, so the gate's "
+        f"precondition is untested: stage={attempt.stage!r}"
+    )
