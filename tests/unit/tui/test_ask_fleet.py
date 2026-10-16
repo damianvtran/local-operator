@@ -1617,7 +1617,11 @@ async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, 
     behind the sidebar marks and the picker's ``asks: N`` must hide the rows the
     fleet LIST hides, or "asks: 1" opens an empty list. Under ``at_expiry`` a
     timed-out row 2 h past its deadline (and a stale ``open`` past its deadline,
-    which the readers judge as lapsed) is out of both; an open ask is in both."""
+    which the readers judge as lapsed) is out of both; an open ask is in both.
+
+    The TALLY never counts a lapsed row, under any window (#2481 design D3: a
+    timed-out ask owes no answer, so it marks nothing); the window decides
+    whether the LIST still shows it. Parity is therefore over answerable rows."""
     from local_operator import settings_io
     from local_operator.config import ConfigManager
     from local_operator.config_watch import process_watcher
@@ -1634,7 +1638,9 @@ async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, 
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
         counts, total = app._read_fleet_asks()
-        assert counts == {"s-lapsed": 1, "s-stale": 1, "s-open": 1} and total == 3
+        assert counts == {"s-open": 1} and total == 1
+        shown = {str(row["session_id"]) for row in store.index_asks(isolated_index)}
+        assert shown == {"s-lapsed", "s-stale", "s-open"}, "the 7 d window lists all three"
 
         settings_io._store(
             ConfigManager(isolated_index),
@@ -1647,7 +1653,8 @@ async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, 
         assert counts == {"s-open": 1} and total == 1
         listed_counts: dict[str, int] = {}
         for row in listed:
-            if store.is_outstanding(row.get("status")):
+            status = row.get("status")
+            if store.is_outstanding(status) and not store.is_lapsed(status):
                 sid = str(row["session_id"])
                 listed_counts[sid] = listed_counts.get(sid, 0) + 1
         assert counts == listed_counts
