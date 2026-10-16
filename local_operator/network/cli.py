@@ -4461,6 +4461,20 @@ _JOIN_UNANSWERED_SENTENCE = (
     "The invite is untouched: start again with `lop network join @<token-file> --park --json`."
 )
 
+#: What a parked ceremony says when it STOPPED without reporting — a transport death
+#: inside the finish, not an unanswered window and not a refusal the inviter sent.
+#: ONE OWNER because two sites have to say it: the parker that catches its own
+#: transport failure during the finish (``_park_join``), and the answering side that
+#: observes a parker which died WITHOUT leaving a row at all (``_await_join_result``,
+#: the SIGKILL case the parker cannot cover for itself). The sentence is the honest
+#: one either way: the ceremony is gone, nothing was sent that could be a pairing, and
+#: the invite was not spent.
+_JOIN_STOPPED_SENTENCE = (
+    "the parked ceremony stopped before it reported back, so nothing was joined and "
+    "the invite is untouched. Start again with `lop network join @<token-file> "
+    "--park --json`."
+)
+
 
 def _process_alive(pid: int) -> bool:
     """Whether the process that parked a ceremony is still there to finish it.
@@ -4617,7 +4631,7 @@ def _park_join(
     """
     import os
 
-    from local_operator.network import types
+    from local_operator.network import types, wire
     from local_operator.network.types import JoinParkUnanswered, MeshRefusal
 
     invite_mod = helpers["invite_mod"]
@@ -4727,6 +4741,23 @@ def _park_join(
             message=refusal.sentence,
         )
         raise
+    except (wire.LinkCryptoError, OSError, TimeoutError):
+        # A TRANSPORT DEATH DURING THE FINISH. Without this the exception escapes to
+        # ``_join_one``'s own transport clause, which records the ATTEMPT but has no
+        # ``pending`` in scope — so the parked row stayed ``awaiting_confirmation``
+        # with a dead holder, and the answering invocation read that as "nothing was
+        # joined" over a ceremony that stopped for a reason. This is the WRITER half
+        # (the reader half in ``_await_join_result`` covers a parker killed before it
+        # could run this). ``pending`` IS in scope here, so no signature changes.
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="refused",
+            store=store,
+            error_code="pairing_stopped",
+            message=_JOIN_STOPPED_SENTENCE,
+        )
+        raise
     store.clear_join_answer(envelope.invite_id)
     _parked_outcome(
         pending,
@@ -4806,12 +4837,11 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
         store.clear_pending_join(chosen.invite_id)
         store.clear_join_answer(chosen.invite_id)
         if outcome is None:
-            raise MeshRefusal(
-                "pairing_abandoned",
-                "the pairing process stopped before it reported back, so nothing was joined and "
-                "the invite is untouched. Start again with `lop network join @<token-file> "
-                "--park --json`.",
-            )
+            # The record itself was gone by the time the parker was observed dead
+            # (``_await_join_result`` publishes a terminal outcome when the row is
+            # still there). The ceremony never reported, so say that truthfully —
+            # one sentence, owned by ``_JOIN_STOPPED_SENTENCE``.
+            raise MeshRefusal("pairing_stopped", _JOIN_STOPPED_SENTENCE)
         if outcome.status == "joined":
             return _emit(args, dict(outcome.result), list(outcome.result_lines))
         raise MeshRefusal(
@@ -4893,12 +4923,30 @@ def _await_join_result(pending: Any, store: Any) -> Any:
             # The parker publishes its outcome BEFORE exiting. It can finish
             # between our awaiting-confirmation read and this liveness probe,
             # so death alone cannot distinguish abandonment from a completed
-            # ceremony. Re-read once after observing death; an absent or still
-            # awaiting row remains abandoned, never an invented success.
+            # ceremony. Re-read once after observing death.
             final = store.pending_join(pending.invite_id)
-            if final is not None and final.status != "awaiting_confirmation":
+            if final is None:
+                # The record went with the ceremony: there is nothing left to read
+                # and nothing truthful to publish. That is the true abandonment.
+                return None
+            if final.status != "awaiting_confirmation":
                 return final
-            return None
+            # THE PARKER DIED WITHOUT PUBLISHING A TERMINAL OUTCOME. This happens when
+            # the child is killed outright (a SIGKILL leaves it no chance to write) or
+            # when a transport death escaped the parker's own publication. The row is
+            # the only channel the answering invocation has, so leaving it
+            # ``awaiting_confirmation`` with a dead holder is exactly the silent death
+            # that reported "nothing was joined" over a ceremony that did in fact
+            # stop for a reason. PUBLISH THE TRUTH HERE, on the reader side, which is
+            # the one side that survives a child that could not run its own writer.
+            _parked_outcome(
+                final,
+                status="refused",
+                store=store,
+                error_code="pairing_stopped",
+                message=_JOIN_STOPPED_SENTENCE,
+            )
+            return final
         time.sleep(0.2)
     return None
 

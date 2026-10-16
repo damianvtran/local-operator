@@ -441,16 +441,140 @@ def test_a_pairing_outcome_published_between_read_and_exit_probe_is_preserved(
     assert outcome.error_code == ("declined" if status == "refused" else "")
 
 
-@pytest.mark.parametrize("removed", [False, True])
+@pytest.mark.parametrize("removed", [True])
 def test_a_dead_pairing_without_a_published_outcome_is_still_abandoned(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, removed: bool
 ) -> None:
+    """The record GONE is the true abandonment: nothing is left to read or publish.
+
+    The former ``removed=False`` arm of this parametrisation asserted ``None`` for a
+    record that was still there and still ``awaiting_confirmation`` — which is exactly
+    the silent-death bug (a dead holder whose row never went terminal). That case is
+    now covered, from the truthful side, by
+    ``test_a_parker_that_died_unpublished_leaves_a_terminal_outcome`` below; the
+    assertion that survives here is the one that was always right.
+    """
     pending = _pending_result_fixture(monkeypatch, tmp_path)
 
     def dead_without_outcome(_pid: int) -> bool:
-        if removed:
-            store.clear_pending_join(pending.invite_id)
+        store.clear_pending_join(pending.invite_id)
         return False
 
     monkeypatch.setattr(net_cli, "_process_alive", dead_without_outcome)
     assert net_cli._await_join_result(pending, store) is None
+
+
+def test_a_parker_that_died_unpublished_leaves_a_terminal_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RED-first: a dead parker with a still-awaiting row must publish the TRUTH.
+
+    THE FLAKE (main run 38841686162, 1 of ~3-in-45): a parked ceremony whose child
+    died during ``result_read`` without publishing a terminal row left the record
+    ``awaiting_confirmation`` with a dead pid, so ``_await_join_result`` returned
+    ``None`` and the answering invocation reported "nothing was joined" over a
+    ceremony that had in fact stopped. A SIGKILLed parker cannot run its own writer,
+    so the fix has to be READER-side: the observer publishes the terminal outcome.
+
+    A synthetic record is the controlled boundary here (as in the sibling race test):
+    a real ``SIGKILL`` of a live parker mid-``result_read`` is not reproducible on
+    demand, and ``_parked_outcome`` / ``_await_join_result`` are the real functions
+    against the real disk store.
+    """
+    pending = _pending_result_fixture(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(net_cli, "_process_alive", lambda _pid: False)
+    outcome = net_cli._await_join_result(pending, store)
+
+    # NOT ``None``: the ceremony is reported, not invented as abandoned.
+    assert outcome is not None, "a dead parker with a live row was read as abandonment"
+    assert outcome.status == "refused"
+    assert outcome.error_code == "pairing_stopped"
+    assert outcome.message == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
+    assert outcome.pid == 0, "a terminal outcome must zero the pid it reports"
+    # DURABLE: the row on disk is terminal too, so no later reader finds it lingering.
+    stored = store.pending_join(pending.invite_id)
+    assert stored is not None and stored.status == "refused"
+    assert stored.error_code == "pairing_stopped"
+
+
+def test_answering_a_vanished_parker_says_what_happened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The answering invocation must carry the stopped sentence, not a bare abandonment.
+
+    This is the phase-two half of the flake: when the parked record is gone entirely
+    by the time the reader looks, ``_answer_parked_join`` is the surface the person
+    sees, and it has to name the stop rather than the generic "nothing was joined".
+    """
+    pending = _pending_result_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(net_cli, "_live_parked_joins", lambda _store: [pending])
+    monkeypatch.setattr(net_cli, "_await_join_result", lambda _pending, _store: None)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        net_cli._answer_parked_join(_confirm_args(pending.sas), pending.sas)  # noqa: SLF001
+    assert refused.value.code == "pairing_stopped"
+    assert refused.value.sentence == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
+
+
+def test_the_parker_publishes_when_its_own_finish_is_cut_by_the_link(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The WRITER half: a parker whose own ``result_read`` dies publishes the truth.
+
+    The reader-side fix cannot cover a death the parker LIVES through and could have
+    reported — that is this path. ``_finish_pairing`` raises the transport error the
+    flake names (``wire.LinkCryptoError``), and the parked row must go TERMINAL with
+    ``pairing_stopped`` rather than linger ``awaiting_confirmation``. ``_park_join`` is
+    called directly with the real disk store and a pre-written answer (so it proceeds
+    straight to the finish); the socket/codec/reader are controlled boundaries, which
+    is the qualification: the subject is the parker's own catch-and-publish, not the
+    wire.
+    """
+    server_a, server_b, host, port = devices
+    _record, minted = _minted(server_a)
+
+    def _cut_by_the_link(**_kwargs: Any) -> Any:
+        raise wire.LinkCryptoError("the result read failed authentication", kind="auth")
+
+    monkeypatch.setattr(net_cli, "_finish_pairing", _cut_by_the_link)
+    # The park CLEARS any pre-written answer before it waits, so the answer is supplied
+    # through the wait itself: a controlled boundary for the human step, which is not
+    # what this test is about. It returns the admit answer that reaches the finish.
+    monkeypatch.setattr(
+        net_cli,
+        "_await_join_answer",
+        lambda invite_id, _window, _store: types.JoinAnswer(
+            invite_id=invite_id, decision="admit", code="123456", answered_by="harness"
+        ),
+    )
+
+    with pytest.raises(wire.LinkCryptoError):
+        net_cli._park_join(  # noqa: SLF001 — the CLI's own parker
+            args=_park_args(name=server_b.identity.name),
+            store=store,
+            envelope=minted.envelope,
+            result=Namespace(sas="123456"),
+            fingerprint="synthetic-fingerprint",
+            sock=None,
+            codec=None,
+            reader=None,
+            host=f"{host}:{port}",
+            identity=server_b.identity,
+            advertised=[],
+            handshake=None,
+            offer_view={"state": "absent", "items": []},
+            helpers={
+                "invite_mod": invite_mod,
+                "pair_timeout_seconds": pair_timeout_seconds,
+                "pair_abort_frame": pair_abort_frame,
+            },
+        )
+
+    row = store.pending_join(minted.envelope.invite_id)
+    assert row is not None, "the parked record went with the ceremony without an outcome"
+    assert row.status == "refused"
+    assert row.error_code == "pairing_stopped"
+    assert row.message == net_cli._JOIN_STOPPED_SENTENCE  # noqa: SLF001
+    assert row.pid == 0, "a terminal outcome must zero the pid it reports"

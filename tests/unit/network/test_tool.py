@@ -627,6 +627,77 @@ def test_a_detached_ceremony_is_reaped_by_a_waiter_of_its_own() -> None:
             control.wait(timeout=10.0)
 
 
+def test_the_reaper_names_how_the_child_ended(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The flaky-sweep fix: a parked child's exit status is KEPT, not discarded.
+
+    The reaper used to call ``os.waitpid(pid, 0)`` and throw the status away, so a
+    ceremony that died EARLY left no trace of how: a clean exit, an error code and a
+    signal were indistinguishable. This spawns a child that exits with a distinct
+    NON-ZERO status, hands it to the real reaper, and asserts the LOG names it — the
+    discriminating fact being that a discarded status could not produce it.
+    """
+    if not hasattr(os, "waitpid"):
+        pytest.skip("no zombies off POSIX — and no exit status to read")
+
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(7)"])
+    with caplog.at_level("WARNING"):
+        net_tool._reap_when_it_exits(child.pid)  # noqa: SLF001 — the helper under test
+        deadline = time.time() + 15.0
+        while time.time() < deadline and "exited with status 7" not in caplog.text:
+            time.sleep(0.05)
+
+    assert "exited with status 7" in caplog.text, (
+        "the reaper did not name the child's exit status: "
+        f"records={[r.message for r in caplog.records]!r}"
+    )
+    # A NON-ZERO exit is a WARNING, so a routine ceremony is not filed as a fault.
+    assert any(r.levelname == "WARNING" for r in caplog.records if "status 7" in r.message)
+
+
+def test_a_clean_exit_is_logged_but_not_as_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counterfactual for the level: an ordinary finish is INFO, never WARNING.
+
+    Without this, the WARNING assertion above would pass for a reaper that warned on
+    every exit, which is not the judgement the fix is making.
+    """
+    if not hasattr(os, "waitpid"):
+        pytest.skip("no zombies off POSIX — and no exit status to read")
+
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"])
+    with caplog.at_level("INFO"):
+        net_tool._reap_when_it_exits(child.pid)  # noqa: SLF001 — the helper under test
+        deadline = time.time() + 15.0
+        while time.time() < deadline and "exited with status 0" not in caplog.text:
+            time.sleep(0.05)
+
+    assert "exited with status 0" in caplog.text
+    assert not any(
+        r.levelname == "WARNING" for r in caplog.records if "exited with status 0" in r.message
+    ), "a clean ceremony was filed as a fault"
+
+
+def test_a_signalled_child_is_named_as_a_signal() -> None:
+    """A killed child is named by its SIGNAL, which a status-code reader would miss.
+
+    The pure decoder, asserted directly: ``WIFSIGNALED`` is what a SIGKILLed parker
+    is, and it is the shape the flake is suspected to take.
+    """
+    if not hasattr(os, "waitpid"):
+        pytest.skip("no wait-status to decode off POSIX")
+
+    # Build a real signalled status rather than fabricating one: a child that kills
+    # itself with SIGKILL leaves a genuine WIFSIGNALED status.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"]
+    )
+    _pid, status = os.waitpid(child.pid, 0)
+    assert net_tool._describe_child_exit(status) == "killed by signal 9"  # noqa: SLF001
+
+
 def test_a_missing_argument_is_refused_with_a_sentence_not_a_call() -> None:
     result = _call("show")
     assert result.is_error
