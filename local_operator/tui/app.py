@@ -26699,6 +26699,11 @@ class OperatorApp(App[None]):
             # cleared HERE rather than left to go stale on a switch flipped
             # mid-session.
             self._ask_rows = []
+            # A session `x` mark rides only on `_ask_rows`; with the rows gone no
+            # snapshot would ever sweep it (#2481 review round 3, m2).
+            for ask_id in list(self._ask_dismiss_in_flight):
+                self._mark_ask_in_flight(ask_id, False)
+            self._ask_dismiss_in_flight.clear()
             self._retire_ask_secret_refusal()
             self._ask_fleet_rows = []
             self._ask_marks = {}
