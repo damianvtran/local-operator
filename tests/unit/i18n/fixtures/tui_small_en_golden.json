@@ -84,5 +84,19 @@
   "tui.small.session_panel.diagnostics_heading": "Session diagnostics\n",
   "tui.small.subagent_panel.ctrl_g_shrink": "ctrl+g to shrink",
   "tui.small.subagent_panel.ctrl_g_expand": "ctrl+g to expand",
-  "tui.small.wake_panel.scheduled_count": "{count, plural, one {1 scheduled} other {{shown} scheduled}}"
+  "tui.small.wake_panel.scheduled_count": "{count, plural, one {1 scheduled} other {{shown} scheduled}}",
+  "tui.small.settings_view.default_marker": "  (default)",
+  "tui.small.settings_view.hop_count": "  {count, plural, one {{shown} hop} other {{shown} hops}}",
+  "tui.small.settings_view.reorder_hint": "  shift+↑↓ reorder · d delete",
+  "tui.small.settings_view.press_key": "press a key…",
+  "tui.small.settings_view.hop_row_hint": "shift+↑↓ reorder · d delete · enter edits this hop",
+  "tui.small.settings_view.chain_row_hint": "enter opens the chain · d deletes it",
+  "tui.small.settings_view.chain_add_hint": "enter, then type: <chain-key> <provider>/<model>",
+  "tui.small.settings_view.hop_add_hint": "enter, then type: <provider>/<model>",
+  "tui.small.settings_view.read_only_pane": "read-only",
+  "tui.small.settings_view.overflow_more": "  … {spilled} more",
+  "tui.small.settings_view.read_only_label": "  read-only",
+  "tui.small.settings_view.title": "settings",
+  "tui.small.settings_view.bool_on": "on",
+  "tui.small.settings_view.bool_off": "off"
 }

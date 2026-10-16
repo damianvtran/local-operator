@@ -282,6 +282,62 @@ def session_picker_type_to_filter() -> Msg:
     return Msg("tui.small.session_picker.type_to_filter", {})
 
 
+def settings_view_bool_off() -> Msg:
+    return Msg("tui.small.settings_view.bool_off", {})
+
+
+def settings_view_bool_on() -> Msg:
+    return Msg("tui.small.settings_view.bool_on", {})
+
+
+def settings_view_chain_add_hint() -> Msg:
+    return Msg("tui.small.settings_view.chain_add_hint", {})
+
+
+def settings_view_chain_row_hint() -> Msg:
+    return Msg("tui.small.settings_view.chain_row_hint", {})
+
+
+def settings_view_default_marker() -> Msg:
+    return Msg("tui.small.settings_view.default_marker", {})
+
+
+def settings_view_hop_add_hint() -> Msg:
+    return Msg("tui.small.settings_view.hop_add_hint", {})
+
+
+def settings_view_hop_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.settings_view.hop_count", {"count": count, "shown": shown})
+
+
+def settings_view_hop_row_hint() -> Msg:
+    return Msg("tui.small.settings_view.hop_row_hint", {})
+
+
+def settings_view_overflow_more(*, spilled: str) -> Msg:
+    return Msg("tui.small.settings_view.overflow_more", {"spilled": spilled})
+
+
+def settings_view_press_key() -> Msg:
+    return Msg("tui.small.settings_view.press_key", {})
+
+
+def settings_view_read_only_label() -> Msg:
+    return Msg("tui.small.settings_view.read_only_label", {})
+
+
+def settings_view_read_only_pane() -> Msg:
+    return Msg("tui.small.settings_view.read_only_pane", {})
+
+
+def settings_view_reorder_hint() -> Msg:
+    return Msg("tui.small.settings_view.reorder_hint", {})
+
+
+def settings_view_title() -> Msg:
+    return Msg("tui.small.settings_view.title", {})
+
+
 def spend_channel_not_itemised() -> Msg:
     return Msg("tui.small.spend.channel_not_itemised", {})
 

@@ -42,9 +42,13 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_usage as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.usage")
 
 #: Bar geometry. The bar is the only element here that can be made narrower
 #: without losing information — a percentage is exact and a countdown is words —
@@ -220,15 +224,15 @@ class UsageStats:
         """``6 windows · 1 exhausted · 1 near limit`` — worst state first."""
         if not self.windows:
             return ""
-        parts = [f"{self.windows} window{'s' if self.windows != 1 else ''}"]
+        parts = [_t(_x.windows_count(count=self.windows, shown=str(self.windows)))]
         if self.exhausted:
-            parts.append(f"{self.exhausted} exhausted")
+            parts.append(_t(_x.exhausted(value=str(self.exhausted))))
         if self.warning:
-            parts.append(f"{self.warning} near limit")
+            parts.append(_t(_x.near_limit(value=str(self.warning))))
         if self.balances:
-            parts.append(f"{self.balances} reported balance{'s' if self.balances != 1 else ''}")
+            parts.append(_t(_x.reported_balance(count=self.balances, shown=str(self.balances))))
         if self.unknown:
-            parts.append(f"{self.unknown} not reported")
+            parts.append(_t(_x.not_reported(value=str(self.unknown))))
         return " · ".join(parts)
 
 
@@ -687,7 +691,7 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
         # A dead grant is excluded even with no meters: its note already
         # states the condition AND the remedy, so repeating a vaguer version
         # of it in the heading spends the same cells saying less.
-        row.append("  ·  usage unavailable", style=dim)
+        row.append(_t(_x.unavailable()), style=dim)
     payable = [limit for limit in report.limits if limit.paid_usable()]
     if payable:
         # Eligible credit replaces included shared quota, but only explicit
@@ -711,7 +715,7 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
         row.append(f"{binding.label} {fraction * 100:.0f}%", style=tint)
         countdown = format_countdown(binding.resets_in_ms(now_ms))
         if countdown:
-            row.append(f", resets in {countdown}", style=dim)
+            row.append(_t(_x.resets_in(value=countdown)), style=dim)
     return row
 
 
@@ -864,10 +868,7 @@ def build_usage_body(  # noqa: ANN001
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
         account_note = _account_status_note(report, now_ms, header_ms)
-        from local_operator.i18n.keys import tui_usage
-        from local_operator.i18n.text import tr
-
-        paid_text = tr("tui.usage")
+        paid_text = _t
         # Reuse the backend's normalized eligibility, not wallet funding alone.
         paid = [limit for limit in report.limits if limit.paid_usable()]
         exhausted_plan = any(
@@ -894,17 +895,17 @@ def build_usage_body(  # noqa: ANN001
                 and not allowance.tier
                 and not allowance.paid_fallback
             ):
-                copy.append(paid_text(tui_usage.paid_continue()))
+                copy.append(paid_text(_x.paid_continue()))
             if retained_tiers and allowance.tier:
-                copy.append(paid_text(tui_usage.paid_family_caps()))
+                copy.append(paid_text(_x.paid_family_caps()))
             if allowance.paid_fallback:
                 qualifier = (
-                    paid_text(tui_usage.paid_blocked())
+                    paid_text(_x.paid_blocked())
                     if allowance.available is False
                     else (
-                        paid_text(tui_usage.paid_eligibility_unknown())
+                        paid_text(_x.paid_eligibility_unknown())
                         if allowance.available is None
-                        else paid_text(tui_usage.paid_unlimited()) if allowance.unlimited else ""
+                        else paid_text(_x.paid_unlimited()) if allowance.unlimited else ""
                     )
                 )
                 if qualifier:
@@ -974,7 +975,7 @@ def build_usage_body(  # noqa: ANN001
             # Unknown quota is not evidence that the account has no limits.
             # The retained Muse qualifier already states the unknown outcome.
             if not muse_note:
-                lines.append(Text("  no windows reported", style=dim))
+                lines.append(Text(_t(_x.no_windows()), style=dim))
             cuts.add(len(lines))
             blocks.append((block_start, len(lines)))
             continue
@@ -1642,7 +1643,7 @@ class UsagePanel(Static):
                 frozenset({1}),
             )
         if self._loading and not self._reports:
-            return UsageBody([Text("fetching…", style=dim)], frozenset({1}))
+            return UsageBody([Text(_t(_x.fetching()), style=dim)], frozenset({1}))
         if not self._reports:
             # Two failures look identical in an empty panel and only one is
             # actionable, so the message names both rather than the shorter one.
@@ -1692,7 +1693,7 @@ class UsagePanel(Static):
         faint = Style(color=theme_mod.semantic_color("faint"))
         warning = Style(color=theme_mod.semantic_color("warning"))
         row = Text()
-        row.append("Usage", style=Style(color=theme_mod.semantic_color("fg")))
+        row.append(_t(_x.title()), style=Style(color=theme_mod.semantic_color("fg")))
         stale = expired = 0
         age = ""
         if self._fetched_ms is not None and not self._loading and not self._error:
@@ -1740,13 +1741,13 @@ class UsagePanel(Static):
             # the order changes nothing there.
             if expired:
                 row.append("  · ", style=faint)
-                row.append(f"{expired} sign-in expired", style=warning)
+                row.append(_t(_x.sign_in_expired(value=str(expired))), style=warning)
             if stale:
                 row.append("  · ", style=faint)
-                row.append(f"{stale} stale", style=warning)
+                row.append(_t(_x.stale(value=str(stale))), style=warning)
         if self._refreshing and not self._error:
             row.append("  · ", style=faint)
-            row.append("refreshing…", style=dim)
+            row.append(_t(_x.refreshing()), style=dim)
         # Truncated like every other composed row. The title grew suffixes
         # (target, age, refreshing) that can outrun a 32-cell card, and an
         # untruncated Text WRAPS — an extra visual row `_repaint`'s pinned
@@ -1839,7 +1840,7 @@ class UsagePanel(Static):
             # already had"), and it must stay visible next to the age it
             # qualifies while the user scrolls looking for fresher rows.
             note = Text(
-                "refresh failed — showing last known numbers",
+                _t(_x.refresh_failed()),
                 style=Style(color=theme_mod.semantic_color("warning")),
             )
             note.truncate(max(1, self._content_width()), overflow="ellipsis")
@@ -1865,9 +1866,9 @@ class UsagePanel(Static):
             # two are the same KIND of row — both are statements about the list
             # rather than entries in it — so they travel together at the bottom.
             position = Text()
-            position.append("showing ", style=faint)
+            position.append(_t(_x.showing_prefix()), style=faint)
             position.append(str(shown_end), style=dim)
-            position.append(" of ", style=faint)
+            position.append(_t(_x.of_separator()), style=faint)
             position.append(str(len(lines)), style=dim)
             rows.append(position)
         rows.append(self._hint_row(scrolled))
