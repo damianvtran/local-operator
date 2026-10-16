@@ -254,6 +254,23 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 	}
 }
 
+/** A fold of one conversation's published ask rows (id and status), for "did
+ *  this conversation's ask population change?".
+ *
+ *  WHY IT EXISTS (#2388). The list frame's `asks_open` cannot say it for a
+ *  lapsed ask: a timed-out ask is no longer counted, so dismissing it, or
+ *  answering it late, leaves the count at 0 before and after. The row list on
+ *  the conversation's own projection does move, so the open asks sheet re-reads
+ *  on this signature as well as on the list frame's. Order-insensitive, like
+ *  `asksPopulationSignature`, so a re-rank is not a change. */
+export function askRowsSignature(rows: PendingAsk[] | undefined | null): string {
+	if (!Array.isArray(rows)) return "";
+	return rows
+		.map((row) => `${row?.ask_id}:${row?.status}`)
+		.sort()
+		.join(",");
+}
+
 /** The asks worth showing on the outstanding surfaces, newest first (the wire's
  *  own order is open-first newest-first — `index_asks`' sort — and this keeps a
  *  single order rather than re-ranking). */

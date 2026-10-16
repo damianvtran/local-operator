@@ -286,7 +286,12 @@ export function useAsksRevision(): number {
     streaming at 30/s cannot move it), ORDER-INSENSITIVE (the daemon's row order
     is its own rank and a re-rank is not new information), and a runtime that
     does not publish asks contributes NOTHING rather than a zero (absence is the
-    capability proxy, §4 — a zero would be a claim it cannot make). */
+    capability proxy, §4 — a zero would be a claim it cannot make).
+
+    A TIMED-OUT ASK IS NOT IN THE COUNT (#2388), so a session holding only
+    lapsed asks contributes nothing, and dismissing or late-answering one does
+    not move this signature. An open asks sheet learns that from the
+    conversation's own projection rows instead (`askRowsSignature`). */
 export function asksPopulationSignature(rows: SessionSummary[]): string {
 	const parts: string[] = [];
 	for (const row of rows) {

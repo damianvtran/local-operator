@@ -1439,8 +1439,10 @@ later.
 
 An ask now settles when the AGENT is told, by its deadline or by an answer. Before, it settled only
 when the user acted. `asks/store.py` `OUTSTANDING_STATUSES` is `{open}`. `LAPSED_STATUSES` stays
-`{timed_out}` and is now DISJOINT from it, no longer a subset. Binding on §1, §2.2, the §4 frozen
-contract (`asks_open`), §11's marks and totals, and §12.2 item 1, which were amended in place.
+`{timed_out}` and is now DISJOINT from it, no longer a subset. Binding on §1, the §4 frozen
+contract (`asks_open`), §11's marks and totals, and §12.2 item 1, which were amended in place. §2.2's
+queue model and event table are untouched: the fold, the injection rows and the `timed_out`→`late`
+flip it defines are exactly what the paragraphs below say does not move.
 
 * **What moves.** Every count read off the outstanding set or `asks_open` stops counting a timed-out
   ask: the wire tally, a stopped session's durable projection (`mobile/daemon.py`), the phone's
