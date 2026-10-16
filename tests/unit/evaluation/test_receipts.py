@@ -316,12 +316,27 @@ def test_short_nonsecret_values_do_not_reject_ordinary_evidence() -> None:
     redactions.assert_clear({"enabled": False, "labels": ["false", "120"]})
 
 
-def test_canary_floor_boundary_is_eight_bytes() -> None:
-    # The floor is a UTF-8 byte length, matching the encoded-variant guard:
-    # seven bytes is ordinary content, eight bytes is canaried.
-    RedactionSet.from_resolved_values(("1234567",)).assert_clear("value=1234567")
-    with pytest.raises(ValueError, match="secret canary survived"):
-        RedactionSet.from_resolved_values(("12345678",)).assert_clear("value=12345678")
+@pytest.mark.parametrize(
+    ("value", "canaried"),
+    [
+        pytest.param("\u00e9\u00e9\u00e9", False, id="3-multibyte-6-bytes"),
+        pytest.param("\u00e9\u00e9\u00e9\u00e9", True, id="4-multibyte-8-bytes"),
+        pytest.param("1234567", False, id="7-ascii-7-bytes"),
+        pytest.param("12345678", True, id="8-ascii-8-bytes"),
+    ],
+)
+def test_canary_floor_counts_utf8_bytes_not_characters(value: str, canaried: bool) -> None:
+    # Pins the byte semantics, not the character count: the three-character
+    # "\u00e9\u00e9\u00e9" is six UTF-8 bytes (below the floor), and a future
+    # refactor to len(value) would canary it and fail here.
+    redactions = RedactionSet.from_resolved_values((value,))
+    if canaried:
+        assert len(value.encode("utf-8")) == 8
+        with pytest.raises(ValueError, match="secret canary survived"):
+            redactions.assert_clear({"leaked": value})
+    else:
+        assert len(value.encode("utf-8")) < 8
+        redactions.assert_clear({"ok": value})
 
 
 @pytest.mark.parametrize(

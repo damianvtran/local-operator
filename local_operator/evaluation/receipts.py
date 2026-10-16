@@ -574,12 +574,20 @@ class RedactionSet:
         exact_encoded_variants: set[str] = set()
         percent_variants: set[str] = set()
         hex_variants: set[str] = set()
+        # Plaintext obeys the SAME floor as the encoded variants and is decided
+        # in the same pass, so "one rule" is literally one loop: a value below
+        # the floor yields no canary of any form. Only values at or above it are
+        # distinctive enough to refuse evidence over. Dropping (not truncating)
+        # keeps assert_clear a pure substring check over exactly the canaried
+        # set.
+        plaintext_canaries: set[str] = set()
         for value in snapshot:
             raw = value.encode("utf-8")
             # Short fragments collide too readily with ordinary evidence, in
             # every encoding including plaintext: see _MIN_CANARY_BYTES.
             if len(raw) < _MIN_CANARY_BYTES:
                 continue
+            plaintext_canaries.add(value)
             standard = base64.b64encode(raw).decode("ascii")
             urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
             exact_encoded_variants.update(
@@ -589,18 +597,8 @@ class RedactionSet:
             # not. Raw hexadecimal has no literal/plaintext distinction.
             percent_variants.add(_canonical_percent_escapes(quote(value, safe="")))
             hex_variants.add(raw.hex().casefold())
-        # Plaintext canaries obey the same floor as the encoded ones: only
-        # values at or above it are distinctive enough to refuse evidence
-        # over. Dropping (not truncating) keeps assert_clear a pure
-        # substring check over exactly the canaried set.
-        plaintext_canaries = tuple(
-            sorted(
-                {value for value in snapshot if len(value.encode("utf-8")) >= _MIN_CANARY_BYTES},
-                key=lambda value: (-len(value), value),
-            )
-        )
         return cls(
-            plaintext_canaries,
+            tuple(sorted(plaintext_canaries, key=lambda value: (-len(value), value))),
             tuple(sorted(exact_encoded_variants, key=lambda value: (-len(value), value))),
             tuple(sorted(percent_variants, key=lambda value: (-len(value), value))),
             tuple(sorted(hex_variants, key=lambda value: (-len(value), value))),
