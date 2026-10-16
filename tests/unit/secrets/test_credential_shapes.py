@@ -1027,6 +1027,8 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
     assert {shape.label for shape in guarded} == {
         "credential-assignment",
         "credential-url-value",
+        "dsn-password",
+        "dsn-password-plain",
         "cli-credential-flag",
         "vendor-prefixed-token",
         "gcp-service-account-value",
@@ -1043,6 +1045,14 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
     assert "db.internal" in dsn, "the host must stay readable"
     assert "sh4pedSentinelPw" not in dsn
     assert dsn.startswith("mongodb+srv://svc_user:")
+
+    # Both DSN spellings now use the guarded renderer. A single-label census
+    # must not silently miss the plain-host variant or lose its readable parts.
+    plain_value = "GuardedPlain" + "Synthetic7X9"
+    plain = "mongodb" + "://fixture_user:" + plain_value + "@db/test"
+    plain_masked, plain_hits = scrub_shapes_with_hits(plain)
+    assert plain_masked == "mongodb" + "://fixture_user:" + REDACTION_MARKER + "@db/test"
+    assert "dsn-password-plain" in {hit.label for hit in plain_hits}
 
     # The query rule's mask must also come from its group: the ambiguous-name
     # release lives in the guard, and the mask keeps the name and everything —
@@ -5745,16 +5755,13 @@ def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None
 
 
 def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
-    """A DSN copy plus a SECOND, bare mention of the same ``$VAR`` is CONTAINED.
+    """A whole structural reference stays readable in both of its mentions.
 
-    The DSN rule masks the copy inside the URL and deliberately leaves a bare
-    ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
-    the fragment test found that survivor under the hit's own value and read it as
-    a partial mask — the loud ``rotate it`` notice for a value that never was
-    credential material. The exposed decision site is now the second place the
-    predicate is consulted (the masking floor is the other; the registration floor
-    consults only its placeholder half), which is the whole of the fix: no word-list
-    change reaches it, because the value is correctly a placeholder already.
+    The old DSN mask hid a reference that the assignment policy already read as
+    syntax, then interpreted the duplicate as a partial secret exposure. The DSN
+    guard now shares the whole-reference proof, so this synthetic document must
+    stay byte-identical and must not learn a credential or escalate. This updates
+    the expected placeholder policy, not the genuine-secret neighbor below.
 
     Every literal is built by concatenation on purpose — a credential-shaped
     literal written into a source file is exactly what the scrubber is for.
@@ -5768,7 +5775,13 @@ def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
     # The second mention is the trigger; the first line alone is the control.
     duplicated = f"{head}\n# token is {reference}"
     masked, hits = scrub_shapes_with_hits(duplicated)
-    assert REDACTION_MARKER in masked, "the DSN copy must still be masked"
+    assert masked == duplicated, "a complete reference must not become a masked credential"
+    store = VariableStore(cwd=".")
+    assert store.redact(duplicated) == duplicated
+    assert store.redaction_values() == []
+    opaque_value = "DuplicateNeighbor" + "Synthetic9X7"
+    opaque_head = head.replace(reference, opaque_value)
+    assert opaque_value not in scrub_shapes(opaque_head), "a genuine opaque DSN must still mask"
     assert (
         rs.shape_report(hits).reached_model is False
     ), f"a duplicated placeholder files a rotation demand: {masked!r}"
