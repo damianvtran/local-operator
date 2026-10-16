@@ -2205,6 +2205,16 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
     plain_only = True
     for block in message.content:
         if isinstance(block, TextContent):
+            # Same blank-block rule as ``AnthropicClient._message_blocks`` and
+            # for the same reason: a row poisoned before #2460 decodes to an
+            # empty ``TextContent``, and shipping it here re-sends the emptiness
+            # to whatever the openai-compat route forwards to — including
+            # Claude, which refuses the whole request over it. Dropping it is
+            # what lets such a session recover on THIS wire too; the
+            # whole-message backfill below still handles a genuinely
+            # content-less turn.
+            if not block.text.strip():
+                continue
             parts.append({"type": "text", "text": block.text})
         elif isinstance(block, ImageContent):
             plain_only = False
@@ -2315,6 +2325,13 @@ def _messages_to_openai_responses(
         text_type = "output_text" if message.role == "assistant" else "input_text"
         for block in message.content:
             if isinstance(block, TextContent):
+                # Blank dropped, mirroring the chat wire above and
+                # ``AnthropicClient._message_blocks``: the QA round measured
+                # this wire still emitting the poisoned row's empty
+                # ``input_text`` (Q1) because only the zero-block case was
+                # backfilled here.
+                if not block.text.strip():
+                    continue
                 content.append({"type": text_type, "text": block.text})
             elif isinstance(block, ImageContent):
                 content.append(
@@ -2335,20 +2352,45 @@ def _messages_to_openai_responses(
                     "requests must use the chat-completions wire."
                 )
         if not content and message.role == "user":
-            # A user turn with nothing to say is backfilled, not skipped, and
-            # this mirrors the rule the Google wire below already applies
-            # (``parts or [{"text": ""}]``). It became reachable when
-            # ``Message.user`` stopped emitting an empty text block (#2460):
+            # A user turn with nothing to say is backfilled, not skipped, for
+            # the same reason the Anthropic wire backfills it (see
+            # ``EMPTY_USER_TEXT``) and the same reason Google's builder does
+            # (``parts or [{"text": ""}]``): the turn occupies a role, so
+            # dropping it changes the role sequence. It became reachable when
+            # ``Message.user`` stopped emitting an empty text block (#2460) —
             # the message now renders zero blocks where it used to render one
             # blank ``input_text``, and an empty ``content`` array is a shape
-            # this wire has never sent. A user item is also the one item a
-            # request cannot simply drop — it is the request's own subject.
-            content = [{"type": "input_text", "text": ""}]
+            # this wire has never sent.
+            #
+            # The placeholder rather than ``""`` — the blank part is exactly
+            # what this PR drops everywhere else, so reintroducing it here for
+            # the empty-turn case would leave the shape QA round 1 flagged
+            # (Q1) reachable by another route.
+            content = [{"type": "input_text", "text": EMPTY_USER_TEXT}]
         items.append({"role": message.role, "content": content})
     return items
 
 
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
+
+#: Sent in place of a USER turn's text when the turn has none at all — every
+#: block it carried was blank, so there is nothing to serialize.
+#:
+#: Backfilled rather than skipped, deliberately, and that is the difference from
+#: ``EMPTY_TOOL_RESULT_TEXT``'s neighbouring rule plus
+#: ``_is_empty_assistant``: skipping is the right answer for an ASSISTANT turn
+#: because dropping it loses nothing (the turn is empty by definition, and a
+#: tool result answers a TOOL call, so nothing references it). A user turn is
+#: the request's own subject and it OCCUPIES A ROLE, so dropping one is visible
+#: to the provider as a role-sequence change — a blank final user turn removed
+#: leaves a trailing assistant turn, which newer Claude models read as a
+#: PREFILL and refuse, and a blank leading one removed makes the body start
+#: with ``assistant`` ("first message must use the user role"). #2460's QA
+#: round walked 399 histories and measured 0 histories that skip makes worse
+#: than main, but that is a measurement of today's reachability, not a licence
+#: to change the role sequence: the placeholder keeps the order while removing
+#: the blank block the provider refuses.
+EMPTY_USER_TEXT = "[no message text]"
 
 
 def _tool_content_openai(message: Message) -> str | list[dict[str, Any]]:
@@ -4289,16 +4331,22 @@ class AnthropicClient:
                     messages.append({"role": "user", "content": content})
             else:
                 blocks = self._message_blocks(message)
-                # A message whose every block was dropped carries nothing to
-                # send: no text, no image, no tool call, and nothing
-                # referencing it (a tool result answers a TOOL call, and those
-                # took the branch above). Sending its remaining empty array is
-                # a 400, so the message is skipped — the same treatment, for
-                # the same reason, `_is_empty_assistant` gives an errored
-                # model turn. Whitespace-only text must not become an
-                # operator turn the model reads as silence and answers.
                 if not blocks:
-                    continue
+                    # Every block was blank, so there is no content left to
+                    # send — but the message still OCCUPIES A ROLE, and that is
+                    # why this is a backfill rather than the ``continue`` an
+                    # empty assistant turn gets. Dropping the message changes
+                    # the role sequence the provider sees: a blank final user
+                    # turn removed leaves a trailing assistant turn, which
+                    # newer Claude models read as a PREFILL and refuse, and a
+                    # blank leading one removed opens the body with
+                    # ``assistant`` ("first message must use the user role").
+                    # The placeholder removes the blank block the provider
+                    # refuses while leaving the order intact; see
+                    # ``EMPTY_USER_TEXT`` for why backfilling beats skipping
+                    # here, and ``_is_empty_assistant`` for the assistant case
+                    # where skipping is the right answer.
+                    blocks = [{"type": "text", "text": EMPTY_USER_TEXT}]
                 messages.append({"role": message.role, "content": blocks})
 
         body: dict[str, Any] = {
