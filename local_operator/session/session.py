@@ -4147,9 +4147,13 @@ class Session:
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
         #: resume. The runtime flushes this FIFO before releasing `_turn_lock`.
-        #: An aside the user adopted mid-turn rides the same FIFO as a
-        #: :class:`_PendingAdoption`, for the same reason and in arrival order.
+        #: An aside the user adopted mid-turn rides the same queue as a
+        #: :class:`_PendingAdoption`, for the same reason; a held one is skipped
+        #: rather than blocking receipts behind it (D7).
         self._pending_shell_records: list[tuple[str, ToolResult] | _PendingAdoption] = []
+        #: Tail ids of held adoptions already warned about, so a hold is logged
+        #: once rather than at every boundary that re-tries it.
+        self._held_adoption_warned: set[str] = set()
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
         # automatic pass runs inside a turn and is covered by ``_is_streaming``;
@@ -8665,6 +8669,9 @@ class Session:
                 carried_prompt=True,
             )
         finally:
+            # D8: anything queued after the pipeline's own flush (or on an
+            # early exit before it) lands before the lock goes free.
+            await self._flush_queued_before_release()
             self._turn_lock.release()
 
     async def seed_history(self, messages: list[Message]) -> None:
@@ -15817,7 +15824,11 @@ class Session:
         # during the wait therefore bumps the epoch past this sample, which is
         # exactly how the honoured-vs-stale test below can tell the two apart.
         arrived_at_epoch = self._abort_epoch
-        async with self._turn_lock:
+        # acquire/try/finally rather than ``async with``, so every exit — the
+        # pipeline and both early returns below — passes D8's flush-before-
+        # release rule.
+        await self._turn_lock.acquire()
+        try:
             if self._leaving_deliveries:
                 # THE LATCH, RE-CHECKED AT ADMISSION (session 664a234ec561,
                 # 2026-09-28). The spawn-time check (``_deliver_job_results``)
@@ -15919,6 +15930,9 @@ class Session:
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
             )
+        finally:
+            await self._flush_queued_before_release()
+            self._turn_lock.release()
 
     async def _run_turn_pipeline(
         self,
@@ -20750,7 +20764,7 @@ class Session:
             # `record_shell` queues while manual compaction owns the message
             # list. Fold those receipts into the newly compacted context before
             # another prompt can acquire the lock and build its request.
-            await self._flush_shell_records()
+            await self._flush_queued_before_release()
             self._turn_lock.release()
 
     @staticmethod
@@ -23487,10 +23501,15 @@ class Session:
         # prompt acquiring the lock while the transcript write below awaits
         # would start a turn, and the extend after it would then land inside
         # that turn's live list — the splice this method exists to prevent.
-        async with self._turn_lock:
+        await self._turn_lock.acquire()
+        try:
             if unanswered_tail_call_ids(self._context.messages):
                 raise AsideAdoptRefused(reason="open_tool_batch")
             await self._apply_adoption(messages)
+        finally:
+            # D8: a record queued while this write awaited lands before release.
+            await self._flush_queued_before_release()
+            self._turn_lock.release()
         return "applied"
 
     def _adoption_known(self, messages: Sequence[Message]) -> bool:
@@ -23553,12 +23572,18 @@ class Session:
         # while transcript.append_message is awaiting and build its request from
         # a half-written synthetic exchange. Re-check the FIFO after acquisition
         # to flush anything that raced us while we waited.
-        async with self._turn_lock:
+        await self._turn_lock.acquire()
+        try:
             # Queue-then-flush rather than a direct write: the FIFO pops only
             # after a successful transcript write, so a failure here leaves the
             # receipt for the next boundary instead of losing it.
             self._pending_shell_records.append((command, result))
             await self._flush_shell_records()
+        finally:
+            # D8's rule for every release; a no-op unless something queued
+            # during the write above (or the write failed, when it logs).
+            await self._flush_queued_before_release()
+            self._turn_lock.release()
 
     async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
         """Append one synthetic bash exchange to transcript and live context."""
@@ -23585,62 +23610,134 @@ class Session:
         successful write so a transcript failure leaves the unpersisted tail
         available to the next boundary or dispose.
         """
-        while self._pending_shell_records:
-            queued = self._pending_shell_records[0]
+        # Walk by INDEX and re-read the list each pass: a record queued during
+        # one of this loop's awaits is picked up by the same flush (D8).
+        #
+        # A held adoption is SKIPPED, not a barrier (D7): bang receipts behind it
+        # persist exactly as they did before adoptions shared this queue —
+        # unconditionally, even onto an open tail — because blocking them
+        # behind a pair that may never land lost receipts that used to be
+        # durable. Adoption-vs-later-receipt order is therefore guaranteed only
+        # while the tail is closed, which is every boundary but a cancelled turn.
+        index = 0
+        while index < len(self._pending_shell_records):
+            queued = self._pending_shell_records[index]
             if isinstance(queued, _PendingAdoption):
                 if not await self._land_deferred_adoption(queued):
-                    # Still deferrable: leave it (and everything behind it, so
-                    # FIFO order holds) for the next boundary.
-                    return
+                    index += 1
+                    continue
             else:
                 command, result = queued
                 await self._persist_shell_record(command, result)
-            self._pending_shell_records.pop(0)
+            # Pop by identity, not by index: the list may have grown during the
+            # await above, but nothing else removes from it.
+            self._pending_shell_records.remove(queued)
 
-    async def _report_stranded_adoptions(self) -> None:
-        """Say LOUDLY that an adopt held at a boundary will never land.
+    async def _flush_queued_before_release(self) -> None:
+        """The last flush before ``_turn_lock`` is released — call it, then release.
 
-        Dispose is the last boundary: an adoption still in the FIFO after its
-        flush was held back by an open tool batch (``_land_deferred_adoption``)
-        and no later boundary will come. That is the one case the queued adopt
-        cannot defer, so it is an error in the log and a user-visible notice on
-        the event stream — the same ``NoticeEvent`` path the session's other
-        runtime warnings use — rather than a pair that silently vanishes.
+        THE RULE (D8): every ``_turn_lock.release()`` is immediately preceded by
+        this, with no await in between. A record queued while the lock is held
+        is otherwise stranded until some later turn: the pipeline's own flush
+        is followed by further awaits (shape incidents, the after-turn duty,
+        the patience flush), and an adopt arriving in that window saw the lock
+        held, queued, and then nothing flushed when the lock went free.
+
+        It LOGS rather than raises. It runs in ``finally`` blocks, where an
+        exception would replace the one already propagating (the turn's own
+        outcome); a failed write leaves its record queued for the next boundary
+        or for the dispose report, so nothing is lost by not raising here.
         """
-        stranded = [
+        try:
+            await self._flush_shell_records()
+        except Exception:  # noqa: BLE001 — must not mask the in-flight exception
+            logger.error(
+                "could not persist %d queued record(s) before releasing the turn lock; "
+                "they stay queued for the next boundary",
+                len(self._pending_shell_records),
+                exc_info=True,
+            )
+
+    async def _report_unlanded_records(self) -> None:
+        """Say LOUDLY that a queued record will never land (D7).
+
+        Dispose is the last boundary, so whatever is still queued after its
+        flush never will be: an adoption held back by an open tool batch, or a
+        bang receipt whose transcript write failed. Nothing leaves the queue
+        without a write or this report. Each record is an ERROR line naming it,
+        and the batch is ONE user-visible ``NoticeEvent(kind="error")`` — the
+        path the session's other runtime warnings use — counting both kinds.
+        """
+        adoptions = [
             queued
             for queued in self._pending_shell_records
             if isinstance(queued, _PendingAdoption) and queued.messages
         ]
-        if not stranded:
+        receipts = [
+            queued
+            for queued in self._pending_shell_records
+            if not isinstance(queued, _PendingAdoption)
+        ]
+        if not adoptions and not receipts:
             return
-        ids = ", ".join(queued.messages[-1].id for queued in stranded)
-        logger.error(
-            "aside adopt(s) %s never landed: the conversation closed with an open tool "
-            "batch, so the exchange was not added",
-            ids,
-        )
+        for adoption in adoptions:
+            logger.error(
+                "aside adopt %s never landed: the conversation closed with an open tool "
+                "batch, so the exchange was not added",
+                adoption.messages[-1].id,
+            )
+        for _command, result in receipts:
+            logger.error(
+                "shell receipt %s never landed: its transcript write failed and the "
+                "conversation closed",
+                result.tool_call_id,
+            )
+        lost: list[str] = []
+        if adoptions:
+            lost.append(f"{len(adoptions)} aside(s) you added to the conversation")
+        if receipts:
+            lost.append(f"{len(receipts)} shell command record(s)")
         await self._emit(
             NoticeEvent(
-                text=(
-                    "an aside you added to the conversation could not be saved: the "
-                    "conversation closed in the middle of a tool call"
-                ),
+                text=f"{' and '.join(lost)} could not be saved before the conversation closed",
                 kind="error",
             )
         )
+        # DURABLE as well (review R6): the notice reaches only a frontend still
+        # connected during teardown. The row is written straight to the
+        # transcript, as ``_journal_held_delivery_failure`` does once disposed —
+        # ``journal_incident`` returns early then, and the transcript still
+        # accepts appends until the end of ``dispose``.
+        from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+        from local_operator.incidents import format_unlanded_records_message
+
+        rendered = format_unlanded_records_message(
+            [adoption.messages[-1].id for adoption in adoptions],
+            [result.tool_call_id for _command, result in receipts],
+        )
+        try:
+            await self._transcript.append_message(
+                CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": rendered, "raw": rendered[:1000]},
+                ),
+                preserve_mtime=True,
+            )
+        except Exception:  # noqa: BLE001 — the ERROR lines above still stand
+            logger.error("could not journal the unlanded-records incident", exc_info=True)
 
     async def _land_deferred_adoption(self, queued: _PendingAdoption) -> bool:
         """Apply an adopt that waited for this boundary, and tell every frontend.
 
         Returns False, writing nothing, when the live list still ends in
-        unanswered calls. Every current flush site holds the lock with the
-        batch closed (decision D1), so that never happens today — it is the
-        backstop against a future boundary placed inside a loop, which would
-        otherwise splice the pair into a live batch. It does not RAISE here:
-        the adopt can still be deferred, and an exception out of the pipeline's
-        ``finally`` would mask the turn's own outcome and skip the journal and
-        patience flushes after it. The warning is the loud half.
+        unanswered calls. A turn CANCELLED without an abort (its prompt task
+        dropped with the control socket) leaves the tail open at every later
+        boundary, and a future boundary placed inside a loop would too; either
+        way the pair would otherwise splice into a batch. It does not RAISE:
+        the adopt can still land once a new turn closes the tail, and an
+        exception out of a ``finally`` would mask the turn's own outcome. The
+        flush skips it (D7) and dispose reports it if it never lands.
 
         The event is a HISTORY delta, not live message events: these rows were
         never streamed, so a frontend must project them through the settled
@@ -23650,18 +23747,20 @@ class Session:
         if not messages or self._transcript.has_entry(messages[-1].id):
             return True
         if unanswered_tail_call_ids(self._context.messages):
-            # Named by the exchange's tail id, the identity the dedupe keys on,
-            # so a held adopt (and every receipt waiting behind it in FIFO
-            # order) can be traced to the request that produced it.
-            logger.warning(
-                "aside adopt %s held back: the conversation still ends in an open tool "
-                "batch at a flush boundary; it and %d record(s) queued behind it land "
-                "at the next safe one",
-                messages[-1].id,
-                len(self._pending_shell_records) - 1,
-            )
+            # Named by the exchange's tail id, the identity the dedupe keys on.
+            # ONCE per held adoption, not per boundary: every boundary after a
+            # cancelled turn re-tries it, and a line per retry is noise that
+            # buries the dispose report that actually matters.
+            if messages[-1].id not in self._held_adoption_warned:
+                self._held_adoption_warned.add(messages[-1].id)
+                logger.warning(
+                    "aside adopt %s held back: the conversation still ends in an open "
+                    "tool batch at a flush boundary; it lands at the next safe one",
+                    messages[-1].id,
+                )
             return False
         await self._apply_adoption(messages)
+        self._held_adoption_warned.discard(messages[-1].id)
         await self._emit(HistoryDeltaEvent(messages=list(messages)))
         return True
 
@@ -27902,8 +28001,10 @@ class Session:
             # last-resort pass keeps disposal durable if teardown reached here
             # through a host path without a turn task.
             if self._pending_shell_records:
-                await self._flush_shell_records()
-                await self._report_stranded_adoptions()
+                # The logging flush, not the raising one: a failed write must
+                # stay queued for the report below rather than abort teardown.
+                await self._flush_queued_before_release()
+                await self._report_unlanded_records()
             # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
             # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
             # this is what keeps the next cold open bounded rather than O(file).

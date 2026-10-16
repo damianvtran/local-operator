@@ -655,8 +655,10 @@ async def test_a_mid_turn_adopt_answers_queued(
     assert adopted.status_code == 200, adopted.text
     assert adopted.json()["result"]["data"] == {"aside_id": REQUEST_ID, "status": "queued"}
     assert len(remote.adopted) == 1
-    # Queued is still taken: the latch holds, so a second adopt cannot duplicate.
-    assert recovered.json()["result"]["data"]["adoptable"] is False
+    # QA Q4: the latch comes OFF once the owner holds the pair, so an aside whose
+    # queued pair never lands (the runtime closed on an open batch) can be added
+    # again. The owner's tail-id dedupe is what makes the re-send safe.
+    assert recovered.json()["result"]["data"]["adoptable"] is True
 
 
 @pytest.mark.asyncio
@@ -706,6 +708,46 @@ async def test_an_untyped_adopt_failure_keeps_the_latch(
 ) -> None:
     """Anything else is indeterminate (503): the pair may have landed, so no retry."""
     remote = _AdoptingRemote(adopt=RuntimeError("owner went away"))
+    app, _bridge = _install(monkeypatch, tmp_path, remote)
+
+    adopted, recovered = await _ask_then_adopt(app)
+
+    assert adopted.status_code == 503, adopted.text
+    assert recovered.json()["result"]["data"]["adoptable"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_owner_busy_refusal_is_a_typed_409_and_releases_the_latch(
+    tmp_path, monkeypatch, restore_app_state: None
+) -> None:
+    """D9: an owner from before the queue refuses mid-turn with a plain sentence.
+
+    That arrives as ``RuntimeError(<the owner's sentence>)`` from the attach
+    client, which the ladder would answer as a 503 outage. It is a refusal: the
+    route maps the exact frozen sentence to 409 ``aside_adopt_refused`` /
+    ``turn_running`` and releases the latch so the user can add it later.
+    """
+    from local_operator.session.errors import LEGACY_ASIDE_ADOPT_BUSY, AsideAdoptRefused
+
+    remote = _AdoptingRemote(adopt=RuntimeError(LEGACY_ASIDE_ADOPT_BUSY))
+    app, _bridge = _install(monkeypatch, tmp_path, remote)
+
+    adopted, recovered = await _ask_then_adopt(app)
+
+    assert adopted.status_code == 409, adopted.text
+    detail = adopted.json()["detail"]
+    assert detail["code"] == "aside_adopt_refused"
+    assert detail["reason"] == "turn_running"
+    assert detail["text"] == str(AsideAdoptRefused(reason="turn_running"))
+    assert recovered.json()["result"]["data"]["adoptable"] is True
+
+
+@pytest.mark.asyncio
+async def test_only_the_exact_legacy_sentence_is_mapped(
+    tmp_path, monkeypatch, restore_app_state: None
+) -> None:
+    """A different RuntimeError keeps the 503 outage answer and the latch (D9)."""
+    remote = _AdoptingRemote(adopt=RuntimeError("cannot adopt an aside while a turn is busy"))
     app, _bridge = _install(monkeypatch, tmp_path, remote)
 
     adopted, recovered = await _ask_then_adopt(app)

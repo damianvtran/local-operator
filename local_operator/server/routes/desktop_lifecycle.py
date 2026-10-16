@@ -25,7 +25,12 @@ from local_operator.server.routes.desktop_sessions import (
     receipts,
     reply,
 )
-from local_operator.session.errors import AsideEmptyAnswer, AsideUnanswered
+from local_operator.session.errors import (
+    LEGACY_ASIDE_ADOPT_BUSY,
+    AsideAdoptRefused,
+    AsideEmptyAnswer,
+    AsideUnanswered,
+)
 from local_operator.session.variable_ops import RefusalCode, VariableType, refusal_for
 
 router = APIRouter(tags=["Desktop lifecycle"], dependencies=[Depends(require_desktop)])
@@ -703,7 +708,17 @@ async def adopt(session_id: str, aside_id: str, body: Adopt, request: Request):
             async with errors(request), host(request).session(session_id) as bridge:
                 assert bridge.remote is not None
                 await bridge.remote.bind_runtime()
-                state = await bridge.remote.adopt_aside(entry.turns)
+                try:
+                    state = await bridge.remote.adopt_aside(entry.turns)
+                except RuntimeError as error:
+                    # D9: an owner from before the queue refuses mid-turn with
+                    # this frozen sentence as a plain RuntimeError, which the
+                    # ladder would answer as a 503 outage. It is a refusal: the
+                    # owner wrote nothing. Matched exactly, so a real outage
+                    # keeps its 503.
+                    if str(error) != LEGACY_ASIDE_ADOPT_BUSY:
+                        raise
+                    raise AsideAdoptRefused(reason="turn_running") from None
         except HTTPException as refused:
             # A TYPED refusal (409 ``aside_adopt_refused``) means the owner wrote
             # nothing, so the latch must come off or the panel can never retry
@@ -716,6 +731,15 @@ async def adopt(session_id: str, aside_id: str, body: Adopt, request: Request):
         # ``queued``: the owner holds the pair until the running turn's safe
         # boundary and announces it with a history delta (decision D4).
         status = "queued" if state == "queued" else "adopted"
+        if status == "queued":
+            # The latch comes OFF once the owner has the pair (QA Q4). A queued
+            # pair can still fail to land (the runtime closes on an open tool
+            # batch and reports it), and a latch held from here would leave the
+            # user no way to add it again. Re-sending is safe: the owner skips a
+            # pair whose tail id is already queued or durable, so a repeat
+            # answers "queued"/"adopted" without a second copy, and lands fresh
+            # only on a runtime that never got it.
+            entry.adopted = False
         return {"data": {"aside_id": aside_id, "status": status}}
 
     async with errors(request):
