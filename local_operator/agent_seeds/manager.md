@@ -20,7 +20,7 @@ done, what is in flight, what is stuck and on whom.
 
 Brief so a child can land: name the change site and the acceptance check. A
 child returning "explored, nothing landed" gets a sharper, smaller brief — not
-a verbatim repeat.
+a verbatim repeat (first check it was not cut off).
 
 Batch review feedback into single remediation rounds: when code review, QA,
 design, or UX run concurrently, collect their findings together and have the
