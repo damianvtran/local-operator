@@ -103,7 +103,13 @@ def _help_literals() -> dict[str, str]:
             None,
         )
         keyword = next((kw for kw in call.keywords if kw.arg == "help"), None)
-        if option is None or keyword is None:
+        # ``ast.Constant.value`` is a union (str | bytes | bool | int | float |
+        # complex | Ellipsis): the test passes it on unchanged only because the
+        # flag shapes are strings. Narrow it explicitly so pyright can verify
+        # this module (CI type-checks the changed files) — a non-str Constant
+        # could not have matched ``startswith("--")`` above, so the guard
+        # rejects nothing that used to be accepted.
+        if not isinstance(option, str) or keyword is None:
             continue
         # The extraction replaced each `help=` value with `_t(_ehw.<key>())`;
         # the assertion below is that NO such site is still a bare literal.
