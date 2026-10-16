@@ -89,10 +89,12 @@ from local_operator.tui.internal_work_membership import (
 from local_operator.tui.quiet_groups import (
     QuietGroup,
     QuietGroupRecord,
+    QuietGroupSender,
     group_splitter_of,
     quiet_family_of,
     quiet_group_of_segment,
     quiet_group_stretches,
+    quiet_sender_label,
 )
 
 #: The turn spine (D20): user prompts sit at the gutter; everything else
@@ -5314,16 +5316,73 @@ class QuietGroupTracker:
             span_head_loaded=not bar.partial,
             open=False,
         )
-        if group is not None:
-            bar.restate_group(group)
-        # Else: the prefix no longer clears the floor on its own, and the bar
-        # keeps the facts it holds. The one line a reader sees is derived from
-        # the members on hand (`_summary_text` -> `owned_work_clauses`), so it
-        # states the work still folded rather than the released row.
+        if group is None:
+            # The prefix no longer clears the formation floor that admitted it
+            # (the released row was part of its count). The fold is LATCHED —
+            # handing these rows back is the flicker this change removes — so
+            # the bar keeps standing, restated over the rows it still holds
+            # rather than over the ones it let go: a bar that went on counting
+            # a released row would claim work it no longer hides.
+            group = self._latched_group(bar, records)
+        bar.restate_group(group)
         for member in released:
             if not member.work_dormant:
                 member.display = True
         return splitter
+
+    @staticmethod
+    def _latched_group(bar: QuietGroupBlock, records: Sequence[QuietGroupRecord]) -> QuietGroup:
+        """The facts of a latched bar, re-derived from the rows it still holds.
+
+        A latched bar stands over a prefix too small to have formed a group on
+        its own, so the shared derivation refuses it and the facts have to be
+        recomputed here instead of re-used. Everything a reader can see is
+        rebuilt from the kept rows: the family narrows to the receipt kinds
+        still inside (``mixed`` when more than one survives) and falls back to
+        the bar's own word when none does — the fold's family can only narrow as
+        rows leave it, which is the direction the definition already permits.
+        The count, the work rows and the failures are counted over the kept rows
+        only, so the one line never claims a row the fold has released.
+        """
+        from dataclasses import replace
+
+        from local_operator.harness.rows import is_quiet_turn_name
+
+        triggers = [record for record in records if quiet_family_of(record) is not None]
+        families = {quiet_family_of(record) for record in triggers}
+        family = bar.group.family if not families else next(iter(families))
+        if len(families) > 1:
+            family = "mixed"
+        sender_counts: dict[str, int] = {}
+        for record in triggers:
+            if record.sender:
+                label = quiet_sender_label(record.sender)
+                sender_counts[label] = sender_counts.get(label, 0) + 1
+        return replace(
+            bar.group,
+            family=family,
+            count=len(triggers),
+            actions=sum(
+                1
+                for record in records
+                if record.kind == "tool" and not is_quiet_turn_name(record.tool_name)
+            ),
+            failed=sum(
+                1
+                for record in records
+                if record.kind == "tool" and record.tool_state == "failed"
+            ),
+            senders=(
+                tuple(
+                    QuietGroupSender(label=label, count=count)
+                    for label, count in sender_counts.items()
+                )
+                if family in ("peer", "mixed")
+                else ()
+            ),
+            row_ids=tuple(record.id for record in records),
+            open=False,
+        )
 
     def _dissolve(self, bar: QuietGroupBlock, last_splitter: int) -> None:
         """Release the boundary row, then keep the live tail coherent.

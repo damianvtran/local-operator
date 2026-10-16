@@ -1948,3 +1948,10 @@ class TestQuietGroupFold:
             ), "every row the fold released shows in place"
             assert held[0] in bar._members, "the rows before the splitter stay folded"
             assert not held[0].display, "and stay hidden, which is the point of the fold"
+            # A latched bar re-derives its FACTS from the rows it still holds:
+            # the released splitter was a work row, and a bar that went on
+            # counting it would claim work it no longer hides.
+            assert len(bar._members) == 1
+            assert bar.group.count == 1, "one receipt, stated as one"
+            assert bar.group.actions == 0, "the released work row is not claimed"
+            assert len(bar.group.row_ids) == 1
