@@ -685,6 +685,57 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         assert len(capped["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
         assert capped["diff"][-1] == "…"
 
+    def test_more_than_two_hundred_lines_with_a_long_repeated_run_still_publishes(self) -> None:
+        """Review round 2, R2-1: a credential-free diff must never be withheld.
+
+        Two equal runs of the same line are not distinguishable, so a verifier
+        that re-matched a hunk SLICE could align them differently from the
+        matcher that produced the whole-file diff, report a change that never
+        existed and withhold a diff containing no credential at all. This pins
+        the published result with the exact comparison that regressed: the
+        producer's rows must equal ``unified_diff``'s OWN rows, so the benign
+        edit is published rather than withheld.
+        """
+        import difflib
+
+        repeated = "setting = enabled"
+        lines = [repeated] * 205
+        lines[100] = "config head"
+        before = "\n".join(lines) + "\n"
+        after = before.replace(repeated + "\n" + repeated, repeated + "\nchanged\n", 1)
+        rows = self._details(before, after)
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert rows == expected, "no-credential diff diverged from unified_diff"
+        assert rows[-1] != "…", "a credential-free diff was withheld"
+        assert any(line == "+changed" for line in rows), "the benign edit is published"
+
+    def test_over_cap_widening_fails_closed_towards_hiding(self) -> None:
+        """R2-1 follow-up: the over-cap path must HIDE, never publish a split block.
+
+        A block larger than the stored cap cannot be kept whole, so the producer
+        ends its payload with the truncation marker; the publication seam refuses
+        that marker and withholds the WHOLE field (pinned at the seam in the
+        harness feedback suite). This asserts the producer half: the marker is
+        emitted and the stored list is still bounded.
+        """
+        from local_operator.tools import builtin
+
+        body = "\n".join([self.LINE] * 400)
+        big = (
+            "-----BEGIN "
+            + "PRIV"
+            "ATE KEY-----\n" + body + "\n-----END "
+            + "PRIV"
+            "ATE KEY-----\n"
+        )
+        before = big + "Middle guidance 111.\n" + big
+        after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)
+        rows = self._details(before, after)
+        assert rows[-1] == "…", "the over-cap payload must advertise truncation"
+        assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:
     """The tool card renders +N/-N from these keys, so they must always be
