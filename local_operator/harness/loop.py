@@ -107,7 +107,11 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
-from local_operator.incidents import CONTINUATION_LIMIT_CAUSE, REASONING_ECHO_MARKERS
+from local_operator.incidents import (
+    CONTINUATION_LIMIT_CAUSE,
+    OUTPUT_LIMIT_CAUSE,
+    REASONING_ECHO_MARKERS,
+)
 from local_operator.model.effort import real_rungs
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -566,6 +570,46 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: allowance per turn would re-buy the same diagnosis. Each re-ask is one
 #: extra model call.
 MAX_WORDLESS_STOP_RECOVERIES = 1
+
+#: What the loop tells the model after a turn was cut off at the output limit
+#: with NOTHING produced, on a model the loop has no cheaper rung to retreat to
+#: (the router's ``auto`` sentinel: the level is delegated to the server, so
+#: ``_lower_effort`` declines — see its docstring). The empty message itself is
+#: REMOVED from the wire history by that arm (an assistant turn with no content
+#: blocks is illegal on the Anthropic wire, and replaying "I said nothing"
+#: teaches the re-ask to say nothing), so without this prompt neither the model
+#: nor a reader of a resumed session can see why the conversation continues.
+#: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
+LENGTH_STOP_RECOVERY_PROMPT = (
+    "Harness recovery notice: your last message hit the model's output limit "
+    "before anything visible was produced — no text and no tool calls arrived, "
+    "so the turn would have ended here with nothing to show for it. Continue "
+    "the work: produce your next tool call, or your final answer if the work is "
+    "done, keeping each step well inside the output budget."
+)
+
+#: How many times ONE run re-asks a model whose turn was cut off at the output
+#: limit with nothing visible, on a model with NO cheaper effort rung to retreat
+#: to — the router's ``auto`` sentinel (the level is delegated, so nothing sits
+#: below it), or a ladder already at its cheapest real rung. DISTINCT from
+#: ``MAX_EMPTY_TRUNCATION_RETRIES`` above: that budget buys a
+#: RETREAT (one rung lower, where the budget goes to output instead of thought),
+#: and here no rung exists to buy — the turn simply
+#: ended, having produced NOTHING, and the child settled looking finished. That
+#: is the measured fleet shape this budget is for: 281 ``length`` stops across
+#: ~173 sessions, 149 of them silent, 141 on ``radient/auto``, 138 with
+#: ``output_tokens == reasoning_tokens == 8192``; 140 of the silent stops sat
+#: inside 91 of 3320 child sessions, which is the cost this arm exists to remove.
+#:
+#: ONE: a single re-ask states the one fact only this layer knows (the turn was
+#: cut off, not finished) and gives the model a chance to produce its next action
+#: in smaller pieces. A SECOND silent length turn in the same run is the model's
+#: answer about this budget, not an accident, and ends the run NAMED rather than
+#: bare (``incidents.OUTPUT_LIMIT_CAUSE``) so a parent reads "cut off" and not
+#: "finished". Run-scoped like every sibling recovery (the wordless, echo,
+#: connectivity and nameless budgets): a fresh allowance per turn would re-buy
+#: the same diagnosis.
+MAX_LENGTH_SILENT_RECOVERIES = 1
 
 #: How many times ONE run will continue a turn that the network cut short —
 #: the laptop closed at home and opened at work, which is minutes of no route
@@ -1779,6 +1823,17 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # Turns this run has re-asked after a ``length`` cut-off produced nothing
+        # on a model with no cheaper rung to retreat to -- see
+        # ``MAX_LENGTH_SILENT_RECOVERIES``. Run-scoped and topped up by nothing,
+        # like every sibling recovery budget.
+        length_silent_recoveries = 0
+        # Whether the model call that LAST ended this run was a silent length
+        # cut-off whose recovery budget was spent. Reset per model call (below)
+        # rather than only set once: a run that recovers through a late injection
+        # and then answers has NOT ended cut off, and stamping a cause on its end
+        # would tell the parent a completed run was truncated.
+        length_silent_cut_off = False
         # Turns this run has re-asked after arriving with no text and no tool
         # calls on a clean stop -- see ``MAX_WORDLESS_STOP_RECOVERIES``.
         # Run-scoped and topped up by nothing, like the truncation budget
@@ -1888,6 +1943,9 @@ class AgentLoop:
                             return
 
                     assistant, stop_reason, stream_error = None, "stop", None
+                    # Per model call: the flag describes how THIS call ended, and
+                    # the terminal end event reads it for the last call only.
+                    length_silent_cut_off = False
                     turn_connectivity_loss = False
                     turn_retryable_interruption = False
                     turn_attempted_selector: "ModelSpec | None" = None
@@ -2716,6 +2774,107 @@ class AgentLoop:
                                 has_more_tool_calls = True
                                 continue
                         if silent:
+                            # NO RETREAT RUNG AND NOTHING PRODUCED. ``lower`` is
+                            # ``None`` for the router's ``auto`` sentinel (it
+                            # delegates the level to the server, so no rung sits
+                            # below it -- ``_lower_effort``), so this arm used to
+                            # be the whole story: a notice, and a run that ended
+                            # having produced NOTHING while every surface read it
+                            # as finished. A delegated CHILD is the case that
+                            # matters most -- its deliverable is the point, and
+                            # the parent paid to resume it.
+                            #
+                            # So the loop spends one re-ask first, the
+                            # wordless-stop recovery's shape: state the one fact
+                            # only this layer knows (cut off at the output limit,
+                            # not finished) and give the model a chance to
+                            # produce its next action in smaller pieces. The
+                            # graceful-cancel boundary is honoured exactly as the
+                            # retreat above honours it: a requested stop must not
+                            # pay for one more request.
+                            #
+                            # ``retry_eligible`` is part of the condition and not
+                            # decorative: it is what keeps a LADDERED model's
+                            # exhausted retries on their existing path. On that
+                            # shape the loop DID retreat (it offered two cheaper
+                            # rungs and the model returned empty on each), the
+                            # retries are spent, and the remaining move -- stepping
+                            # the model down -- belongs to the operator. The arm
+                            # here is the one with NO rung to offer at all: the
+                            # ladder is consulted and declines (``lower is None``
+                            # while the retries are unspent) — the router's
+                            # ``auto`` sentinel, or a ladder already at its
+                            # cheapest real rung.
+                            if (
+                                retry_eligible
+                                and lower is None
+                                and not graceful_length
+                                and length_silent_recoveries < MAX_LENGTH_SILENT_RECOVERIES
+                            ):
+                                length_silent_recoveries += 1
+                                # The empty turn must not reach the re-ask's wire
+                                # history, for the empty-truncation retry's two
+                                # reasons: an assistant message with no content
+                                # blocks is illegal on the Anthropic wire, and
+                                # replaying "I said nothing" teaches the re-ask to
+                                # say nothing.
+                                if context.messages and context.messages[-1] is assistant:
+                                    context.messages.pop()
+                                if new_messages and new_messages[-1] is assistant:
+                                    new_messages.pop()
+                                # Persisted for the same reason every recovery
+                                # prompt is: a resumed session must be able to see
+                                # why it was re-asked. Harness chrome -- see
+                                # ``harness.rows.harness_chrome_prompts``.
+                                recovery = Message.user(LENGTH_STOP_RECOVERY_PROMPT)
+                                context.messages.append(recovery)
+                                new_messages.append(recovery)
+                                yield NoticeEvent(
+                                    text=(
+                                        "model spent its whole output budget "
+                                        "thinking and produced nothing — "
+                                        "re-asking it to continue the work"
+                                    ),
+                                    kind="warning",
+                                )
+                                # No TurnEndEvent, for the wordless recovery's
+                                # reason: nothing was announced or shown for this
+                                # turn, so there is no live row to settle.
+                                has_more_tool_calls = True
+                                continue
+                            if (
+                                lower is None
+                                and retry_eligible
+                                and not graceful_length
+                                and length_silent_recoveries >= MAX_LENGTH_SILENT_RECOVERIES
+                            ):
+                                # The silent-length budget is SPENT (the re-ask
+                                # above already ran), so this second silent length
+                                # turn is the model's answer rather than an
+                                # accident, and the run must be NAMED at its end
+                                # instead of left bare -- a bare end every surface
+                                # reads as a completed answer, which is how a
+                                # cut-off child reached its parent saying it had
+                                # finished (``incidents.OUTPUT_LIMIT_CAUSE``;
+                                # ``Session._classify_cut_off`` turns the pair
+                                # into an involuntary error outcome).
+                                #
+                                # Gated on the counter rather than stamped at
+                                # every silent length end, and the difference is
+                                # the LADDERED model with retries left: it is
+                                # offered no re-ask (``lower`` is not None, so the
+                                # arm above retreats a rung instead), and once its
+                                # own lower-effort retries run out the loop DID
+                                # retreat -- the remaining move (stepping the
+                                # model down) is the operator's, and the shape
+                                # that shipped for it does not change here. The
+                                # boundary is read again here (the same predicate
+                                # the graceful arm above and the boundary below
+                                # use) so a requested stop can never be branded
+                                # involuntary. Reset per model call (above), so a
+                                # run that recovers and then answers is not
+                                # branded with an earlier call's cut-off.
+                                length_silent_cut_off = True
                             # No cheaper rung to retry at (or the retries are
                             # spent): the turn is about to end with NOTHING on
                             # screen — minutes of "thinking" and then silence,
@@ -3194,7 +3353,20 @@ class AgentLoop:
                         return
                 break
 
-            yield AgentEndEvent(messages=new_messages, generation=generation)
+            # THE LAST MODEL CALL'S SHAPE, carried rather than re-derived: a run
+            # whose final call was a silent length cut-off with its recovery
+            # budget spent ends INVOLUNTARY and NAMED. Every other end keeps the
+            # bare shape (``aborted=False``, no cause) that reads as a deliberate
+            # completion. This is the same one-writer-per-fact split the
+            # continuation guard uses: the loop stamps the token and the
+            # involuntariness, the classifier renders the sentence
+            # (``Session._classify_cut_off``, ``tests/unit/session/test_cut_off_turns.py``).
+            yield AgentEndEvent(
+                messages=new_messages,
+                aborted=length_silent_cut_off,
+                cut_off_cause=OUTPUT_LIMIT_CAUSE if length_silent_cut_off else "",
+                generation=generation,
+            )
         finally:
             self._unwire_deadline(deadline_task)
             # The fault-only recovery window dies with the run for the same

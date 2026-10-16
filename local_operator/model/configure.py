@@ -899,7 +899,24 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             info = None
 
     context_window = UNKNOWN_CONTEXT_WINDOW
-    max_output = UNKNOWN_MAX_OUTPUT
+    # 0, not ``UNKNOWN_MAX_OUTPUT``: 8192 is a NUMBER and a no-data route must not
+    # assert one. ``ModelSpec.max_output_tokens`` defaults to 8192, so a spec built
+    # from a placeholder row was indistinguishable from a model that really
+    # publishes an 8k cap -- and ``turn_output_budget`` therefore clamped every
+    # router route (``radient/auto``, ``radient-key/auto``, ``openrouter/auto``) to
+    # 8192, which a reasoning-heavy turn spends entirely on thinking and returns
+    # empty at ``stop_reason='length'``. The registry sentinel
+    # (``aggregator_router_model_info.max_tokens = -1``) says the SELECTED model's
+    # cap is unknown; that fact has to survive into the spec. 0 is already this
+    # codebase's no-data value (``turn_output_budget``, ``_effective_max_tokens``)
+    # and already renders as "output unknown" in the picker.
+    #
+    # ``UNKNOWN_MAX_OUTPUT`` itself is untouched and stays exported: it stops
+    # being a SPEC default only. This was its last code reader, and the seed it
+    # described is the defect, so the constant now survives as the documented
+    # history its neighbours cite (``_fill_from_row`` on where a missing cap used
+    # to fall back to) rather than as a live default anywhere.
+    max_output = 0
     supports_images = True
     # The mirror of ``supports_images`` with the OPPOSITE default, and the
     # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
@@ -2226,9 +2243,17 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
         # provider's real limit. The band's `311.0k/—` is the visible half.
         info.context_window = row.context_window
     # Independent of the window: an OpenAI-shaped gateway can quote a context
-    # length and no completion cap, and a missing `max_tokens` falls back to
-    # UNKNOWN_MAX_OUTPUT (8192), which truncates a long answer with no error.
-    # ``None`` and ``-1`` are both "no data" here, same as the window.
+    # length and no completion cap, and the ROW's cap is worth taking where the
+    # direct sources left none -- a stated cap NARROWS the ask, and a model with a
+    # real 8k limit asked for 131,072 is a 400 or a silent cut.
+    #
+    # What this comment used to say is the defect that was fixed here: a missing
+    # ``max_tokens`` fell back to ``UNKNOWN_MAX_OUTPUT`` (8192) in the SPEC builder,
+    # "which truncates a long answer with no error". The fallback is gone -- a
+    # no-data route now carries ``0`` and the budget fills it with the policy
+    # ceiling (see ``build_model_spec``), so the fill below is no longer a guard
+    # against an invented 8k cap; it is how a real, stated cap still reaches the
+    # spec. ``None`` and ``-1`` are both "no data" here, same as the window.
     if not (info.max_tokens and info.max_tokens > 0) and row.max_tokens > 0:
         # Guarded like the other two listing paths: this row is second-hand
         # catalogue data (models.dev, or an aggregator's document), so it can

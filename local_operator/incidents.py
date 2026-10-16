@@ -584,6 +584,22 @@ STALL_BOUND_CAUSE = "runtime-stall-bound"
 #: without being taught a new field.
 CONTINUATION_LIMIT_CAUSE = "continuation-limit"
 
+#: The LOOP's OTHER involuntary bound: a turn hit the model's OUTPUT limit with
+#: nothing visible produced, and the harness could not continue it. Published so
+#: a bare ``AgentEndEvent`` stops reading as a completed answer on every surface.
+#:
+#: WHY IT IS THE SAME SHAPE AS ``CONTINUATION_LIMIT_CAUSE`` RATHER THAN A PRIVATE
+#: STRING: a cut-off child arriving at its parent saying it had finished is the
+#: silent half of the subagent-stall report, and it is measured on this arm too --
+#: 281 ``length`` stops across ~173 fleet sessions, 149 of them silent, 141 on
+#: ``radient/auto``, 138 with ``output_tokens == reasoning_tokens == 8192`` (the
+#: whole budget spent thinking), and 140 of those silent stops inside 91 of 3320
+#: child sessions. A token in this table rather than a private
+#: string is what makes ``is_cut_off_cause`` answer True and every existing
+#: renderer (the attention outcome, the panel's "cut off" row, the roster) name it
+#: without being taught a new field.
+OUTPUT_LIMIT_CAUSE = "output-limit"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
@@ -597,6 +613,16 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # actor — there is no reaper and no process to go looking for.
     CONTINUATION_LIMIT_CAUSE: (
         "the turn kept being asked to continue, so it was stopped and the pending message dropped"
+    ),
+    # Bounded like the continuation arm above and for the same reason: the loop
+    # chose to spend the budget, so the sentence says what ran out rather than
+    # naming an actor outside the victim. It names the loop's half of the story
+    # ("could not continue it") deliberately -- the model DID produce a turn, so
+    # the fact a reader needs is not "the model failed" but "this end is not the
+    # end of the work".
+    OUTPUT_LIMIT_CAUSE: (
+        "the turn hit the model's output limit with nothing produced, and the harness could not "
+        "continue it"
     ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
