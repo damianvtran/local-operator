@@ -1,13 +1,16 @@
 {
   "schema": 1,
-  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. C (relay.shell) activates the two relay SPA shell screens it extracts from — their residual (unextracted SessionCard/state/search/start/theme-sheet) copy is frozen as advisory-equivalent legacy, so a NEW hardcoded string in a touched shell path fails the gate. Other app paths remain scanned advisory until a later slice activates them.",
+  "note": "Exact literal+sink multisets freeze existing copy in activated mechanism paths; new/replaced/deleted fingerprints require reviewed extraction, never a file exemption. C (relay.shell) activated the two relay SPA shell screens it extracts from; C2 (relay.session) adds the two history/start surfaces it extracts from (past-sessions.tsx, and the directory/model sheets that carry the retired new-session screen's copy) — their residual (unextracted SessionCard/state/resume/sheet-row) copy is frozen as advisory-equivalent legacy, so a NEW hardcoded string in a touched path fails the gate. Other app paths remain scanned advisory until a later slice activates them.",
   "enforced": [
     "src/i18n/runtime.ts",
     "src/i18n/wire-cache.ts",
     "src/store.ts",
     "src/main.tsx",
     "src/screens/session-list.tsx",
-    "src/screens/session-view.tsx"
+    "src/screens/session-view.tsx",
+    "src/screens/past-sessions.tsx",
+    "src/components/directory-sheet.tsx",
+    "src/components/model-sheet.tsx"
   ],
   "nontranslatable": [
     {
@@ -59,7 +62,6 @@
       "[\"jsx:text\",\"local operator\"]": 1,
       "[\"jsx:expression\",\"reconnecting…\"]": 1,
       "[\"jsx:text\",\"reconnecting…\"]": 1,
-      "[\"jsx:placeholder\",\"Search conversations…\"]": 1,
       "[\"jsx:expression\",\"marking…\"]": 2,
       "[\"jsx:expression\",\"mark all as read\"]": 2,
       "[\"jsx:expression\",\"mark all\"]": 2,
@@ -67,20 +69,13 @@
       "[\"jsx:expression\",\"Dismiss\"]": 1,
       "[\"jsx:aria-label\",\"Dismiss\"]": 1,
       "[\"jsx:text\",\"touch and hold a row to pin it\"]": 1,
-      "[\"jsx:expression\",\"start one below, or from the TUI on your machine\"]": 1,
       "[\"jsx:expression\",\"★ Pinned\"]": 2,
-      "[\"jsx:expression\",\"no matching conversations\"]": 2,
-      "[\"jsx:text\",\"start one below, or from the TUI on your machine\"]": 1,
       "[\"jsx:text\",\"★ Pinned\"]": 1,
-      "[\"jsx:text\",\"no matching conversations\"]": 1,
-      "[\"jsx:expression\",\"starting…\"]": 1,
-      "[\"jsx:expression\",\"new session\"]": 1,
       "[\"jsx:text\",\"past\"]": 1,
       "[\"jsx:text\",\"projects\"]": 1,
       "[\"jsx:title\",\"untitled\"]": 1
     },
     "src/screens/session-view.tsx": {
-      "[\"jsx:aria-label\",\"back to sessions\"]": 2,
       "[\"jsx:expression\",\"untitled\"]": 1,
       "[\"jsx:aria-label\",\"unpin this session\"]": 1,
       "[\"jsx:aria-label\",\"pin this session\"]": 1,
@@ -103,12 +98,31 @@
       "[\"jsx:expression\",\"resume\"]": 1,
       "[\"jsx:expression\",\"not answering — showing its last synced view\"]": 2,
       "[\"jsx:expression\",\"reconnecting — showing the last synced view\"]": 2,
-      "[\"jsx:expression\",\"no messages yet\"]": 2,
-      "[\"jsx:expression\",\"send a message below to get started\"]": 2,
       "[\"jsx:text\",\"not answering — showing its last synced view\"]": 1,
-      "[\"jsx:text\",\"reconnecting — showing the last synced view\"]": 1,
-      "[\"jsx:text\",\"no messages yet\"]": 1,
-      "[\"jsx:text\",\"send a message below to get started\"]": 1
+      "[\"jsx:text\",\"reconnecting — showing the last synced view\"]": 1
+    },
+    "src/screens/past-sessions.tsx": {
+      "[\"jsx:expression\",\"no matches\"]": 2,
+      "[\"jsx:expression\",\"no past sessions yet\"]": 2,
+      "[\"jsx:expression\",\"[fork]\"]": 2,
+      "[\"jsx:expression\",\"untitled\"]": 2,
+      "[\"jsx:expression\",\"in conversation\"]": 2,
+      "[\"jsx:expression\",\"opening…\"]": 2,
+      "[\"jsx:expression\",\"resume\"]": 2,
+      "[\"jsx:text\",\"[fork]\"]": 1,
+      "[\"jsx:text\",\"in conversation\"]": 1
+    },
+    "src/components/directory-sheet.tsx": {
+      "[\"jsx:expression\",\"moving…\"]": 1,
+      "[\"jsx:expression\",\"change\"]": 1,
+      "[\"jsx:aria-label\",\"working directory:\"]": 1,
+      "[\"jsx:aria-label\",\"unknown\"]": 1
+    },
+    "src/components/model-sheet.tsx": {
+      "[\"jsx:expression\",\"no models available from this machine — check the runtime's\\n\\t\\t\\t\\t\\t\\tproviders\"]": 1,
+      "[\"jsx:expression\",\"no matching models — try a provider (anthropic, xai) or a\\n\\t\\t\\t\\t\\t\\tmodel name (opus, glm)\"]": 1,
+      "[\"jsx:text\",\"no models available from this machine — check the runtime's\\n\\t\\t\\t\\t\\t\\tproviders\"]": 1,
+      "[\"jsx:text\",\"no matching models — try a provider (anthropic, xai) or a\\n\\t\\t\\t\\t\\t\\tmodel name (opus, glm)\"]": 1
     }
   }
 }

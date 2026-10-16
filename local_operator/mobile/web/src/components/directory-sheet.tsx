@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState } from "react";
 import { changeDirectory, getDirectories } from "../api";
 import { cn } from "../lib/cn";
 import { shortenHome } from "../lib/format";
+import { messageRuntime } from "../store";
 import type { Directories } from "../types";
 import { Chip } from "./ui/chip";
 import { Sheet } from "./ui/sheet";
@@ -157,7 +158,7 @@ export function DirectorySheet({
 	};
 
 	return (
-		<Sheet open={open} onClose={onClose} title="working directory">
+		<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.session.directory.sheet_title")}>
 			<div className="flex flex-col gap-2 px-1 pb-2">
 				{rows.map(({ path, tag }) => (
 					<button
@@ -205,7 +206,7 @@ export function DirectorySheet({
 					<input
 						value={typed}
 						onChange={(e) => setTyped(e.target.value)}
-						placeholder="or type another path…"
+						placeholder={messageRuntime.t("relay.session.directory.path_placeholder")}
 						spellCheck={false}
 						autoCapitalize="off"
 						autoCorrect="off"

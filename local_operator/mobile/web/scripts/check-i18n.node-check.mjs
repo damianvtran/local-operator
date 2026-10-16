@@ -72,6 +72,22 @@ test("a NEW hardcoded string in a touched relay.shell path fails the actual mand
 		} finally { rmSync(rig.directory, { recursive: true, force: true }); }
 	}
 });
+test("a NEW hardcoded string in a touched relay.session path fails the actual mandatory gate", () => {
+	// C2 activates the history/start surfaces it extracts from: the session-list
+	// body copy sits in a file C already activated, but past-sessions.tsx and the
+	// two sheets that carry the retired new-session screen's copy are NEW here.
+	// A new literal in any of them must fail the same mandatory entry point.
+	for (const scope of ["src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx"]) {
+		const baselineSource = readFileSync(join(root, scope), "utf8");
+		const mutatedSource = `${baselineSource}\nconst message = "New hardcoded session copy";\n`;
+		const rig = fixture(mutatedSource, baselineSource, scope);
+		try {
+			const result = rig.run();
+			assert.equal(result.status, 1, `${scope} must refuse a new literal`);
+			assert.match(result.stderr, /New hardcoded session copy/);
+		} finally { rmSync(rig.directory, { recursive: true, force: true }); }
+	}
+});
 test("the activated relay.shell screens are exactly the reviewed scope", () => {
 	assert(ENFORCED.includes("src/screens/session-list.tsx"));
 	assert(ENFORCED.includes("src/screens/session-view.tsx"));
@@ -81,6 +97,20 @@ test("the activated relay.shell screens are exactly the reviewed scope", () => {
 	const baseline = JSON.parse(readFileSync(join(root, "i18n-baseline.json"), "utf8"));
 	assert.deepEqual([...baseline.enforced].sort(), [...ENFORCED].sort());
 	for (const scope of ["src/screens/session-list.tsx", "src/screens/session-view.tsx"]) {
+		assert(Object.keys(baseline.legacy[scope] ?? {}).length > 0, `${scope} needs frozen residual fingerprints`);
+	}
+});
+test("the activated relay.session history/start surfaces are exactly the reviewed scope", () => {
+	// C2 extracts from these three files beyond the shell screens. The retired
+	// `screens/new-session.tsx` is gone from main (removed in 6abef9783c); its
+	// copy now lives in the two sheets and the session-list footer, which is why
+	// they — not a `new-session.tsx` — are the activated scope here.
+	const sessionScope = ["src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx"];
+	for (const scope of sessionScope) assert(ENFORCED.includes(scope), `${scope} must be activated`);
+	assert(!ENFORCED.includes("src/components/composer.tsx"), "composer is a later namespace");
+	assert(!ENFORCED.includes("src/screens/agent-view.tsx"), "agent-view is a later namespace");
+	const baseline = JSON.parse(readFileSync(join(root, "i18n-baseline.json"), "utf8"));
+	for (const scope of sessionScope) {
 		assert(Object.keys(baseline.legacy[scope] ?? {}).length > 0, `${scope} needs frozen residual fingerprints`);
 	}
 });
