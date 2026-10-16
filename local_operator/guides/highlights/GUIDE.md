@@ -1,11 +1,15 @@
 ---
 name: highlights
-description: What the Highlights block under an answer is — the file callouts and generated graphics added after a turn — and how to switch it off, with privacy, cost and fixes.
+description: "Highlights under an answer: callouts for a turn's deliverables (reports, PDFs, HTML previews), charts drawn from its numbers — how to switch it off, with privacy, cost and fixes."
 ---
 
 # Highlights
 
 After a turn that produced something real — a file, a block of numbers — Local Operator can add a short **Highlights** block under the final answer: callouts for the files the turn made, and a small generated graphic when the numbers justify one. The block draws no heading or label — no title, badge or separator announces it — and appears seamlessly directly under the answer's text: its position, not any caption, tells the reader it belongs to the turn. It is added only under a real user turn — a message you typed, or your answer to an ask the agent raised (never for wakes, monitors, peer messages, a timed-out or declined ask, or `lop exec`), always after the answer, and never in the model's context: the block sits in the transcript beside the answer, not in it.
+
+## For the agent
+
+The block is your delivery surface: a file the turn wrote or named surfaces under your answer as a file callout on its own, so name each deliverable and its path — and never tell the user you cannot attach, send or share a file. A standalone `.html` document you write can render as an inline preview on the desktop UI, and a turn's structured numbers can be drawn as a graphic: never deny a file or a visual that can be produced.
 
 ## Where it shows
 
@@ -22,6 +26,7 @@ Not yet: the **relay / phone web** renderer is in review (core PR #2222), so a p
 
 - **File callouts** — up to four files the turn wrote or named (`reports/latency.md`, `data/bench.csv`, …), one row each with its name, the path as the row carries it (session- or `~/`-relative) and its size: openable in the desktop UI, and in the TUI clickable wherever the terminal renders links (plain, copyable text otherwise). Past the featured four, the rest fold into an `N more files` line that expands in place (bounded at the 20 stored). A finish with two files or fewer and no component is ONE line instead — `2 files: latency.md, bench.csv`. The path is never absolute — session-relative when the file sits under the session's cwd, `~/`-relative otherwise. Spends no model tokens.
 - **Graphics** — a chart or table drawn from the turn's own numbers. Spends model tokens, and is **on by default**: the desktop UI renders it and the TUI skips it. It still costs nothing on most turns — the graphics question is not even asked unless the turn holds numbers to draw (see Cost). Turn it off with `supplements.graphics` (below).
+- **Prepared HTML previews** — a standalone `.html`/`.htm` the turn successfully wrote can be mounted directly, with no classifier or generator call: the exact content the write executed (at most three documents per turn, 48 KiB each) is wrapped in the same validator and sandboxed frame as a graphic. Only the standalone-document profile is supported — `<!doctype html>`, one `<head>`/`<body>`, one plain-text `<title>`, inline style/script; external or sidecar scripts and stylesheets, CSS imports, module loaders, base URLs and custom meta are refused and stay file callouts. A later edit of that file, or any shell/eval step in the turn, invalidates a captured document. The desktop UI mounts it; the TUI skips components. Rides the `supplements.graphics` switch — off means file callouts.
 - **The state line** — one quiet line while a job runs, and on the arms that never settle: `Preparing highlights…`, `Highlights cancelled`, `Couldn't prepare highlights`. The desktop UI draws those arms' controls too (`Adjust…`, `Cancel`, `Retry`); the TUI's actions are the `/highlights cancel | retry | adjust <text>` slash commands instead, because a terminal line advertising a click it cannot honour is a lie.
 
 ## Turning it on and off
