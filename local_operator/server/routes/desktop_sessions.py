@@ -2447,7 +2447,7 @@ async def list_sessions(
         # disagree about, so ordering the extras by it would put a second
         # ordering authority inside one section and make the app's Pinned list
         # read as catalogue order followed by pin order.
-        sessions = page.rows + page.pinned_off_page + page.remote
+        sessions = page.rows + page.off_page + page.remote
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the
