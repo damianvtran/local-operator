@@ -282,6 +282,26 @@ def _observation_phase_error() -> RpcRemoteError:
     )
 
 
+def _invalid_state_error() -> RpcRemoteError:
+    """The wire error a worker answers when it REFUSES before ``_dispatch``.
+
+    Emitted by ``Worker._handle`` when ``self._state`` is not live for the
+    method -- so no adapter code ran and nothing was applied. The task_077
+    episode (ep-19a1fcf8d852) wedged on exactly this code mid read-back retry.
+    """
+
+    return RpcRemoteError(
+        "invalid_state",
+        "method is invalid in current state",
+        RpcErrorDetail(
+            exception_type="invalid_state",
+            message="method is invalid in current state",
+            method="execute",
+            operation_id="exec-5fdcadffdce7-obs2",
+        ),
+    )
+
+
 def _deadline_error() -> RpcRemoteError:
     """The ambiguous class: the failure declares nothing about the batch, so
     no re-read is safe."""
@@ -1767,6 +1787,115 @@ class TestFailedExecuteRecovery:
         assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
         assert bridge.end_diagnostic is not None
         assert "no re-read path is wired" in bridge.end_diagnostic
+
+    @pytest.mark.asyncio
+    async def test_a_predispatch_refusal_still_re_binds_instead_of_wedging(
+        self, tmp_path: Path
+    ) -> None:
+        """THE ACCURACY LOSS THIS CLOSES (task_077, ep-19a1fcf8d852).
+
+        The committed screenshot-transport failure is what the re-bind was
+        built for; when the retry then answers ``invalid_state`` (the worker
+        REFUSED before ``_dispatch``, nothing applied) the class changed and the
+        old gate rejected it -> immediate wedge -> 257 applied steps became
+        unscoreable. A refusal is safe to re-read, so the ONE re-bind must run.
+        """
+
+        executed: list[Any] = []
+        recorded: list[tuple[str, dict[str, Any]]] = []
+        recovered_calls: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            # The bridge's execute seam is what the session arm hands it; the
+            # read-back retries already ran and the CURRENT answer is the
+            # refusal (the recorded sequence's final class).
+            raise _invalid_state_error()
+
+        async def recover() -> Observation:
+            recovered_calls.append(1)
+            return _observation(sequence=2, text="screen C")
+
+        bridge = _bridge(
+            tmp_path,
+            execute=execute,
+            recover=recover,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+
+        # The refusal is re-bindable: the episode CONTINUES (no wedge), and the
+        # reply tells the model to re-read rather than assuming the batch failed.
+        assert reply["is_error"] is True
+        assert reply["details"].get("recovered") is True
+        assert bridge.end_requested is None
+        assert recovered_calls == [1]  # exactly ONE re-read, never a retry loop
+        assert [kind for kind, _ in recorded] == ["output_epoch", "recovered"]
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_with_no_recover_seam_still_wedges_legibly(
+        self, tmp_path: Path
+    ) -> None:
+        """Negative control: admitting the refusal to the re-bind gate must not
+        invent a recovery where none is wired -- the episode still ends legibly."""
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _invalid_state_error()
+
+        bridge = _bridge(tmp_path, execute=execute)  # no recover seam
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_requested == BRIDGE_WEDGED_TERMINAL
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_whose_re_read_fails_still_wedges(self, tmp_path: Path) -> None:
+        """Negative control: the environment still cannot answer, so the ONE
+        re-read fails and the wedge stands -- one attempt, never a loop."""
+
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _invalid_state_error()
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            raise _observation_phase_error()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert len(re_reads) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_ambiguous_failure_is_still_never_re_read(self, tmp_path: Path) -> None:
+        """Negative control: the widening admits ONLY a provable refusal. An
+        adapter_error whose phase is unknown stays ambiguous -- no re-read."""
+
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise RpcRemoteError(
+                "adapter_error",
+                "adapter operation failed",
+                RpcErrorDetail(
+                    exception_type="RuntimeError",
+                    message="ambiguous",
+                    method="execute",
+                    operation_id="exec-amb",
+                ),
+            )
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == []
 
     @pytest.mark.asyncio
     async def test_an_unrecoverable_failure_ends_legibly_and_never_spins(

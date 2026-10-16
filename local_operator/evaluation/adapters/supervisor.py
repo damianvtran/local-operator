@@ -120,15 +120,28 @@ def _mutation_committed(error: BaseException) -> bool:
     * A ``phase`` of ``"unknown"`` -- the default, and what every adapter that
       has not adopted the contract emits -- is ambiguous by definition.
 
+    ONE class that is NOT ambiguous and is admitted here: an ``invalid_state``
+    answer, which the worker emits BEFORE ``_dispatch`` (``worker.py``) -- so no
+    adapter code ran and nothing was applied. A REFUSAL is provably
+    non-committed, which is *safer* to keep alive than the committed class, not
+    less. Admitted so the read-only re-bind that this predicate mirrors
+    (``episode._refused_before_dispatch``) can actually run: if the supervisor
+    poisoned on the refusal, the re-read would hit the poison gate and pay a
+    full backoff to die anyway -- the exact mirror drift ``episode.py`` warns
+    about. The ``begin_rescue``-unsupported ``invalid_state`` never reaches
+    here (rescue runs on a fresh worker via ``run_rescue``'s ``_call_raw``).
+
     A session kept alive here is NOT trusted further than before: the resume
     call re-enters ``_mutating_call``, so a second failure poisons normally.
     """
 
-    return (
-        isinstance(error, RpcRemoteError)
-        and error.code == "adapter_error"
-        and error.detail is not None
-        and error.detail.phase == "observation"
+    return isinstance(error, RpcRemoteError) and (
+        (
+            error.code == "adapter_error"
+            and error.detail is not None
+            and error.detail.phase == "observation"
+        )
+        or error.code == "invalid_state"
     )
 
 

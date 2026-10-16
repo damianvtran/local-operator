@@ -142,6 +142,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeSpec,
     UndeclaredDisclosedInfra,
     _observation_phase_failure,
+    _rebindable_failure,
     _terminal_kind,
 )
 from local_operator.evaluation.runner.model import EpisodeTurn
@@ -1655,8 +1656,13 @@ class ActionBridge:
         """
 
         recover = self.recover
+        # ``committed`` keeps its STRICT meaning for the wedge sentence ("the
+        # adapter declared the batch committed"); the RE-BIND gate is wider --
+        # it also admits a pre-dispatch refusal (``invalid_state``), which is
+        # provably non-committed but still safe to re-read. See
+        # ``_refused_before_dispatch`` for the accuracy loss this closes.
         committed = _observation_phase_failure(error)
-        recovery_attempted = recover is not None and committed
+        recovery_attempted = recover is not None and _rebindable_failure(error)
         recovered: Observation | None = None
         recover_error: Exception | None = None
         if recovery_attempted and recover is not None:
@@ -3433,7 +3439,7 @@ def _make_execute(
                     timeout=config.step_timeout,
                 )
             except Exception as error:
-                if attempt == attempts or not _observation_phase_failure(error):
+                if attempt == attempts or not _rebindable_failure(error):
                     raise
                 record.write(
                     "observation_retry",
