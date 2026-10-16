@@ -171,7 +171,7 @@ class AgentParams(BaseModel):
         default=None,
         description=(
             "create/update on a ROLE: default model tier. 'inherit' clears it. "
-            "A specialist carries no tier pin; pin one on a team member entry."
+            "A specialist carries no tier pin."
         ),
     )
 
@@ -1234,7 +1234,9 @@ def write_profile(
     # a roster believed the pins existed (#2509). Refusing is the only honest
     # answer while nothing can read them: ``resolve_profile`` honours an
     # ``effort:`` tag only for a role, so a specialist has no reader for any of
-    # the three, and per-team control belongs on the member entry instead.
+    # the three. No surface is named as their home: a per-team override on a
+    # roster is a follow-up, and pointing at one today would send the caller to
+    # a field ``TeamMember`` does not have.
     #
     # ONLY A FIELD THAT ASKS FOR SOMETHING IS REFUSED, which is what keeps an
     # ordinary specialist save working. The desktop editor sends these keys only
@@ -1244,26 +1246,31 @@ def write_profile(
     # ``'inherit'`` is the no-pin sentinel, and ``delegate: false`` asks for the
     # state a specialist is already in. Each is a no-op, not a request to store
     # a role field, so each is accepted.
+    #
+    # EACH REFUSED FIELD CARRIES ITS OWN REASON. The launch-only-honours-a-role's-
+    # pin clause is true of ``effort`` alone; a non-empty allowlist and a
+    # ``delegate: true`` have their own honest explanation, and one clause
+    # borrowed from the tier machinery described neither of them.
     if kind != "role":
+        # The sentinel is not a pin: 'inherit' is how a caller says "no tier",
+        # and it takes the same no-op path as an omitted field (above).
+        asked_effort = params.effort is not None and params.effort != INHERIT_EFFORT
         asked_for = [
-            field
-            for field, requested in (
-                ("effort", params.effort is not None and params.effort != INHERIT_EFFORT),
-                ("tools", bool(params.tools)),
-                ("delegate", params.delegate is True),
+            f"{field!r} ({reason})"
+            for field, reason, requested in (
+                ("effort", "a launch honours only a role's tier pin", asked_effort),
+                ("tools", "a specialist's tool surface is unrestricted", bool(params.tools)),
+                ("delegate", "a specialist cannot delegate", params.delegate is True),
             )
             if requested
         ]
         if asked_for:
-            quoted = [repr(field) for field in asked_for]
-            listed = quoted[0]
-            if len(quoted) > 1:
-                listed = ", ".join(quoted[:-1]) + " and " + quoted[-1]
+            listed = asked_for[0]
+            if len(asked_for) > 1:
+                listed = ", ".join(asked_for[:-1]) + " and " + asked_for[-1]
             raise ValueError(
-                f"specialists carry no role fields, so {listed} cannot be set on one; "
-                "a launch honours only a role's tier pin, and per-team control comes "
-                "from the member entry on a team roster. Update a role instead, or "
-                "drop the field."
+                f"specialists carry no role fields: {listed} cannot be set on one. "
+                "Update a role instead, or drop the field."
             )
 
     instructions = (params.instructions or "").strip()

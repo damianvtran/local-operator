@@ -1713,9 +1713,14 @@ async def test_a_specialist_update_refuses_a_role_field_and_leaves_the_row_alone
 
 
 @pytest.mark.asyncio
-async def test_the_refusal_names_every_field_the_call_set(context) -> None:
-    """One sentence, and every offending field in it: a caller fixing one at a
-    time should not have to make three refused round trips."""
+async def test_the_refusal_names_every_field_the_call_set(context, registry) -> None:
+    """One refusal, and every offending field in it: a caller fixing one at a
+    time should not have to make three refused round trips.
+
+    The FIELDS are the contract here, not the wording around them — the reason
+    each field carries is copy, and this file must not pin prose it does not
+    own.
+    """
     body = await call(
         context,
         op="create",
@@ -1728,8 +1733,10 @@ async def test_the_refusal_names_every_field_the_call_set(context) -> None:
         delegate=True,
     )
 
-    assert "'effort', 'tools' and 'delegate' cannot be set on one" in body
-    assert "a launch honours only a role's tier pin" in body
+    assert "specialists carry no role fields" in body
+    for field in ("effort", "tools", "delegate"):
+        assert repr(field) in body, field
+    assert registry.get_agent_by_name("zz-spec-probe") is None, "nothing may be written"
 
 
 @pytest.mark.asyncio
@@ -1786,14 +1793,3 @@ async def test_a_role_still_stores_the_role_fields_it_is_asked_for(context, regi
     assert profile.effort == "hi"
     assert profile.may_delegate is True
     assert set(profile.tools or ()) == {"read", "grep"}
-
-
-def test_the_authoring_schema_says_which_fields_are_role_only(context) -> None:
-    """The model reads this schema, so the rule has to be visible BEFORE the
-    call rather than only in the refusal that follows it."""
-    tool = build_agent_tool(context)
-    assert tool is not None
-    properties = tool.parameters["properties"]
-
-    for field in ("tools", "effort", "delegate"):
-        assert "ROLE" in properties[field]["description"], field
