@@ -1,0 +1,57 @@
+{
+  "cli.exec_worker_help.agent": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for agent. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.agent_id": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for agent_id. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.control": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for control. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.hosting": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for hosting. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.job_id": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for job_id. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.json": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for json. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.model": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for model. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.prompt": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for prompt. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.resume": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for resume. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.train": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for train. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_worker_help.yolo": {
+    "role": "argparse exec-worker argument help",
+    "tone": "instructional, preserve the existing meaning",
+    "note": "Help for yolo. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes preserve a literal apostrophe. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  }
+}

@@ -54,6 +54,13 @@ DATA_DIR = REPO / "local_operator" / "i18n" / "data"
 KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
 
+#: Security disposition is independent of per-carried-namespace audit passes.
+#: Chinese's held wire.slash candidate cannot be bypassed by omitting its file
+#: or ledger row and publishing a smaller passed package. Even new passed rows
+#: do not clear the hold: removal requires a separately reviewed, explicit
+#: security disposition. This blocks eligibility, not recognition/formatting.
+SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
+
 #: Namespaces whose ENGLISH copy the relay SPA carries in-process, as the
 #: ``bundled.gen.ts`` map the store registers before any consumer renders.
 #: EXPLICIT and reviewed, never "every ``relay.*`` file": ``relay.login`` is
@@ -260,7 +267,7 @@ def _shipped_locales() -> list[str]:
         if isinstance(locale, str) and isinstance(namespace, str):
             by_locale.setdefault(locale, {})[namespace] = entry
     for locale in SUPPORTED_LOCALES:
-        if locale == "en":
+        if locale == "en" or locale in SECURITY_HELD_LOCALES:
             continue
         record = by_locale.get(locale)
         if not record:
