@@ -428,5 +428,75 @@
     "role": "header count",
     "tone": "plain",
     "note": "Count of scheduled wakes; the singular branch spells the digit into the sentence, matching the pre-split form, and the digit is raw (never grouped)."
+  },
+  "tui.small.settings_view.default_marker": {
+    "role": "marker",
+    "tone": "dim",
+    "note": "Marks a value as the built-in default; the two leading spaces are its indent and the parentheses are the marker itself."
+  },
+  "tui.small.settings_view.hop_count": {
+    "role": "count",
+    "tone": "faint",
+    "note": "Chain hop count; the indent is layout and the digit is raw (never grouped)."
+  },
+  "tui.small.settings_view.reorder_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Key hints under a selected hop; the indent, the arrow glyphs and the chord letters are all load-bearing."
+  },
+  "tui.small.settings_view.press_key": {
+    "role": "prompt",
+    "tone": "accent",
+    "note": "Prompt while capturing a keybinding; the ellipsis is a single character."
+  },
+  "tui.small.settings_view.hop_row_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Detail hint for a hop row; the chords are literal keys a user presses."
+  },
+  "tui.small.settings_view.chain_row_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Detail hint for a chain row; separate key from the hop variant because the wording differs."
+  },
+  "tui.small.settings_view.chain_add_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Hint for adding a chain; the angle-bracket placeholders are the instruction's shape and stay verbatim."
+  },
+  "tui.small.settings_view.hop_add_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Hint for adding a hop; the shorter sibling of the chain-add hint."
+  },
+  "tui.small.settings_view.read_only_pane": {
+    "role": "state label",
+    "tone": "dim",
+    "note": "Standalone read-only marker for a pane; no indent, unlike its sibling read_only_label."
+  },
+  "tui.small.settings_view.overflow_more": {
+    "role": "overflow row",
+    "tone": "dim",
+    "note": "Overflow notice with the hidden row count; ellipsis is one character and the digit is raw."
+  },
+  "tui.small.settings_view.read_only_label": {
+    "role": "state label",
+    "tone": "dim",
+    "note": "The indented form of the read-only marker; a separate key from read_only_pane because the indent differs."
+  },
+  "tui.small.settings_view.title": {
+    "role": "title",
+    "tone": "head",
+    "note": "The screen's title; a single lowercase word, matching the app's other panel titles."
+  },
+  "tui.small.settings_view.bool_on": {
+    "role": "choice label",
+    "tone": "plain",
+    "note": "Boolean TRUE choice label. Deliberately lowercase and lowercase-only: it renders in a value column beside 'off'."
+  },
+  "tui.small.settings_view.bool_off": {
+    "role": "choice label",
+    "tone": "plain",
+    "note": "Boolean FALSE choice label; paired with bool_on and equally short because the column is narrow."
   }
 }

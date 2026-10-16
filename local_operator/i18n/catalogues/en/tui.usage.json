@@ -3,5 +3,21 @@
   "tui.usage.paid.family_caps": "model-family caps still apply",
   "tui.usage.paid.blocked": "Spend unavailable",
   "tui.usage.paid.eligibility_unknown": "Spend eligibility unknown",
-  "tui.usage.paid.unlimited": "Unlimited paid allowance"
+  "tui.usage.paid.unlimited": "Unlimited paid allowance",
+  "tui.usage.windows_count": "{count, plural, one {{shown} window} other {{shown} windows}}",
+  "tui.usage.exhausted": "{value} exhausted",
+  "tui.usage.near_limit": "{value} near limit",
+  "tui.usage.reported_balance": "{count, plural, one {{shown} reported balance} other {{shown} reported balances}}",
+  "tui.usage.not_reported": "{value} not reported",
+  "tui.usage.unavailable": "  ·  usage unavailable",
+  "tui.usage.resets_in": ", resets in {value}",
+  "tui.usage.no_windows": "  no windows reported",
+  "tui.usage.fetching": "fetching…",
+  "tui.usage.title": "Usage",
+  "tui.usage.sign_in_expired": "{value} sign-in expired",
+  "tui.usage.stale": "{value} stale",
+  "tui.usage.refreshing": "refreshing…",
+  "tui.usage.refresh_failed": "refresh failed — showing last known numbers",
+  "tui.usage.showing_prefix": "showing ",
+  "tui.usage.of_separator": " of "
 }
