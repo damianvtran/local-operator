@@ -8800,6 +8800,12 @@ def test_a_client_name_that_is_not_an_invocation_never_anchors_the_rule(line: st
         "psql -h h -p " + "s3cr3tPw" + " -U admin",
         _MONGO + " -p " + "s3cr3tPw" + " --eval x",
         "/usr/bin/" + _MONGO + " -p " + "s3cr3tPw" + " --eval x",
+        # a LINE BREAK is a command boundary: a multi-line result's next line
+        # starts a command, and review round 1 caught this leaking when the
+        # leading class carried no newline.
+        "line one\n" + "mysql -p " + "s3cr3tPw",
+        "line one\r\n" + "psql -p " + "s3cr3tPw",
+        "line one\n" + "redis-cli -a " + "s3cr3tPw",
     ],
 )
 def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> None:

@@ -4087,11 +4087,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     #
     # The invocation reading is what the rule always MEANT (see "the client
     # binary" above): the word must begin a command — the string start, or just
-    # after whitespace or a shell separator — and must be followed by whitespace,
-    # so a filename stem or a hyphenated slug cannot anchor it. A path-qualified
-    # invocation is admitted on purpose (see the leading class), because a client
-    # reached by an absolute path IS being invoked; what the class refuses is a
-    # name that is not being invoked at all.
+    # after whitespace (a space, a tab, or a LINE BREAK, which is a command
+    # boundary in a multi-line result) or a shell separator — and must be
+    # followed by whitespace, so a filename stem or a hyphenated slug cannot
+    # anchor it. A path-qualified invocation is admitted on purpose (see the
+    # leading class), because a client reached by an absolute path IS being
+    # invoked; what the class refuses is a name that is not being invoked at all.
     #
     # Every true positive keeps its mask: the inline-password spellings pinned in
     # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
@@ -4101,8 +4102,9 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "client-inline-password",
         re.compile(
-            r"(?i)((?:^|[ \t(;|&/])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
-            r"mongo|mongosh|clickhouse-client|redis-cli|influx)(?=[ \t])"
+            r"(?i)((?:^|[ \t\n\r(;|&/])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
+            r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
+            r"(?=[ \t])"
             r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
         ),
         r"\1" + REDACTION_MARKER,
