@@ -37,6 +37,7 @@ from local_operator.harness.types import (
 )
 from local_operator.providers.clients import (
     DEFAULT_ESTIMATE_SLOPE,
+    EMPTY_USER_TEXT,
     MIN_OUTPUT_TOKENS,
     OUTPUT_CLAMP_SAFETY_MARGIN,
     AnthropicClient,
@@ -4534,6 +4535,270 @@ def test_anthropic_drops_empty_assistant_turns() -> None:
     )
     body = AnthropicClient()._build_body(request)
     assert [m["role"] for m in body["messages"]] == ["user", "user"]
+
+
+def test_anthropic_drops_empty_text_blocks_on_every_message() -> None:
+    """#2460: Anthropic 400s the WHOLE request with "messages: text content
+    blocks must be non-empty" over one empty block, and the message holding it
+    is in history, so it is resent on every later turn — one image-only send
+    killed a session permanently.
+
+    A whitespace-only block is refused the same way and carries nothing a
+    model can read, so it is dropped by the same rule.
+    """
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text=""),
+            TextContent(text="  \n"),
+            TextContent(text="real"),
+            ImageContent(data="aGk=", mime_type="image/png"),
+        ],
+    )
+    blocks = AnthropicClient._message_blocks(message)
+    assert blocks == [
+        {"type": "text", "text": "real"},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+        },
+    ]
+
+
+def test_anthropic_recovers_a_transcript_that_already_stores_the_empty_block() -> None:
+    """The render-side repair, on the EXACT row the issue reports.
+
+    An image-only desktop send persisted ``content: [{}, {attachment...}]``.
+    The ``{}`` parses back as an empty ``TextContent`` (pydantic's smart union
+    takes the leftmost member, which ignores unknown keys), so the fix has to
+    drop it at body-build time to recover sessions already poisoned on disk —
+    a write-side fix alone cannot reach them.
+    """
+    stored = {
+        "id": "row-1",
+        "role": "user",
+        "input_mode": "typed",
+        "content": [{}, {"data": "aGk=", "mime_type": "image/png"}],
+    }
+    message = Message.model_validate(stored)
+    assert [type(block).__name__ for block in message.content] == [
+        "TextContent",
+        "ImageContent",
+    ], "the empty dict decodes to an empty TextContent — the poison this guards"
+
+    body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic", model_id="claude-opus-5-5"),
+            messages=[message],
+        )
+    )
+    # The cache marker is placed on the message's LAST block by
+    # ``_message_cache_breakpoints``, so it rides the image now that the empty
+    # text block is gone — that it lands on the image is itself proof the text
+    # block was dropped, since the marker would otherwise sit on the empty one.
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+    for entry in body["messages"]:
+        for block in entry["content"]:
+            assert (
+                block.get("type") != "text" or block["text"].strip()
+            ), "an empty text block is the 400 this issue is about"
+
+
+def test_anthropic_never_sends_a_message_whose_blocks_all_dropped() -> None:
+    """Dropping every block must not leave an empty content array behind: that
+    is a 400 of its own, for the same reason ``_is_empty_assistant`` skips an
+    errored turn instead of sending it empty."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        messages=[
+            Message(role="user", content=[TextContent(text="")]),
+            Message(role="user", content=[TextContent(text="   ")]),
+            Message.user("the actual question"),
+        ],
+    )
+    body = AnthropicClient()._build_body(request)
+    # Both blank USER turns keep their place in the sequence (round 1 M2) and
+    # only the assistant-less real turn carries the question.
+    assert [m["role"] for m in body["messages"]] == ["user", "user", "user"]
+    assert [m["content"][0]["text"] for m in body["messages"]] == [
+        EMPTY_USER_TEXT,
+        EMPTY_USER_TEXT,
+        "the actual question",
+    ]
+
+
+def test_anthropic_still_skips_an_empty_assistant_turn() -> None:
+    """Backfilling a user turn must not change the ASSISTANT rule: an errored
+    model turn is skipped, not backfilled, because dropping it loses nothing
+    and the turn carries no role that anything references (see
+    ``_is_empty_assistant``)."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        messages=[Message.user("hi"), _empty_assistant(), Message.user("continue")],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user", "user"]
+
+
+def test_anthropic_still_carries_an_image_only_turn() -> None:
+    """The drop is surgical: an image-only message IS content and must reach
+    the wire with its image, just without the empty text block beside it."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4-5"),
+        messages=[Message.user("", images=[ImageContent(data="aGk=", mime_type="image/png")])],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user"]
+    assert [block["type"] for block in body["messages"][0]["content"]] == ["image"]
+
+
+def test_both_openai_wires_drop_a_poisoned_rows_empty_text_block() -> None:
+    """M1/Q1 (review and QA round 1): the blank block a pre-fix row decodes to
+    must be dropped on the OpenAI wires too, not only on Anthropic.
+
+    New rows are no longer written this way, but a transcript poisoned before
+    #2460 still holds the ``{}``, and these two wires kept serialising it
+    verbatim:
+
+        chat : {"content": [{"type": "text", "text": ""}, {"image_url": ...}]}
+        resp : [{"content": [{"input_text", ""}, {"input_image", ...}]}]
+
+    That matters because OpenAI-compatible routes are how Claude is reached
+    off the native wire (Radient, OpenRouter), so leaving the empty part here
+    would keep exactly the class of session this PR exists to recover exposed
+    on the route those operators actually use.
+    """
+    stored = {
+        "id": "row-1",
+        "role": "user",
+        "input_mode": "typed",
+        "content": [{}, {"data": "aGk=", "mime_type": "image/png"}],
+    }
+    message = Message.model_validate(stored)
+
+    chat = _message_to_openai(message)
+    assert chat == {
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}],
+    }, "the empty text part must not reach an openai-compat route"
+
+    responses = _messages_to_openai_responses([message])
+    assert responses == [
+        {
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": "data:image/png;base64,aGk="}],
+        }
+    ]
+
+
+def test_openai_wires_still_backfill_a_content_less_user_turn() -> None:
+    """M1's other half: dropping blank parts must not remove the shape a
+    genuinely content-less turn depends on.
+
+    With every part dropped, ``parts`` is empty and each wire falls back to the
+    shape it already had — the chat wire joins its parts into a single string,
+    and the Responses wire keeps a user item because a request cannot drop its
+    own subject (see ``EMPTY_USER_TEXT`` for why that is a backfill and not a
+    skip).
+    """
+    empty = Message(role="user", content=[])
+    assert _message_to_openai(empty) == {"role": "user", "content": ""}
+    assert _messages_to_openai_responses([empty]) == [
+        {"role": "user", "content": [{"type": "input_text", "text": EMPTY_USER_TEXT}]}
+    ]
+
+
+def test_a_blank_user_turn_keeps_its_place_in_the_role_sequence() -> None:
+    """M2/Q2 (review and QA round 1): a user message whose blocks all dropped
+    must not be SKIPPED.
+
+    Skipping it changes the role sequence the provider sees. Review's exact
+    case: ``[user "hi", assistant "ok", user "  "]`` lost its final user turn
+    and became ``['user','assistant']`` — a trailing assistant turn, which
+    newer Claude models read as a PREFILL and refuse. A blank LEADING user
+    turn is worse: the body would open with ``assistant``, which Anthropic
+    rejects outright ("first message must use the user role").
+
+    The placeholder is what keeps the order while still removing the blank
+    block the provider refuses.
+    """
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-opus-5-5"),
+        messages=[
+            Message.user("hi"),
+            Message.assistant("ok"),
+            Message(role="user", content=[TextContent(text="  ")]),
+        ],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ], "a skipped blank user turn leaves a trailing assistant turn (a prefill)"
+    assert body["messages"][-1]["content"][0]["text"] == EMPTY_USER_TEXT
+    assert not any(
+        block["text"].strip() == ""
+        for message in body["messages"]
+        for block in message["content"]
+        if block.get("type") == "text"
+    ), "no blank text block may reach the wire"
+
+
+def test_a_blank_leading_user_turn_still_opens_the_body() -> None:
+    """The mirror of the prefill case, and the one Anthropic refuses hardest:
+    the first message must be ``user``."""
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-opus-5-5"),
+        messages=[
+            Message(role="user", content=[TextContent(text="")]),
+            Message.assistant("ok"),
+            Message.user("real question"),
+        ],
+    )
+    body = AnthropicClient()._build_body(request)
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant", "user"]
+    assert body["messages"][0]["content"][0]["text"] == EMPTY_USER_TEXT
+
+
+def test_responses_keeps_a_shape_for_an_empty_user_turn() -> None:
+    """#2460, second-order: ``Message.user`` no longer emits a text block for
+    absent text, so an empty user message now reaches this wire with ZERO
+    blocks.
+
+    Every other wire already had a shape for that — Google backfills, the chat
+    wire joins parts into one string — and the Responses wire is the one that
+    would have emitted an empty ``content`` array it has never sent. Pinned
+    here so the write-side fix cannot silently introduce it: an image-only turn
+    must carry its image with no invented text part.
+
+    The backfill is ``EMPTY_USER_TEXT`` rather than ``""`` (round 1, M1/Q1):
+    the blank part is what this PR drops on every other wire, so reintroducing
+    an empty string here would leave that shape reachable by another route.
+    """
+    assert _messages_to_openai_responses([Message.user("")]) == [
+        {"role": "user", "content": [{"type": "input_text", "text": EMPTY_USER_TEXT}]}
+    ]
+    image_only = _messages_to_openai_responses(
+        [Message.user("", images=[ImageContent(data="aGk=", mime_type="image/png")])]
+    )
+    assert image_only == [
+        {
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": "data:image/png;base64,aGk="}],
+        }
+    ]
 
 
 def test_google_drops_whitespace_only_assistant_turns() -> None:
