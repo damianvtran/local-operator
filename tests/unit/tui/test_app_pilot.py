@@ -16,7 +16,7 @@ import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import pytest
@@ -764,8 +764,11 @@ class FakeSession:
         self.asides.append(list(turns))
         return ""
 
-    async def adopt_aside(self, messages: list[Any]) -> None:
+    async def adopt_aside(self, messages: list[Any]) -> Literal["queued", "applied"] | None:
+        # ``None`` is the protocol's "applied" (an older implementation); a
+        # subclass may answer the real ``"queued"``/``"applied"`` states.
         self.adopted.append(list(messages))
+        return None
 
     async def compact_now(self) -> CompactionOutcome:
         return self._answer_compaction()
