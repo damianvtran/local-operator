@@ -1632,7 +1632,9 @@ def _live_generation_is_user_facing(session_id: str) -> bool:
 _COLD_TODO_CHILD_LIMIT = 96
 
 
-def _durable_projection(session_id: str) -> SessionProjection | None:
+def _durable_projection(
+    session_id: str, *, lapsed_visible_ms: int | None = None
+) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk.
 
     Reads through the daemon's incremental fold cache (:mod:`.durable`): the
@@ -1816,11 +1818,22 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     # than the cap (the live fold's contract, see ``ProjectionFold.set_asks``).
     # Nothing worth showing leaves BOTH fields absent: ``asks_open: 0`` would
     # claim a live, empty queue, which a stopped conversation does not have.
+    #
+    # ``asks.lapsed_visible_for`` applies here too (decision D8): a stopped
+    # conversation's lapsed ask leaves its screen when the window says so. Read
+    # off the process watcher's snapshot when the caller did not pass it —
+    # ``service.amain`` starts that watcher at boot, so it follows another
+    # process's write within one poll — and never polled from here, because
+    # this runs in a worker thread and a poll fans out to loop-thread listeners.
     from local_operator.asks import store as ask_store
     from local_operator.asks.policy import PROJECTION_CAP
+    from local_operator.asks.visibility import lapsed_visible_ms as _lapsed_visible_ms
     from local_operator.paths import config_dir
 
-    ask_rows = ask_store.session_asks(config_dir(), session_id)
+    window = (
+        lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(config_dir())
+    )
+    ask_rows = ask_store.session_asks(config_dir(), session_id, lapsed_visible_ms=window)
     if ask_rows:
         outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
         fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
@@ -6420,9 +6433,15 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         from local_operator.asks.store import index_asks
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
-        rows = await asyncio.to_thread(index_asks, config_dir())
+        # ``asks.lapsed_visible_for`` (decision D8), read HERE on the loop with
+        # a fresh poll — the boundary the phone reads, and the one thread a
+        # poll's listener fan-out may run on — then handed into the off-loop
+        # index walk as a plain int.
+        window = lapsed_visible_ms(config_dir(), poll_now=True)
+        rows = await asyncio.to_thread(index_asks, config_dir(), lapsed_visible_ms=window)
         # PER-ROW LIVENESS (design round 1, D1/D4 = UX U1/U3/U4). The index knows
         # an ask is durable; it does not know whether answering it will be a warm
         # round trip or a ~30 s engage. That fact lives in this process's dial
