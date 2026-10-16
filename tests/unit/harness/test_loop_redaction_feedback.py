@@ -1857,6 +1857,38 @@ class TestQ3BoundedDiffProjection:
         assert out[0] != _DIFF_DETAIL_WITHHELD, "a real change still processes"
         assert "new value" in repr(out)
 
+    @pytest.mark.asyncio
+    async def test_producer_over_cap_truncation_is_withheld_at_the_seam(self, tmp_path):
+        """The fail-closed credential direction for a block bigger than the cap.
+
+        ``_diff_details`` cannot keep an over-cap block whole, so it ends the
+        payload with its truncation marker. That marker is what the seam refuses,
+        so the whole field is withheld: the credential direction is HIDDEN, never
+        a partially published block. This drives both halves together.
+        """
+        from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
+        from local_operator.tools.builtin import _diff_details
+        from local_operator.variables import VariableStore
+
+        _, body_line = _q3_pem()
+        big = (
+            "-----BEGIN "
+            + "PRIV"
+            "ATE KEY-----\n" + "\n".join([body_line] * 400) + "\n-----END "
+            + "PRIV"
+            "ATE KEY-----\n"
+        )
+        before = big + "Middle guidance 111.\n" + big
+        after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)
+        details = _diff_details("synthetic-over-cap.md", before, after)
+        assert details["diff"][-1] == "…"
+        out = await AgentLoop._redact_details(
+            details, VariableStore(cwd=str(tmp_path)).redact, "edit", None
+        )
+        assert out is not None
+        assert out["diff"][0] == _DIFF_DETAIL_WITHHELD
+        assert body_line not in repr(out), "no body row may reach the published payload"
+
     @pytest.mark.parametrize(
         "case",
         ["count", "partial", "ellipsis", "huge-count", "late", "nonstring", "embedded-separator"],
