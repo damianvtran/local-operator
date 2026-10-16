@@ -450,9 +450,9 @@ _DSN_SCHEMES = (
 #:
 #: **The exclusion is the whole false-positive boundary of that rule.** A
 #: truncated value carries no host, so the rule has to decide from the userinfo
-#: alone whether it is looking at a credential or at ``host:port`` — and the only
-#: in-band signal is that a PORT IS ALWAYS DIGITS (see
-#: :data:`_DSN_TRUNCATED_PATTERN`). ``http://localhost:8080`` is exactly the
+#: alone whether it is looking at a credential or at a host and port — and the
+#: only in-band signal is that a PORT IS ALWAYS DIGITS (see
+#: :data:`_DSN_TRUNCATED_PATTERN`). A local development URL is exactly the
 #: spelling where a non-numeric reading would be wrong, and it is the scheme those
 #: URLs use, so leaning on the scheme list as well as the digit test keeps the two
 #: signals independent rather than making one carry both.
@@ -494,23 +494,32 @@ _DSN_PATTERN = re.compile(
 #: a cut value is proposed to no rule at all and is published in full.
 #:
 #: **Why this fires only on the PROVABLE subset.** The value must already carry
-#: (1) a KNOWN credential scheme, (2) an explicit userinfo with the ``user:``
-#: separator, and (3) a password run that is NOT all digits. Signal (3) is the
-#: line between a credential and a port: in a URL authority a port is always
-#: digits, so ``postgres://dbhost:5432/prod`` is a host:port and stays readable
-#: while ``postgres://appuser:S3cret`` is a userinfo and is masked. That is the
-#: same distinction the existing rules make structurally (they only accept a host
-#: after the ``@``), extended to the case where the host is gone.
+#: (1) a KNOWN credential scheme, (2) an explicit userinfo with the ``SEP``
+#: separator below, and (3) a password run that is NOT all digits. Signal (3) is
+#: the line between a credential and a port: in a URL authority a port is always
+#: digits, so a scheme whose userinfo separator is followed by digits then a path
+#: is a host and port and stays readable, while a NON-numeric run after a
+#: scheme's userinfo separator is a password. That is the same distinction the
+#: existing rules make structurally (they only accept a host after the tail
+#: separator), extended to the case where the host is gone.
 #:
-#: **What it deliberately does NOT decide.** A bare ``x:y`` with no scheme —
-#: ``dbhost:5432`` and ``appuser:S3cret`` are the same spelling and there is no
-#: in-band signal between them — is left alone, as is an all-digit password
+#: **A host tail DISQUALIFIES a value, and that is not a heuristic.** This rule is
+#: for a value that was CUT, so a completed ``userinfo`` followed by the separator
+#: and then MORE authority text is a whole connection string, which the rules
+#: above already own. The pattern therefore refuses a match whose password run is
+#: followed by the tail separator — the same test that keeps this module's own
+#: prose (which documents the complete spelling) from matching itself.
+#:
+#: **What it deliberately does NOT decide.** A bare ``x:y`` with no scheme — a
+#: host and port and a user and password are the same spelling with no in-band
+#: signal between them — is left alone, as is an all-digit password
 #: (indistinguishable from a port). Both are recorded residuals, not oversights.
 #: The password class reuses the DSN's own exclusions (no whitespace, quote,
-#: colon, slash or at-sign), so a truncated tail cannot run into the next token.
+#: colon, slash, backtick or tail separator), so a cut tail cannot run into the
+#: next token.
 _DSN_TRUNCATED_PATTERN = re.compile(
     rf"(?i)\b((?:{_DSN_TRUNCATED_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
-    r"((?![0-9]+(?:[/:?#]|\s|$))[^\s:/@\"']{4,})(?![\w:])"
+    r"((?![0-9]+(?:[/:?#]|\s|$))[^\s:/@\"'`]{4,})(?![^\s\"'`]*@)"
 )
 
 #: Triple-grouped so the password can be masked with the user and host kept:
@@ -529,12 +538,6 @@ _DSN_TRUNCATED_PATTERN = re.compile(
 #: the assignment rule cannot rescue it — was not masked at all, with ZERO incidents.
 #: The class still refuses whitespace, quotes and ``:``, so an unterminated line cannot
 #: run away, and the authority part (``user``) still cannot contain ``:``/``@``.
-_DSN_PATTERN = re.compile(
-    rf"(?i)\b((?:{_DSN_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
-    r"([^\s]*?)@(?=[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+(?:[/:?#]|$))"
-)
-
-
 #: The words a NAME may end in, and the qualifiers that may precede one inside a
 #: run-together name (``apiKey``, ``authToken``). Kept as data rather than as a
 #: regex so the check runs on a MATCH instead of at every character position —
