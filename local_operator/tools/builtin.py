@@ -10253,12 +10253,19 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     # rows come back different and a credential-free diff would be withheld
     # (review round 2, R2-1).
     matcher = difflib.SequenceMatcher(None, before_lines, after_lines)
-    diff = list(
-        _unified_diff_rows(
-            before_lines, after_lines, matcher.get_opcodes(), context=_DIFF_CONTEXT_LINES
-        )
+    # SNAPSHOT the opcodes BEFORE grouping. ``get_grouped_opcodes`` MUTATES the
+    # list ``get_opcodes`` hands back (it rewrites the leading and trailing
+    # ``equal`` tuples as it trims them), so a later ``get_opcodes()`` call would
+    # return DIFFERENT opcodes than the ones the diff was rendered from. One
+    # snapshot, taken first, is what keeps the render and the widening describing
+    # the same edit (review round 2, R2-1).
+    opcodes = list(matcher.get_opcodes())
+    diff = ["--- ", "+++ "] + _render_groups(
+        before_lines,
+        after_lines,
+        matcher.get_grouped_opcodes(n=_DIFF_CONTEXT_LINES),
     )
-    diff = _keep_pem_blocks_whole(diff, before_lines, after_lines, matcher)
+    diff = _keep_pem_blocks_whole(diff, before_lines, after_lines, opcodes)
     if len(diff) > _DIFF_DETAILS_CAP_LINES:
         diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
     return {"path": str(path), "added": added, "removed": removed, "diff": diff}
@@ -10268,7 +10275,7 @@ def _keep_pem_blocks_whole(
     diff: list[str],
     before_lines: Sequence[str],
     after_lines: Sequence[str],
-    matcher: difflib.SequenceMatcher,
+    opcodes: Sequence[tuple[str, int, int, int, int]],
 ) -> list[str]:
     """Widen hunks so a complete PRIVATE KEY block is never split across the edge.
 
@@ -10318,7 +10325,7 @@ def _keep_pem_blocks_whole(
     out = diff[:2]
     for old_start, old_end, new_start, new_end, rows in merged:
         rendered = _opcodes_for_slices(
-            before_lines, after_lines, matcher.get_opcodes(), old_start, old_end, new_start, new_end
+            before_lines, after_lines, opcodes, old_start, old_end, new_start, new_end
         )
         if rendered is None or not _same_change_rows(rows, rendered):
             # Cannot prove the widened rendering: mark the payload truncated so
@@ -10458,27 +10465,20 @@ def _merge_touching(
     return merged
 
 
-def _unified_diff_rows(
+def _render_groups(
     before_lines: Sequence[str],
     after_lines: Sequence[str],
-    opcodes: Sequence[tuple[str, int, int, int, int]],
-    *,
-    context: int,
+    groups: Iterable[Sequence[tuple[str, int, int, int, int]]],
 ) -> list[str]:
-    """The unified-diff rows for one side's OPCODES, with ``context`` gap lines.
+    """The hunk rows for ``difflib``'s OWN opcode groups, exactly as it renders them.
 
-    This is ``difflib.unified_diff``'s own rendering rule, applied to a matcher's
-    opcodes that the caller already holds: header rows, then each group of
-    opcodes split where the equal gap between changes exceeds ``2 * context``.
-    Rendering from a SINGLE matcher is what keeps the widened view and the
-    original view describing the same edit — a second matcher over a slice can
-    align a long repeated run differently and disagree about a change that never
-    existed (review round 2, R2-1).
+    The groups come from the matcher that produced the diff, so this makes no
+    alignment decision of its own: it only spells each group as a unified-diff
+    hunk. That is why the rendering cannot disagree with the diff the same
+    matcher produced, whereas a second ``SequenceMatcher`` over a slice can
+    (review round 2, R2-1).
     """
     rows: list[str] = []
-    groups = difflib.SequenceMatcher.get_grouped_opcodes(
-        _OpcodesHolder(opcodes), n=context
-    )
     for group in groups:
         first, last = group[0], group[-1]
         rows.append(
@@ -10496,17 +10496,7 @@ def _unified_diff_rows(
             else:  # replace
                 rows.extend("-" + line for line in before_lines[old_from:old_to])
                 rows.extend("+" + line for line in after_lines[new_from:new_to])
-    return ["--- ", "+++ "] + rows
-
-
-class _OpcodesHolder:
-    """``get_grouped_opcodes`` needs a matcher; this gives it ours, nothing else."""
-
-    def __init__(self, opcodes: Sequence[tuple[str, int, int, int, int]]) -> None:
-        self._opcodes = list(opcodes)
-
-    def get_opcodes(self) -> list[tuple[str, int, int, int, int]]:
-        return list(self._opcodes)
+    return rows
 
 
 def _same_change_rows(original: Sequence[str], rendered: Sequence[str]) -> bool:
