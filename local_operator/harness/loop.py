@@ -1696,18 +1696,81 @@ def _plan_guard_arguments(name: str, arguments: Any) -> Any:
     position — every other op, name and shape — is returned BY IDENTITY, which is what
     lets the caller keep today's inputs, and today's verdict, exactly.
     """
-    from local_operator.memory import structural_reference
-    from local_operator.tools.memory_tools import _guarded_path, _recall_reference
-
     if not isinstance(arguments, dict):
         return arguments
     if name == "memory" and arguments.get("op") == "recall":
+        from local_operator.memory import structural_reference
+
         if structural_reference(arguments.get("text")):
             return {**arguments, "text": ""}
         return arguments
+    # ``memory_tools`` (sqlite3, urllib) is imported only where it can be used: every
+    # planned call in every session reaches this helper, and only a read's ``path`` can
+    # carry the exempt ``q``. The two clauses below mirror ``_recall_reference``'s own
+    # first line, so a call they skip is one that helper answers ``None`` for too.
+    if name != "read" or not isinstance(arguments.get("path"), str):
+        return arguments
+    from local_operator.tools.memory_tools import _guarded_path, _recall_reference
+
     if _recall_reference(name, arguments.get("path")) is not None:
         return {**arguments, "path": _guarded_path(arguments["path"])}
     return arguments
+
+
+def _decode_plan_guard_raw(raw: str) -> tuple[Any, bool]:
+    """``json.loads(raw)``, and whether decode -> encode provably keeps every value.
+
+    ``_plan_guard_raw`` replaces the guard's copy of the wire JSON with a decode ->
+    re-serialize round trip while the executor still dispatches the ORIGINAL
+    ``call.raw_arguments``. So anything that trip cannot carry across is content the
+    guard stops seeing: a call the guard refuses today would run. A JSON document has
+    exactly two spellings a provider can stream where that happens, and both are
+    DETECTED here rather than judged safe one by one:
+
+    * a DUPLICATE KEY — ``json.loads`` keeps the last occurrence and silently drops the
+      earlier value, and the value it drops leaves the guard's copy while the original
+      raw still carries it. Measured: a read whose raw is
+      ``{"path":"memory://global?q=<colliding id>","raw":"<Luhn-valid card>","raw":"true"}``
+      is refused when the raw reaches the guard and RUNS on the re-encoded copy.
+      ``json.dumps`` cannot emit a duplicate key at all, so no corpus row spelled with
+      it can express this case: the tests spell that raw by hand.
+    * a NUMBER LITERAL whose own spelling the encoder does not reproduce, because
+      ``json.dumps`` writes ``repr()`` of the parsed value (``1E5`` -> ``100000.0``),
+      which can shorten a digit run the card/IBAN arms look for. The review's second
+      spelling does NOT reproduce: ``4111111111111111.0`` parses to a float whose
+      ``repr()`` is that same literal, so the encoder emits ``4111111111111111.0`` —
+      MEASURED, and therefore no test asserts an evasion for it.
+
+    Escape and whitespace spellings are NOT lossy in the direction that matters: the
+    decoded copy holds the same or more literal characters than the wire spelling did,
+    so they are left to the round trip — which is what keeps an ordinary spaced
+    ``{"path": "memory://global?q=<ref>"}`` masking exactly as it does today. A raw
+    this cannot PROVE lossless makes the caller hand the guard the original (fail
+    closed), so the refusal it produces today still fires.
+    """
+    duplicated = False
+    respelled = False
+
+    def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicated
+        if len({key for key, _ in pairs}) != len(pairs):
+            duplicated = True
+        return dict(pairs)
+
+    def _int(text: str) -> int:
+        nonlocal respelled
+        value = int(text)
+        respelled |= repr(value) != text
+        return value
+
+    def _float(text: str) -> float:
+        nonlocal respelled
+        value = float(text)
+        respelled |= repr(value) != text
+        return value
+
+    decoded = json.loads(raw, object_pairs_hook=_object, parse_int=_int, parse_float=_float)
+    return decoded, not (duplicated or respelled)
 
 
 def _plan_guard_raw(name: str, raw: str) -> str:
@@ -1715,19 +1778,24 @@ def _plan_guard_raw(name: str, raw: str) -> str:
 
     The streamed wire JSON is a SEPARATE carrier: ``retained_arguments`` decodes it
     and guards its text as well, so masking the argument dict alone would leave a
-    live (streamed) call refused on its raw spelling. Only a parseable ``raw`` is
-    re-serialized, and only when masking actually changed something — an unparseable
-    ``raw``, a non-object one or one whose own value is NOT an admitted reference is
-    returned untouched, so the fail-closed refusal it produces today is unchanged.
+    live (streamed) call refused on its raw spelling. Only a parseable ``raw`` whose
+    own copy holds an admitted reference is re-serialized, and only when the decoder
+    and the encoder can carry the rest of it ACROSS UNCHANGED (see
+    ``_decode_plan_guard_raw``) — an unparseable ``raw``, a non-object one, one whose
+    own value is NOT an admitted reference, and one whose round trip is lossy are all
+    returned untouched, so the fail-closed refusal each produces today is unchanged.
     """
     try:
-        decoded = json.loads(raw)
+        decoded, lossless = _decode_plan_guard_raw(raw)
     except (ValueError, TypeError):
         return raw
     masked = _plan_guard_arguments(name, decoded)
-    if masked is decoded:
+    if masked is decoded or not lossless:
         return raw
-    return json.dumps(masked, ensure_ascii=False, separators=(",", ":"))
+    try:
+        return json.dumps(masked, ensure_ascii=False, separators=(",", ":"))
+    except (ValueError, TypeError):
+        return raw
 
 
 def _plan_guard_inputs(name: str, arguments: Any, raw: str | None) -> tuple[Any, str | None]:
