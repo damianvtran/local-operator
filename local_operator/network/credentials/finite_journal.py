@@ -95,7 +95,9 @@ class Journal:
             return
         placement.credentials_dir_for(self.network, self.root)
         with store._write_lock(self.path):
-            with placement._cross_process_lock(self.path.with_name(".finite-journal.lock"), root=self.root):
+            with placement._cross_process_lock(
+                self.path.with_name(".finite-journal.lock"), root=self.root
+            ):
                 try:
                     yield
                 finally:

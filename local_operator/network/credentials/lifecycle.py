@@ -427,7 +427,9 @@ class LifecycleStore:
     def locked(self) -> Iterator[None]:
         placement.credentials_dir_for(self.network_id, self.root)
         with store._write_lock(self.path):
-            with placement._cross_process_lock(self.path.with_name(LIFECYCLE_LOCK_FILENAME), root=self.root):
+            with placement._cross_process_lock(
+                self.path.with_name(LIFECYCLE_LOCK_FILENAME), root=self.root
+            ):
                 yield
 
     def load(self) -> LifecycleDocument:

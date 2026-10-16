@@ -206,7 +206,8 @@ def _path_refusal() -> NoReturn:
 
     raise MeshRefusal(
         "credential_path_invalid",
-        "The credential metadata path changed or is not a safe directory/file; preparation refused this path.",
+        "The credential metadata path changed or is not a safe directory/file; "
+        "preparation refused this path.",
     )
 
 
@@ -242,7 +243,9 @@ def _private_mode(path: Path, before: os.stat_result, *, directory: bool) -> Non
     _checked_info(before, directory=directory)
     fd = None
     use_fd = (
-        os.name != "nt" and hasattr(os, "fchmod") and bool(getattr(os, "O_NOFOLLOW", 0))
+        os.name != "nt"
+        and hasattr(os, "fchmod")
+        and bool(getattr(os, "O_NOFOLLOW", 0))
         and (not directory or bool(getattr(os, "O_DIRECTORY", 0)))
     )
     mode = DIR_MODE if directory else FILE_MODE
@@ -296,7 +299,8 @@ def _ensure_private_dir(path: Path, *, root: Path) -> Path:
         except FileNotFoundError:
             raise MeshRefusal(
                 "profile_parent_missing",
-                "Initialize the selected profile's parent directory before writing credential metadata.",
+                "Initialize the selected profile's parent directory "
+                "before writing credential metadata.",
             ) from None
         _checked_info(parent_info, directory=True, private=False)
         created = False
@@ -356,6 +360,7 @@ def _open_lock(path: Path) -> int:
     except BaseException:
         os.close(fd)
         raise
+
 
 def network_credentials_dir(network_id: str, root: Path | None = None) -> Path:
     return credentials_dir_for(network_id, root)
