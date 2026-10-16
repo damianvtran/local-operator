@@ -413,6 +413,26 @@ Same `browser` tool. Actions:
 - `upload` (attach local files to a file input; see below)
 - `close` (drop the surface and its tab)
 
+### Typing a credential: use `secret_ref`, never `text`
+
+A literal password in `type`'s `text` is written into the transcript that
+produced the call — there is no credible way to take it back. When a field needs
+a stored secret, pass its NAME instead:
+
+```text
+type selector="input[name=password]" secret_ref="SUDO_PASSWORD"
+```
+
+- The ref resolves **session-first** — the value the user typed into an `ask`
+  `secret: true` question, or handed over with `/credential` — then from the
+  encrypted store (the `secret` tool's).
+- The value never appears in the call, the result or a trace: every sentence
+  names the ref, and the session's redaction sink is armed with the value before
+  it is typed, so even a page that echoes it back reads `[redacted]`.
+- Nothing stored under that name? Ask the user to sign in by hand in the tab
+  (the browser drives their real session), or hand the value over with the
+  `secret` tool, then retry. Never fall back to putting the value in `text`.
+
 ### Downloading a file the page offers
 
 Seven receipts from a billing page is the case this exists for, and it is the
