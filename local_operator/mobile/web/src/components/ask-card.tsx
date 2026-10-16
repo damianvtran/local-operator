@@ -36,6 +36,7 @@
 import { useMemo, useState } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
+import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
 	askStateLine,
@@ -378,13 +379,8 @@ export function AskCard({
 					? "text-ink-dim"
 					: "text-ink-muted";
 
-	return (
-		<div
-			data-testid="ask-card"
-			data-ask-id={row.ask_id}
-			data-ask-status={String(row.status || "open")}
-			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
-		>
+	const body = (
+		<>
 			{/* THE STATE LINE STANDS DOWN WHEN THE CARD IS TERMINAL. "Queued — the
 			    agent is continuing; expires in 11 m" beside "this conversation no
 			    longer exists" is the same contradiction §5's preamble forbids — the
@@ -619,6 +615,44 @@ export function AskCard({
 					    be refused. An EXPIRED ask additionally keeps no error register at
 					    all (§5) — the remedy is in the state line. */}
 				</>
+			)}
+		</>
+	);
+
+	return (
+		<div
+			data-testid="ask-card"
+			data-ask-id={row.ask_id}
+			data-ask-status={String(row.status || "open")}
+			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
+		>
+			{lapsed && !terminal ? (
+				/* A LAPSED ASK IS COLLAPSED BEHIND ITS BADGE (decision D11, Ben's
+				   2026-10-15 request): it reads the way the desktop's declined row does,
+				   one line with a status word, and seeing it is an explicit tap. The
+				   app-wide `Disclosure` idiom, never a second collapse pattern, closed by
+				   default and taking no focus on mount (D12: a lapsed ask never claims
+				   the user). The body is the read-only card above — the lapsed line, the
+				   question, and Dismiss, which stays inside so nothing on the collapsed
+				   header can be tapped by accident. A TERMINAL row is not wrapped: its
+				   refusal sentence is the whole state and must stay readable. */
+				<Disclosure
+					headerClassName="gap-2"
+					header={
+						<>
+							<span className="shrink-0 rounded-sm border border-hairline px-1.5 text-meta text-ink-muted">
+								Timed out
+							</span>
+							<span className="min-w-0 truncate text-body-sm text-ink-muted">
+								{questions[0]?.question ?? ""}
+							</span>
+						</>
+					}
+				>
+					<div className="flex flex-col gap-2 pt-1">{body}</div>
+				</Disclosure>
+			) : (
+				body
 			)}
 		</div>
 	);
