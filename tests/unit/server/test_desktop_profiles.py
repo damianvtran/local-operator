@@ -895,3 +895,103 @@ async def test_the_effective_endpoint_names_every_layer_and_its_source(api):
 
     missing = await client.get("/v1/desktop/teams/nope/effective")
     assert missing.status_code == 404, missing.text
+
+
+async def test_the_effective_endpoint_reports_the_sentinel_the_unconfigured_tier_and_the_session(
+    api,
+):
+    """I3 + M3/I4. ``model.source`` names the layer that CHOSE the model, and
+    ``effort.value`` is the requested level whenever there is no ladder to clamp
+    against -- the frozen §1 rule: "clamped against the model's ladder only when
+    the model is known; otherwise it equals ``requested``".
+
+    Three of these shapes have no model to name (the sentinel resolves to the
+    launching SESSION's model, which a server cannot know; an unconfigured tier
+    has none; a slot with no tier inherits), and all three still report the level
+    the operator asked for rather than a null that reads as "no effort at all".
+    """
+    client, root = api
+    ConfigManager(root).set_config_value(
+        "subagents",
+        {
+            "models": {
+                "lo": "default",  # the sentinel: "run it on the session's model"
+                "hi": "anthropic/claude-opus-4-5",  # a real ladder, stops at ``high``
+                # ``med`` deliberately absent: the unconfigured tier.
+            }
+        },
+    )
+    created = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="teamwork",
+            manager="manager",
+            members=[
+                {"role": "sentinel", "kind": "agent", "count": 1, "tier": "lo", "effort": "xhigh"},
+                {"role": "unset", "kind": "agent", "count": 1, "tier": "med", "effort": "xhigh"},
+                {"role": "session", "kind": "agent", "count": 1, "effort": "high"},
+                {"role": "ladder", "kind": "agent", "count": 1, "tier": "hi", "effort": "xhigh"},
+            ],
+        ),
+    )
+    assert created.status_code == 200, created.text
+
+    report = await client.get("/v1/desktop/teams/teamwork/effective")
+    assert report.status_code == 200, report.text
+    rows = _effective(report.json())
+
+    # I3: a tier chose it, so the source is ``tier`` even though the value is null.
+    assert rows["sentinel"]["model"] == {"value": None, "source": "tier"}
+    assert rows["sentinel"]["effort"] == {
+        "value": "xhigh",
+        "requested": "xhigh",
+        "source": "team",
+    }
+    assert rows["sentinel"]["available"] is True
+
+    assert rows["unset"]["available"] is False
+    assert rows["unset"]["reason"] == "no model configured at subagents.models.med"
+    assert rows["unset"]["model"] == {"value": None, "source": "tier"}
+    assert rows["unset"]["effort"]["value"] == "xhigh"
+
+    # No tier anywhere: the model really does come from the launching session.
+    assert rows["session"]["model"] == {"value": None, "source": "session"}
+    assert rows["session"]["effort"]["value"] == "high"
+
+    # A known ladder still clamps, and keeps the requested word beside it.
+    assert rows["ladder"]["model"] == {"value": "anthropic/claude-opus-4-5", "source": "tier"}
+    assert rows["ladder"]["effort"] == {
+        "value": "high",
+        "requested": "xhigh",
+        "source": "team",
+    }
+
+
+async def test_the_effective_endpoint_does_not_clamp_against_a_model_with_no_ladder(api):
+    """Q2/M3: a tier pointing at a model the catalogue has no reasoning ladder
+    for cannot be clamped, so ``effort.value`` is the requested level.
+
+    This is the case QA measured as ``null`` against the frozen text, and the
+    reason the rule is written per-model rather than per-tier: the tier IS
+    configured and the model IS named -- there is simply nothing to clamp into.
+    """
+    client, root = api
+    ConfigManager(root).set_config_value("subagents", {"models": {"hi": "test/no-ladder-model"}})
+    created = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(
+            name="teamwork",
+            manager="manager",
+            members=[
+                {"role": "worker", "kind": "agent", "count": 1, "tier": "hi", "effort": "max"}
+            ],
+        ),
+    )
+    assert created.status_code == 200, created.text
+
+    report = await client.get("/v1/desktop/teams/teamwork/effective")
+    assert report.status_code == 200, report.text
+    worker = _effective(report.json())["worker"]
+    assert worker["available"] is True
+    assert worker["model"] == {"value": "test/no-ladder-model", "source": "tier"}
+    assert worker["effort"] == {"value": "max", "requested": "max", "source": "team"}

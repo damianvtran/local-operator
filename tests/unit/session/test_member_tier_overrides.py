@@ -906,13 +906,21 @@ def test_the_tier_vocabulary_is_re_exported_and_the_literal_matches_it():
     assert set(get_args(literal)) == set(CANONICAL_EFFORT_TIERS)
 
 
-def test_the_display_clamp_is_the_launch_clamp():
+def test_the_display_clamp_is_the_launch_clamp_where_a_ladder_exists():
     """``/effective``'s reported effort must be the level the LAUNCH would run at.
 
     Pinned as an EQUIVALENCE rather than as a table, because a table is two
     copies of the ladder rules by the time the next model lands. ``auto`` is in
     the list on purpose: it is the member's "this model's own default", not a
     rung, and the two sides have to agree about that too.
+
+    Only models WITH a ladder are compared here. Where there is no ladder the
+    contract deliberately DIVERGES from ``_with_tier_effort``: the launch leaves
+    such a spec untouched (there is nothing to clamp), while the frozen §1 rule
+    for the endpoint is that ``effort.value`` "equals ``requested``" when the
+    model is not known. That half is asserted through the endpoint itself, in
+    ``test_the_effective_endpoint_reports_the_requested_effort...``, because it is
+    the response shape P3 consumes rather than this helper.
     """
     from local_operator.model.configure import build_model_spec
     from local_operator.server.utils.desktop_profiles import _clamped_effort
@@ -924,12 +932,12 @@ def test_the_display_clamp_is_the_launch_clamp():
     for provider, model_id in (
         ("anthropic", "claude-opus-4-5"),  # ladder stops at ``high``
         ("anthropic", "claude-opus-5-5"),  # full ladder, default ``medium``
-        ("test", "unknown-model"),  # no ladder at all
     ):
         spec = build_model_spec(provider, model_id)
+        assert spec.reasoning_efforts, f"precondition: {model_id} has a ladder"
         for requested in (None, "auto", "none", "low", "medium", "high", "xhigh", "max"):
-            # Exactly the route's expression: with nothing requested, the value
-            # is what the spec already carries.
+            # Exactly the route's expression for a known model: with nothing
+            # requested, the value is what the spec already carries.
             reported = (
                 spec.reasoning_effort if requested is None else _clamped_effort(spec, requested)
             )
@@ -937,3 +945,269 @@ def test_the_display_clamp_is_the_launch_clamp():
                 spec, _member_reasoning_effort(spec, requested)
             ).reasoning_effort
             assert reported == launched, (model_id, requested)
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1: I1/M2 (fresh roster), M1/I2/Q1 (tool strictness),
+# I5 (config-read error), m1 (hand-edited conflict), m4 (row pin on a
+# team:pod ancestor), Q3 (one warning per team/value)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_launch_uses_an_override_edited_mid_session(tmp_path, monkeypatch):
+    """I1/M2, D8. The row the model came from is the one the NEXT launch sees.
+
+    ``Session.active_team`` is assigned once, at ``attach_team``, and nothing
+    refreshes it -- so a launch that read it would keep using the roster as it
+    was when the session attached the team, while ``/effective`` and the resume
+    (both registry reads) showed the edit. The P3 editor's whole loop is "edit
+    the override, then the next launch uses it", so the launch has to read the
+    same place they do.
+    """
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"lo": LO, "hi": HI})
+    registry = TeamRegistry(config)
+    team = make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="teamwork")
+    try:
+        first = await launch(session, stream, "first", agent="worker")
+        assert first.model_label == LO
+
+        # The operator edits the slot; the session is NOT re-attached.
+        registry.update_team(
+            team.id, TeamEditFields(members=[TeamMember(role="worker", tier="hi")])
+        )
+        active = session.active_team
+        assert active is not None and active.members[0].tier == "lo", (
+            "precondition: the attached object is a snapshot, which is why it "
+            "cannot be the roster a launch resolves against"
+        )
+
+        second = await launch(session, stream, "second", agent="worker")
+        assert second.model_label == HI
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_team_tool_refuses_a_bad_override_word_on_both_ops(tmp_path, monkeypatch):
+    """M1/I2/Q1, D9. ``model_copy`` skipped the validators, so the tool saved a
+    word that the next load silently dropped -- the receipt claimed a pin that
+    did not exist, and the child ran on a model the operator was not told about.
+
+    ``high`` is the natural slip (a valid EFFORT word offered while the model is
+    choosing a TIER), which is why the refused value is that one and not
+    something absurd.
+    """
+    registry = TeamRegistry(tmp_path)
+    context = ToolContext(cwd=".", team_registry=registry)
+    write_config(tmp_path, model_choice="model", models={"hi": HI})
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def call(**args: Any) -> Any:
+        return await execute_team("tc", args, None, None, context)
+
+    created = await call(op="create", name="clean", manager="m", members=["worker"])
+    assert not created.is_error, created.text
+
+    for bad in ({"member": "worker", "tier": "high"}, {"member": "worker", "effort": "warp"}):
+        refused = await call(op="update", name="clean", overrides=[bad])
+        assert refused.is_error, refused.text
+        assert "invalid arguments" in refused.text
+        # Nothing landed -- not in the row, and not in the file a reload reads.
+        stored = registry.get_team_by_name("clean")
+        assert stored is not None and stored.members[0].is_default()
+        written = next((tmp_path / "teams").glob("*/team.yml")).read_text()
+        assert "high" not in written and "warp" not in written
+
+    refused_create = await call(
+        op="create",
+        name="dirty",
+        manager="m",
+        members=["worker"],
+        overrides=[{"member": "worker", "tier": "high"}],
+    )
+    assert refused_create.is_error, refused_create.text
+    assert registry.get_team_by_name("dirty") is None
+
+    # The valid path still works, so the refusal is the word and not the feature.
+    accepted = await call(op="update", name="clean", overrides=[{"member": "worker", "tier": "hi"}])
+    assert not accepted.is_error, accepted.text
+    stored = registry.get_team_by_name("clean")
+    assert stored is not None and stored.members[0].tier == "hi"
+
+
+@pytest.mark.asyncio
+async def test_a_config_read_error_is_named_as_the_config_not_the_registry(tmp_path, monkeypatch):
+    """I5. The tier-targets read moved into the resolver, so its failure used to
+    be reported as an unreadable AGENT REGISTRY -- two different problems, with
+    two different remedies. It is a reason again, and the lenient path (session
+    naming) must not die in a retry that reads the same broken config."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", lo=LO)
+    registry = TeamRegistry(tmp_path / "config")
+    session = make_session(tmp_path, registry, RecordingStream())
+
+    def boom() -> Any:
+        raise OSError("config.yml unreadable")
+
+    monkeypatch.setattr("local_operator.harness.subagent.read_effort_tier_targets", boom)
+    try:
+        with pytest.raises(SubagentModelUnavailable) as caught:
+            session._launch_subagent(label="x", prompt="go", effort="lo")
+        assert "config could not be read" in caught.value.reason
+        assert "agent registry" not in caught.value.reason
+        assert not session.jobs.list()
+
+        # Lenient: warns, then answers "inherit". No traceback, no raised error.
+        assert session._resolve_subagent_model("task", "lo") is None
+
+        # And a MEMBER tier reaches the same reason rather than the registry's.
+        make_team(registry, "teamwork", [TeamMember(role="worker", tier="lo")])
+        team = registry.get_team_by_name("teamwork")
+        assert team is not None
+        session.attach_team(team)
+        with pytest.raises(SubagentModelUnavailable) as member_caught:
+            session._launch_subagent(label="w", prompt="go", agent="worker")
+        assert "config could not be read" in member_caught.value.reason
+    finally:
+        await session.dispose()
+
+
+def test_a_hand_edited_conflict_does_not_block_an_unrelated_save(tmp_path):
+    """m1. The conflict check is DELTA-based: a row already on disk with two
+    disagreeing slots of one name still loads (the load is lenient by design), so
+    refusing every later write would brick a row whose only fault is a hand edit
+    the operator has not got to. A write that INTRODUCES or CHANGES the conflict
+    is still refused, because that write is the one that would leave one of the
+    two slots silently inert."""
+    config = tmp_path / "config"
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="coder")])
+    path = next((config / "teams").glob("*/team.yml"))
+    path.write_text(
+        path.read_text().replace(
+            "- role: coder\n  count: 1\n  kind: agent\n",
+            "- role: coder\n  count: 1\n  kind: agent\n  tier: hi\n"
+            "- role: Coder\n  count: 1\n  kind: agent\n  tier: lo\n",
+        )
+    )
+
+    reloaded = TeamRegistry(config)
+    conflicted = reloaded.get_team_by_name("teamwork")
+    assert (
+        conflicted is not None and len(conflicted.members) == 2
+    ), "precondition: the hand-edited row still loads"
+
+    saved = reloaded.update_team(conflicted.id, TeamEditFields(description="tidy"))
+    assert saved.description == "tidy"
+
+    with pytest.raises(ValueError, match="different overrides"):
+        reloaded.update_team(
+            conflicted.id,
+            TeamEditFields(
+                members=[
+                    TeamMember(role="coder", tier="hi"),
+                    TeamMember(role="Coder", tier="med"),
+                ]
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_worker_of_a_settled_team_launch_manager_takes_the_managers_row_pin(
+    tmp_path, monkeypatch
+):
+    """m4. A ``team:pod`` launch runs as pod's MANAGER, so that manager's own row
+    pin is what the launch and the resume resolve with -- but the two walk
+    readers used the recorded ``team:pod`` TOKEN as the role, found no row of that
+    name, and fell back to the manager's recorded label. With the tier re-pointed
+    across a restart, that fallback answers the OLD model, which is exactly what
+    the walk exists to avoid."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, models={"med": MED})
+    agents = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        agents,
+        AgentParams(
+            op="create",
+            name="lead",
+            description="leads a pod",
+            instructions="Lead the pod.",
+            effort="med",
+            delegate=True,
+        ),
+        creating=True,
+    )
+    registry = TeamRegistry(config)
+    make_team(registry, "pod", [TeamMember(role="worker")], manager="lead")
+    make_team(registry, "org", [TeamMember(role="pod", kind="team")])
+
+    stream = HoldingStream(hold="manage it")
+    root = make_session(tmp_path, registry, stream, team="org", agents=agents)
+    try:
+        lead_id = root._launch_subagent(label="pod", prompt="manage it", agent="team:pod")
+        await wait_for(lambda: (r := root.subagent_comms._record(lead_id)) is not None and r.child)
+        lead = root.subagent_comms._record(lead_id).child
+        assert lead.model_label == MED
+        worker_id = lead._launch_subagent(label="worker", prompt="do the work")
+        await wait_for(lambda: completed(lead, worker_id))
+        stream.release.set()
+        await wait_for(lambda: completed(root, lead_id))
+        await root._persist_subagent_roster()
+    finally:
+        stream.release.set()
+        await root.dispose()
+
+    # Restart, and the operator re-points the tier the manager's ROW pin names.
+    write_tiers(config, med=HI)
+    after = RecordingStream()
+    revived = make_session(tmp_path, registry, after, team="org", agents=agents)
+    try:
+        text = await hub_resume(revived, worker_id)
+        new_id = resumed_id(revived, text)
+        await wait_for(lambda: completed(revived, new_id))
+        assert after.model_for(RESUME_PROMPT) == HI
+    finally:
+        await revived.dispose()
+
+
+def test_a_bad_override_word_warns_once_per_team_and_value(tmp_path, caplog):
+    """Q3. The registry re-validates every row on every refresh, so an undeduped
+    warning repeated for as long as the bad word sat in ``team.yml`` (QA measured
+    four identical pairs inside one request burst). The message still names the
+    fault, once per (team, field, value)."""
+    import logging
+    import uuid
+
+    config = tmp_path / "config"
+    registry = TeamRegistry(config)
+    make_team(registry, "teamwork", [TeamMember(role="coder")])
+    path = next((config / "teams").glob("*/team.yml"))
+    # A word no other test can have used, so the once-per-key dedupe cannot be
+    # satisfied by an earlier test in the same worker.
+    bad = f"x{uuid.uuid4().hex[:6]}"
+    path.write_text(
+        path.read_text().replace(
+            "- role: coder\n  count: 1\n  kind: agent\n",
+            f"- role: coder\n  count: 1\n  kind: agent\n  tier: {bad}\n",
+        )
+    )
+
+    # TWO registry instances, because the dedupe has to survive the reads a
+    # running process makes over time -- and a single instance would not even
+    # re-read inside its refresh interval, which is how a test can pass without
+    # exercising the repeat.
+    first_reader = TeamRegistry(config)
+    with caplog.at_level(logging.WARNING, logger="local_operator.teams"):
+        assert first_reader.list_teams(), "the row still loads"
+        first = [r for r in caplog.records if "ignoring the override" in r.getMessage()]
+        assert len(first) == 1, [r.getMessage() for r in first]
+        TeamRegistry(config).list_teams()
+        again = [r for r in caplog.records if "ignoring the override" in r.getMessage()]
+        assert len(again) == 1, "the next read must not repeat it"

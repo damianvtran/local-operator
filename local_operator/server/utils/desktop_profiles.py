@@ -192,9 +192,28 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
     availability, and the MODEL is only reported once it has been built, for the
     same reason a launch builds it: a tier that cannot produce a spec is not
     "available".
+
+    ``effort.value`` is the level the child will ACTUALLY run at when a model is
+    known to clamp against, and the requested level otherwise -- the frozen §1
+    rule: "clamped against the model's ladder only when the model is known;
+    otherwise it equals ``requested``". "Not known" covers every case with no
+    ladder in hand: the launching session's model (which a server cannot name),
+    the ``default`` sentinel, an unavailable tier, and a model whose catalogue
+    entry carries no reasoning ladder at all. ``requested`` always keeps the
+    word the operator wrote, so the pair is the contract whether or not the value
+    could be resolved -- and ``auto`` therefore surfaces as ``auto`` when there
+    is no ladder to resolve it against, which is the same answer the editor's own
+    ``value ?? requested`` fallback renders.
     """
     if resolution is not None and resolution.unavailable:
         reason = resolution.unavailable
+    requested = None if resolution is None else resolution.effort
+    # ``model.source`` answers "which layer chose the model". A tier the operator
+    # WROTE chose it, even when nothing is configured at it or it points at the
+    # session's own model through the sentinel -- so only a slot with no tier at
+    # all reports ``session``, the one case where the model really does come from
+    # the launching session (design §1's sentinel ruling, applied to every tier).
+    has_tier = resolution is not None and resolution.tier is not None
     entry: dict[str, Any] = {
         "role": str(member.role),
         "kind": str(member.kind),
@@ -202,10 +221,10 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
             "value": None if resolution is None else resolution.tier,
             "source": "none" if resolution is None else resolution.tier_source,
         },
-        "model": {"value": None, "source": "session"},
+        "model": {"value": None, "source": "tier" if has_tier else "session"},
         "effort": {
-            "value": None,
-            "requested": None if resolution is None else resolution.effort,
+            "value": requested,
+            "requested": requested,
             "source": "model_default" if resolution is None else resolution.effort_source,
         },
         "available": not reason,
@@ -218,9 +237,11 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
         return entry
     selector = resolution.selector
     if _is_sentinel(selector):
-        # The sentinel resolves to the session's model AT LAUNCH, and the
-        # desktop server is not a session: ``source: "tier"`` says a tier chose
-        # it while the value stays null, which is the honest pair.
+        # The sentinel resolves to the session's model AT LAUNCH, and the desktop
+        # server is not a session: ``source: "tier"`` says a tier chose it while
+        # the value stays null, which is the honest pair. ``effort.value`` is
+        # left as ``requested`` by the case above -- there is no ladder to clamp
+        # against.
         return entry
     provider, _, model_id = str(selector).partition("/")
     try:
@@ -232,10 +253,13 @@ def _effective_member(member: Any, resolution: Any, reason: str) -> dict[str, An
         entry["reason"] = f"{selector!r} could not be resolved ({exc})"
         return entry
     entry["model"] = {"value": f"{provider}/{model_id}", "source": "tier"}
-    requested = resolution.effort
-    entry["effort"]["value"] = (
-        spec.reasoning_effort if requested is None else _clamped_effort(spec, requested)
-    )
+    if requested is None:
+        # Nothing was asked for, so the level the model sits on IS the answer.
+        entry["effort"]["value"] = spec.reasoning_effort
+    elif spec.reasoning_efforts:
+        entry["effort"]["value"] = _clamped_effort(spec, requested)
+    # Any other model: no ladder to clamp against, so the requested level stands
+    # (the value set above is already the right answer).
     return entry
 
 
