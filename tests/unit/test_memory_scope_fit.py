@@ -52,6 +52,8 @@ def test_refusal_is_value_free(tmp_path):
         "checks green",
         "MRs #12 and #13 are waiting on review",
         "MRs rebased onto main",
+        "PR rebased onto main",
+        "the PR was merged",
         "commit cafebabe merged",
         "sha deadbeef landed",
     ],
@@ -126,6 +128,11 @@ def test_ordinary_personal_fact_not_refused(tmp_path, text):
         "mr smith lives at #12",
         "mrs okafor is at flat #4",
         "mrs tran is #1 priority",
+        # Round 4: `PR` is also permanent residency / public relations.
+        "My PR application merged into the family one",
+        "The PR agency merged with a rival",
+        "Our PR consultant squashed the rumour",
+        "I merged my notes to main folder",
     ],
 )
 def test_personal_words_that_look_workish_store(tmp_path, text):
