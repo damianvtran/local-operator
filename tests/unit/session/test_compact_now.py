@@ -230,7 +230,13 @@ async def test_a_chat_shaped_archive_replays_its_middle_as_verbatim_text(tmp_pat
     assert "compaction_summary" in (marker.provider_payload or {})
     assert not any(isinstance(block, ImageContent) for block in marker.content)
     texts = [block.text for block in marker.content if isinstance(block, TextContent)]
-    assert "".join(texts) == persisted["text"]
+    # The carry digest (when the pass mined one) rides FIRST as its own text
+    # block — retained asks/decisions/identifiers ahead of the archive bytes —
+    # then the archived source verbatim, head to tail. See
+    # ``snapcompact._with_carry_block``.
+    carry = persisted.get("carry") or ""
+    expected = (carry + "\n" if carry else "") + persisted["text"]
+    assert "".join(texts) == expected
     await session.dispose()
 
 
