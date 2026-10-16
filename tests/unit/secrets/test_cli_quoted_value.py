@@ -337,3 +337,83 @@ class TestTheQuotedWideningKeepsItsFloorsAndControls:
         scrubbed, labels = _masked(FLAG + ' "' + secret + '"')
         assert "cli-credential-flag" in labels
         assert secret not in scrubbed
+
+
+class TestAnOpenQuoteWithNoCloserDoesNotEatProse:
+    """QA round 1, Q1 (MAJOR): the unterminated branch must not run to EOL.
+
+    An earlier cut closed R2 by letting the quoted run extend to a matching
+    closer OR to end of line when there is none. That masked ordinary text
+    whenever a credential flag was followed by an opening quote and no value had
+    been opened at all — help/usage lines, docs, error text, a chained shell
+    line — which is the "a mask the operator learns to distrust" failure the
+    module docstring warns about. The unterminated branch is now bounded to a
+    SINGLE non-whitespace token, so an opening quote ahead of prose matches
+    nothing.
+
+    These are the exact shapes QA measured, kept as regressions. The prose is
+    literal text (it carries no credential), so it needs no parts-built literal.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "usage: tool " + FLAG + ' "  the api token to send',
+            "usage: tool " + FLAG + " '  the api token to use",
+            'see --password "  the password to use',
+            'error: --secret " requires a value',
+            FLAG + ' " --env prod --verbose',
+        ],
+        ids=["usage-dq", "usage-sq", "password-prose", "error-line", "chained-flags"],
+    )
+    def test_prose_after_an_opening_quote_is_not_rewritten(self, text: str) -> None:
+        scrubbed, labels = _masked(text)
+        assert scrubbed == text, scrubbed
+        assert labels == [], labels
+
+    def test_the_same_line_with_a_real_single_token_value_still_masks(self) -> None:
+        """The bound is the fix, not a retreat: a token is still a value."""
+        scrubbed, labels = _masked(FLAG + ' "' + RESIDUAL_VALUE)
+        assert "cli-credential-flag" in labels
+        assert RESIDUAL_VALUE not in scrubbed
+
+
+class TestAMultiWordUnterminatedValueIsADocumentedResidual:
+    """No closer means no knowable end, so it is left readable rather than guessed.
+
+    The rule cannot know where a multi-word unterminated value stops without a
+    delimiter, and every spelling that guessed (end-of-line) over-masked prose
+    (see the class above). The residual is stated and pinned here rather than
+    chased, so a later round that widens the unterminated branch back to EOL has
+    a row to argue against — it must not do so by resurrecting the over-mask.
+    """
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            (
+                FLAG + ' "' + RESIDUAL_VALUE + " and more",
+                FLAG + ' "' + REDACTION_MARKER + " and more",
+            ),
+            (
+                FLAG + " '" + RESIDUAL_VALUE + " and more",
+                FLAG + " '" + REDACTION_MARKER + " and more",
+            ),
+        ],
+        ids=["multiword-unterminated-dq", "multiword-unterminated-sq"],
+    )
+    def test_the_leading_token_is_masked_and_the_tail_is_the_residual(
+        self, text: str, expected: str
+    ) -> None:
+        """The FIRST token is a value and masks; the words after it are the residual.
+
+        ``--token "<credential> and more`` with no closer bound the run to the one
+        non-whitespace token, so the credential itself is gone. What stays readable
+        is the tail after it — the honest residual, not a leak: a rule that does not
+        know where the value ends cannot mask the words without a delimiter, and
+        end-of-line was the over-mask this whole class exists to refuse.
+        """
+        scrubbed, labels = _masked(text)
+        assert "cli-credential-flag" in labels, labels
+        assert RESIDUAL_VALUE not in scrubbed, scrubbed
+        assert scrubbed == expected, scrubbed
