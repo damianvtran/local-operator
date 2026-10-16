@@ -204,3 +204,136 @@ class TestNoNewFalsePositivesOnOrdinaryQuotedText:
     def test_ordinary_quoted_text_is_not_rewritten(self, text: str) -> None:
         scrubbed, _ = _masked(text)
         assert scrubbed == text, scrubbed
+
+
+#: An opaque CLI credential built FROM PARTS, for the same reason the module's own
+#: literals are: this file is read by agents through the pass it describes, so a
+#: credential-shaped literal in its source would be a leak in THEIR transcript.
+#: The two halves are joined at runtime so no single literal in the tree is the
+#: value the tests assert on.
+RESIDUAL_VALUE = "Zx9Kp2" + "-" + "Qm7Lv4Rt8"
+
+#: A double-quoted value carrying the OTHER quote inside it, and the mirror image.
+#: A shell records exactly this spelling whenever the credential itself contains a
+#: quote character, and a JSON-logged command line is the other place it appears.
+DQ_WITH_INNER_SQ = '"' + RESIDUAL_VALUE + "'" + RESIDUAL_VALUE + '"'
+SQ_WITH_INNER_DQ = "'" + RESIDUAL_VALUE + '"' + RESIDUAL_VALUE + "'"
+
+
+class TestAQuotedValueCarryingTheOtherQuoteIsMasked:
+    """R1: the other quote byte must not break the value run.
+
+    The value carrier excluded BOTH quote characters, so a value whose own bytes
+    carry the opposite quote ended the run at that byte, the quoted alternative
+    could never complete, no rule matched, and the value was published in full
+    with no hit and no notice. Both directions are pinned because the carrier
+    refuses the quote pair symmetrically.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            FLAG + " " + DQ_WITH_INNER_SQ,
+            FLAG + " " + SQ_WITH_INNER_DQ,
+        ],
+        ids=["double-with-inner-single", "single-with-inner-double"],
+    )
+    def test_the_value_is_gone(self, text: str) -> None:
+        scrubbed, labels = _masked(text)
+        assert "cli-credential-flag" in labels, labels
+        assert RESIDUAL_VALUE not in scrubbed, scrubbed
+
+    def test_the_outer_quotes_survive_and_only_the_value_goes(self) -> None:
+        """The mask keeps the delimiter and rewrites the whole interior."""
+        scrubbed, _ = _masked(FLAG + " " + DQ_WITH_INNER_SQ)
+        assert scrubbed == FLAG + ' "' + REDACTION_MARKER + '"', scrubbed
+
+    def test_the_registered_value_is_the_whole_interior(self) -> None:
+        _, hits = shapes.scrub_secrets_with_hits(FLAG + " " + DQ_WITH_INNER_SQ)
+        values = {hit.value for hit in hits if hit.label == "cli-credential-flag"}
+        assert values == {DQ_WITH_INNER_SQ.strip('"')}, values
+
+
+class TestAnUnterminatedQuotedValueIsMasked:
+    """R2: a quote with no closer must still mask the run.
+
+    ``(?(q)(?P=q))`` required the closing quote to match, so an unterminated run
+    failed the conditional, matched nothing and was published in full. A truncated
+    transcript — an echoed line, a cut-off log tail — is exactly this shape.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            FLAG + ' "' + RESIDUAL_VALUE,
+            FLAG + " '" + RESIDUAL_VALUE,
+        ],
+        ids=["unterminated-double", "unterminated-single"],
+    )
+    def test_the_value_is_gone(self, text: str) -> None:
+        scrubbed, labels = _masked(text)
+        assert "cli-credential-flag" in labels, labels
+        assert RESIDUAL_VALUE not in scrubbed, scrubbed
+
+    def test_the_opening_quote_survives(self) -> None:
+        scrubbed, _ = _masked(FLAG + ' "' + RESIDUAL_VALUE)
+        assert scrubbed == FLAG + ' "' + REDACTION_MARKER, scrubbed
+
+
+class TestTheQuotedWideningKeepsItsFloorsAndControls:
+    """The control surface R1/R2 must not move."""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            (FLAG + " " + RESIDUAL_VALUE, FLAG + " " + REDACTION_MARKER),
+            (FLAG + ' "' + RESIDUAL_VALUE + '"', FLAG + ' "' + REDACTION_MARKER + '"'),
+            (FLAG + " '" + RESIDUAL_VALUE + "'", FLAG + " '" + REDACTION_MARKER + "'"),
+        ],
+        ids=["bare-space-control", "double-quoted-control", "single-quoted-control"],
+    )
+    def test_the_q1_spellings_are_unchanged(self, text: str, expected: str) -> None:
+        scrubbed, labels = _masked(text)
+        assert scrubbed == expected, scrubbed
+        assert labels == ["cli-credential-flag"], labels
+
+    def test_a_sub_floor_quoted_value_is_untouched(self) -> None:
+        """No floor was widened: a 2-char quoted value carries no ≥3-char secret."""
+        for text in (FLAG + ' "Zx"', FLAG + " 'Zx'", FLAG + ' ""'):
+            scrubbed, _ = _masked(text)
+            assert scrubbed == text, scrubbed
+
+    def test_a_duration_flag_is_not_a_credential(self) -> None:
+        scrubbed, labels = _masked("--token-ttl=3600")
+        assert scrubbed == "--token-ttl=3600", scrubbed
+        assert labels == [], labels
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            FLAG + ' "NAME[=VALUE]"',
+            FLAG + " 'NAME[=VALUE]'",
+            '--token "$TOKEN"',
+            "--password '${CI_TOKEN}'",
+            '--secret "GITHUB_TOKEN"',
+            "--token 'OS_PROD2_ADMIN_PASSWORD'",
+        ],
+        ids=[
+            "placeholder-double",
+            "placeholder-single",
+            "expression",
+            "brace-reference",
+            "store-name",
+            "store-name-single",
+        ],
+    )
+    def test_the_guards_verdicts_still_decide_the_inner_value(self, text: str) -> None:
+        scrubbed, _ = _masked(text)
+        assert scrubbed == text, scrubbed
+
+    def test_a_quoted_value_containing_a_space_is_judged(self) -> None:
+        """The interior is the value, spaced spelling included."""
+        secret = RESIDUAL_VALUE + " and more"
+        scrubbed, labels = _masked(FLAG + ' "' + secret + '"')
+        assert "cli-credential-flag" in labels
+        assert secret not in scrubbed

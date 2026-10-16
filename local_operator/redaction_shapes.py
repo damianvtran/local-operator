@@ -4021,10 +4021,31 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # flag is the NAME of a stored secret rather than a value. See
         # ``_flag_value_guard`` and ``_value_is_a_reference_to_a_credential`` for the
         # production incident that measured it.
+        #
+        # **The quoted carrier admits the OTHER quote and a missing closer** (R1/R2
+        # follow-on). ``[^"'\n]`` refused both quote bytes, so a quoted value whose
+        # own bytes carry the opposite quote ended the run there and matched nothing —
+        # an interior ``"`` in a shell- or JSON-recorded command line whose value
+        # contains a ``'`` (and the mirror) was published in full with no hit and no
+        # notice. And the closer was a REQUIRED conditional, so an unterminated run —
+        # a truncated echo or a cut-off log tail — failed it and was published too.
+        #
+        # The value run is now temperated by the MATCHING quote alone (``(?!\1)``
+        # over ``[^\n]``), so it carries the opposite quote freely and stops at the
+        # first closer; the closer itself is optional (``(\1)?``), which masks the
+        # unterminated run to end of line. The quote bytes still sit OUTSIDE group 3,
+        # so ``--token "[redacted]"`` keeps its quotes. The run is ATOMIC
+        # (``{3,}`` inside ``(?>...)``): a greedy class with a trailing optional
+        # backreference is exactly the shape that let the engine backtrack to a
+        # shorter run and re-cut the mask (the Q2 class), and an atomic run removes
+        # that path entirely. The floors are untouched: the quoted alternative still
+        # needs three characters, so ``""`` and ``'Zx'`` stay unmasked.
         re.compile(
             r"(?i)(--"
             + _CREDENTIAL_FLAG_WORDS
-            + r"(?:=|\s+)(?P<q>\"|')?)(?P<v>(?(q)[^\"'\n]{3,}|[^\s\"']{3,}))(?(q)(?P=q))"
+            + r"(?:=|\s+)(?P<q>\"|')?)"
+            + r"(?P<v>(?(q)(?>(?:(?!(?P=q))[^\n]){3,})|[^\s\"']{3,}))"
+            + r"(?P=q)?"
         ),
         None,
         3,
