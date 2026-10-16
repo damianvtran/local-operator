@@ -27,6 +27,15 @@ failure the other frame does not show:
     group-answered        the acceptance shape with the turn's answer after
                           the run: the bar closed at the boundary, the answer
                           visible below it
+    group-hazards         a run carrying the two marked outcomes design round 1
+                          (D-4) asks to see folded: a quiet `no_reply` pair
+                          (which must NOT count as work) and a FAILED tool
+                          receipt (which must count, and keep its failure ink)
+    group-hazards-open    the same run with the bar opened: the marked members
+                          listed in place, exactly as they paint unfolded
+    group-head-cut        a windowed settled pass whose leading span was cut
+                          off the top, so the bar states the MINIMUM (`N+`)
+                          rather than a count
     hazard                the live-prose repro (F1): a receipt, a STREAMING
                           answer, another receipt — on a pre-fix tree the bar
                           folds over and hides the answer
@@ -305,6 +314,44 @@ def _seed_group_idle(app: OperatorApp) -> list[PeerMessageBlock]:
     return [first, second]
 
 
+def _seed_group_hazards(app: OperatorApp) -> list[PeerMessageBlock]:
+    """A run carrying the two outcomes design round 1 (D-4) asks to see folded:
+    a quiet `no_reply` pair and a FAILED tool receipt, under one bar.
+
+    Both are marked rows, and a bar that summed them into the same word as a
+    green tool row would be lying about the run. The quiet call must NOT count
+    as work (it is the sanctioned silent end), while the failed row must count
+    and must carry its own failure ink when the bar is opened.
+    """
+    first = PeerMessageBlock(LONG_PEER_BODY, LONG_SENDER)
+    app._append_block(first)
+    _quiet_pair(app)
+    _tool(app, "t0", "send", {"target": "lo-release-window", "message": "ack"}, "delivered")
+    second = PeerMessageBlock(SHORT_PEER_BODY, SHORT_SENDER)
+    app._append_block(second)
+    card = ToolCard("t1", "bash", {"command": "pytest tests/unit/tui -q"})
+    app._append_block(card)
+    card.mark_failed("3 failed")
+    return [first, second]
+
+
+def _persisted_peer(body: str, entry_id: str) -> Any:
+    """A persisted peer row, for the settled-page (head-cut) shape."""
+    from types import SimpleNamespace
+
+    from local_operator.harness.peer_cycle_display import PEER_MESSAGE_MESSAGE_TYPE
+
+    return SimpleNamespace(
+        role=None,
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        id=entry_id,
+        text="",
+        tool_calls=None,
+        content=[],
+        details={"body": body, "sender": {"pid": 9, "conversation_name": "other"}},
+    )
+
+
 def _seed_group_answered(app: OperatorApp) -> list[PeerMessageBlock]:
     """The idle shape plus the turn's answer after the run: the bar closes at
     the boundary (visible prose), the answer stays visible below it."""
@@ -379,6 +426,18 @@ async def main() -> None:
             blocks = _seed_group_idle(app)
         elif shape == "group-answered":
             blocks = _seed_group_answered(app)
+        elif shape == "group-hazards":
+            blocks = _seed_group_hazards(app)
+        elif shape == "group-head-cut":
+            # The head-cut read is a property of the SPAN a windowed pass saw,
+            # so it is driven through the real settled seam with a non-zero
+            # `start`, not seeded as blocks (design round 1, D-4).
+            await _settle_until(pilot, lambda: app._session is not None, label="session boot")
+            app._project_settled_rows(
+                [_persisted_peer(f"cut {i}", f"hc{i}") for i in range(4)], start=1
+            )
+            await pilot.pause()
+            blocks = []
         elif shape in ("group", "group-open", "loose"):
             blocks = _seed_group(app)
         else:
@@ -393,7 +452,7 @@ async def main() -> None:
                 if callable(toggle):
                     toggle()
             await pilot.pause()
-        elif shape == "group-open":
+        elif shape in ("group-open", "group-hazards-open"):
             # Open every bar: the frame this state exists for is the members
             # listing in place — the same widgets that paint unfolded, with
             # the bar's own one line above them.

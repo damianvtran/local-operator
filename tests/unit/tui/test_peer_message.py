@@ -1343,6 +1343,51 @@ class TestQuietGroupFold:
             assert card.display, "opening the bar lists the work it triggered"
 
     @pytest.mark.asyncio
+    async def test_the_bar_states_the_hidden_work_below_the_old_three_action_gate(self) -> None:
+        """The summary carries the KINDS the fold hides, not just the count.
+
+        Design round 1, D-1: with `mixed_actions` gated at >=3 real tools, this
+        two-receipt/one-tool run read only `messages · 2` while expanding to
+        three rows — a reader who counts got 3 != 2, and the work row (the
+        actionable kind: a real tool the operator may care about) was invisible
+        on the collapsed line. The design's fact shape (quiet-turns.md §5)
+        defines `actions` as "n non-quiet tool rows" with no such gate.
+        """
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            app._append_block(ToolCard("t1", "bash", {"command": "ls"}))
+            await pilot.pause()
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            row = bar._build_row(100).plain
+            assert "messages · 2" in row
+            assert "1 action" in row, f"the hidden work row must be stated: {row!r}"
+            assert not bar.group.mixed_actions, "the old gate did not fire, yet the clause is owed"
+            # A group with NO work states no actions clause (never `0 actions`).
+            bar.toggle_expanded()
+            await pilot.pause()
+            assert "0 action" not in row
+
+    @pytest.mark.asyncio
+    async def test_a_workless_group_states_no_actions_clause(self) -> None:
+        """The non-zero guard: receipts alone must not gain `0 actions`."""
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            row = bar._build_row(100).plain
+            assert "messages · 2" in row
+            assert "action" not in row, f"receipt-only group states no work: {row!r}"
+
+    @pytest.mark.asyncio
     async def test_a_user_row_closes_the_run_and_later_receipts_form_another_group(self) -> None:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))

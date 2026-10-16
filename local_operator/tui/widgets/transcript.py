@@ -3753,7 +3753,16 @@ class QuietGroupBlock(ExpandableActionBlock):
         # ICU selects the locale's noun form with the number, but the count label
         # stays the existing raw decimal text; formatting that selector would add
         # thousands separators and change already-reviewed English frame bytes.
-        if self.group.mixed_actions:
+        # State the work whenever the group HAS work, not only when the
+        # derivation's `mixed_actions` threshold fires. The design's fact shape
+        # (docs/design/quiet-turns.md §5) defines `actions` as "n non-quiet tool
+        # rows" with no gate, and the acceptance asks the summary to carry the
+        # KINDS the fold hides: `mixed_actions` (>=3 real tools) left a 1-2 tool
+        # run reading `messages · 2` while expanding to five rows including an
+        # outbound `send wake` — a reader who counts got 5 != 2 (design round 1,
+        # D-1). Gated on a NONZERO count so a group with no work never states
+        # `0 actions`; the one-row guarantee is in `_build_row`'s truncation.
+        if self.group.actions:
             parts.append(
                 _t(
                     tui_transcript.group_actions(
@@ -3828,7 +3837,12 @@ class QuietGroupBlock(ExpandableActionBlock):
             row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
-        row.append(summary, style=dim)
+        # The summary clause states what the fold HIDES, so it is the one span
+        # on this row a reader must be able to read: `dim` on the bar band
+        # measured 4.18:1 and failed AA, while `muted` on the same band is
+        # 7.93:1 (design round 1, D-3). The icon and hint keep `dim` — a
+        # separator/tint role, not content — so sibling ink is unchanged.
+        row.append(summary, style=muted)
         if slot:
             used = cell_len(row.plain)
             pad = max(1, width - used - cell_len(slot))
