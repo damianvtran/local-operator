@@ -610,6 +610,42 @@ def _durable_session() -> None:
     ask_store.write_entry(config_dir(), SESSION_A, cwd="/tmp/gone", asks=[_pending()])
 
 
+def _durable_ask_session(ask_id: str, *, expired: bool) -> None:
+    """The same durable, runtime-less session, with a real ask IN THE LOG.
+
+    The cold dismissal folds the LOG, so an index row with no ``queued`` event
+    behind it is not dismissible at all (there is no ask) — a test that seeded
+    only the index would be asserting the refusal while believing it tested the
+    door. ``expired`` picks the two states a dismissal distinguishes: past its
+    deadline (the one state it is offered on) and still inside it.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    _session_dir(SESSION_A)
+    directory = config_dir() / "sessions" / SESSION_A
+    asyncio.run(Transcript(directory).append_message(Message.user("existing", id="existing")))
+    now = int(time.time() * 1000)
+    ask_store.append_event(
+        directory,
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now - 3_600_000,
+            "created_at": now - 3_600_000,
+            # Past the deadline and inside the 7 d window (the state a dismissal
+            # is offered on, and the one whose notice is still owed), or still
+            # running: the refusal cell's state.
+            "expires_at": now - 60_000 if expired else now + 3_600_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [_question("q1")],
+        },
+    )
+
+
 def _cold_engage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[_FakeAskClient, list[tuple[str, object]]]:
@@ -640,17 +676,18 @@ def _cold_engage(
         ("ask_respond", {"ask_id": "ask-1", "answers": {"q1": ["yes"]}}, "answered"),
         ("ask_revise", {"ask_id": "ask-1", "answers": {"q1": ["no"]}}, "revised"),
         ("ask_decline", {"ask_id": "ask-1"}, "declined"),
-        ("ask_dismiss", {"ask_id": "ask-1"}, "dismissed"),
     ],
 )
 def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answered_with) -> None:
-    """THE ENGAGE (design §2.4), for all four settle ops.
+    """THE ENGAGE (design §2.4), for the three settle ops that NEED a runtime.
 
     The operator's bug was exactly this: a queued ask is durable so the agent
     can move on, and the relay REFUSED the answer once the runtime had exited —
     "session not connected" — so the answer was accepted by the phone and read
-    by nobody. Decline and dismiss settle the ask just as an answer does, so
-    they take the SAME arm: one engage path, four ops.
+    by nobody. Decline settles the ask just as an answer does, so it takes the
+    SAME arm: one engage path. ``ask_dismiss`` USED to be the fourth and is not
+    any more (fork A, §14): the next cell pins its own arm, and the split is the
+    point — an answer has to reach a runtime, a dismissal does not.
     """
     from local_operator.session.runtime.launch import AskErrand
 
@@ -672,6 +709,55 @@ def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answer
         assert client.calls[-1][1]["answers"] == body["answers"]
     # The engaged connection is released rather than left open by the route.
     assert client.closed is True
+
+
+def test_a_cold_dismiss_never_engages(monkeypatch) -> None:
+    """FORK A (§14): dismissing on a stopped conversation boots NOTHING.
+
+    The engage arm exists because a queued ask's READER is a runtime. A dismissal
+    has no reader: it is one append plus an index rewrite, squared against the
+    fold, and the notice it may still owe is delivered by the next real reopen.
+    Before the fork this op engaged (measured end to end: a boot, a deadline
+    notice and a PAID TURN), which is the promise the phone's card was already
+    making — "dismiss — send no reply".
+    """
+    client, engagements = _cold_engage(monkeypatch)
+    _durable_ask_session("ask-lapsed", expired=True)
+
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "dismissed"}
+    assert engagements == []
+    assert client.calls == []
+    # The dismissal is DURABLE — the phone's settled row is not a paint.
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert [event["kind"] for event in events][-1] == ask_store.EVENT_DISMISSED
+
+
+def test_a_cold_dismiss_of_an_open_ask_refuses_in_the_queues_own_words(monkeypatch) -> None:
+    """Only ``ask_owner_present`` falls back to the dial (fork A).
+
+    A refusal is the answer, not a reason to boot a runtime: an open ask is not
+    dismissible (no surface offers it, and the queue refuses it), so engaging to
+    ask a runtime the same question would spend a boot to be told the same thing.
+    The sentence is the queue's, verbatim, because a stale tap reads the same
+    words on the phone as on the TUI.
+    """
+    client, engagements = _cold_engage(monkeypatch)
+    _durable_ask_session("ask-open-1", expired=False)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-open-1"},
+    )
+
+    assert reply.status_code == 422, reply.text
+    assert reply.json()["error"] == "only a timed-out ask can be dismissed; it is still open."
+    assert engagements == []
+    assert client.calls == []
 
 
 def test_a_refused_cold_answer_keeps_the_session_claimed_active(monkeypatch) -> None:

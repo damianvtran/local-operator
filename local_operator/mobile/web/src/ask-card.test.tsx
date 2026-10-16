@@ -408,17 +408,25 @@ describe("AskCard", () => {
 		).toBeTruthy();
 	});
 
-	it("says a COLD dismissal brings the session up, before the tap", () => {
-		/* U3: the label promises "send no reply" and that stays true, but on a cold
-		   conversation the relay also brings it up to RECORD the dismissal — the
-		   conversation surfaces as active, which the copy owed the reader. */
-		const cold = renderCard(ask({ status: "timed_out", runtime_live: false }));
+	it("promises no engage for a COLD dismissal, before or during the tap", async () => {
+		/* FORK A (2026-10-16): the relay used to ENGAGE the conversation to RECORD the
+		   dismissal, so the card said so in advance (U3) and named the ~30 s while it
+		   ran. A dismissal now takes the no-boot door on every surface, so "dismiss —
+		   send no reply" is the WHOLE truth warm or cold, and the card must claim no
+		   bring-up at either moment. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise<never>(() => {}),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
 		expandLapsed();
-		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
-		cold.unmount();
-		renderCard(ask({ status: "timed_out" }));
-		expandLapsed();
-		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
+		expect(
+			screen.getByRole("button", { name: /dismiss — send no reply/ }),
+		).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		expect(screen.queryByText(/brought up to record it/)).toBeNull();
+		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		expect(screen.queryByText(/~30 s/)).toBeNull();
 	});
 
 	it("stops claiming an engage the moment the outcome is known", async () => {
