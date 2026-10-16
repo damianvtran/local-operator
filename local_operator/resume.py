@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from local_operator.harness.rows import user_row_text
 from local_operator.procstate import is_zombie, pid_liveness, process_sample
 
 # The archive index is imported at module scope deliberately: it is stdlib-only
@@ -3704,7 +3705,16 @@ def session_name(
     stored = stored_session_title(session_dir)
     if stored:
         return _condense(stored, max_chars) if condense else stored
-    opening = _opening_message(session_dir)
+    # The opener is a persisted USER ROW, so the fallback is read through the
+    # same "what did the user actually say" rule the transcript paints with.
+    # A ``$skill`` invocation persists as its EXPANDED payload, and naming a
+    # conversation after it labels this picker — and every surface that serves
+    # this same fallback, the desktop sidebar included — with the whole
+    # SKILL.md body (``docs/design/history-fold-convergence.md`` row D8).
+    # It closes the ``@path`` half of the same class too: an expansion is
+    # APPENDED to the opener, and the TUI names such a conversation from the
+    # bare token it was handed, so without this one conversation had two names.
+    opening = user_row_text(_opening_message(session_dir))
     if not opening:
         return ""
     # ``condense=False`` returns the opening text with its line breaks intact,

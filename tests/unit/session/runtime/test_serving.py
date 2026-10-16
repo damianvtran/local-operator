@@ -290,6 +290,31 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
     return handle, session
 
 
+def _skill_payload(typed: str) -> str:
+    """The persisted form of a ``$skill`` invocation: what a CLIENT sent.
+
+    Built from the REAL ``Skill`` and the REAL renderer, the way the fold-parity
+    test does it: a hand-spelled tag would pin a payload shape the product never
+    produces, and it is the payload's own ``invocation`` attribute that the fix
+    reads back. Expansion is the client's duty (a desktop renders it in
+    ``local-operator-ui``'s ``skill-invocation.ts``), which is why the harness is
+    handed this and never the typed line.
+    """
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import parse_invocation, render_invocation
+
+    skill = Skill(
+        name="research",
+        description="research things",
+        file_path=Path("/skills/research/SKILL.md"),
+        base_dir=Path("/skills/research"),
+        source="user",
+    )
+    invocation = parse_invocation(typed, {"research": skill})
+    assert invocation is not None
+    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+
+
 def test_default_conversation_name_is_empty_not_a_placeholder() -> None:
     """A fresh mobile session shows nothing until named, so the phone's own
     fallback ("untitled" / cwd) applies — never a frozen "mobile session"."""
@@ -1104,6 +1129,53 @@ async def test_first_prompt_wears_a_provisional_title_before_the_model_answers()
     # Failure released the latch and stashed the opener for a route-edge retry.
     assert handle._name_requested is False
     assert handle._pending_name_text == "review what regressed in mobile titles"
+
+
+@pytest.mark.asyncio
+async def test_a_skill_payload_names_the_conversation_after_the_typed_line() -> None:
+    """D8: the opener is the SENT payload, and the title must not be.
+
+    A desktop expands ``$skill`` client-side, so this handle is handed the
+    payload. Naming from it wore the payload's own header as the conversation's
+    name — "The user invoked the `research` skill…" — and put the whole SKILL.md
+    body in the phone's list row. The typed line rides the payload's
+    ``invocation`` attribute, so that is what the label and the generation
+    prompt are derived from.
+    """
+    handle, session = make_handle()
+    payload = _skill_payload("$research the widget market")
+    assert "SKILL_BODY_MARKER" in payload
+
+    handle._maybe_name_conversation(payload)
+
+    # The stand-in the list wears is the typed line, not the payload.
+    assert handle._fold.projection.conversation_name == "$research the widget market"
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # And the opener the title is GENERATED from is the typed line too: the body
+    # never reaches the naming call, in either half of the message it sends.
+    assert session._complete_calls, "no naming call was made"
+    for _system, prompt in session._complete_calls:
+        assert "$research the widget market" in prompt
+        assert "SKILL_BODY_MARKER" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_ordinary_prose_is_still_named_from_itself() -> None:
+    """Negative control: the collapse is a payload reader, not a new normaliser.
+
+    A message that is not a rendered payload must reach naming character for
+    character — the WIDGET case is an ordinary one-turn request.
+    """
+    handle, session = make_handle()
+
+    handle._maybe_name_conversation("reconcile the widget market figures")
+
+    assert handle._fold.projection.conversation_name == "Reconcile the widget market figures"
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert "reconcile the widget market figures" in session._complete_calls[0][1]
 
 
 @pytest.mark.asyncio
