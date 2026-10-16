@@ -163,19 +163,43 @@ def _fold(text: str) -> str:
 
 # Work/lane/progress locators and status verbs. GLOBAL memory is for durable user facts;
 # MR/CI/release status and lane next-steps belong in a session bank. These patterns are
-# deliberately narrow: they name a tracker ref, a status verb, or an explicit next-step
-# phrase, and are only ever matched against the FOLDED copy (never stored or echoed).
-_WORK_REF = re.compile(r"(?<![\w#])#\d{1,6}\b|(?<![\w!])!\d{1,6}\b", re.I)
+# deliberately narrow: they require WORK CONTEXT next to the locator, and are only ever
+# matched against the FOLDED copy (never stored or echoed).
+#
+# QA round 1 (M-1): a bare `#N` is how people write chapters, order/invoice/room/seat
+# and extension numbers (`Office #4`, `order #1123`), and `next step`/`HOLD` occur in
+# ordinary prose (`next step is to fold in the flour`, `a HOLD on the cheque`). A locator
+# alone is therefore NOT a marker: it must sit next to a work word.
+_WORK_WORD = (
+    r"pr|mrs?|pull request|merge request|issue|ticket|ci|pipeline|build|checks?|commit|"
+    r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
+    r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
+)
+_WORK_REF = re.compile(
+    r"\b(?:" + _WORK_WORD + r")\b[^.\n]{0,24}(?<![\w#])#\d{1,6}\b"
+    r"|(?<![\w#])#\d{1,6}\b[^.\n]{0,24}\b(?:" + _WORK_WORD + r")\b"
+    r"|(?<![\w!])!\d{1,6}\b",
+    re.I,
+)
 _WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+[0-9a-f]{7,40}\b", re.I)
+_WORK_NOUN = r"pr|mr|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
 _WORK_STATUS = re.compile(
     r"\b(?:ci|pipeline|build|checks?)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
     r"\b"
     r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}\b(?:pr|mr|#\d|into main)\b"
     r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:the )?(?:release|version|v\d)"
-    r"|\bnext step\b|\bnext lane\b|\bremaining work\b",
+    r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
+    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
+    r"|\bremaining work\b",
     re.I,
 )
-_WORK_HOLD = re.compile(r"(?<![\w-])HOLD(?![\w-])")
+# A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI, not a
+# bank/parcel/dry-cleaner hold an ordinary person records.
+_WORK_HOLD = re.compile(
+    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + _WORK_NOUN + r")\b"
+    r"|\b(?:" + _WORK_NOUN + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+    re.I,
+)
 
 
 def work_progress_markers(text: str) -> list[str]:
