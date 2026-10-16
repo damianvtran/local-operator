@@ -120,6 +120,9 @@ class AskQueue:
         #: test, it is a hope (AGENTS.md, timing section).
         self._now = clock or _now_ms
         self._timer: asyncio.Task[None] | None = None
+        #: Set by :meth:`arm` while a timer is alive: its current plan may miss a
+        #: deadline added since it was made (see :meth:`_run_timer`).
+        self._timer_stale = False
         self._disposed = False
         #: Row ids handed to delivery by THIS process. SCHEDULING DEDUPE ONLY
         #: (amended 2026-10-04): it closes the gap between handing a message to
@@ -1891,16 +1894,40 @@ class AskQueue:
     # -- the in-runtime timer ----------------------------------------------
 
     def arm(self) -> None:
-        """Ensure exactly ONE deadline timer task exists for this session."""
+        """Ensure exactly ONE deadline timer task exists for this session.
+
+        A live task is kept, but told its plan is stale: a timer waiting on a
+        lapsed row's window edge does not re-read the log each tick (see
+        :meth:`_run_timer`), so a change that may have added an earlier deadline
+        — every enqueue and reconcile ends here — must wake it to re-plan.
+        """
         if self._disposed:
             return
         if self._timer is not None and not self._timer.done():
+            self._timer_stale = True
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # no loop yet; the next reconcile (from a turn or boot) arms
         self._timer = loop.create_task(self._run_timer())
+
+    def rearm(self) -> None:
+        """Replace the timer task, so its next wake is planned from scratch.
+
+        For a change :meth:`arm` cannot see from inside a sleep: the
+        ``asks.lapsed_visible_for`` window itself (QA round 1, Q2). A task
+        already asleep holds a delay computed with the OLD window — up to a full
+        tick with an open ask present, and the whole wait to the old edge with
+        lapsed rows only — so a row crossing the new window soon after the edit
+        was hidden late or never. Cancelling and re-creating it plans with the
+        new window at once.
+        """
+        task = self._timer
+        self._timer = None
+        if task is not None and not task.done():
+            task.cancel()
+        self.arm()
 
     async def _run_timer(self) -> None:
         """Sleep to the earliest deadline (≤60 s granularity), then reconcile.
@@ -1916,14 +1943,24 @@ class AskQueue:
         running session would keep painting a row the setting says is gone
         until the next turn happened to republish. The reconcile at the wake
         ends in ``_refresh`` → ``publish_ask_state``, which re-reads the window.
-        The window is read per loop, so a changed setting takes effect at the
-        next tick (the session also republishes at once on the change itself).
+        A changed window replaces this task (:meth:`rearm`), so the next wake
+        is planned with it.
+
+        WITH AN OPEN ASK the loop is today's: re-fold and reconcile every tick.
+        WITH LAPSED ROWS ONLY nothing can move but the clock, so it waits to the
+        window edge in the same bounded ticks (a suspend or clock change still
+        costs at most one tick) WITHOUT re-reading the log or reconciling on
+        each — at the 7 d default that was a log read and fold every minute for
+        a week (review round 1, R1-4). Anything that could add an earlier
+        deadline goes through :meth:`arm`, which flags the plan stale and sends
+        the loop back to re-read.
         """
         try:
             while not self._disposed:
                 now = self._now()
                 records = self.records(now)
                 due = [int(r["expires_at"]) for r in records if r["status"] == store.STATUS_OPEN]
+                has_open = bool(due)
                 window = self.lapsed_visible_ms()
                 due.extend(
                     # ``+ 1``: the horizon is strict (``now - expires_at >
@@ -1936,17 +1973,21 @@ class AskQueue:
                 )
                 if not due:
                     return
-                delay_s = min(policy.MAX_TICK_MS, max(0, min(due) - now)) / 1000.0
-                await asyncio.sleep(max(0.05, delay_s))
+                target = min(due)
+                if has_open:
+                    delay_s = min(policy.MAX_TICK_MS, max(0, target - now)) / 1000.0
+                    await asyncio.sleep(max(0.05, delay_s))
+                    if self._disposed:
+                        return
+                    await self.reconcile()
+                    continue
+                self._timer_stale = False
+                while not self._disposed and not self._timer_stale and self._now() < target:
+                    delay_s = min(policy.MAX_TICK_MS, target - self._now()) / 1000.0
+                    await asyncio.sleep(max(0.05, delay_s))
                 if self._disposed:
                     return
-                # An OPEN ask keeps today's every-tick reconcile. A queue with
-                # only lapsed rows reconciles when a window has actually passed:
-                # at the 7 d default it would otherwise rewrite the index and
-                # republish every minute for a week, for a row nothing changed.
-                if any(r["status"] == store.STATUS_OPEN for r in records) or self._now() >= min(
-                    due
-                ):
+                if self._now() >= target:
                     await self.reconcile()
         except asyncio.CancelledError:
             return

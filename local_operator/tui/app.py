@@ -27066,16 +27066,21 @@ class OperatorApp(App[None]):
         should look like.
         """
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         counts: dict[str, int] = {}
         total = 0
-        for session_id, entry in store.read_index(config_dir()).items():
-            asks = entry.get("asks")
-            outstanding = len(store.outstanding_asks(asks if isinstance(asks, list) else []))
-            if outstanding:
-                counts[session_id] = outstanding
-                total += outstanding
+        # Through ``index_asks`` — the SAME reader, window and re-derivation the
+        # fleet list uses (``_load_fleet_asks``) — so a mark or ``asks: N`` never
+        # counts a row the list it opens will not show (``asks.lapsed_visible_for``,
+        # decision D8; review round 1, R1-1).
+        root = config_dir()
+        for row in store.index_asks(root, lapsed_visible_ms=lapsed_visible_ms(root)):
+            if store.is_outstanding(row.get("status")):
+                session_id = str(row.get("session_id") or "")
+                counts[session_id] = counts.get(session_id, 0) + 1
+                total += 1
         return counts, total
 
     def _expand_asks(self, ask_id: str | None = None, *, by_policy: bool = False) -> None:
