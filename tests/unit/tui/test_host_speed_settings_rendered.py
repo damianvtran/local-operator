@@ -283,24 +283,65 @@ def ui_proof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         assert getattr(app, "_notifier", None) is None
 
 
+async def _await_transcript_scroll_settled(proof, pilot, *, tries: int = 400) -> None:
+    """Await the transcript's OWN scroll completion before sampling a frame.
+
+    WHY THIS REPLACES A PRE-LOOP SETTLE. A single
+    ``pilot.wait_for_scheduled_animations()`` before the loop did NOT stop the
+    between-sample motion (CI run 38842431374: the two ownership frames still
+    differed by exactly two rows at both widths). The published sidecar says why:
+    the transcript's ``virtual_size`` is IDENTICAL in both frames ([96, 47]), so
+    nothing was appended between the samples -- the scroll OFFSET moved. Both
+    moved cards shift by the same two rows, which is an offset change, not a
+    relayout and not new content.
+
+    The producer is an in-flight ANIMATED scroll. The fixture calls
+    ``card.scroll_visible(immediate=True)``, and ``animate`` defaults to True;
+    Textual's ``immediate=True`` only skips the ``call_after_refresh`` deferral --
+    it still routes to ``_scroll_to(animate=True)``, which animates over the
+    default duration. ``wait_for_scheduled_animations`` is a CPU-idle heuristic
+    (20 ms granularity, 1 s cap) and so is not a completion condition for that
+    animation.
+
+    So this waits on the harness's own named state, the same predicate
+    ``tests/unit/tui/test_rendered_history_paging.py`` uses: the animator is no
+    longer driving this view's ``scroll_y`` AND the scroll has reached its
+    target. That is a bounded await on a completion condition, NOT polling until
+    the two geometries happen to agree (still forbidden) and NOT a longer idle
+    guess. Running it before EACH sample is the point: motion that begins after
+    sample 1 is covered by sample 2's own wait.
+
+    ``tries`` is a wedge backstop, not the assertion: a transcript that never
+    settles fails loudly here rather than silently shipping an unstable pair.
+    """
+    view = proof.app._transcript_view()
+    for _ in range(tries):
+        await pilot.pause()
+        if (
+            not proof.app.animator.is_being_animated(view, "scroll_y")
+            and view.scroll_y == view.scroll_target_y
+        ):
+            # One extra beat for the anchor/gap settle the growth queued after
+            # the scroll landed (the pattern the paging tests use).
+            await pilot.pause()
+            return
+    raise AssertionError(
+        "transcript scroll never settled before capture; "
+        f"animating={proof.app.animator.is_being_animated(view, 'scroll_y')} "
+        f"scroll_y={view.scroll_y} target={view.scroll_target_y}"
+    )
+
+
 async def capture_pair(proof, pilot, case: str, phase: str) -> set[str]:
     """Use the existing active-screen exporter; keep unviewed evidence labelled."""
     from scripts.visual_capture import save_capture
 
     proof.output.mkdir(exist_ok=True)
     generated: set[str] = set()
-    # Settle ONCE before either sample. The observed two-row motion is the
-    # transcript tail's scroll animator reacting to a row arriving (design round
-    # 3, D2 and its viewed frames), and this primitive is the harness's own sync
-    # for exactly that class: it waits for animator completion plus the
-    # message/callback-scheduled reflow that follows. ``pilot.pause()`` already
-    # drains the ``call_later`` pump, so the added value here is animator
-    # completion. LIMIT, stated plainly: this does NOT await a not-yet-completed
-    # async task -- an in-flight ``to_thread`` or provider call can still land
-    # between the samples. It is NOT polling until the two geometries agree, and
-    # it adds no tolerance or dropped field.
-    await pilot.wait_for_scheduled_animations()
     for frame in ("post-pause-1", "post-pause-2"):
+        # Settle BEFORE each sample: a pre-loop settle alone let an in-flight
+        # animated card scroll continue into the second sample.
+        await _await_transcript_scroll_settled(proof, pilot)
         await pilot.pause()
         stem = f"{case}-{phase}-{frame}"
         target = proof.output / f"{stem}.svg"
@@ -436,23 +477,22 @@ def publish_proof(
 async def test_capture_pair_settles_before_sampling_both_frames(monkeypatch, tmp_path):
     """Ordered control for the sampling ORDER/contract only.
 
-    No clock, no App, no exporter: a stub pilot records call order and a stub
-    writer records each export, so this pins that the settle precedes BOTH
-    samples and fails if it is moved after the first sample or dropped. SCOPE
-    LIMIT: because it stubs the primitive, it CANNOT detect whether the real
-    ``wait_for_scheduled_animations`` returns before a receipt has arrived -- it
-    proves placement, never completion. Design round 3's viewed frames are the
-    separate evidence for the benign motion itself.
+    The settle helper is stubbed, so this pins that a settle runs before EACH
+    sample (once per frame) and fails if it is moved after a sample or dropped.
+    SCOPE LIMIT: because the helper is stubbed, this proves placement, never
+    completion -- it cannot detect whether the real predicate returns before the
+    motion. Design round 3's viewed frames and the published sidecars are the
+    separate evidence about the motion itself.
     """
     import scripts.visual_capture as visual_capture
 
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     order: list[str] = []
 
-    class _OrderPilot:
-        async def wait_for_scheduled_animations(self) -> None:
-            order.append("settle")
+    async def fake_settle(_proof, _pilot, **_kwargs) -> None:
+        order.append("settle")
 
+    class _OrderPilot:
         async def pause(self) -> None:
             order.append("sample")
 
@@ -471,6 +511,7 @@ async def test_capture_pair_settles_before_sampling_both_frames(monkeypatch, tmp
         )
         return str(target)
 
+    monkeypatch.setattr(sys.modules[__name__], "_await_transcript_scroll_settled", fake_settle)
     monkeypatch.setattr(visual_capture, "save_capture", fake_save_capture)
     proof = SimpleNamespace(
         root=tmp_path / "synthetic-order",
@@ -481,7 +522,14 @@ async def test_capture_pair_settles_before_sampling_both_frames(monkeypatch, tmp
         case_note="Synthetic ordered control; not rendered evidence.",
     )
     generated = await capture_pair(proof, _OrderPilot(), "host-speed-100x30", "happy")
-    assert order == ["settle", "sample", "export", "sample", "export"]
+    assert order == [
+        "settle",
+        "sample",
+        "export",
+        "settle",
+        "sample",
+        "export",
+    ]
     assert generated == {
         "host-speed-100x30-happy-post-pause-1.svg",
         "host-speed-100x30-happy-post-pause-1.geometry.json",
