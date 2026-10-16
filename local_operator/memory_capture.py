@@ -74,6 +74,67 @@ def policy(config: Path) -> dict[str, Any]:
     }
 
 
+def carry_rows(carry: str, *, limit: int = 12) -> list[dict[str, Any]]:
+    """Memory candidates from an archive's carry digest.
+
+    WHY the carry, when ``extract`` already scans a locator set: the scan reads
+    ``recovery_text``, which samples only a bounded head and tail of the pre-cut
+    prefix. Measured on the operator's own session (439818272d84, pass 45): that
+    sample covered 10.4% of a 9.6 M-char prefix and MISSED 2,584 of 3,524
+    locators (73%) — and missed every operator ask and decision in the middle
+    entirely, because prose carries no locator. The carry is the pass's own
+    deterministic digest of exactly the material that was about to be dropped
+    (see :mod:`local_operator.compaction.mine`), so feeding it here closes that
+    gap with no extra model call and no second scan of the transcript.
+
+    Bounded and de-duplicated like every other capture source: at most
+    ``limit`` rows, each already trimmed to its tier's item cap by the miner.
+    Only ``stated`` material (an operator ask, a decision the assistant stated)
+    is promoted as a fact body; identifiers are added by the caller's existing
+    locator scan over the same digest, so the two do not double-store.
+    """
+    if not carry:
+        return []
+    from local_operator.compaction.mine import parse_carry
+
+    parsed = parse_carry(carry)
+    rows: list[dict[str, Any]] = []
+    for item in parsed.asks:
+        rows.append({"title": item[:100], "body": item, "tags": ["ask"]})
+    for item in parsed.decisions:
+        rows.append({"title": item[:100], "body": item, "tags": ["decision"]})
+    if len(rows) < limit:
+        for item in parsed.identifiers:
+            rows.append({"title": item[:100], "body": item, "tags": ["locator"]})
+    return rows[:limit]
+
+
+def carry_digest(carry: str) -> str:
+    """The summary-slot digest lines for a carry, so ``extract``'s semantic arm
+    can mint buckets from a pass that has no model summary (snapcompact).
+
+    Renders the carry under the headings ``extract`` already recognises
+    (``Goal``/``Key Decisions``/``Progress``/``Critical Context``), so the
+    semantic arm works UNCHANGED and no new fact grammar is introduced.
+    """
+    if not carry:
+        return ""
+    from local_operator.compaction.mine import parse_carry
+
+    parsed = parse_carry(carry)
+    lines: list[str] = []
+    if parsed.asks:
+        lines.append("# Goal")
+        lines.extend(f"- {item}" for item in parsed.asks)
+    if parsed.decisions:
+        lines.append("# Key Decisions")
+        lines.extend(f"- {item}" for item in parsed.decisions)
+    if parsed.identifiers:
+        lines.append("# Critical Context")
+        lines.extend(f"- {item}" for item in parsed.identifiers)
+    return "\n".join(lines)
+
+
 def snapshot(messages: list[Any]) -> str:
     """Bound before serialising; images/tool objects/environment are never ingested."""
     head: list[str] = []
@@ -317,11 +378,18 @@ async def finish(
     task: asyncio.Task[Any],
     summary: str,
     committed_at: float | None = None,
+    carry: str = "",
 ) -> str:
     try:
         rows = await asyncio.wait_for(asyncio.shield(task), timeout=2)
-        # Summary parsing is deterministic, not another provider request.
+        # Summary parsing is deterministic, not another provider request. The
+        # carry digest renders under the SAME sections extract already reads, so
+        # a snapcompact pass (no model summary) still yields semantic facts —
+        # the retained asks and decisions — instead of only locators.
         rows = rows + await asyncio.to_thread(extract, "", summary)
+        if carry:
+            rows = rows + carry_rows(carry)
+            rows = rows + await asyncio.to_thread(extract, "", carry_digest(carry))
         await asyncio.to_thread(persist, store, marker_id, rows[:52], "ok", committed_at)
         return "ok"
     except asyncio.CancelledError:
@@ -408,7 +476,9 @@ async def _session_tail(session: Any) -> str:
                 payload = marker.payload
                 preserve = payload.get("preserve_data") or {}
                 summary = "" if preserve.get("snapcompact") else payload.get("summary", "")
-                terminal = await finish(store, marker.id, task, summary, marker.ts)
+                snap = preserve.get("snapcompact") if isinstance(preserve, dict) else None
+                carry_text = str(snap.get("carry") or "") if isinstance(snap, dict) else ""
+                terminal = await finish(store, marker.id, task, summary, marker.ts, carry_text)
                 session._memory_terminal = (marker.id, terminal)
 
             session._spawn_background(recover())
@@ -449,7 +519,8 @@ def hint(store: MemoryStore, marker_id: str) -> str:
     text = (
         (
             f"Context compacted; {state[1]} candidates captured to session memory. "
-            "Search/read memory:// for paths and links. Store goals and decisions explicitly."
+            "Search/read memory:// for paths and links, retained asks and decisions. "
+            "Store goals and decisions explicitly."
         )
         if state[0] == "ok"
         else (

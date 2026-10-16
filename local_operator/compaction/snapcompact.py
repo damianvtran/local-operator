@@ -50,6 +50,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
 
 from .api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_CHARS
+from .mine import (
+    CARRY_TOKEN_BUDGET,
+    carry_digest_lines,
+    merge_carry,
+    mine_carry,
+    parse_carry,
+    render_carry,
+)
 from .png import encode_grayscale_png
 from .tokens import _CHARS_PER_TOKEN_FALLBACK, estimate_tokens
 
@@ -128,6 +136,7 @@ __all__ = [
     "frame_token_estimate_for",
     "replayed_frame_count",
     "CROSS_RULER_SLOPE_MARGIN",
+    "carry_token_budget",
 ]
 
 
@@ -303,6 +312,17 @@ def _edge_chars_for(shape: Shape, context_window: int | None) -> int:
     per_edge_chars = (pair_token_budget // 2) * _CHARS_PER_TOKEN_FALLBACK
     # Never below one page: some verbatim anchor always beats none.
     return max(shape.capacity, min(default, per_edge_chars))
+
+
+def carry_token_budget() -> int:
+    """Tokens this archive reserves for the carry digest, inside its own budget.
+
+    A one-line indirection over :data:`~local_operator.compaction.mine.CARRY_TOKEN_BUDGET`
+    so the reservation is named once and ``compact_to_archive``'s budget loop
+    reads it through the same module that bounds the carry's characters —
+    keeping the char cap and the token reservation from drifting apart.
+    """
+    return CARRY_TOKEN_BUDGET
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +631,20 @@ class Archive(BaseModel):
     #: or short means the archive replays all-image, which is also what every
     #: pre-policy archive does.
     page_digests: list[str] = Field(default_factory=list)
+    #: The never-page-truncated, TIER-RANKED carry digest (see
+    #: :mod:`local_operator.compaction.mine`). This is the field that stops the
+    #: cliff: each pass mines the pages it is about to DROP into this digest and
+    #: folds the previous pass's carry in, so material that has been carried is
+    #: no longer lost when its page goes — successive passes stop re-truncating
+    #: the same history. It lives OUTSIDE :attr:`text` deliberately: ``text`` is
+    #: the next pass's fold source and re-enters the edge/paginate/drop path, so
+    #: a carry folded into it would be truncated again; kept separate it is
+    #: replayed as leading plain text and merged forward untouched.
+    #:
+    #: Additive and optional, exactly like ``middle_kinds``: absent means the
+    #: archive carries no digest (every pre-carry archive, and any pass whose
+    #: mined material was empty), which replays byte-identically to before.
+    carry: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # ``frames`` is raw PNG bytes in memory and base64 text on disk, and the
@@ -738,6 +772,7 @@ def compact_to_archive(
     *,
     max_frames: int = DEFAULT_MAX_FRAMES,
     context_window: int | None = None,
+    previous_carry: str | None = None,
 ) -> Archive:
     """Run one snapcompact pass over discarded ``messages``.
 
@@ -800,9 +835,10 @@ def compact_to_archive(
 
     pages = _paginate(image_text, shape)
     truncated_chars = 0
+    dropped_pages: list[str] = []
     if len(pages) > max_frames:
-        dropped = pages[: len(pages) - max_frames]
-        truncated_chars = sum(len(p) for p in dropped)
+        dropped_pages.extend(pages[: len(pages) - max_frames])
+        truncated_chars = sum(len(p) for p in dropped_pages)
         pages = pages[len(pages) - max_frames :]
 
     # Token budget: drop oldest middle pages until the replayed archive fits a
@@ -815,12 +851,20 @@ def compact_to_archive(
     # round through tiktoken.
     per_frame = frame_token_estimate_for(provider, model_id)
     if pages and context_window and context_window > 0:
-        budget = max(per_frame, int(context_window * 0.5))
+        # Reserve the carry's tokens inside the SAME budget the pages compete
+        # for: the carry is mined from what this loop drops, so pricing the
+        # archive without it would let the pass commit above its own target —
+        # the "a pass meant to get under the line ends up above it" failure
+        # this budget exists to prevent, one layer down. The carry's cost is
+        # charged whether or not this pass mints anything (a prior carry is
+        # carried forward), which is the conservative side.
+        budget = max(per_frame, int(context_window * 0.5)) - carry_token_budget()
         edge_tokens = estimate_archive_tokens(
             Archive(frames=[], text_head=text_head, text_tail=text_tail)
         )
         while pages and edge_tokens + len(pages) * per_frame > budget:
             truncated_chars += len(pages[0])
+            dropped_pages.append(pages[0])
             pages = pages[1:]
 
     # ONE cumulative marker for everything both passes dropped, appended
@@ -832,6 +876,25 @@ def compact_to_archive(
     # the budget is an estimate with a 2x reserve, not an invoice.
     if truncated_chars:
         text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
+
+    # The carry: mine the pages this pass is about to DROP into a bounded,
+    # tier-ranked digest and fold the previous pass's carry in. This is the
+    # step that stops the cliff — without it the dropped pages are re-folded
+    # from ``Archive.text`` next pass and re-truncated again, so the oldest
+    # material is lost a little more on every pass. With it, material that has
+    # been mined survives as plain text even after its page is dropped. The
+    # carry is stored OUTSIDE ``text`` (see ``Archive.carry``), so it never
+    # re-enters the edge/paginate/drop path that ``previous_text`` does.
+    #
+    # Only the DROPPED pages are mined, not the kept ones: the kept pages stay
+    # readable as pages (text or frames), so mining them too would double the
+    # archive's readable payload for no retention gain. Pages dropped by EITHER
+    # budget (the frame cap or the token budget) are covered.
+    dropped_text = "\n".join(dropped_pages)
+    fresh = mine_carry(dropped_text) if dropped_text else mine_carry("")
+    prior = parse_carry(previous_carry or "")
+    merged = merge_carry(prior, fresh)
+    carry = render_carry(merged)
 
     # Replay policy, decided per page while the pages are in hand: text when
     # the page stays cheaper even under the worst measured provider/local
@@ -859,6 +922,7 @@ def compact_to_archive(
         truncated_chars=truncated_chars,
         middle_kinds=middle_kinds,
         page_digests=page_digests,
+        carry=carry,
     )
 
 
@@ -1057,7 +1121,9 @@ def history_blocks(
     kinds = archive.middle_kinds
     pages = _policy_pages(archive)
     if pages is not None and len(pages) == len(kinds):
-        return _policy_middle_blocks(archive, pages, max_frame_data_bytes)
+        return _with_carry_block(
+            archive, _policy_middle_blocks(archive, pages, max_frame_data_bytes)
+        )
 
     # Legacy all-image replay — byte-for-byte what this function always did.
     kept_positions, omitted = _retained_image_positions(
@@ -1077,7 +1143,31 @@ def history_blocks(
         )
     if archive.text_tail:
         blocks.append({"kind": "text", "text": archive.text_tail})
-    return blocks
+    return _with_carry_block(archive, blocks)
+
+
+def _with_carry_block(archive: Archive, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prepend the carry digest as the OLDEST readable block, when present.
+
+    The carry is the tier-ranked digest of material this archive's passes have
+    dropped (see :mod:`local_operator.compaction.mine`). It replays FIRST so the
+    model reads the retained key facts — operator asks, decisions, identifiers
+    — before the frames and edges, exactly as a chronological oldest-first read
+    would. ``Archive.carry`` empty (every pre-carry archive, and a pass that
+    mined nothing) returns the blocks untouched, so those replays stay byte for
+    byte what they were; every existing caller that does not read the carry
+    keeps its old output.
+    """
+    carry = (archive.carry or "").strip()
+    if not carry:
+        return blocks
+    # Trailing newline ON the block, not implied by the join: rendered marker
+    # parts are separate content blocks a provider may concatenate with no
+    # separator, so without it the digest's last line would glue onto the
+    # oldest edge's first line (measured: "...helper[User]..."). Ending the
+    # block keeps the readable text block sequence well-formed however a host
+    # joins them.
+    return [{"kind": "text", "text": carry + "\n"}, *blocks]
 
 
 # ---------------------------------------------------------------------------
@@ -1168,6 +1258,17 @@ def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
         "- If an exact earlier detail matters and a section is unclear, re-derive"
         " it from the workspace (re-read files, re-run commands) rather than guess."
     )
+    # A bounded digest of the carry, so the text slot is a REAL digest and not
+    # only reading instructions: the model gets the retained asks, decisions and
+    # identifiers without OCR-ing the frames. Bounded hard (2,000 chars) and
+    # derived entirely from the archive, so it can never contradict the frames
+    # and never costs a model call (the pass stays local/deterministic).
+    if archive.carry:
+        digest = carry_digest_lines(parse_carry(archive.carry))
+        if digest:
+            lines.append("")
+            lines.append("Retained digest from earlier history (still on disk above):")
+            lines.extend(digest)
     return "\n".join(lines)
 
 
@@ -1186,5 +1287,11 @@ def estimate_archive_tokens(archive: Archive) -> int:
                 + "\n".join(page for page, kind in zip(pages, archive.middle_kinds) if kind == "t")
                 + archive.text_tail
             )
+    # The carry rides as leading plain text (see ``history_blocks``), so it is
+    # priced with the text ruler beside the edges — the reservation in
+    # ``compact_to_archive``'s budget loop is what keeps this honest before the
+    # carry exists.
+    if archive.carry:
+        text = archive.carry + "\n" + text
     text_tokens = estimate_tokens(Message.assistant(text)) if text else 0
     return text_tokens + frames * FRAME_TOKEN_ESTIMATE

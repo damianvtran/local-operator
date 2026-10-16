@@ -114,9 +114,13 @@ inventory/consolidation guidance; it never evicts explicit or pinned facts.
 
 A concurrent deterministic scan captures bounded safe locators (paths, URLs,
 contacts, thread/PR references and secret names). Context-full additionally
-reuses semantic sections of its existing summary. Snapcompact has **no model
-summary**, so old unstored goals/decisions can age out: explicitly retain them.
-No extra inference call or model fork is made. Capture cannot block compaction;
+reuses semantic sections of its existing summary. Snapcompact still makes **no
+model-summary call**, but its pass now carries a bounded, tier-ranked digest of
+the material it drops (operator asks, decisions, identifiers), and capture reads
+that digest too — so retained asks and decisions become session facts instead of
+aging out with the frames. Automatic capture remains best-effort: explicitly
+retain goals and decisions anyway. No extra inference call or model fork is made.
+Capture cannot block compaction;
 its terminal hint arrives at the next ordinary provider boundary and never
 wakes a session. A crash between commit and capture is retried idempotently.
 

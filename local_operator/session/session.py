@@ -21585,6 +21585,18 @@ class Session:
 
                 self._memory_recovery_marker = memory_marker.id
 
+                # The snapcompact archive's carry digest, if this pass minted
+                # one: handed to capture so the retained asks/decisions become
+                # memory://session facts deterministically, rather than relying
+                # on the bounded locator scan over a sampled prefix (which
+                # misses them). Empty for a context-full pass and for a
+                # snapcompact pass whose mine found nothing.
+                carry_text = ""
+                if isinstance(preserve_data, dict):
+                    snap = preserve_data.get("snapcompact")
+                    if isinstance(snap, dict):
+                        carry_text = str(snap.get("carry") or "")
+
                 async def complete_memory_capture() -> None:
                     try:
                         terminal = await finish(
@@ -21593,6 +21605,7 @@ class Session:
                             plan.memory_capture[0],
                             summary if plan.strategy == "context-full" else "",
                             memory_marker.ts,
+                            carry_text,
                         )
                     except asyncio.CancelledError:
                         # A cancelled capture left no watermark. Re-arm the recovery that
@@ -22243,6 +22256,7 @@ class Session:
                     effective.model_id,
                     self._previous_archive_text(),
                     context_window=effective.context_window,
+                    previous_carry=self._previous_archive_carry(),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
@@ -22289,6 +22303,28 @@ class Session:
         if isinstance(snap, dict) and snap.get("text"):
             return str(snap["text"])
         return entry.payload.get("summary")
+
+    def _previous_archive_carry(self) -> str | None:
+        """The latest archive's carry digest, so a pass MERGES into the retained
+        material rather than restarting it.
+
+        The carry is the tier-ranked digest of what earlier passes dropped (see
+        :mod:`local_operator.compaction.mine`). Unlike ``_previous_archive_text``
+        — which the next pass re-folds through the edge/paginate/drop path, and
+        which is therefore re-truncated a little on every pass — the carry is
+        passed SEPARATELY and merged whole, which is what stops the same
+        material being dropped again and again. ``None`` (no prior archive, a
+        context-full prior pass, or an archive written before this field
+        existed) simply starts a fresh carry.
+        """
+        entry = self._transcript.latest_entry("compaction")
+        if entry is None:
+            return None
+        preserve = entry.payload.get("preserve_data") or {}
+        snap = preserve.get("snapcompact")
+        if isinstance(snap, dict) and snap.get("carry"):
+            return str(snap["carry"])
+        return None
 
     #: Output cap for :meth:`complete_once`, and the only bound on what a model
     #: that ignores the output format can bill us for. The cap counts EVERY
