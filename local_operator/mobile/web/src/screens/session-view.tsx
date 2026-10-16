@@ -641,11 +641,14 @@ export function SessionScreen({
 		if (jobId || !projection || !connected) return;
 		if (!askOpenPolicy.awaiting(sessionId)) return;
 		const ids = answerableAsks.map((row) => row.ask_id);
+		/* ONE clock for both: the lapse test in `readQueue` and the policy's own
+		   open window must judge the same instant. */
+		const now = Date.now();
 		const decision = askOpenPolicy.decide(
 			sessionId,
-			readQueue(projection.asks, projection.asks_open),
+			readQueue(projection.asks, projection.asks_open, now),
 			{
-				nowMs: Date.now(),
+				nowMs: now,
 				occupied:
 					blocking !== null || aTextFieldHoldsTheKeyboard() || anotherSheetIsOpen(),
 				surfaceOpen: asksOpen,

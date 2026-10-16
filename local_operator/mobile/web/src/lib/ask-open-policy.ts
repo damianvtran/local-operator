@@ -108,6 +108,8 @@ export const OPEN_WINDOW_MS = 45_000;
 export interface PolicyAskRow {
 	ask_id: string;
 	status?: string;
+	/** Epoch ms; absent or 0 means no deadline. */
+	expires_at?: number;
 }
 
 /** An ask the user can still act on: open, or timed out and still answerable.
@@ -117,6 +119,20 @@ export interface PolicyAskRow {
 function isAnswerableStatus(status: string | undefined): boolean {
 	const value = status ?? "open";
 	return value === "open" || value === "timed_out";
+}
+
+/** An ask whose deadline has passed: the agent took its default and moved on.
+ *
+ *  The same rule as ``lib/asks.ts`` ``isLapsed`` (``timed_out``, or ``open`` with
+ *  a deadline at or before the phone's clock — the index keeps reporting
+ *  ``open`` for a runtime stopped before its deadline), restated over the two
+ *  fields for the same reason as above. */
+function isLapsedRow(row: PolicyAskRow, nowMs: number): boolean {
+	const value = row.status ?? "open";
+	if (value === "timed_out") return true;
+	if (value !== "open") return false;
+	const expires = Number(row.expires_at) || 0;
+	return expires > 0 && expires <= nowMs;
 }
 
 /**
@@ -136,19 +152,31 @@ function isAnswerableStatus(status: string | undefined): boolean {
  * positive tally: the outstanding asks are the ones the bound dropped, and
  * calling that "settled" would spend the view's one decision on a claim the frame
  * contradicts.
+ *
+ * A LAPSED ASK IS NOT PENDING for this decision. Its card offers no answer (the
+ * phone shows it read-only), and a stopped conversation's screen now carries its
+ * asks from the index — Ben's 2026-10-15 specimens are exactly that: past their
+ * deadline, the agent long since moved on. Opening the modal sheet over the
+ * conversation for them would spend the view's one open on a queue with nothing
+ * to answer, so a frame of only lapsed rows reads like settled ones (clause 3).
+ * The tally still counts them outstanding (the store's contract), so the
+ * dropped-rows guard compares the tally with the outstanding rows NAMED, lapsed
+ * or not: a larger tally still means a row the frame does not carry.
  */
 export function readQueue(
 	rows: readonly PolicyAskRow[] | undefined | null,
 	tally: number | undefined | null,
+	nowMs: number = Date.now(),
 ): QueueReading {
 	const published = Array.isArray(rows) ? rows : [];
 	if (published.length > 0) {
-		if (published.some((row) => isAnswerableStatus(row?.status))) return "pending";
-		// Rows, and none of them outstanding. That is "everything addressed" only if
-		// the tally agrees: ``asks_open`` counts outstanding asks BEFORE the wire's
+		const outstanding = published.filter((row) => isAnswerableStatus(row?.status));
+		if (outstanding.some((row) => !isLapsedRow(row, nowMs))) return "pending";
+		// Rows, and none of them answerable now. That is "everything addressed" only
+		// if the tally agrees: ``asks_open`` counts outstanding asks BEFORE the wire's
 		// text bound drops rows, and the drop order keeps newer settled rows over an
 		// older timed-out one.
-		if (typeof tally === "number" && tally > 0) return "unresolved";
+		if (typeof tally === "number" && tally > outstanding.length) return "unresolved";
 		return "settled";
 	}
 	if (tally === 0) return "empty";
