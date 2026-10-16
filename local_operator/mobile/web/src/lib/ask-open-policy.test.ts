@@ -86,6 +86,37 @@ describe("readQueue — what ONE frame says about the queue", () => {
 	it("treats a row with no status as open (the wire's default)", () => {
 		expect(readQueue([{ ask_id: "a1" }], undefined)).toBe("pending");
 	});
+
+	it("does not call a queue of LAPSED asks pending — nothing in it can be answered", () => {
+		/* A stopped conversation's screen now carries its asks from the index, and
+		   Ben's specimens are exactly that: past their deadline, the agent long
+		   since moved on. The card shows them read-only, so opening the modal
+		   sheet over the conversation for them would spend the view's one open
+		   on a queue with nothing to answer. Every row is addressed as far as an
+		   answer goes, and the tally (which counts them outstanding) is the
+		   store's word for "not settled", so the reading is the one clause 3
+		   gives settled rows: SETTLED, and the view stays closed. */
+		const at = 10_000;
+		expect(readQueue([{ ask_id: "t", status: "timed_out" }], 1, at)).toBe("settled");
+		expect(readQueue([{ ask_id: "o", status: "open", expires_at: at - 1 }], 1, at)).toBe("settled");
+		expect(
+			readQueue(
+				[
+					{ ask_id: "t", status: "timed_out" },
+					{ ask_id: "o", status: "open", expires_at: at },
+				],
+				2,
+				at,
+			),
+		).toBe("settled");
+		/* The dropped-rows guard still holds: a tally larger than the lapsed rows
+		   named means an outstanding row the frame does not carry. */
+		expect(readQueue([{ ask_id: "t", status: "timed_out" }], 2, at)).toBe("unresolved");
+		/* An open ask whose deadline is still ahead is still pending. */
+		expect(readQueue([{ ask_id: "f", status: "open", expires_at: at + 60_000 }], 1, at)).toBe(
+			"pending",
+		);
+	});
 });
 
 describe("namesEveryOutstanding — what a dismissal is judged on", () => {
