@@ -309,6 +309,23 @@ def test_the_span_helper_reads_like_a_person_wrote_it():
 # --- the withdrawn state's sentence, and the withdraw op's own copy ----------
 
 
+def test_a_dismissed_ask_has_its_own_word_on_both_doors():
+    """UX round 1, U3 = QA Q3 = agent review MINOR-4: a dismissed ask is not "declined".
+
+    ``refusal_copy`` answered an answered-or-dismissed ask with "you already
+    declined this." — a word for a decision the user never took — and
+    ``dismiss_refusal`` answered a REPEAT dismissal with the lapsed-only sentence
+    ("…is still open."), which says the opposite of what happened. Both doors
+    read one constant, so the phone's second tap and a stale sheet cannot be told
+    apart by the wording.
+    """
+    dismissed = _record(status=store.STATUS_DISMISSED)
+    assert render.refusal_copy(dismissed) == "you already dismissed this."
+    assert render.dismiss_refusal(dismissed) == "you already dismissed this."
+    # The declined case keeps its own sentence, and the two must not swap.
+    assert render.refusal_copy(_record(status=store.STATUS_DECLINED)) == "you already declined this."
+
+
 def test_a_withdrawn_ask_refuses_with_the_chat_route():
     """DESIGN §12's sentence, verbatim: a withdrawn ask's answer box hides
     everywhere (it is not outstanding), so a stale tap must be told the ONE

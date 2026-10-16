@@ -995,6 +995,40 @@ async def test_a_refused_fleet_dismiss_says_so_in_the_asks_own_words(
     assert record == {}
 
 
+async def test_an_unexpected_fleet_dismiss_failure_is_worded_as_a_dismissal(
+    enabled, isolated_index, monkeypatch
+):
+    """Design round 1, D2: the TUI's fallback sentence must name the act that failed.
+
+    ``_fleet_ask_worker``'s fallback is "the answer could not be delivered", which
+    is the right sentence for the three ops that HAVE an answer to deliver — and
+    the wrong one for a dismissal, whose whole promise is that nothing is sent. It
+    fires only when the exception carries no message (every refusal from
+    ``dismiss_cold`` carries its own), and then the user is told an answer failed
+    to arrive when no answer was ever in play.
+    """
+    from local_operator.asks import dismiss as dismiss_module
+
+    async def boom(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+        # The empty-message shape this branch is about — a write error with no
+        # sentence of its own is exactly what D2 measured.
+        raise RuntimeError("")
+
+    monkeypatch.setattr(dismiss_module, "dismiss_cold", boom)
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b2", status="timed_out")])
+    app = _app()
+    seen: list[str] = []
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        monkeypatch.setattr(app, "_ask_gesture_refusal", lambda text: seen.append(text))
+        row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "dismiss", None)
+    assert seen == ["the dismissal could not be recorded."]
+    assert record == {}
+
+
 async def test_a_refused_fleet_answer_says_so_in_the_asks_own_words(
     enabled, isolated_index, monkeypatch
 ):

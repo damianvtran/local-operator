@@ -261,6 +261,26 @@ def test_only_a_timed_out_ask_can_be_dismissed(tmp_path: Path):
     assert "still open" in outcome["error"]
 
 
+def test_a_repeat_dismissal_says_the_ask_is_already_dismissed(tmp_path: Path):
+    """The LIVE door's half of the dismissed sentence (U3 = Q3 = MINOR-4).
+
+    A second dismissal used to answer "only a timed-out ask can be dismissed; it
+    is still open." on this path too — the row is dismissed, not open, and the
+    sentence said the opposite of what the user had just done. The cold door
+    (``asks/dismiss.py``) returns the same words, because both read
+    ``render.dismiss_refusal``.
+    """
+    queue = _queue(tmp_path, FakeSession(), now=BASE + 200_000)
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 200_000
+    assert queue.dismiss(ask_id, by="terminal")["ok"] is True
+    assert queue.dismiss(ask_id, by="terminal") == {
+        "ok": False,
+        "error": "you already dismissed this.",
+    }
+
+
 def test_decline_is_terminal_on_write(tmp_path: Path):
     queue = _queue(tmp_path, FakeSession())
     ask_id = queue.enqueue(_questions(), None)["details"]["ask_id"]
