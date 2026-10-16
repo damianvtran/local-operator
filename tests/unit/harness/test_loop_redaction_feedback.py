@@ -1585,6 +1585,99 @@ async def test_q3_actual_write_durable_provider_and_fork_no_longer_publish_body_
     assert _DIFF_DETAIL_WITHHELD not in repr(diff), "the valid hunk must be processed, not refused"
 
 
+@pytest.mark.asyncio
+async def test_q3_actual_edit_publishes_whole_blocks_when_context_would_split_them(tmp_path):
+    """An EDIT whose framing falls outside the hunk must still be contained.
+
+    ``write`` was covered first; the EDIT half failed independently (QA round 1
+    on PR #2471): a benign middle-line edit between two complete blocks leaves
+    each hunk holding body rows with the armour outside the context window, so
+    no single view carries a credential and the body rows published in the
+    result, the durable row, the provider history and the fork. The producer now
+    widens the hunk, and this drives the REAL path, end to end.
+    """
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.builtin import build_edit_tool, build_read_tool
+    from local_operator.variables import VariableStore
+
+    pem, prefix = _q3_pem()
+    middle = "Middle guidance "
+    document = f"Public starting line.\n{pem}{middle}111.\n{pem}"
+    target = tmp_path / "synthetic-q3-edit.md"
+    target.write_text(document)
+    requests: list[Any] = []
+    calls = [
+        ("edit", {"path": str(target), "old_text": middle + "111.", "new_text": middle + "222."}),
+        ("read", {"path": str(target)}),
+    ]
+
+    def provider(request, signal=None):
+        index = len(requests)
+        requests.append(request)
+
+        async def generate():
+            if index < len(calls):
+                name, args = calls[index]
+                yield StreamToolCallDelta(
+                    index=0, id=f"q3e-{index}", name=name, argument_delta=json.dumps(args)
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return generate()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=100000),
+        stream_fn=provider,
+        tools=[build_edit_tool(), build_read_tool()],
+        transcript=Transcript(tmp_path / "sessions" / "q3editsynthetic1"),
+        system_blocks_provider=lambda *_: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    await session.prompt("Run the synthetic edit and read")
+    history = list(session.transcript.build_llm_history())
+    tools = [message for message in history if message.role == "tool"]
+    assert len(tools) == 2
+    observed = {
+        "published": prefix not in repr([message.model_dump() for message in tools]),
+        "durable": prefix not in session.transcript.path.read_text(),
+        "provider": prefix not in repr(requests[-1]),
+    }
+    fork_id, omitted, _ = await session.transcript.fork_snapshot()
+    assert not omitted
+    fork = Transcript(tmp_path / "sessions" / fork_id)
+    observed["fork"] = prefix not in fork.path.read_text()
+    assert [message.model_dump() for message in fork.build_llm_history()] == [
+        message.model_dump() for message in history
+    ]
+    assert all(observed.values()), observed
+    # The EDIT result must be a PROCESSED diff, not a withheld field: the whole
+    # point is that the block is now visible to the seam and masked there.
+    payload = tools[0].provider_payload
+    assert isinstance(payload, dict)
+    details = payload.get("details")
+    assert isinstance(details, dict)
+    diff = details.get("diff")
+    assert isinstance(diff, list)
+    from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
+
+    assert _DIFF_DETAIL_WITHHELD not in repr(diff), "the widened hunk must be processed"
+    assert REDACTION_MARKER in "\n".join(diff)
+    assert any(middle in line for line in diff), "the benign edit stays readable"
+    # The disk holds the edited document exactly: publication changed, bytes did not.
+    assert target.read_text() == document.replace(middle + "111.", middle + "222.")
+
+
 class TestQ3BoundedDiffProjection:
     @pytest.mark.asyncio
     async def test_multiple_spans_preserve_unique_benign_middle_and_metadata(self, tmp_path):
@@ -1722,6 +1815,47 @@ class TestQ3BoundedDiffProjection:
         out = _redact_diff_detail(rows, callback)
         assert out[0] == _DIFF_DETAIL_WITHHELD
         assert all(row == "" for row in out[1:])
+
+    def test_a_context_only_hunk_is_refused_not_projected(self):
+        """A hunk with no ``+``/``-`` row claims a change it does not carry.
+
+        Plan v2 requires at least one changed row per hunk. Accepting a
+        context-only hunk was the shape that let an unchanged body row sit in a
+        hunk while the armour lived in another, so it is now refused outright
+        (review round 1, R1) rather than projected through the callback.
+        """
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
+
+        rows = [
+            "--- ",
+            "+++ ",
+            "@@ -1,2 +1,2 @@",
+            " context one",
+            " context two",
+        ]
+        calls: list[str] = []
+        out = _redact_diff_detail(rows, lambda text: calls.append(text) or text)
+        assert not calls, "a context-only hunk must not reach the callback"
+        assert out[0] == _DIFF_DETAIL_WITHHELD
+        assert all(row == "" for row in out[1:])
+
+    def test_a_hunk_with_one_changed_row_still_processes(self):
+        from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD, _redact_diff_detail
+
+        rows = [
+            "--- ",
+            "+++ ",
+            "@@ -1,2 +1,2 @@",
+            " context one",
+            "-old value",
+            "+new value",
+        ]
+        out = _redact_diff_detail(rows, lambda text: text)
+        assert out[0] != _DIFF_DETAIL_WITHHELD, "a real change still processes"
+        assert "new value" in repr(out)
 
     @pytest.mark.parametrize(
         "case",

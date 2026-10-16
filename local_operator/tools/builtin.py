@@ -10186,6 +10186,37 @@ _DIFF_DETAILS_CAP_LINES = 200
 _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
 
 
+#: One unified-diff hunk header. Counts default to 1 when omitted, which the
+#: grammar allows for a single-line side.
+_DIFF_HUNK_HEADER = re.compile(
+    r"@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@"
+)
+
+
+def _complete_pem_blocks(lines: Sequence[str]) -> list[tuple[int, int]]:
+    """Inclusive ``[header, end]`` ranges of complete PRIVATE KEY armour blocks.
+
+    The existing deciders are the authority for both ends, so this cannot drift
+    from the rule that decides what is a credential: a header with no matching
+    end is NOT a block (the truncated-header residual stays where the shape
+    rules already state it). One linear pass per side, resumed past each block,
+    so a file full of blocks still costs O(lines) once.
+    """
+    blocks: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        if pem_header_line_end(lines[index]) is not None:
+            end = index
+            while end < len(lines) and not pem_end_line(lines[end]):
+                end += 1
+            if end < len(lines):
+                blocks.append((index, end))
+                index = end + 1
+                continue
+        index += 1
+    return blocks
+
+
 def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     """The write/edit tool-result details: line counts + a rendered unified diff.
 
@@ -10194,21 +10225,219 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     diff view describe the SAME change and can never disagree about what
     happened. The diff itself powers the TUI's expanded view; it is capped
     (see ``_DIFF_DETAILS_CAP_LINES``) so the persisted details stay bounded.
+
+    A private-key block that a hunk CUTS is kept whole here, on its own side.
+    The editor's default context (``n=2``) can place body rows inside a hunk
+    while the BEGIN/END armour sits outside it, and then no single view holds a
+    credential: the publication seam's rule needs the whole span, so the body
+    rows would be judged as ordinary prose and published. The fix belongs at the
+    producer because the framing is only knowable here — the consumer sees rows,
+    not the file. Context grows into the EQUAL gap difflib already found, so no
+    line is added to or removed from the change itself: ``added``/``removed``
+    stay a fact about the file states, and executor bytes are untouched.
     """
     added, removed = _line_delta(before, after)
     if not added and not removed:
         return {"path": str(path), "added": 0, "removed": 0}
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
     diff = list(
         difflib.unified_diff(
-            before.splitlines(),
-            after.splitlines(),
+            before_lines,
+            after_lines,
             lineterm="",
             n=2,
         )
     )
+    diff = _keep_pem_blocks_whole(diff, before_lines, after_lines)
     if len(diff) > _DIFF_DETAILS_CAP_LINES:
         diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
     return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+
+
+def _keep_pem_blocks_whole(
+    diff: list[str], before_lines: Sequence[str], after_lines: Sequence[str]
+) -> list[str]:
+    """Widen hunks so a complete PRIVATE KEY block is never split across the edge.
+
+    Every decision reads OBSERVED rows. A hunk's source slice is derived by
+    walking its TAGS (a context row consumes one before AND one after line, a
+    ``-`` row only a before one, a ``+`` row only an after one), so an
+    interleaved change maps correctly instead of being inferred from the
+    header's start alone, and the walk is checked against the DECLARED counts.
+
+    The widened rows are re-rendered from the SOURCE SLICES with the same
+    sequence matcher difflib uses, then checked against the original change
+    rows. A rendering that cannot be verified — or a cut block that cannot be
+    kept whole — emits the producer's truncation marker instead, so the
+    publication seam withholds the whole field rather than publishing body
+    rows: the failure direction is "hidden", never "leaked".
+    """
+    parsed = _parse_diff_hunks(diff)
+    if parsed is None:
+        return diff
+    old_blocks = _complete_pem_blocks(before_lines)
+    new_blocks = _complete_pem_blocks(after_lines)
+    widened: list[tuple[int, int, int, int, list[str]]] = []
+    for old_start, old_count, new_start, new_count, rows in parsed:
+        old_end = _cover_end(old_start, old_start + old_count, old_blocks)
+        new_end = _cover_end(new_start, new_start + new_count, new_blocks)
+        widened.append(
+            (
+                min(old_start, _cover_start(old_start, old_start + old_count, old_blocks)),
+                old_end,
+                min(new_start, _cover_start(new_start, new_start + new_count, new_blocks)),
+                new_end,
+                rows,
+            )
+        )
+    out = diff[:2]
+    for old_start, old_end, new_start, new_end, rows in _merge_touching(widened):
+        rendered = _render_hunk_rows(
+            before_lines[old_start:old_end], after_lines[new_start:new_end]
+        )
+        if rendered is None or not _same_change_rows(rows, rendered):
+            # Cannot prove the widened rendering: mark the payload truncated so
+            # the consumer withholds it. Never publish a split block.
+            return diff[:2] + ["…"]
+        out.append(
+            _format_hunk_header(
+                old_start + 1, old_end - old_start, new_start + 1, new_end - new_start
+            )
+        )
+        out.extend(rendered)
+    return out
+
+
+def _parse_diff_hunks(diff: list[str]) -> list[tuple[int, int, int, int, list[str]]] | None:
+    """``(old_start, old_count, new_start, new_count, rows)`` per hunk, 0-based.
+
+    ``None`` when any header is unparsable or a hunk's rows do not reproduce its
+    declared counts — the caller then leaves the diff exactly as difflib made
+    it, because a widening derived from an unverifiable mapping would move rows
+    nobody can trace back to a file.
+    """
+    hunks: list[tuple[int, int, int, int, list[str]]] = []
+    index = 2
+    while index < len(diff):
+        header = _DIFF_HUNK_HEADER.match(diff[index])
+        if header is None:
+            return None
+        old_count = int(header.group(2) or 1)
+        new_count = int(header.group(4) or 1)
+        rows: list[str] = []
+        old_seen = new_seen = 0
+        index += 1
+        while index < len(diff) and not diff[index].startswith("@@"):
+            tag = diff[index][:1]
+            if tag == " ":
+                old_seen += 1
+                new_seen += 1
+            elif tag == "-":
+                old_seen += 1
+            elif tag == "+":
+                new_seen += 1
+            else:
+                return None
+            rows.append(diff[index])
+            index += 1
+        if old_seen != old_count or new_seen != new_count:
+            return None
+        hunks.append(
+            (int(header.group(1)) - 1, old_count, int(header.group(3)) - 1, new_count, rows)
+        )
+    return hunks or None
+
+
+def _cover_start(start: int, end: int, blocks: Sequence[tuple[int, int]]) -> int:
+    """The leftmost line of any complete block this slice OVERLAPS (else ``start``)."""
+    left = start
+    for block_start, block_end in blocks:
+        if block_start > end or block_end < start:
+            continue
+        left = min(left, block_start)
+    return left
+
+
+def _cover_end(start: int, end: int, blocks: Sequence[tuple[int, int]]) -> int:
+    """The exclusive end covering any complete block this slice OVERLAPS."""
+    right = end
+    for block_start, block_end in blocks:
+        if block_start > end or block_end < start:
+            continue
+        right = max(right, block_end + 1)
+    return right
+
+
+def _merge_touching(
+    hunks: Sequence[tuple[int, int, int, int, list[str]]]
+) -> list[tuple[int, int, int, int, list[str]]]:
+    """Merge hunks whose widened slices now meet, in source order.
+
+    ``difflib`` emits hunks sorted and non-overlapping, and widening only grows
+    a slice into the equal gap that separates it from its neighbour, so ONE
+    left-to-right pass is sufficient.
+    """
+    merged: list[tuple[int, int, int, int, list[str]]] = []
+    for old_start, old_end, new_start, new_end, rows in hunks:
+        if merged and old_start <= merged[-1][1] and new_start <= merged[-1][3]:
+            previous = merged[-1]
+            merged[-1] = (
+                previous[0],
+                max(previous[1], old_end),
+                previous[2],
+                max(previous[3], new_end),
+                previous[4],
+            )
+            continue
+        merged.append((old_start, old_end, new_start, new_end, list(rows)))
+    return merged
+
+
+def _render_hunk_rows(before_slice: Sequence[str], after_slice: Sequence[str]) -> list[str] | None:
+    """The tagged rows for two source slices, in the unified-diff spelling.
+
+    The matcher runs over LINES with autojunk off so no long unchanged run is
+    treated as noise, and the opcodes are rendered exactly as ``unified_diff``
+    renders them (a ``replace`` emits its removed lines then its added ones).
+    """
+    rows: list[str] = []
+    matcher = difflib.SequenceMatcher(None, list(before_slice), list(after_slice), autojunk=False)
+    for tag, old_from, old_to, new_from, new_to in matcher.get_opcodes():
+        if tag == "equal":
+            rows.extend(" " + line for line in before_slice[old_from:old_to])
+        elif tag == "delete":
+            rows.extend("-" + line for line in before_slice[old_from:old_to])
+        elif tag == "insert":
+            rows.extend("+" + line for line in after_slice[new_from:new_to])
+        elif tag == "replace":
+            rows.extend("-" + line for line in before_slice[old_from:old_to])
+            rows.extend("+" + line for line in after_slice[new_from:new_to])
+        else:  # pragma: no cover - get_opcodes yields only the four above
+            return None
+    return rows
+
+
+def _same_change_rows(original: Sequence[str], rendered: Sequence[str]) -> bool:
+    """Whether both renderings describe the SAME change (order-independent tags).
+
+    Unchanged context rows may legitimately differ in number between the narrow
+    and the widened rendering — that is the whole point of widening. The change
+    itself may not: the removed and added rows must match as multisets, or the
+    widened rendering is not describing the edit difflib proved.
+    """
+    removed = sorted(line for line in original if line[:1] == "-")
+    added = sorted(line for line in original if line[:1] == "+")
+    return removed == sorted(line for line in rendered if line[:1] == "-") and added == sorted(
+        line for line in rendered if line[:1] == "+"
+    )
+
+
+def _format_hunk_header(old_start: int, old_count: int, new_start: int, new_count: int) -> str:
+    """``@@ … @@`` with the omitted-count spelling for a one-line side."""
+    old = str(old_start) if old_count == 1 else f"{old_start},{old_count}"
+    new = str(new_start) if new_count == 1 else f"{new_start},{new_count}"
+    return f"@@ -{old} +{new} @@"
 
 
 def _marker_introduced(before: str, after: str) -> int:
