@@ -373,6 +373,25 @@ describe("AskCard", () => {
 		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
 	});
 
+	it("says a cold dismissal starts a turn when the deadline notice is still owed", () => {
+		/* Report 3 (2026-10-16): dismissing a lapsed ask on a stopped conversation
+		   started a turn. The engage that records the dismissal boots the runtime,
+		   whose boot reconcile delivers the deadline notice the agent was never
+		   given (`delivered: false` on a timed-out ask) — an idle delivery runs
+		   one turn. The card promised the opposite. Where the notice already
+		   landed (`delivered: true`) the boot owes nothing and no turn runs. */
+		const owed = renderCard(ask({ status: "timed_out", runtime_live: false, delivered: false }));
+		expect(
+			screen.getByText(
+				"the conversation is brought up to record it, and the agent runs a turn to read the deadline notice it has not seen yet.",
+			),
+		).toBeTruthy();
+		owed.unmount();
+		renderCard(ask({ status: "timed_out", runtime_live: false, delivered: true }));
+		expect(screen.getByText("the conversation is brought up to record it.")).toBeTruthy();
+		expect(screen.queryByText(/runs a turn/)).toBeNull();
+	});
+
 	it("stops claiming an engage the moment the outcome is known", async () => {
 		/* UX round 2, U5: `setBusy("")` lived only in the catch, so a SUCCESSFUL
 		   answer left the card asserting `bringing the session up — this can take up
