@@ -7,6 +7,8 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from ..messages import Msg
 
 
@@ -42,7 +44,7 @@ def usage_amount_unknown() -> Msg:
     return Msg("relay.shell.usage.amount_unknown", {})
 
 
-def usage_as_of(*, value: str) -> Msg:
+def usage_as_of(*, value: datetime) -> Msg:
     return Msg("relay.shell.usage.as_of", {"value": value})
 
 
@@ -78,7 +80,7 @@ def usage_family_caps() -> Msg:
     return Msg("relay.shell.usage.family_caps", {})
 
 
-def usage_fraction(*, value: str) -> Msg:
+def usage_fraction(*, value: int | float) -> Msg:
     return Msg("relay.shell.usage.fraction", {"value": value})
 
 
@@ -98,12 +100,31 @@ def usage_paid() -> Msg:
     return Msg("relay.shell.usage.paid", {})
 
 
-def usage_remaining(*, value: str, unit: str) -> Msg:
+def usage_remaining(*, value: int | float, unit: str) -> Msg:
     return Msg("relay.shell.usage.remaining", {"value": value, "unit": unit})
 
 
-def usage_reset(*, value: str) -> Msg:
+def usage_remaining_percent(*, value: int | float) -> Msg:
+    return Msg("relay.shell.usage.remaining_percent", {"value": value})
+
+
+def usage_remaining_unknown_unit(*, value: int | float) -> Msg:
+    return Msg("relay.shell.usage.remaining_unknown_unit", {"value": value})
+
+
+def usage_reset(*, value: datetime) -> Msg:
     return Msg("relay.shell.usage.reset", {"value": value})
+
+
+def usage_row(*, label: str, window: str, value: str) -> Msg:
+    return Msg("relay.shell.usage.row", {"label": label, "window": window, "value": value})
+
+
+def usage_row_family(*, label: str, family: str, window: str, value: str) -> Msg:
+    return Msg(
+        "relay.shell.usage.row_family",
+        {"label": label, "family": family, "window": window, "value": value},
+    )
 
 
 def usage_stale() -> Msg:
@@ -118,12 +139,36 @@ def usage_unavailable() -> Msg:
     return Msg("relay.shell.usage.unavailable", {})
 
 
+def usage_unit_credits(*, count: int | float) -> Msg:
+    return Msg("relay.shell.usage.unit_credits", {"count": count})
+
+
+def usage_unit_requests(*, count: int | float) -> Msg:
+    return Msg("relay.shell.usage.unit_requests", {"count": count})
+
+
+def usage_unit_tokens(*, count: int | float) -> Msg:
+    return Msg("relay.shell.usage.unit_tokens", {"count": count})
+
+
+def usage_unit_usd() -> Msg:
+    return Msg("relay.shell.usage.unit_usd", {})
+
+
 def usage_unlimited() -> Msg:
     return Msg("relay.shell.usage.unlimited", {})
 
 
-def usage_used(*, value: str, unit: str) -> Msg:
+def usage_used(*, value: int | float, unit: str) -> Msg:
     return Msg("relay.shell.usage.used", {"value": value, "unit": unit})
+
+
+def usage_used_percent(*, value: int | float) -> Msg:
+    return Msg("relay.shell.usage.used_percent", {"value": value})
+
+
+def usage_used_unknown_unit(*, value: int | float) -> Msg:
+    return Msg("relay.shell.usage.used_unknown_unit", {"value": value})
 
 
 def usage_window_five() -> Msg:
