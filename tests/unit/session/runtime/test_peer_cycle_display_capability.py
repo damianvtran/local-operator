@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from typing import Any
 
 import pytest
 from pydantic import ConfigDict, create_model
@@ -85,10 +86,7 @@ async def test_optional_display_archive_on_all_three_real_routes(tmp_path, route
         else:
             assert "peer_cycle_display_records" not in window
             # Actual old schema, not a model that silently ignores extras.
-            from pydantic.fields import FieldInfo
-            from typing_extensions import TypeForm
-
-            fields: dict[str, tuple[TypeForm[object], FieldInfo]] = {}
+            fields: dict[str, Any] = {}
             for name, field in DisplayHistoryWindow.model_fields.items():
                 if name == "peer_cycle_display_records":
                     continue

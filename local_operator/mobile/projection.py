@@ -2745,7 +2745,7 @@ class ProjectionFold:
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
             return
-        details = {"notice_kind": "cross_session_boundary"}
+        details: dict[str, Any] = {"notice_kind": "cross_session_boundary"}
         if isinstance(sender, dict) and sender:
             details["sender"] = dict(sender)
         self._append(

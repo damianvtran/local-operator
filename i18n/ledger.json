@@ -1235,6 +1235,101 @@
       },
       "status": "passed",
       "note": "asks.lapsed_visible_for 12-key delta; translator job 48a476fce2b3 (session 5b0b65d644fb), independent auditor job 814557735932; both anthropic/claude-opus-5-5, no fallback — independent at agent level, same model family (disclosed). no findings; candidate shipped byte-identical. Prior acceptance carried."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "date": "2026-10-16"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-16",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
     }
   ]
 }
