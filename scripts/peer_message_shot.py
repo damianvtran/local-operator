@@ -426,7 +426,12 @@ async def main() -> None:
             blocks = _seed_group_idle(app)
         elif shape == "group-answered":
             blocks = _seed_group_answered(app)
-        elif shape == "group-hazards":
+        elif shape in ("group-hazards", "group-hazards-open"):
+            # BOTH hazards shapes seed the SAME run: `group-hazards-open` was
+            # captured from the generic `_seed` default because only the
+            # collapsed name had a branch here, so its "open" frame painted a
+            # transcript with no failed row at all (design round 2, D-6). The
+            # toggle below opens this run; the seed must be the hazardous one.
             blocks = _seed_group_hazards(app)
         elif shape == "group-head-cut":
             # The head-cut read is a property of the SPAN a windowed pass saw,
