@@ -51,7 +51,7 @@ def test_refusal_is_value_free(tmp_path):
         "remaining work on the branch",
         "checks green",
         "MRs #12 and #13 are waiting on review",
-        "mr #12 needs review",
+        "MRs rebased onto main",
         "commit cafebabe merged",
         "sha deadbeef landed",
     ],
@@ -118,6 +118,14 @@ def test_ordinary_personal_fact_not_refused(tmp_path, text):
         "I bought a Tag Heuer watch, version 2",
         "I commit 5000000 to savings each year",
         "Check the green bin goes out Tuesday",
+        # Round 3: `checks` in the work-word list reopened the #N false positive;
+        # lowercase mr/mrs cannot be told from the honorific.
+        "My bank checks #2 and #3 were reordered",
+        "The rent checks #2 cleared Friday",
+        "I deposited checks #4 and #5",
+        "mr smith lives at #12",
+        "mrs okafor is at flat #4",
+        "mrs tran is #1 priority",
     ],
 )
 def test_personal_words_that_look_workish_store(tmp_path, text):
