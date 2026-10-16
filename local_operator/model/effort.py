@@ -89,6 +89,36 @@ SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max
 FALLBACK_EFFORTS = SUPPORTED_EFFORTS | {"auto"}
 
 
+#: The tier NAMES a ``subagents.models`` row may carry, in the order they are
+#: presented. This is the WHOLE set, not merely a presentation order over a free
+#: mapping: :func:`local_operator.harness.subagent.read_effort_tier_selectors`
+#: drops every other key in ``values.subagents.models``, so a hand-added ``xl:``
+#: is inert everywhere (schema, tool-argument validation, launch) rather than
+#: honoured by some consumers and not others.
+#:
+#: Narrowing to the registry set is what keeps ADVERTISED == REBUILDABLE. These
+#: are the only keys ``lop config edit`` and the ``/settings`` page can write
+#: (``settings_io`` accepts registered keys only), and -- the reason this is a
+#: correctness boundary rather than a preference -- the only ones the config
+#: watcher's per-registry-key diff can report. A tier outside the set would be
+#: read and advertised, but editing it produces no ``changed_keys`` entry, so
+#: ``Session._rebuild_effort_tier_tools`` never fires: the schema would promise a
+#: tier whose edits the live re-render could not reach until the next session.
+#: Widening this tuple therefore means registering the key in
+#: ``settings_io.SETTINGS`` in the same change, which is what makes the watcher
+#: see it.
+#:
+#: The order is load-bearing too: the schema rides in the prompt-cache prefix, so
+#: it follows this tuple rather than YAML key order, and a reordering edit to
+#: ``config.yml`` cannot move the enum.
+#:
+#: It lives HERE, in the leaf module, rather than in ``harness.subagent`` where
+#: it was born, because a second subsystem now needs the same vocabulary at zero
+#: import cost: ``teams.TeamMember.tier`` validates against it, and ``teams`` is
+#: a data-layer module that must not pull the harness in. ``harness.subagent``
+#: re-exports the name, so its own callers are unaffected by the move.
+CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
+
 #: The keys a ``subagents.models.<tier>`` MAPPING may carry (#2428). A tier was
 #: only ever a bare ``provider/model`` selector, so a child launched on it ran at
 #: that model's own default reasoning effort and no config could change it. The

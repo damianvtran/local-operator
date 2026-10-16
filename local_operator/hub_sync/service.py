@@ -783,23 +783,61 @@ def _write_agent(ctx: HubSyncContext, c: chk.ItemCheck, merged: Mapping[str, Any
     )
 
 
-def _write_team(ctx: HubSyncContext, c: chk.ItemCheck, report: ItemMergeReport) -> None:
-    from local_operator.teams import TeamEditFields, TeamMember
+def _carried_members(members: Any, current: Any) -> list[Any]:
+    """``members`` with the stored row's overrides copied onto its surviving slots.
 
-    changed = {r.field: r.merged for r in report.fields if r.outcome == "merged"}
-    payload: dict[str, Any] = {}
-    for key, value in changed.items():
-        if key == "members":
-            payload[key] = [TeamMember(**slot) for slot in value]  # type: ignore[union-attr]
-        else:
-            payload[key] = value
+    The merged roster is the HUB's shape -- ``{role, kind, count}``
+    (:func:`hub_sync.provenance.normalize_roster`) -- so rebuilding the members
+    from it would silently WIPE every local ``tier``/``effort`` the operator had
+    pinned: the merge touched the roster, the overrides never ride the wire, and
+    nothing else would put them back. Copied by ``(kind, role)``, first match,
+    the same lookup a launch resolves with.
+
+    ``current`` is the row this happens against, and the caller re-runs this with
+    the row RE-READ UNDER THE WRITER LOCK: the merge's own fingerprint describes
+    the roster and ``normalize_roster`` drops overrides, so an override edited
+    inside the merge window would otherwise be overwritten by the older value
+    with nothing to notice. That second pass receives this function's own OUTPUT,
+    so it accepts a slot either as the hub's mapping or as a built member -- the
+    two passes must be idempotent.
+    """
+    from local_operator.teams import TeamMember, find_member
+
+    rebuilt: list[Any] = []
+    for slot in members or []:
+        member = slot if isinstance(slot, TeamMember) else TeamMember(**slot)
+        stored = find_member(getattr(current, "members", None), member.role, kind=member.kind)
+        if stored is not None and not stored.is_default():
+            member = member.model_copy(update={"tier": stored.tier, "effort": stored.effort})
+        rebuilt.append(member)
+    return rebuilt
+
+
+def _write_team(ctx: HubSyncContext, c: chk.ItemCheck, report: ItemMergeReport) -> None:
+    from local_operator.teams import TeamEditFields
+
+    # The merged values verbatim: for ``members`` that is the HUB's shape
+    # (``{role, kind, count}``), which ``TeamEditFields`` coerces into members
+    # with no overrides. The carry-forward happens in ``precondition`` below,
+    # where the row has been re-read under the writer lock.
+    payload: dict[str, Any] = {r.field: r.merged for r in report.fields if r.outcome == "merged"}
+    fields = TeamEditFields(**payload)
 
     def precondition(current: Any) -> None:
         now_fp = prov.fingerprint_team(chk.team_fields_of(current))
         if now_fp != c.local_fp:
             raise ConcurrentEdit("the team changed while the merge was being computed")
+        # ``precondition`` is the only hook that sees the row RE-READ UNDER THE
+        # WRITER LOCK and still runs before anything is staged, so the roster
+        # the overrides carry forward FROM is read here rather than outside: a
+        # read taken while computing the merge leaves a window in which an
+        # override edited since is silently replaced by the older value, and the
+        # fingerprint above cannot catch it -- it describes the roster, and
+        # ``normalize_roster`` drops overrides.
+        if "members" in payload:
+            fields.members = _carried_members(payload["members"], current)
 
-    ctx.teams().update_team(c.local_id, TeamEditFields(**payload), precondition=precondition)
+    ctx.teams().update_team(c.local_id, fields, precondition=precondition)
 
 
 def _advance_baseline(ctx: HubSyncContext, c: chk.ItemCheck, recorded_by: str) -> None:

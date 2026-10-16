@@ -342,7 +342,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
     "task": 616,
-    "team": 485,
+    # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
+    # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
+    # prose — the same arm renders the doc back at 485 when that property and its
+    # ``$defs.TeamOverride`` entry are stripped, i.e. the cost is the nested
+    # list-of-objects shape and its three field descriptions, not added
+    # sentences. It is the ONLY entry that moved. Re-measured deliberately
+    # through this test's own printed table; the tier arm below is unmoved
+    # because this doc does not read config.
+    "team": 779,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe

@@ -138,12 +138,10 @@ from local_operator.harness.render import (
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
-    SubagentModelUnavailable,
     is_inherit_tier_sentinel,
-    malformed_tier_reason,
-    read_effort_tier_targets,
     resolve_launch_target,
     run_subagent,
+    team_slot_name,
 )
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
@@ -2733,6 +2731,24 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             # and the one a block with no known split still gets): the text IS
             # the block.
             blocks[index] = str(value)
+
+
+def _member_reasoning_effort(spec: ModelSpec, requested: str | None) -> str | None:
+    """A member override's effort word as a level THIS spec can be asked for.
+
+    ``auto`` is not a ladder rung and must not be clamped like one: it is the
+    member's explicit "use whatever this model does by default", which is why a
+    team can take tier ``hi`` without inheriting that tier's ``xhigh``. Mapping
+    it to the spec's own documented default says that once, here, instead of
+    leaning on ``resolve_effort_in``'s unrankable-word fallback -- which lands on
+    the default only for a model that documents one, and for a different reason.
+
+    ``None`` and a model with no ladder both pass through: the first means no
+    override, and the second is returned untouched by :func:`_with_tier_effort`.
+    """
+    if requested == "auto":
+        return spec.reasoning_default_effort
+    return requested
 
 
 def _with_tier_effort(spec: ModelSpec, effort: str | None) -> ModelSpec:
@@ -17721,13 +17737,29 @@ class Session:
 
             if not model_may_choose_tier():
                 raise ValueError("specific task models require subagents.model_choice=model")
-        model_spec = self._resolve_subagent_model(target.role, effort, strict=True, model=model)
+        model_spec, selection_source = self._resolve_subagent_selection(
+            target.role,
+            effort,
+            strict=True,
+            model=model,
+            roster=target.roster,
+            slot_kind="team" if target.is_team_launch else "agent",
+            # For a ``team:pod`` launch the resolved ROLE is pod's manager while
+            # the override sits on the ``team:pod`` SLOT, so the slot's own name
+            # is what the roster lookup needs (``team_slot_name`` returns
+            # ``None`` for an agent slot, whose role IS its slot name).
+            slot_role=team_slot_name(agent, target.is_team_launch),
+        )
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
             model_spec=model_spec,
+            # Which LAYER chose that model, for the ``selection:`` label the
+            # delegating model reads back. Derived here, where the roster is in
+            # hand, because ``run_subagent`` cannot see one from the arguments.
+            selection_source=selection_source,
             target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
@@ -17777,6 +17809,9 @@ class Session:
         strict: bool = False,
         model: str | None = None,
         apply_tier_effort: bool = True,
+        roster: Any = None,
+        slot_kind: str = "agent",
+        slot_role: str | None = None,
     ) -> ModelSpec | None:
         """Effort tier -> ModelSpec via config; None keeps the parent's model.
 
@@ -17824,7 +17859,77 @@ class Session:
         a delegated role: the supplement renderer reads ``hi`` only to pick a
         model, and its per-turn token cap counts reasoning, so inheriting the
         tier's ``max`` would spend the cap on thinking.
+
+        ``roster`` is the team whose ``team.yml`` NAMES this slot -- the
+        PARENT's active team (``LaunchTarget.roster``) -- and NOT the team the
+        child carries: a ``team:pod`` launch runs as pod's manager while the
+        ``TeamMember`` override that moved it lives on the ``team:pod`` slot of
+        the parent's roster. ``slot_kind`` picks that slot's kind, and
+        ``slot_role`` names it when it differs from ``agent`` (see
+        ``harness.subagent.team_slot_name``); the lookup casefolds and takes
+        the first match. All three default to "no roster", which is every
+        caller that has no launch behind it (session naming, the supplement
+        renderer) and keeps their behaviour byte-identical.
         """
+        spec, _source = self._resolve_subagent_selection(
+            agent,
+            effort,
+            strict=strict,
+            model=model,
+            apply_tier_effort=apply_tier_effort,
+            roster=roster,
+            slot_kind=slot_kind,
+            slot_role=slot_role,
+        )
+        return spec
+
+    def _resolve_subagent_selection(
+        self,
+        agent: str,
+        effort: str | None,
+        *,
+        strict: bool = False,
+        model: str | None = None,
+        apply_tier_effort: bool = True,
+        roster: Any = None,
+        slot_kind: str = "agent",
+        slot_role: str | None = None,
+    ) -> tuple[ModelSpec | None, str]:
+        """``(spec, model_selection_source)`` for one delegated role.
+
+        The SPEC half is what :meth:`_resolve_subagent_model` hands its naming and
+        resume callers. The SOURCE half names WHICH layer decided it, and is the
+        reason this exists: ``run_subagent`` derives a source from the launch
+        ARGUMENTS alone, which cannot see a roster, so the launch path passes the
+        value this computed instead.
+
+        Sources: ``explicit_inherit`` and ``explicit_model`` for a per-run
+        ``model``, ``team`` when a ``TeamMember`` ``tier``/``effort`` decided
+        either field, ``effort`` for the caller's own tier argument, ``role`` for
+        the row's ``effort:`` tag, ``parent`` for no pin at all.
+
+        The resolution itself is
+        :func:`~local_operator.harness.subagent.resolve_member_model` -- the SAME
+        function the desktop ``/effective`` route reads -- so the model a surface
+        ADVERTISES and the model a child RUNS are one answer. Two resolvers is
+        exactly how this codebase got schema-vs-launch drift (see
+        ``_launch_subagent``).
+        """
+        from local_operator.harness.subagent import (
+            SubagentModelUnavailable,
+            resolve_member_model,
+        )
+
+        def _resolved(registry: Any) -> Any:
+            return resolve_member_model(
+                agent,
+                roster=roster,
+                slot_kind=slot_kind,
+                slot_role=slot_role,
+                launch_tier=effort,
+                agent_registry=registry,
+            )
+
         if model is not None:
             # Explicit run choices override the role, but never rewrite it.
             # Retain the inherit sentinel separately from omission so restart
@@ -17832,52 +17937,54 @@ class Session:
             if effort is not None:
                 raise ValueError("pass either model or effort, not both")
             if model == "inherit":
-                return None
+                return None, "explicit_inherit"
             from local_operator.mobile.peer_model import validate_subagent_selection
 
             provider, separator, model_id = model.partition("/")
             if not separator or not provider or not model_id or any(c.isspace() for c in model):
                 raise ValueError("model must be 'inherit' or <provider>/<model-id>")
-            return validate_subagent_selection(provider, model_id)
-        wanted = effort
-        if wanted is None and agent and agent != "task":
-            from local_operator.agent_profiles import resolve_profile
-
-            registry = self.agent_registry
-            try:
-                # FRESH at spawn/resume: the registry's cached view is up to
-                # ``AgentRegistry._refresh_interval`` stale, and a role PIN
-                # written after this session started must reach the NEXT
-                # spawn — the resolution requirement this read exists to
-                # honour.
-                refresh = getattr(registry, "refresh_now", None)
-                if callable(refresh):
-                    refresh()
-                profile = resolve_profile(agent, registry=registry, strict_registry=True)
-            except Exception as exc:  # noqa: BLE001
-                # An unreadable registry is NOT "no role of that name": the
-                # old swallow sent this down the seed path (a packaged seed
-                # carries no operator pin) and then inherited the session
-                # model with no trace — precisely the silent substitution the
-                # strict tier path refuses one layer up. Surface it instead.
-                if strict:
-                    raise SubagentModelUnavailable(
-                        agent,
-                        f"the agent registry could not be read ({exc}); refusing to "
-                        "inherit the session model for a role whose pin cannot be "
-                        "resolved",
-                    ) from exc
-                logger.warning(
-                    "agent registry could not be read while resolving role %r (%s); "
-                    "using the session model",
+            chosen = validate_subagent_selection(provider, model_id)
+            # The MODEL and the DEPTH are independent fields, so a member's own
+            # ``effort`` still applies to an explicitly chosen model. Only that
+            # field does: an explicit ``model=`` IS a statement about the model,
+            # so a member TIER loses to it (including the effort a ``{model,
+            # effort}`` tier mapping carries -- that effort belongs to the tier's
+            # model, which is not the one being run).
+            member = _resolved(None)
+            if apply_tier_effort and member.effort_source == "team":
+                chosen = _with_tier_effort(chosen, _member_reasoning_effort(chosen, member.effort))
+            return chosen, "explicit_model"
+        try:
+            resolution = _resolved(self.agent_registry)
+        except Exception as exc:  # noqa: BLE001
+            # An unreadable registry is NOT "no role of that name": the old
+            # swallow sent this down the seed path (a packaged seed carries no
+            # operator pin) and then inherited the session model with no trace --
+            # precisely the silent substitution the strict tier path refuses one
+            # layer up. Surface it instead.
+            if strict:
+                raise SubagentModelUnavailable(
                     agent,
-                    exc,
-                )
-                profile = None
-            if profile is not None:
-                wanted = profile.effort
-        if wanted is None:
-            return None
+                    f"the agent registry could not be read ({exc}); refusing to "
+                    "inherit the session model for a role whose pin cannot be "
+                    "resolved",
+                ) from exc
+            logger.warning(
+                "agent registry could not be read while resolving role %r (%s); "
+                "using the session model",
+                agent,
+                exc,
+            )
+            # Re-resolve with no registry at all: the ROW pin is what could not
+            # be read, and a roster override does not need it, so a member tier
+            # still wins on the lenient path.
+            resolution = _resolved(None)
+        wanted = resolution.tier
+        source = (
+            "team"
+            if resolution.decided_by_team
+            else "effort" if effort else "role" if resolution.selector is not None else "parent"
+        )
 
         def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:
             # One exit for every "asked for a tier, cannot honour it" branch so
@@ -17893,74 +18000,57 @@ class Session:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None
 
-        try:
-            # The same read the tool schemas use (``configured_effort_tiers``),
-            # so a tier the schema advertises is one this path resolves and
-            # vice versa. Unstripped-but-not on purpose: the shared reader
-            # strips selectors once, so the tier it advertises cannot pass
-            # this check and then die on a whitespace-padded provider name at
-            # the first provider call. Malformed selectors are still kept by
-            # the read: they must reach the named refusal below, not vanish
-            # into "not configured".
-            #
-            # The TARGETS read rather than the bare selectors, for the
-            # reasoning effort a ``{model, effort}`` tier carries (#2428): the
-            # selector half is exactly what ``read_effort_tier_selectors``
-            # returns, so the checks below are unchanged for both forms.
-            selector, tier_effort = read_effort_tier_targets().get(wanted, (None, None))
-        except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
-            return _unavailable(f"config could not be read ({exc})")
-        # Type before falsiness, and the ``is not None`` is what makes the two
-        # surfaces agree (review R2-F7). A FALSY non-string (``lo: 0``,
-        # ``lo: []``) is a key the operator DID write, so it must draw the same
-        # "lacks provider/model" refusal that ``effort_tier_rejection`` gives
-        # it — under the old order it fell into the quiet "not configured"
-        # branch and the tool-argument path called the same key malformed,
-        # which is the schema-vs-launch drift this change exists to close,
-        # merely moved into the message text. Only a genuinely absent key
-        # (``None``) or an empty/whitespace-only string (the shared reader
-        # strips) stays quiet: a session with no ``subagents.models`` at all
-        # names itself on the parent model by design and must not warn.
-        if selector is not None and not isinstance(selector, str):
-            return _unavailable(malformed_tier_reason(wanted, selector))
-        if not selector:
-            return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
+        if resolution.unavailable:
+            _unavailable(resolution.unavailable, quiet=resolution.unavailable_quiet)
+            return None, source
+        selector = resolution.selector
+        # ``apply_tier_effort=False`` returns the model at ITS OWN default: the
+        # one caller is the supplement renderer, which borrows a tier's model
+        # without being a delegated role and whose per-turn token cap counts
+        # reasoning.
+        requested = resolution.effort if apply_tier_effort else None
+        if selector is None:
+            # No tier anywhere. An effort override on its own is still a PIN --
+            # on the SESSION's model, the same shape the ``default`` sentinel
+            # returns below -- because an operator who asked for a depth asked
+            # for this child specifically. With no effort either there is nothing
+            # to resolve and the child inherits, as every unpinned child does.
+            if requested is None:
+                return None, source
+            return (
+                _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                source,
+            )
         if is_inherit_tier_sentinel(selector):
             # The explicit opt-in, resolved at LAUNCH and not at write time:
-            # ``self.model`` is the accessor the rest of the session uses to
-            # name the model every provider call is built from, and the SAME
-            # one ``run_subagent`` reaches for when a child owns no model
-            # (``model=model_spec if model_spec is not None else
-            # parent_session.model``). Reading it here rather than recording
-            # the model into the config is what makes a later default move
-            # every pin on this tier — the requirement the sentinel exists to
-            # satisfy, and the pinned test in
-            # ``tests/unit/session/test_pinned_subagent_model.py`` holds it.
+            # ``self.model`` is the accessor the rest of the session uses to name
+            # the model every provider call is built from, and the SAME one
+            # ``run_subagent`` reaches for when a child owns no model. Reading it
+            # here rather than recording the model into the config is what makes
+            # a later default move every pin on this tier.
             #
             # Because this returns a SPEC and not ``None``, ``owns_model`` is
             # stamped True and the child's routing is pinned to it: an
-            # operator-configured tier is a deliberate pin even when it points
-            # at the session's own model, and the disclosure code already
-            # anticipates exactly that (a pin whose label equals the parent's
-            # is why ``owns_model`` is a separate field).
-            return _with_tier_effort(self.model, tier_effort if apply_tier_effort else None)
-        provider, _, model_id = selector.partition("/")
-        # BOTH halves, to the same standard ``configured_effort_tiers`` applies
-        # (review R3-F11). Checking only the model let a leading-slash selector
-        # (``hi: "/kimi"``) through here while the schema surface refused it —
-        # the same schema-vs-launch drift this change exists to close, and the
-        # worse direction of it: the launch built ``ModelSpec(provider='',
-        # model_id='kimi')`` and the child died at its first provider call
-        # instead of at launch, where the tier is still named.
-        if not provider or not model_id:
-            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
+            # operator-configured tier is a deliberate pin even when it points at
+            # the session's own model, and the disclosure code already
+            # anticipates exactly that (a pin whose label equals the parent's is
+            # why ``owns_model`` is a separate field).
+            return (
+                _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                source,
+            )
+        # BOTH halves were already checked, to the same standard
+        # ``configured_effort_tiers`` applies, by ``resolve_member_model`` -- one
+        # place, so a selector that reaches here has a provider and a model.
+        provider, _, model_id = str(selector).partition("/")
         try:
             from local_operator.model.configure import build_model_spec
 
             spec = build_model_spec(provider, model_id)
-            return _with_tier_effort(spec, tier_effort if apply_tier_effort else None)
         except Exception as exc:  # noqa: BLE001 — an unbuildable selector is a reason, not a crash
-            return _unavailable(f"{selector!r} could not be resolved ({exc})")
+            _unavailable(f"{selector!r} could not be resolved ({exc})")
+            return None, source
+        return _with_tier_effort(spec, _member_reasoning_effort(spec, requested)), source
 
     def _append_or_park_journal(self, message: CustomMessage) -> None:
         """Put a journal notice on the live context, or park it for a boundary.

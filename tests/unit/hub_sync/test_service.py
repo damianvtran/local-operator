@@ -431,6 +431,49 @@ def test_team_roster_merge_honors_a_local_slot_removal_and_takes_a_remote_additi
     )  # a warning, not a failure
 
 
+def test_a_roster_merge_keeps_the_local_overrides_on_surviving_slots(env) -> None:
+    """A hub merge touches the ROSTER; the overrides are local and must ride along.
+
+    The merged members the merge produces are the HUB's shape -- ``{role, kind,
+    count}``, because the hub wire carries nothing else -- so a merge that
+    rebuilt the roster from them would silently drop every ``tier``/``effort``
+    the operator had pinned. A dropped override is not cosmetic: it puts that
+    child back on the model the operator moved it off, and nothing in the
+    receipt would say so.
+    """
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    # The operator pins the slot locally, on a slot the remote merge KEEPS.
+    teams.update_team(
+        team.id,
+        TeamEditFields(
+            members=[
+                TeamMember(role="coder", count=1, tier="hi", effort="xhigh"),
+                TeamMember(role="reviewer", count=2),
+            ]
+        ),
+    )
+    hub.teams["ht1"] = {
+        **hub.teams["ht1"],
+        "members": [
+            *hub.teams["ht1"]["members"],
+            {"role": "qa", "kind": "agent", "count": 1},
+        ],
+    }
+
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+
+    assert report.reports[0].applied
+    after = teams.get_team(team.id)
+    assert [m.role for m in after.members] == ["coder", "reviewer", "qa"]
+    coder = next(m for m in after.members if m.role == "coder")
+    assert (coder.tier, coder.effort) == ("hi", "xhigh")
+    # The slots the merge added carry none: an override is per-slot, never
+    # copied onto a neighbour.
+    assert next(m for m in after.members if m.role == "qa").is_default()
+    assert next(m for m in after.members if m.role == "reviewer").is_default()
+
+
 def test_team_name_is_never_touched_and_a_remote_rename_is_only_a_note(env) -> None:
     ctx, hub, _a, teams, root = env
     team = _pull_team(teams, hub, root)
@@ -1523,3 +1566,49 @@ def test_an_equal_read_without_a_revision_never_marks(env, monkeypatch) -> None:
     assert stored.outbound is None
     # And the push path refuses by name rather than writing unconditionally.
     assert svc.push_eligibility(ctx, stored)["can_auto_push"] is False
+
+
+def test_a_roster_merge_keeps_an_override_edited_during_the_merge(env, monkeypatch) -> None:
+    """m3. The carry-forward reads the roster UNDER the writer lock.
+
+    The merge is computed from a snapshot, and the fingerprint that guards the
+    write describes the ROSTER -- ``normalize_roster`` drops overrides -- so an
+    override edited after the merge and before the write is invisible to the
+    guard. Reading the row early therefore loses that edit silently; reading it
+    inside ``precondition``, which is the only hook that sees the row re-read
+    under the lock, keeps it. The window is simulated here by applying the
+    concurrent edit from inside ``update_team`` itself.
+    """
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    # The operator pins a slot the remote merge keeps, with a value the
+    # concurrent edit below will move.
+    teams.update_team(
+        team.id, TeamEditFields(members=[TeamMember(role="coder", count=1, tier="lo")])
+    )
+    hub.teams["ht1"] = {
+        **hub.teams["ht1"],
+        "members": [*hub.teams["ht1"]["members"], {"role": "qa", "kind": "agent", "count": 1}],
+    }
+
+    original = teams.update_team
+
+    def edit_in_the_window(team_id: Any, fields: Any, *, precondition: Any = None) -> Any:
+        # The SAME slots, so the roster fingerprint the merge's guard compares is
+        # unchanged and the guard does not fire -- which is the whole point of the
+        # finding: it describes the roster, and overrides are not part of it.
+        original(
+            team_id,
+            TeamEditFields(members=[TeamMember(role="coder", count=1, tier="hi")]),
+        )
+        return original(team_id, fields, precondition=precondition)
+
+    monkeypatch.setattr(teams, "update_team", edit_in_the_window)
+
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+
+    assert report.reports[0].applied, report.reports[0]
+    after = teams.get_team(team.id)
+    assert [m.role for m in after.members] == ["coder", "qa"]
+    coder = next(m for m in after.members if m.role == "coder")
+    assert coder.tier == "hi", "the edit made inside the merge window must survive the write"
