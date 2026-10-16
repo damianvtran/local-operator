@@ -113,8 +113,10 @@ export function questionTally(rows: PendingAsk[] | undefined | null): {
  *  Says what is true in every timeout notice the agent receives (design round 1,
  *  D3): it may use its recommended option or its best judgment, and a secret ask
  *  has no default at all ("do not run anything that needed it"), so "took its
- *  default" claimed more than the agent was told. */
-const LAPSED_LINE = "Lapsed — the agent goes ahead without your answer";
+ *  default" claimed more than the agent was told. "Timed out", Ben's word and
+ *  the badge's, byte-identical to the desktop's `ASK_STATUS_COPY.timed_out` and
+ *  the TUI card title (#2481 design D2): one state, one name on every surface. */
+const LAPSED_LINE = "Timed out — the agent goes ahead without your answer";
 
 /** Whether an ask's conversation is DEAD — every op on it is a terminal refusal.
  *

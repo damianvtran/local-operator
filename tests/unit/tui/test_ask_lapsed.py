@@ -117,7 +117,7 @@ async def test_a_lapsed_row_takes_view_and_dismiss_and_never_decline():
     listing.action_pick()
     assert [type(message).__name__ for message in posted] == ["Picked"]
     # The header advertises only what the row honours.
-    assert listing.header_hints() == ("enter view", "x dismiss", "esc collapse")
+    assert listing.header_hints() == ("x dismiss", "enter view", "esc collapse")
 
 
 async def test_the_drawer_and_the_bar_stop_counting_lapsed_asks_as_moved_on():
@@ -321,7 +321,7 @@ async def test_the_middle_half_is_named_pending():
     assert EMPTY_OUTSTANDING == "No asks are pending. They have all settled — see Settled."
     assert EMPTY_SETTLED == "No asks have settled yet. They are all still pending."
     binding = next(b for b in AskQueueList.BINDINGS if getattr(b, "key", "") == "2")
-    assert binding.description == "Pending"
+    assert getattr(binding, "description", None) == "Pending"
 
 
 async def test_the_bar_counts_timed_out_asks_in_questions():
@@ -330,6 +330,19 @@ async def test_the_bar_counts_timed_out_asks_in_questions():
 
     assert queue_headline(0, 1) == "1 question timed out"
     assert queue_headline(2, 3) == "2 questions waiting · 3 questions timed out"
+
+
+def _glyph_ink(painted: Any) -> str:
+    """The bar glyph's colour name, lower-cased — the first painted span."""
+    span = next(span for span in painted.spans if span.start == 0)
+    color = getattr(span.style, "color", None)
+    return str(getattr(color, "name", "")).lower()
+
+
+def _current_id(listing: AskQueueList) -> str:
+    row = listing.current()
+    assert row is not None
+    return row.ask_id
 
 
 async def test_the_bar_glyph_is_muted_when_nothing_is_answerable(enabled):
@@ -342,19 +355,15 @@ async def test_the_bar_glyph_is_muted_when_nothing_is_answerable(enabled):
         await _settle(pilot)
         app._sync_ask_surface(ask_rows([_row("a2", "Which region?", status="timed_out")]))
         await _settle(pilot)
-        painted = app.query_one(AskBar).render()
-        glyph = next(span for span in painted.spans if span.start == 0)
-        muted = theme_mod.semantic_color("muted")
-        accent = theme_mod.semantic_color("accent")
-        assert str(glyph.style.color.name).lower() == str(muted).lower(), glyph.style
-        assert str(glyph.style.color.name).lower() != str(accent).lower()
+        muted = str(theme_mod.semantic_color("muted")).lower()
+        accent = str(theme_mod.semantic_color("accent")).lower()
+        ink = _glyph_ink(app.query_one(AskBar).render())
+        assert ink == muted and ink != accent, ink
         app._sync_ask_surface(
             ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?", status="timed_out")])
         )
         await _settle(pilot)
-        painted = app.query_one(AskBar).render()
-        glyph = next(span for span in painted.spans if span.start == 0)
-        assert str(glyph.style.color.name).lower() == str(accent).lower()
+        assert _glyph_ink(app.query_one(AskBar).render()) == accent
 
 
 async def test_sidebar_marks_and_total_count_answerable_asks_only(enabled, tmp_path, monkeypatch):
@@ -415,7 +424,7 @@ async def test_enter_and_click_on_a_lapsed_row_open_the_read_only_card(enabled):
         await pilot.press("escape")
         await _settle(pilot)
         listing = app.query_one(AskQueueList)
-        assert listing.current().ask_id == "a2"
+        assert _current_id(listing) == "a2"
         # A click opens it the same way.
         top = listing.content_region.y - listing.region.y
         await pilot.click(AskQueueList, offset=(4, top + listing.HEADER_ROWS + 1))
@@ -434,18 +443,18 @@ async def test_the_cursor_starts_on_the_first_answerable_row():
         ]
     )
     listing = AskQueueList(rows)
-    assert listing.current().ask_id == "a1"
+    assert _current_id(listing) == "a1"
 
 
 async def test_the_header_hints_follow_the_row_under_the_cursor():
     """UX U3: no `enter answer · d decline` over a lapsed row."""
     rows = ask_rows([_row("a1", "Deploy now?"), _row("t1", "Old one?", status="timed_out")])
     listing = AskQueueList(rows)
-    assert listing.current().ask_id == "a1"
+    assert _current_id(listing) == "a1"
     assert listing.header_hints() == ("enter answer", "d decline", "esc collapse")
     listing.action_move(1)
-    assert listing.current().ask_id == "t1"
-    assert listing.header_hints() == ("enter view", "x dismiss", "esc collapse")
+    assert _current_id(listing) == "t1"
+    assert listing.header_hints() == ("x dismiss", "enter view", "esc collapse")
 
 
 async def test_x_dismiss_is_acknowledged_at_once(enabled):
@@ -470,7 +479,7 @@ async def test_x_dismiss_is_acknowledged_at_once(enabled):
         await pilot.press("x")
         await _settle(pilot)
         assert session.dismissed[0][0] == "a2"
-        assert listing.is_in_flight("a2"), "the row gave no sign the key landed"
+        assert listing.in_flight("a2"), "the row gave no sign the key landed"
         # A second press on the same row does not send twice.
         await pilot.press("x")
         await _settle(pilot)

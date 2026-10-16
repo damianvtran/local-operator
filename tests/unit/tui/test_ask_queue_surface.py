@@ -889,18 +889,14 @@ async def test_the_sidebar_mark_is_painted_for_the_current_session(enabled):
         assert sidebar._asking == {}
 
 
-async def test_the_sidebar_mark_survives_a_queue_that_only_timed_out(enabled):
-    """A timed-out ask keeps the mark: it is OUTSTANDING to the store.
+async def test_a_queue_that_only_timed_out_marks_nothing_but_keeps_its_bar(enabled):
+    """A timed-out ask owes no answer, so it puts no `?` in the sidebar.
 
-    D10 makes it read-only on every surface, but leaves the store's contract
-    alone: the index and the wire's ``asks_open`` still count it, so the live
-    half of the mark must too, or a session's mark would disagree with its own
-    index entry.
-
-    The mark used to be painted from the OPEN count alone, so a queue of nothing
-    but timed-out asks dropped it to absence — even though the bar was still up
-    and every one of those asks was still answerable. The mark, the bar and the
-    wire's ``asks_open`` now read the same set (``store.OUTSTANDING_STATUSES``).
+    #2481 design D3 / UX U2: the mark says "you owe an answer here", and since
+    D10 a timed-out ask is read-only on every surface. The sidebar marks and the
+    footer total count ANSWERABLE asks, as the desktop's marks do
+    (local-operator-ui #1116), while the session's own bar stays up — it is the
+    door to `x` dismiss.
     """
     session = _AskSession()
     app = _app(session)
@@ -909,7 +905,7 @@ async def test_the_sidebar_mark_survives_a_queue_that_only_timed_out(enabled):
         app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?", status="timed_out")]))
         await _settle(pilot)
         sidebar = app._session_sidebar
-        assert sidebar._asking == {session.session_id: 1}
+        assert sidebar._asking == {}
         assert app._ask_bar.display is True
 
 
@@ -1198,7 +1194,7 @@ async def test_a_click_on_a_row_opens_that_ask(enabled):
         # and both are still true when unspoken. Asserting all three makes the
         # sacrifice order one a reader can predict rather than guess.
         ((130, 30), "d decline"),
-        ((100, 30), "Waiting or moved on"),
+        ((100, 30), "Pending"),
         ((60, 20), "Settled"),
     ],
 )
@@ -1433,13 +1429,13 @@ async def test_the_bar_and_the_list_speak_from_one_fold(enabled):
         header = app.query_one(AskQueueList).render().plain.splitlines()[0]
         # The CHIP: only the open half is "waiting"; the timed-out one is named
         # as what it is.
-        assert "2 questions waiting · 1 ask timed out" in bar_text, bar_text
+        assert "2 questions waiting · 1 question timed out" in bar_text, bar_text
         # The DRAWER: the lapsed row is SETTLED since D11, so the drawer counts
         # what is waiting, and the segments file the lapsed row under Settled.
         assert "2 questions waiting" in header, header
         # Same rows, same totals: the two registers describe ONE queue.
         assert "All · 3" in header, header
-        assert "Waiting or moved on · 2" in header, header
+        assert "Pending · 2" in header, header
         assert "Settled · 1" in header, header
 
 

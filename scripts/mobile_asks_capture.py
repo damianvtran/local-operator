@@ -37,7 +37,7 @@ WHAT EACH FRAME IS FOR (design §5.0/§5.3, R7):
   the session's asks in the index, and its sheet showing the timed-out ask as
   lapsed — dismiss, no options. ``-ended-bar`` is the screen before the tap,
   and shows the sheet did not open by itself over a queue of lapsed asks: the
-  quiet "1 lapsed question" entry, dim rather than accent.
+  quiet "1 question timed out" entry, dim rather than accent.
 * ``-ended-open`` — the same lapsed card after the user taps its ``Timed out``
   header open (decision D11): the card arrives COLLAPSED behind that badge, and
   the read-only body — the lapsed line, the question, Dismiss — is one explicit
@@ -48,7 +48,7 @@ WHAT EACH FRAME IS FOR (design §5.0/§5.3, R7):
 * ``-sheet`` is the MIXED sheet: open asks beside the lapsed ``qa-deadline``,
   with the title counting only the open ones as questions.
 * ``-sheet`` also carries the LAPSED card (``qa-deadline``, timed out): the
-  question read-only under "Lapsed — the agent took its default and moved on",
+  question read-only under "Timed out — the agent goes ahead without your answer",
   with dismiss and no options.
 * ``-loading``  — the read in flight (the fetch is stalled for the frame, so the
   state is reproducible rather than a timing race).
