@@ -26673,8 +26673,7 @@ class Session:
             # than at the next turn. ``rearm`` REPLACES the timer task, because a
             # sleeping one holds a delay planned with the old window (QA round 1,
             # Q2); its next wake is the new ``expires_at + window`` (decision D9).
-            # No queue built yet
-            # means nothing has been published to correct.
+            # No queue built yet means nothing has been published to correct.
             self.publish_ask_state()
             self._ask_queue.rearm()
 

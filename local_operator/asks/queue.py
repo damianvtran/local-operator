@@ -123,6 +123,8 @@ class AskQueue:
         #: Set by :meth:`arm` while a timer is alive: its current plan may miss a
         #: deadline added since it was made (see :meth:`_run_timer`).
         self._timer_stale = False
+        #: Tasks currently inside :meth:`reconcile` (see the note there).
+        self._reconciling: set[asyncio.Task[Any]] = set()
         self._disposed = False
         #: Row ids handed to delivery by THIS process. SCHEDULING DEDUPE ONLY
         #: (amended 2026-10-04): it closes the gap between handing a message to
@@ -1221,6 +1223,21 @@ class AskQueue:
         """
         if self._disposed:
             return []
+        # Recorded so :meth:`rearm` can tell when the timer task is INSIDE this
+        # call: cancelling it between ``_handed.add`` and the delivery hand-off
+        # strands the id in ``_handed`` and the row is never delivered (review
+        # round 2, R2-2). A set of tasks, because a turn start or an answer can
+        # run a reconcile while the timer's own is suspended.
+        current = asyncio.current_task()
+        if current is not None:
+            self._reconciling.add(current)
+        try:
+            return await self._reconcile(now_ms, load_time=load_time)
+        finally:
+            if current is not None:
+                self._reconciling.discard(current)
+
+    async def _reconcile(self, now_ms: int | None, *, load_time: bool) -> list[str]:
         now = now_ms if now_ms is not None else self._now()
         # Read ONLY on the load-time reconcile; ``None`` everywhere else, which is
         # what keeps the live paths off the marker read entirely.
@@ -1922,8 +1939,18 @@ class AskQueue:
         lapsed rows only — so a row crossing the new window soon after the edit
         was hidden late or never. Cancelling and re-creating it plans with the
         new window at once.
+
+        EXCEPT MID-RECONCILE (review round 2, R2-2): a timer inside
+        :meth:`reconcile` may be between handing a row id to ``_handed`` and
+        delivering it, and a cancel there loses the row for this process. It is
+        left to finish instead: both branches of :meth:`_run_timer` re-plan from
+        the top right after their reconcile, reading the window afresh, which is
+        all the replacement would have done.
         """
         task = self._timer
+        if task is not None and task in self._reconciling:
+            self._timer_stale = True
+            return
         self._timer = None
         if task is not None and not task.done():
             task.cancel()

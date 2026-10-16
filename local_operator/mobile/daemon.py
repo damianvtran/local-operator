@@ -3093,8 +3093,26 @@ class MobileDaemon:
                 if "asks.lapsed_visible_for" not in changed:
                     return
                 # Listener fan-out runs on the loop thread (ConfigWatcher's
-                # contract), so the subscriber table is read here unlocked and
-                # the folds hop off-loop inside the capture.
+                # contract), so these tables are read and mutated here unlocked
+                # and the folds hop off-loop inside the capture.
+                #
+                # DROP EVERY STOPPED ROUTE'S RETAINED PAYLOAD FIRST, watched or
+                # not (review round 2, R2-1). A conversation this daemon watched
+                # die carries a TERMINAL ledger from the scan's capture, and
+                # ``capture_subagent_details`` re-serves the retained frame for
+                # every later non-terminal capture of it (``state.terminal and
+                # not terminal``) — the old rows, on the open stream and on
+                # reopen alike. With the payload gone, the same capture takes
+                # the ``durable_rematerialize`` branch: the fresh fold at the
+                # retained epoch, ended receipt kept. Live routes are left
+                # alone; their runtime republishes on the change itself.
+                for session_id in list(self.session_projections):
+                    if _entry_for_session(self, session_id) is None:
+                        self.session_projections.pop(session_id, None)
+                # Stamp the drop, as the display follower does: a durable fold
+                # already in flight was folded with the OLD window, and its
+                # capture must not land as the retained payload just dropped.
+                self.display_generation += 1
                 for session_id in list(self.table.session_subscribers):
                     if _entry_for_session(self, session_id) is not None:
                         continue
