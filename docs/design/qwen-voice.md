@@ -1,12 +1,34 @@
 # Qwen voice: one lop session as the voice of the Qwen Audio Agent
 
 Status: slice 1 (backend). Source: the architect's record "Relay voice v2: the
-Qwen rig is the voice, and the lop session gives the answers" (2026-10-16, EDT),
-(`~/.local-operator/sessions/206635829b1d/scratchpad/relay-voice-design-v2.md`
-on the machine it was written on), which holds the file:line evidence for every
-decision below. This page is the
-in-repo record of its decisions and its frozen contract; it does not restate
-the evidence.
+Qwen rig is the voice, and the lop session gives the answers" (2026-10-16, EDT).
+This page is the in-repo record of its decisions and its frozen contract; the
+evidence those decisions rest on is summarised under "Evidence" below.
+
+## Evidence
+
+Read from qwen-audio-agent 2.0.1 and speech_to_speech 1.0.0, the versions the
+rig pins:
+
+- **s2s cannot speak text without its LLM.** Every `response.create` queues an
+  LLM generation (`handlers/response.py` → `LLM/language_model.py`), and a
+  response's `instructions` replace the session's. There is no TTS-only
+  response, so the LLM boundary is the only place to get verbatim speech
+  without patching s2s. That is why Q2 replaces the model with a deterministic
+  relay endpoint, and why Q3 routes speech through a token.
+- **Gateway tasks run one at a time per owner** (`task-operations.mjs`,
+  `laneLimit: 1`). A task tied to a whole session turn would hold every later
+  take, including steers, until the turn ended; hence Q4.
+- **The token mechanism.** The rig's provider is a copy of the s2s profile and
+  puts only `⟦lop-say:<uuid>⟧` into the instructions it builds for a spoken
+  reply, a result injection and a permission injection. The relay endpoint
+  resolves the token from an in-process registry and streams exactly that text;
+  an unknown token yields empty output. The only further edits are s2s's own
+  `remove_markdown`/`remove_unspeechable` and lop's `speakable` cap.
+- **Auth placement.** The desktop bearer stays in Electron main, which is the
+  only HTTP caller of these routes and proxies a closed set of verbs. The
+  Gateway process runs third-party code, and a bearer there would reach
+  `/v1/credentials`, so it never receives one.
 
 ## What it is
 
@@ -96,8 +118,18 @@ machine `code` in `detail.code` and a sentence in `detail.text`.
   `/voice/live-token` routes.
 
 The desktop app's internal messages (main ↔ Gateway utility process, main ↔
-renderer) are part of the same contract and are defined in the source record;
-they do not touch this repository.
+renderer) are part of the same contract and do not touch this repository:
+
+- Main ↔ Gateway utility process (`parentPort`). Up: `take {taskId, text}`,
+  `status`. Down: `outcome {taskId, ok | code}`, `speak {text, kind: reply |
+  gate | phrase}`, `slot {active}`, `cancel_all`. The utility process speaks
+  only texts main sent it, plus the Q7 phrases.
+- Main ↔ renderer: event `voice.qwen.take {taskId, text}`; invokes
+  `voice.qwen.result {taskId, ok | code}` and `voice.qwen.speak {text, kind}`;
+  status `voice.qwen.status {rig: stopped | starting | ready | error,
+  webui_url}`.
+- Main ↔ renderer invoke `voice.qwen.start` (UI-only): starts the rig when the
+  slot is held but the rig is stopped, for example after an app relaunch.
 
 ## Carried forward from session voice
 

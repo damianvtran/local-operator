@@ -236,6 +236,50 @@ async def test_a_take_binds_to_the_user_message_start_whose_id_is_its_request_id
             replay_open = next(f for f in replayed if f["type"] == "open")
             assert not replay_open["payload"]["gap"], "the replay must not be a gap reset"
             assert _user_starts(replayed) == expected
+
+            # /voice/text on the REAL journal (review M1): a stored text block
+            # carries no ``type`` key (``exclude_defaults``), which a hand-built
+            # fake row does not reproduce, so the assistant read is pinned here.
+            rows = [
+                json.loads(line)
+                for line in (root / "sessions" / sid / "transcript.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            spoken_rows = [
+                row
+                for row in rows
+                if row.get("type") == "message"
+                and (row.get("payload") or {}).get("role") == "assistant"
+                and any(
+                    str(block.get("text") or "").strip()
+                    for block in row["payload"].get("content") or []
+                )
+            ]
+            assert spoken_rows, "the mock turns wrote no assistant text"
+            reply = spoken_rows[-1]
+            assert all("type" not in block for block in reply["payload"]["content"]), reply
+            said = await client.post(
+                "/v1/desktop/voice/text",
+                json={"session_id": sid, "source": {"kind": "message", "message_id": reply["id"]}},
+            )
+            assert said.status_code == 200, said.text
+            text = said.json()["result"]["text"]
+            assert text and said.json()["result"]["spoken_chars"] == len(text)
+            user_row = next(
+                row
+                for row in rows
+                if row.get("type") == "message" and (row.get("payload") or {}).get("role") == "user"
+            )
+            refused = await client.post(
+                "/v1/desktop/voice/text",
+                json={
+                    "session_id": sid,
+                    "source": {"kind": "message", "message_id": user_row["id"]},
+                },
+            )
+            assert refused.status_code == 404, refused.text
+            assert refused.json()["detail"]["code"] == "unknown_source"
     finally:
         for task in pumps:
             task.cancel()

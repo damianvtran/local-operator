@@ -5312,8 +5312,8 @@ SETTINGS: tuple[Setting, ...] = (
         default=800,
         minimum=100,
         maximum=4000,
-        # No ``unit``: the label and help already say "characters", and the
-        # settings projection reserves ``unit`` for the one duration row.
+        # No ``unit``: the help text already names characters, and
+        # test_desktop_controls pins that only the hours row declares a unit.
         help=_t(_wv.max_spoken_chars_help()),
     ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
