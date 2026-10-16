@@ -294,6 +294,9 @@ SCROLLBAR_THUMB = "█"
 
 #: The free-text row's label while it holds nothing and is not selected.
 OTHER_LABEL = "Other (type your own)"
+#: The free-text row on a READ-ONLY (lapsed) card: the option existed, but the
+#: card takes no typing, so it is named without the invitation.
+OTHER_READ_ONLY_LABEL = "Other"
 #: Its label once it is selected or carries text; the typed string follows.
 OTHER_PREFIX = "Other: "
 #: The text caret drawn at the end of the field while the row is selected.
@@ -2835,6 +2838,10 @@ class AskPickerScreen(Container):
         """One row's label text, free-text row included, without styling."""
         if index != self.other_row:
             return self.question.options[index].label
+        if self._read_only:
+            # "(type your own)" invites typing a lapsed card refuses (#2481
+            # design D8); the row still says the agent offered a free answer.
+            return OTHER_READ_ONLY_LABEL
         typed = self.state.typed
         if self.question.secret:
             if typed or self.state.selected == self.other_row:
@@ -3563,9 +3570,27 @@ class AskPickerScreen(Container):
         # row ordinals and Escape — so those are all the footer claims.
         if self._read_only:
             # A LAPSED card (D10) takes no answer by any key, so the footer names
-            # the one key that still does something. The card's own exit word,
-            # never a secret question's `decline`: Escape here declines nothing.
-            return self._shed_to_fit([self._exit_hint], [], width)
+            # only the keys that READ (#2481 UX U9): `↑↓` where the options are
+            # windowed and `^e` where the reveal would show more — of the question
+            # above all, which the explicit look exists to show in full. Each is
+            # offered only where it changes the frame, the rule every other
+            # footer here keeps. The card's own exit word, never a secret
+            # question's `decline`: Escape here declines nothing.
+            hints = []
+            ladder = []
+            # Windowed by the DRAWN rows, not by the position row: a short card
+            # windows its options without room for `showing 1–1 of 4`, and the
+            # arrows still scroll there (measured at 80x16).
+            if self.visible_rows and len(self._window()) < self.row_count:
+                hints.append(("↑↓", "scroll"))
+                ladder.append("↑↓")
+            reveal = self._reveal_hint()
+            if reveal is not None:
+                hints.append(reveal)
+                ladder.append(REVEAL_HINT_KEY)
+            hints.append(self._exit_hint)
+            ladder.append(self._exit_hint[0])
+            return self._shed_to_fit(hints, ladder, width)
         #
         # A footer describing one keyboard while the caret sits on another is
         # the same lie this row already refuses to tell about `enter` on a

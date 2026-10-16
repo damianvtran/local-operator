@@ -482,6 +482,22 @@ def _openable(row: AskRow) -> bool:
     return row.answerable or row.lapsed
 
 
+def compact_headline(open_count: int, timed_out_count: int) -> str:
+    """The bar's count when :func:`queue_headline` does not fit (#2481 design D6).
+
+    Whole clauses, never cells: ``N waiting · N timed out``. A cut inside the full
+    sentence read ``… 1 question`` at 50 columns — a third count of something
+    waiting — and took the chevron with it. Urgency has no clause here; the amber
+    glyph still carries it.
+    """
+    parts: list[str] = []
+    if open_count:
+        parts.append(f"{open_count} waiting")
+    if timed_out_count:
+        parts.append(f"{timed_out_count} timed out")
+    return " · ".join(parts)
+
+
 def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0) -> str:
     """The queue's count, in ONE vocabulary for the bar and the list header.
 
@@ -739,7 +755,19 @@ class AskBar(Widget):
             text = Text(no_wrap=True, overflow="ellipsis")
             text.append(ASK_MARKER, style=glyph_style)
             return text
-        base = f"{ASK_MARKER} {queue_headline(self._count, self._timed_out, self._urgent_count)}"
+        # SHED WHOLE CLAUSES (#2481 design D6): the full sentence, then without
+        # its urgent clause (the amber glyph keeps saying it), then the compact
+        # form. Measured against `avail`, which already reserves the chevron.
+        headline = queue_headline(self._count, self._timed_out, self._urgent_count)
+        for candidate in (
+            headline,
+            queue_headline(self._count, self._timed_out),
+            compact_headline(self._count, self._timed_out),
+        ):
+            headline = candidate
+            if cell_len(f"{ASK_MARKER} {candidate}") <= avail:
+                break
+        base = f"{ASK_MARKER} {headline}"
         # "view", not "answer", over a queue that owes nothing: a lapsed-only bar
         # opens a list of read-only rows (D10), and the verb must not promise an
         # answer box the list will not offer.
@@ -761,10 +789,9 @@ class AskBar(Widget):
             tail = ""
         text = Text(no_wrap=True, overflow="ellipsis")
         text.append(ASK_MARKER, style=glyph_style)
-        text.append(
-            f" {queue_headline(self._count, self._timed_out, self._urgent_count)}",
-            style=copy_style,
-        )
+        # Clipped at the reserve, never past it: the chevron is the only thing
+        # saying which way this control goes, so the copy gives way to it.
+        text.append(f" {_clip_cells(headline, avail - 1)}", style=copy_style)
         if head_part:
             text.append(head_part, style=copy_style)
         if tail:
@@ -772,7 +799,9 @@ class AskBar(Widget):
         padding = width - 1 - cell_len(text.plain)
         if padding > 0:
             text.append(" " * padding)
-        text.append(chevron, style=Style(bold=True) + accent)
+        # Muted with the rest of the bar when nothing is owed (#2481 UX U14):
+        # one cell of accent on a bar that says nothing is waiting still calls.
+        text.append(chevron, style=Style(bold=True) + accent if self._count else muted)
         return text
 
 
@@ -1484,6 +1513,14 @@ class AskQueueList(Widget):
         # yields to the hint the way it already yields to the numbers.
         hints = self.header_hints()
         reserve = [HeaderAtom("  ·  " + hints[0], "muted")] if hints else []
+        current = self.current()
+        if current is not None and current.lapsed and "enter view" in hints:
+            # A LAPSED row has two keys and neither is guessable: `x` is the only
+            # one that changes anything (U8) and `enter view` is the only way to
+            # read the whole question (U1). The clause yields to BOTH, so the look
+            # is discoverable at the default 80 columns (#2481 UX round 2, U10) —
+            # the segments already carry the counts the clause would repeat.
+            reserve = [HeaderAtom("  ·  " + hint, "muted") for hint in hints[:2]]
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))

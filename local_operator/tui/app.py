@@ -5853,6 +5853,13 @@ class OperatorApp(App[None]):
         #: a second Enter could spawn a second worker and CANCEL the first one
         #: mid-engage. Every mount seeds the widget from this set.
         self._ask_in_flight: set[str] = set()
+        #: The subset of `_ask_in_flight` a SESSION-scope `x` set (`_dismiss_ask`).
+        #: Only these are cleared by the snapshot that drops their row: a FLEET
+        #: op owns its mark for the whole engage window and clears it itself in
+        #: `_fleet_ask_worker` — a snapshot sweep that inferred ownership from
+        #: which rows were loaded cleared it after a collapse, and a reopened
+        #: list then CANCELLED the engage (#2481 review round 2, M1).
+        self._ask_dismiss_in_flight: set[str] = set()
         #: ``session_id -> title`` from the session catalogue, for the fleet
         #: list's row handles (round 2: U8/U6). A fleet row names the
         #: conversation it belongs to, and the catalogue's title is the name
@@ -26704,12 +26711,11 @@ class OperatorApp(App[None]):
             return
         self._ask_rows = list(rows)
         # A session-scope `x` holds its row in flight until the frame drops it
-        # (`_dismiss_ask`); THIS is that frame. Fleet ops end their own mark in
-        # `_fleet_ask_worker`, so only ids gone from both scopes are cleared.
-        present_ids = {row.ask_id for row in self._ask_rows} | {
-            row.ask_id for row in self._ask_fleet_rows
-        }
-        for ask_id in [i for i in self._ask_in_flight if i not in present_ids]:
+        # (`_dismiss_ask`); THIS is that frame. Only those marks are swept here —
+        # never a fleet op's, which `_fleet_ask_worker` ends itself (M1).
+        present_ids = {row.ask_id for row in self._ask_rows}
+        for ask_id in [i for i in self._ask_dismiss_in_flight if i not in present_ids]:
+            self._ask_dismiss_in_flight.discard(ask_id)
             self._mark_ask_in_flight(ask_id, False)
         self._refresh_ask_secret_notice()
         #: The wire's OWN tally and its truncation marker, kept beside the rows so
@@ -28308,6 +28314,7 @@ class OperatorApp(App[None]):
         if outcome.get("ok"):
             return
         if clear_in_flight:
+            self._ask_dismiss_in_flight.discard(clear_in_flight)
             self._mark_ask_in_flight(clear_in_flight, False)
         text = str(outcome.get("error") or "the ask was refused")
         if toast:
@@ -28346,6 +28353,7 @@ class OperatorApp(App[None]):
         # frame that drops it lands, or a refusal clears it. Before this, a
         # viewer's dismiss crossed the wire with nothing on screen saying the key
         # had landed. Snapshots clear it when the row leaves (`_sync_ask_surface`).
+        self._ask_dismiss_in_flight.add(ask_id)
         self._mark_ask_in_flight(ask_id, True)
         outcome: Any = reader(ask_id, by="terminal")
         self._handle_ask_outcome(outcome, toast=True, clear_in_flight=ask_id)
