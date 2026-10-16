@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "Agent name selector",
+  "cli.exec_worker_help.agent_id": "Agent id",
+  "cli.exec_worker_help.control": "Publish a session record and serve the control socket for this run",
+  "cli.exec_worker_help.hosting": "Hosting platform override",
+  "cli.exec_worker_help.job_id": "Ledger job id; when set, the worker appends a terminal record (finished_at + exit_code) to the JSONL ledger on exit",
+  "cli.exec_worker_help.json": "Emit one JSON line per agent event",
+  "cli.exec_worker_help.model": "Model override",
+  "cli.exec_worker_help.prompt": "The prompt to execute",
+  "cli.exec_worker_help.resume": "Resume a previous session by id (or ''@latest'')",
+  "cli.exec_worker_help.train": "Training mode: append the transcript to the agent directory (legacy --train)",
+  "cli.exec_worker_help.yolo": "Auto-approve all tool tiers"
+}
