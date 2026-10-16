@@ -1540,3 +1540,95 @@ def test_the_index_keeps_a_timed_out_only_queue_rather_than_going_absent(tmp_pat
     # instant the fold was (the fixture clock is years behind the wall clock).
     rows = store.index_asks(tmp_path, now=BASE + 120_001)
     assert [row["ask_id"] for row in rows] == [ask_id]
+
+
+# ---------------------------------------------------------------------------
+# The lapsed-visibility window (decisions D8, D9: `asks.lapsed_visible_for`)
+# ---------------------------------------------------------------------------
+
+HOUR_MS = 3600 * 1000
+
+
+def test_projection_hides_a_lapsed_row_past_the_window_but_the_index_keeps_it(tmp_path: Path):
+    """The window is a DISPLAY rule (D6): the live projection drops the row,
+    while ``_refresh`` keeps writing the index at the 7 d horizon so a stopped
+    session's row comes back if the operator widens the setting again."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    expires_at = BASE + 120_000
+    queue._now = lambda: expires_at + HOUR_MS + 1
+    assert queue.projection(lapsed_visible_ms=HOUR_MS) == []
+    assert [r["ask_id"] for r in queue.projection(lapsed_visible_ms=2 * HOUR_MS)] == [ask_id]
+    # No keyword is today's 7 d result.
+    assert [r["ask_id"] for r in queue.projection()] == [ask_id]
+    queue._refresh()
+    entry = store.read_entry(tmp_path, "s1")
+    assert entry is not None and [r["ask_id"] for r in entry["asks"]] == [ask_id]
+
+
+def test_projection_keeps_answered_rows_whatever_the_window(tmp_path: Path):
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue.respond(ask_id, {"q0": ["yes"]})
+    queue._now = lambda: BASE + 120_000 + HOUR_MS
+    assert [r["ask_id"] for r in queue.projection(lapsed_visible_ms=0)] == [ask_id]
+
+
+def test_the_timer_wakes_at_expires_at_plus_the_window(tmp_path: Path, monkeypatch):
+    """ "Gone after 1 h" must be true with no new turn (D9 ii): the deadline
+    timer, which used to stop once nothing was ``open``, also sleeps to the
+    earliest ``expires_at + window`` among lapsed rows and republishes then."""
+    from local_operator.asks import queue as queue_module
+
+    clock = {"now": BASE}
+    session = FakeSession()
+    published: list[int] = []
+    session.publish_ask_state = lambda: published.append(clock["now"])  # type: ignore[attr-defined]
+    queue = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: clock["now"])
+    monkeypatch.setattr(queue_module, "_lapsed_visible_ms", lambda _dir: HOUR_MS)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    expires_at = BASE + 120_000
+    # Past the deadline: the row is lapsed, nothing is ``open`` any more.
+    clock["now"] = expires_at + 1
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        # Each sleep lands exactly where the timer aimed it.
+        clock["now"] += int(round(seconds * 1000))
+
+    monkeypatch.setattr(queue_module.asyncio, "sleep", fake_sleep)
+
+    async def scenario() -> None:
+        await queue._run_timer()
+
+    _run(scenario())
+    assert sleeps, "the timer returned without waiting for the lapsed row's window"
+    # Ticks are bounded by MAX_TICK_MS, so the SUM is the wake instant: the
+    # first millisecond PAST the window, the horizon's own strict ``>`` rule.
+    hidden_at = expires_at + HOUR_MS + 1
+    assert clock["now"] == hidden_at
+    assert all(s * 1000 <= policy.MAX_TICK_MS for s in sleeps)
+    assert published and published[-1] == hidden_at
+    assert queue.projection(lapsed_visible_ms=HOUR_MS) == []
+    assert [r["ask_id"] for r in queue.projection(lapsed_visible_ms=HOUR_MS + 1)] == [ask_id]
+
+
+def test_the_timer_does_not_wait_on_a_lapsed_row_already_hidden(tmp_path: Path, monkeypatch):
+    from local_operator.asks import queue as queue_module
+
+    session = FakeSession()
+    queue = _queue(tmp_path, session, now=BASE)
+    monkeypatch.setattr(queue_module, "_lapsed_visible_ms", lambda _dir: 0)
+    queue.enqueue(_questions(), 120)
+    queue._now = lambda: BASE + 120_001
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(queue_module.asyncio, "sleep", fake_sleep)
+    _run(queue._run_timer())
+    assert sleeps == []
