@@ -40,7 +40,8 @@
     "local_operator/tui/widgets/welcome.py",
     "local_operator/tunnels/setup.py",
     "local_operator/headless_print.py",
-    "local_operator/tui/widgets/projects_view.py"
+    "local_operator/tui/widgets/projects_view.py",
+    "local_operator/exec_worker.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -74,7 +75,6 @@
     "local_operator/evaluation/triage.py": 3,
     "local_operator/exec_mode.py": 13,
     "local_operator/exec_startup.py": 0,
-    "local_operator/exec_worker.py": 11,
     "local_operator/harness/comms.py": 1,
     "local_operator/harness/jobs.py": 4,
     "local_operator/harness/loop.py": 10,
