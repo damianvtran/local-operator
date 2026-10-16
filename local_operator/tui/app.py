@@ -27024,8 +27024,9 @@ class OperatorApp(App[None]):
 
         The rule is ``AskRow.answerable``, which reads the fold's own
         ``OUTSTANDING_STATUSES`` — the same set the wire's tally and the index
-        use, so a timed-out-but-answerable ask can never be counted by one
-        surface and dropped by another.
+        use, so an ask can never be counted by one surface and dropped by
+        another. Since #2388 that set is ``open`` alone: a timed-out ask is
+        settled, shown but neither offered nor counted.
         """
         return [row for row in self._ask_rows if row.answerable]
 

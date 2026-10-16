@@ -10895,7 +10895,7 @@ class Session:
         projection and the legacy single-slot card are built by whichever host
         is attached, and only that host can repaint them. The sink receives
         ``(rows, outstanding_count)`` — the frozen wire shape and its outstanding
-        tally (open + timed-out-and-answerable; see
+        tally (open asks; a timed-out one is settled, #2388 — see
         ``asks.store.OUTSTANDING_STATUSES``) — so a host never re-derives the
         fold.
         """

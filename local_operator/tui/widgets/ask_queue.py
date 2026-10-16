@@ -218,8 +218,9 @@ SETTLED_CHIPS: dict[str, tuple[str, str]] = {
 #: ...which is to say: everything the reader must not be asked to answer. THE
 #: OUTSTANDING SET, taken from the fold rather than re-listed here, MINUS the
 #: lapsed set (D10): "answerable now" is outstanding AND NOT lapsed, and both
-#: halves live in ``asks.store`` so no surface re-lists the statuses. The wire's
-#: tally keeps counting the whole outstanding set; only the OFFER narrows.
+#: halves live in ``asks.store`` so no surface re-lists the statuses. Since
+#: #2388 the two sets are disjoint, so this equals the outstanding set; the
+#: subtraction stays so the offer never widens if they overlap again.
 _ANSWERABLE = store.OUTSTANDING_STATUSES - store.LAPSED_STATUSES
 
 #: THE DELIVERING HALF's word (§10): answered, response row not yet durable. It

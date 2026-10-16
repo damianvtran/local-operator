@@ -55,10 +55,11 @@ export type AskTone = "waiting" | "settled" | "gone" | "attention";
  *
  *  `timed_out` is answerable on the wire: the queue still takes a late answer
  *  and delivers it as a `late` response. The phone's card no longer offers one
- *  there — a lapsed ask (`isLapsed`) is shown read-only — but this predicate
- *  states the store's contract, which the outstanding count and the dock still
- *  follow. Everything already settled (answered/late/declined/dismissed/
- *  withdrawn) and everything too old to carry (expired) is not answerable.
+ *  there — a lapsed ask (`isLapsed`) is shown read-only — and the runtime's
+ *  `asks_open` no longer counts one (#2388); the dock still follows this
+ *  predicate, which is what keeps a lapsed-only queue's Dismiss door.
+ *  Everything already settled (answered/late/declined/dismissed/withdrawn)
+ *  and everything too old to carry (expired) is not answerable.
  */
 export function isAnswerable(status: string): boolean {
 	return status === "open" || status === "timed_out";
