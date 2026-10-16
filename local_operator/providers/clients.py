@@ -2807,6 +2807,58 @@ class OpenAICompatClient:
         conv_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:grok-cache:{key}"))
         return {"x-grok-conv-id": conv_id}
 
+    def _radient_correlation_headers(
+        self, request: ChatRequest, url: str
+    ) -> dict[str, str]:
+        """The Radient client-correlation headers for one chat call (PR-3).
+
+        WHY this lives here and not only in ``clients/radient.py``: chat does
+        not go through ``RadientClient`` at all -- it goes through this generic
+        OpenAI-compatible client (the registry builds an
+        ``OpenAICompatClient`` for ``radient``/``radient-key``), so the speech
+        and transcription call sites were the only ones that ever sent
+        ``X-Radient-Client-Session-Id`` / ``X-Radient-Client-Request-Id`` and
+        almost no production inference usage row carried a session id. The
+        server half already stores a grammatical pair on its usage row; this
+        is the missing client half for the chat wire.
+
+        Session value: ``request.prompt_cache_key``. Session hosts populate
+        it once from their session id (a fork inherits its parent's lineage,
+        which is the same conversation prefix), so it identifies the lop
+        session/conversation without this settings-free client needing a
+        second session-id channel that failover clones would have to carry.
+        It is passed verbatim through ``_correlation_headers`` -- the same
+        helper and grammar (``[A-Za-z0-9._:-]{1,64}``) the speech paths use --
+        so an ungrammatical lineage (too long, or carrying characters outside
+        the grammar) drops the session header silently rather than failing a
+        paid request, exactly as on those paths. The request value is minted
+        fresh per ``stream()`` call via ``new_correlation_id()``: each call is
+        one HTTP attempt that can produce its own usage row, so each attempt
+        needs its own join key.
+
+        Scope: ONLY a Radient request may carry these. The gate is the
+        provider id (``radient``/``radient-key``, covering a deliberate
+        base-url override such as a local stub or proxy) or the actual
+        request host ``api.radienthq.com`` (a custom OpenAI-compatible
+        provider pointed at the hub is served by the same server, mirroring
+        ``_grok_conv_headers``' host gate). Every other provider's request
+        stays byte-identical to before. These headers are telemetry only --
+        never routing, never money -- per the published contract.
+
+        The import is local on purpose: ``clients.radient`` is a heavy
+        sync (``requests``/pydantic) client surface, and importing it at
+        this module's top would drag it onto the hot import path of every
+        provider build for a header only Radient calls need.
+        """
+        if (
+            request.model.provider not in {"radient", "radient-key"}
+            and httpx.URL(url).host != "api.radienthq.com"
+        ):
+            return {}
+        from local_operator.clients.radient import _correlation_headers, new_correlation_id
+
+        return _correlation_headers(request.prompt_cache_key, new_correlation_id())
+
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
         endpoint = f"{self._base_url}/chat/completions"
         direct_deepseek = request.model.provider == "deepseek"
@@ -3247,6 +3299,7 @@ class OpenAICompatClient:
 
         headers = self._headers(api_key, oauth_access)
         headers.update(self._grok_conv_headers(request, url))
+        headers.update(self._radient_correlation_headers(request, url))
         body = self._build_body(request, scope=scope)
         envelope = _StreamOutputEnvelope(
             int(
@@ -3556,6 +3609,7 @@ class OpenAICompatClient:
         headers = self._headers(api_key, oauth_access)
         headers.update(self._codex_affinity_headers(request, oauth_access, url))
         headers.update(self._grok_conv_headers(request, url))
+        headers.update(self._radient_correlation_headers(request, url))
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
