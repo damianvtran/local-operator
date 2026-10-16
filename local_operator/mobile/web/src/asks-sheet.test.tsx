@@ -8,7 +8,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AsksSheet } from "./components/asks-sheet";
-import type { PendingAsk, SessionSummary } from "./types";
+import type { PendingAsk, SessionProjection, SessionSummary } from "./types";
 
 vi.mock("./api", () => ({
 	getAsks: vi.fn(async () => ({ asks: [] })),
@@ -17,12 +17,31 @@ vi.mock("./api", () => ({
 
 let rows: SessionSummary[] = [];
 let revision = 0;
+/* The opening conversation's own projection slot (its `asks` rows), as the
+   session screen's stream would deliver it. */
+let slot: { projection: SessionProjection | null; connected: boolean } = {
+	projection: null,
+	connected: true,
+};
+/* The list frame's revision is the REAL signature rule, folded here the way the
+   store folds it: the counter moves only when the signature of `rows` does. A
+   test can then say "asks_open stayed 0" and mean it, instead of choosing the
+   revision by hand. A test that wants to force a bump still assigns `revision`. */
+let lastSignature = "";
 vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
 		useSessions: () => ({ sessions: rows, connected: true }),
-		useAsksRevision: () => revision,
+		useProjection: () => slot,
+		useAsksRevision: () => {
+			const next = actual.asksPopulationSignature(rows);
+			if (next !== lastSignature) {
+				lastSignature = next;
+				revision += 1;
+			}
+			return revision;
+		},
 	};
 });
 
@@ -66,6 +85,8 @@ function summary(patch: Partial<SessionSummary> = {}): SessionSummary {
 beforeEach(() => {
 	rows = [];
 	revision = 0;
+	lastSignature = "";
+	slot = { projection: null, connected: true };
 	(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask()] });
 });
 
@@ -144,6 +165,35 @@ describe("AsksSheet", () => {
 		revision = 1;
 		rerender(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(getAsks).toHaveBeenCalledTimes(2));
+	});
+
+	it("re-reads when a lapsed ask is dismissed elsewhere, although asks_open stays 0", async () => {
+		/* #2388: a timed-out ask no longer counts in `asks_open`, so a session
+		   holding only a lapsed ask publishes 0 before AND after another surface
+		   dismisses it (or answers it late) — the list frame's signature cannot move.
+		   The sheet must still drop the gone row promptly, not on the 20 s backstop;
+		   the signal is the opening conversation's own projection rows. */
+		const lapsed = ask({ ask_id: "t", status: "timed_out" });
+		const withAsks = (asks: PendingAsk[]) =>
+			({ asks, asks_open: 0 }) as unknown as SessionProjection;
+		rows = [summary({ asks_open: 0 })];
+		slot = { projection: withAsks([lapsed]), connected: true };
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [lapsed] });
+		const { rerender } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 timed out")).toBeTruthy());
+		expect(screen.getAllByTestId("ask-card").length).toBe(1);
+		expect(getAsks).toHaveBeenCalledTimes(1);
+
+		/* Another surface dismisses it: the index no longer lists it, the session's
+		   projection drops the row, and the list frame still says asks_open 0. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
+		rows = [summary({ asks_open: 0 })];
+		slot = { projection: withAsks([]), connected: true };
+		rerender(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(getAsks).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(screen.queryAllByTestId("ask-card").length).toBe(0));
+		expect(screen.getByText("asks")).toBeTruthy();
+		expect(screen.getByText(/nothing waiting/)).toBeTruthy();
 	});
 
 	it("states the daemon's refusal reason when the read fails", async () => {
