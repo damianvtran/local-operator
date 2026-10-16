@@ -44,7 +44,7 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   **Taken:** the utterance is admitted through the same admission path as `POST /v1/desktop/sessions/{id}/messages` (desktop_sessions.py:3688).
   - It is sent as `input_mode="dictated"` with `input_path=<AudioPath>`.
   - It is sent as `mode="steer"` when the session is streaming, else `mode="prompt"` (Prompt.mode, desktop_sessions.py:1151).
-  - *Amendment (slice 1, 2026-10-16):* `/messages` itself takes `mode` from its client; the server-side rule this reuses is `admit_receipt_request`'s (desktop_sessions.py:554): steer while `is_streaming`, else prompt. A pending gate is not a separate term: a parked approval sits inside a streaming turn, so it already steers, and the steer is queued until the gate settles (`tests/unit/voice/test_steer_during_approval.py`). The utterance calls the `/messages` handler itself rather than a copy of it.
+  - *Amendment (slice 1, 2026-10-16):* `/messages` itself takes `mode` from its client; the server-side rule this reuses is `admit_receipt_request`'s (desktop_sessions.py:554): steer while `is_streaming`, else prompt. A parked approval sits inside a streaming turn, so a steer is what `/messages` would send there. That steer never ANSWERS the gate, but it is not always queued behind it either: it is held until the card settles only for a non-interruptible tool (`write`, `tests/unit/voice/test_steer_during_approval.py`). For an interruptible tool (`bash`) the steer cancels the card and the call is skipped ("Tool call skipped: interrupted by steering.", QA round 1, Q3). The voice route therefore never steers into a pending approval: see V13. The utterance calls the `/messages` handler itself rather than a copy of it.
   - Tools run in the session as usual and render on screen as usual.
   **Rejected:** a separate voice context. It would fork the conversation the operator wants to keep.
   **Owner:** coder.
@@ -59,8 +59,8 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   **Owner:** coder. Ships in slice 2.
 - **V7 — Approvals.**
   **Taken:** voice never answers a gate.
-  - Approvals are ANNOUNCED aloud from host-authored gate text, then approved on screen through the existing card and presence path.
-  - The utterance route has no code path to `answer_gate`. While a gate is pending, an utterance is admitted as a steer, never as an answer.
+  - Approvals are ANNOUNCED aloud from the gate's text as the server resolves it (the tool name and the tool's approval summary), then approved on screen through the existing card and presence path. *Amendment (slice 1, round 1):* that summary is not host-authored prose: it can quote model-written arguments (a bash command, a path). It is the same text the card shows, so speaking it reveals nothing new.
+  - The utterance route has no code path to `answer_gate`. While an approval is pending, an utterance is refused (V13), never admitted as an answer.
   **Rejected:** a spoken "yes". A transcript is produced by a provider pipeline, and the mic hears the app's own TTS output. A model-written reply could therefore become an approval, which breaks approval-authority.md §0.
   - Spoken deny and answers to non-secret asks are ordinary under §1 and allowed in principle. They are deferred to slice 3.
   **Overturned by:** never by voice transcription alone. It would need a presence gesture.
@@ -94,6 +94,16 @@ not a separate voice model with its own personality. "Aida only first" is droppe
   - "Unanswered is not a denial" (acp-agent.md D2).
   - The desktop approve route is presence-gated, so voice cannot approve (acp-agent.md D1).
   **Rejected:** merging `feat/acp-poc`. It solves an external-front-end topology that V1 rejects.
+- **V13 — Utterances while an approval is pending.** *(Added slice 1, round 1, from QA Q3.)*
+  **Taken:** while the slot session has a pending APPROVAL gate, `POST /v1/desktop/voice/utterance` refuses with 409 `approval_pending` ("Answer the approval on screen first.").
+  - It covers the text door and audio alike.
+  - Audio is refused BEFORE STT runs, so a refused recording spends nothing. The check repeats after STT, because a card can park while a transcription is running.
+  - Asks are not covered: an ask is not cancelled by a steer, and spoken asks are slice 2.
+  **Rejected:**
+  - Admitting the steer (V5 as first written). A steer cancels an interruptible tool's card, so a word the mic heard, including the app's own announcement of the card, would make the card vanish and skip the tool. Not an approval, but the operator loses the decision.
+  - Queuing the utterance in the daemon until the gate settles. That is a second admission queue beside the owner's, with its own lifetime and replay rules.
+  - Changing steer semantics for every surface. Typed steers behave the same way today (QA 13b); that is a harness decision outside this feature.
+  **Owner:** coder.
 - **V12 — Input mode.**
   **Taken:** push-to-talk only in v1, reusing `keymap.push_to_talk`. Hands-free (VAD, echo cancellation, barge-in) is deferred.
   **Rejected:** always-listening by default. Echo from the app's own TTS, accidental prompts to an agent that holds tools, and per-utterance STT spend.
@@ -111,8 +121,10 @@ Every route uses `require_desktop`.
   - 409: `voice_unavailable` (no TTS path; STT absence is allowed because of the text door) or `voice_store_busy`.
 - `POST /v1/desktop/voice/utterance` (multipart)
   - Body: `session_id`, `request_id`, and either `file` (wav/webm/ogg/mp4, ≤16 MiB) or `text`.
+  - `request_id` is a dashed lowercase UUID, the `RequestID` type of `/messages` (`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`). It is the receipt journal key, so a retry reuses it and a new utterance mints a new one. *(Stated in slice 1, round 1; the type was always `/messages`' own.)*
   - 200: `{text, path, admission: MessageAdmission}`.
-  - 409: `voice_not_enabled`, or `stt_unavailable` with the cascade's reason.
+  - 409: `voice_not_enabled`, `approval_pending` (V13), or `stt_unavailable` with the cascade's reason.
+  - 422: `invalid_voice_request` (a malformed `request_id`, both or neither of `file`/`text`, an unsupported recording, or a transcript `/messages` would refuse, such as a whole-draft slash command), or `empty_transcript`.
 - `POST /v1/desktop/voice/speech`
   - Body: `{session_id, source: {kind: "message", message_id} | {kind: "gate", request_id} | {kind: "ask", ask_id}}`.
   - 200: audio bytes, with headers `X-Voice-Path` and `X-Voice-Spoken-Chars`.

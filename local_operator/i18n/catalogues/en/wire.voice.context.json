@@ -69,5 +69,20 @@
     "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
     "tone": "concise, neutral, actionable",
     "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_request_id": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.invalid_message": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
+  },
+  "wire.voice.approval_pending": {
+    "role": "Desktop voice-mode refusal (detail.text of a /v1/desktop/voice* error envelope), shown as a toast or inline notice",
+    "tone": "concise, neutral, actionable",
+    "note": "English-only addition with English fallback until independently translated and audited."
   }
 }

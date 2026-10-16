@@ -28,6 +28,19 @@ def test_an_unterminated_fence_still_hides_the_code() -> None:
     assert "rm -rf" not in sp.speakable("Run this:\n```sh\nrm -rf build").text
 
 
+def test_embedded_commands_are_never_read_aloud() -> None:
+    """B2: a ``[[…]]`` control token is machinery, not words for a listener."""
+    assert sp.clean("Done. [[notify: build green]] See you.") == "Done. See you."
+    assert sp.clean("[[a]] and [[b: c]]") == "and"
+    # The link-suffixed form goes whole, rather than leaving a "[x" link text.
+    assert sp.clean("a [[x]](http://y) b") == "a b"
+    # Bounded to one line, so a stray opener cannot swallow the rest of a reply.
+    assert sp.clean("keep [[ this reply") == "keep [[ this reply"
+    assert sp.clean("first [[open\nsecond]] end") == "first [[open second]] end"
+    # An ordinary markdown link is still read as its text.
+    assert sp.clean("see [the docs](http://x) now") == "see the docs now"
+
+
 def test_short_text_is_not_truncated() -> None:
     result = sp.speakable("Two files changed.", max_chars=800)
     assert result == sp.Speakable("Two files changed.", truncated=False)
