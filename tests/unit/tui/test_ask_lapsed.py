@@ -213,6 +213,8 @@ async def test_a_mounted_card_whose_ask_lapses_stays_but_no_longer_sends(enabled
         assert card.read_only
         assert "timed out" in card._title and LAPSED_TITLE_TAIL in card._title, card._title
         assert "still reaches" not in card._title
+        # No row is lit as "what Enter takes": nothing on a lapsed card is taken.
+        assert not any(line.startswith("❯") for line in card.render_lines_for_test())
         card.focus()
         await _settle(pilot)
         await pilot.press("enter")
