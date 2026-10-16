@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,8 @@ def _offload_to_peer(pair_devices: Devices, monkeypatch: pytest.MonkeyPatch) -> 
         # product's own measured recovery — a fresh dial answers in ~70ms (see
         # `relay._link_for`'s docstring) — and this is a SETUP precondition, not
         # the refusal behaviour these cells exist to read.
+        # WHY (F1, review r1): a consumed retry stays countable — recurrences show in CI's warnings.
+        warnings.warn("setup move retried once over a peer-gone link", stacklevel=2)
         moved = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert moved["ok"] is True, moved
     assert (server_b.root / "sessions" / SESSION / "transcript.jsonl").is_file()
