@@ -385,6 +385,9 @@ def test_audio_path_vocabulary_is_closed() -> None:
         "provider_stt_openai",
         "provider_stt_superwhisper",
         "model_audio_sidecar",
+        # The opt-in key-free rung (session-voice.md R8). Only the desktop voice
+        # routes resolve it; /v1/stt/paths never lists it (no local_stt_url).
+        "local_stt_loopback",
         "none",
     ]
 

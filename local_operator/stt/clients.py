@@ -203,7 +203,13 @@ class ElevenLabsSttClient:
 
 
 class OpenAiSttClient:
-    """``POST /v1/audio/transcriptions`` with the user's own OpenAI key."""
+    """``POST /v1/audio/transcriptions`` with the user's own OpenAI key.
+
+    Also the client of the loopback rung (``local_stt_loopback``): the endpoint
+    is OpenAI-compatible, so only ``base_url`` and the ``label`` the failure
+    sentences name differ. Without the label a refused LOCAL server would read
+    "OpenAI request failed", sending the operator to the wrong place.
+    """
 
     def __init__(
         self,
@@ -211,10 +217,12 @@ class OpenAiSttClient:
         *,
         base_url: str | None = None,
         client: Optional[httpx.AsyncClient] = None,
+        label: str = "OpenAI",
     ) -> None:
         self._api_key = api_key
         self._base_url = (base_url or OPENAI_STT_BASE_URL).rstrip("/")
         self._client = client
+        self._label = label
 
     async def transcribe(
         self,
@@ -251,7 +259,7 @@ class OpenAiSttClient:
                     files=files,
                     data=data,
                     timeout_s=timeout_s,
-                    label="OpenAI",
+                    label=self._label,
                     secrets=[self._api_key],
                 )
             except APIError as exc:
@@ -262,12 +270,12 @@ class OpenAiSttClient:
             text = payload.get("text")
             if not isinstance(text, str):
                 raise APIError(
-                    "OpenAI returned a response without transcript text.",
+                    f"{self._label} returned a response without transcript text.",
                     status_code=response.status_code,
                 )
             return SttClientResult(text=text, model=model_id, provider="openai")
         # Only reachable when every candidate was skipped as model-unavailable.
-        raise last or APIError("OpenAI transcription failed on every model candidate.")
+        raise last or APIError(f"{self._label} transcription failed on every model candidate.")
 
 
 def _model_unavailable(exc: APIError) -> bool:

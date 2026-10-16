@@ -40,6 +40,15 @@ the classified failure the route should report. When NO rung was available it
 raises the same exception with no attempts — the route maps that case to the
 structured 409 the surface reads to offer the audio door.
 
+**Loopback rung (opt-in)** — a caller that passes ``local_stt_url`` (today only
+the desktop voice routes, from ``voice.local_stt_url``) gets one more rung,
+``local_stt_loopback``, appended LAST: an OpenAI-compatible
+``/v1/audio/transcriptions`` on this machine's loopback (session-voice.md R8).
+It is the key-free path, so it stands behind every credentialed rung exactly as
+``local_tts_system`` stands behind the TTS ones, and a caller that passes
+nothing resolves exactly as before. Availability is "configured and the host is
+loopback"; whether the server is UP is a call-time fact, like every other rung.
+
 **Token executor** (:func:`transcribe_backend`) — the same run for ONE NAMED
 rung over in-memory bytes, with no walk and no fall-forward: the mobile
 bridge's dispatch (``clients/stt.py``), where the surface already decided —
@@ -95,6 +104,22 @@ STT_RUNG_PATHS = (
     AudioPath.PROVIDER_STT_ELEVENLABS,
     AudioPath.PROVIDER_STT_OPENAI,
 )
+
+#: The opt-in rung, walked after :data:`STT_RUNG_PATHS` when a caller supplies
+#: a loopback URL (see the module docstring). Kept out of that tuple so the
+#: token executor and every existing walk stay exactly as they were.
+LOCAL_RUNG_PATH = AudioPath.LOCAL_STT_LOOPBACK
+
+#: The model id sent to the loopback server. It is whatever that server loaded;
+#: an OpenAI-compatible server requires the field, and mlx_audio's names the
+#: model to load, so the default is the one measured for this rung (Parakeet
+#: TDT 0.6B v3: exact transcript, 0.06 s warm, relay-voice R8).
+LOCAL_STT_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+
+#: The loopback server takes no credential; the OpenAI client still sends a
+#: bearer, so it sends this placeholder rather than any stored key. A real key
+#: must never travel to a local process the operator merely pointed a URL at.
+LOCAL_STT_PLACEHOLDER_KEY = "local"
 
 #: Why the reserved rung reads unavailable. Kept as a constant because it is
 #: surfaced verbatim and a test pins it.
@@ -217,6 +242,38 @@ def _model_capable(model: object | None) -> bool:
     return model is not None and bool(getattr(model, "supports_audio_input", False))
 
 
+def local_stt_rung(local_stt_url: str | None) -> RungAvailability:
+    """The loopback rung's availability for ``local_stt_url`` (see module docstring).
+
+    Loopback ONLY, checked here rather than trusted from the setting: the rung
+    sends the operator's recorded voice to whatever the URL names, and "local"
+    is the whole promise of a key-free rung. A LAN or remote host reads as
+    unavailable with the reason, never as a quiet upload.
+    """
+    from urllib.parse import urlsplit
+
+    from local_operator.server.utils.static_roots import is_loopback_host
+
+    url = (local_stt_url or "").strip()
+    if not url:
+        return RungAvailability(
+            LOCAL_RUNG_PATH, False, "No local transcription server is configured."
+        )
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        host = None
+    if not is_loopback_host(host):
+        return RungAvailability(
+            LOCAL_RUNG_PATH,
+            False,
+            "The local transcription server must be on this machine (localhost or 127.0.0.1).",
+        )
+    return RungAvailability(
+        LOCAL_RUNG_PATH, True, "A local transcription server is configured on this machine."
+    )
+
+
 async def resolve_audio_path(
     *,
     config_dir: Path | None,
@@ -224,8 +281,15 @@ async def resolve_audio_path(
     model: object | None = None,
     session_id: str | None = None,
     store: AuthStore | None = None,
+    local_stt_url: str | None = None,
 ) -> AudioPathResolution:
-    """Decide which speech path a submission would take. See module docstring."""
+    """Decide which speech path a submission would take. See module docstring.
+
+    ``local_stt_url`` opts in to the loopback rung, placed after the
+    credentialed rungs and before the model-audio rung (it IS an STT call).
+    ``None`` -- every caller but the voice routes -- leaves the rungs exactly as
+    they were.
+    """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
@@ -270,6 +334,7 @@ async def resolve_audio_path(
             "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
         ),
         RungAvailability(AudioPath.PROVIDER_STT_SUPERWHISPER, False, SUPERWHISPER_REASON),
+        *((local_stt_rung(local_stt_url),) if local_stt_url is not None else ()),
         RungAvailability(
             AudioPath.MODEL_AUDIO_SIDECAR,
             model_capable,
@@ -307,6 +372,7 @@ def _rung_label(path: AudioPath) -> str:
         AudioPath.PROVIDER_STT_RADIENT: "Radient",
         AudioPath.PROVIDER_STT_ELEVENLABS: "ElevenLabs",
         AudioPath.PROVIDER_STT_OPENAI: "OpenAI",
+        AudioPath.LOCAL_STT_LOOPBACK: "The local transcription server",
     }.get(path, str(path))
 
 
@@ -416,6 +482,41 @@ async def _run_openai_rung(
     return result.text, None, ""
 
 
+async def _run_local_rung(
+    audio: bytes,
+    *,
+    mime: str,
+    local_stt_url: str,
+    language: str | None,
+    prompt: str | None,
+    timeout_s: float,
+) -> tuple[str, Any, str]:
+    """The loopback rung: the OpenAI client pointed at the configured local server.
+
+    ``base_url`` is normalised to the ``/v1`` root the client appends
+    ``/audio/transcriptions`` to, so ``http://127.0.0.1:8000`` and
+    ``http://127.0.0.1:8000/v1`` both work. The model is pinned (no fallback id):
+    a local server that lacks it should say so, not be asked for ``whisper-1``.
+    No cost and no provider: nothing was bought.
+    """
+    from local_operator.providers.local import normalize_base_url
+
+    client = OpenAiSttClient(
+        LOCAL_STT_PLACEHOLDER_KEY,
+        base_url=normalize_base_url(local_stt_url),
+        label="The local transcription server",
+    )
+    result = await client.transcribe(
+        audio,
+        mime=mime,
+        model=LOCAL_STT_MODEL,
+        language=language,
+        prompt=prompt,
+        timeout_s=timeout_s,
+    )
+    return result.text, None, ""
+
+
 def _failed_attempt(path: AudioPath, exc: BaseException) -> SttAttempt:
     """One failed rung, with the shared mapper's sentence as the detail."""
     if isinstance(exc, APIError):
@@ -461,8 +562,12 @@ async def transcribe_audio(
     language: str | None = None,
     prompt: str | None = None,
     correlation_session_id: str | None = None,
+    local_stt_url: str | None = None,
 ) -> SttOutcome:
     """Run the STT cascade over one audio file. See module docstring.
+
+    ``local_stt_url`` opts in to the loopback rung, walked last (see
+    :func:`resolve_audio_path`).
 
     ``correlation_session_id`` (PR-3) is the CALLER's conversation id for the
     hub's client correlation header and the emitted spend record — deliberately
@@ -478,9 +583,11 @@ async def transcribe_audio(
             model=model,
             session_id=session_id,
             store=store,
+            local_stt_url=local_stt_url,
         )
+        walkable = (*STT_RUNG_PATHS, LOCAL_RUNG_PATH)
         candidates = [
-            rung.path for rung in resolution.rungs if rung.available and rung.path in STT_RUNG_PATHS
+            rung.path for rung in resolution.rungs if rung.available and rung.path in walkable
         ]
         if not candidates:
             raise SttUnavailable(str(resolution.reason), resolution=resolution)
@@ -531,7 +638,16 @@ async def transcribe_audio(
                             if sniffed is not None
                             else stt_audio.mime_for_path(audio_path)
                         )
-                    if path == AudioPath.PROVIDER_STT_ELEVENLABS:
+                    if path == LOCAL_RUNG_PATH:
+                        attempt = _run_local_rung(
+                            audio,
+                            mime=mime,
+                            local_stt_url=local_stt_url or "",
+                            language=language,
+                            prompt=prompt,
+                            timeout_s=attempt_timeout,
+                        )
+                    elif path == AudioPath.PROVIDER_STT_ELEVENLABS:
                         attempt = _run_elevenlabs_rung(
                             audio,
                             mime=mime,

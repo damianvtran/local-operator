@@ -51,6 +51,11 @@ class AudioPath(StrEnum):
     #: The recorded audio is sent to an audio-capable model; a forked sidecar
     #: best-effort fills the transcript record (see ``stt/sidecar.py``).
     MODEL_AUDIO_SIDECAR = "model_audio_sidecar"
+    #: An OpenAI-compatible transcription server on THIS machine's loopback
+    #: (``voice.local_stt_url``), the key-free rung (session-voice.md R8). OPT-IN:
+    #: only a caller passing ``include_local=True`` ever sees it, so every
+    #: existing surface's resolution is unchanged.
+    LOCAL_STT_LOOPBACK = "local_stt_loopback"
     #: No usable path. Appears in availability/refusal payloads only.
     NONE = "none"
 
