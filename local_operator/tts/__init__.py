@@ -8,7 +8,10 @@ differ in what they can express, and a shared enum would let an STT-only token
 leak into a TTS payload (``model_audio_sidecar`` has no meaning for a
 synthesis call). One token vocabulary per direction.
 
-The order below is FROZEN (design note §5): Radient → ElevenLabs → OpenAI.
+The order below is FROZEN (design note §5): Radient → ElevenLabs → OpenAI, then
+``local_tts_system`` (macOS ``say``) as the key-free last rung for the callers
+that opt into it (docs/design/session-voice.md V9; ``tts/local_say.py`` says
+why it is opt-in).
 The tokens are the closed vocabulary every surface speaks; ``none`` appears
 only in availability/refusal payloads, never on a spoken message.
 
@@ -47,6 +50,10 @@ class VoicePath(StrEnum):
     PROVIDER_TTS_RADIENT = "provider_tts_radient"
     PROVIDER_TTS_ELEVENLABS = "provider_tts_elevenlabs"
     PROVIDER_TTS_OPENAI = "provider_tts_openai"
+    #: The system voice (macOS ``say``): key-free and WAV-only. Reported ONLY to
+    #: a caller that passed ``include_local=True`` (the voice routes), so the
+    #: generic ``/v1/tts/paths`` and ``/v1/tools/speech`` never see it.
+    LOCAL_TTS_SYSTEM = "local_tts_system"
     #: No usable path. Appears in availability/refusal payloads only.
     NONE = "none"
 

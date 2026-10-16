@@ -113,8 +113,27 @@ def test_voice_path_vocabulary_is_closed() -> None:
         "provider_tts_radient",
         "provider_tts_elevenlabs",
         "provider_tts_openai",
+        # The voice routes' opt-in key-free rung (docs/design/session-voice.md
+        # V9); `test_the_paths_route_never_reports_the_local_rung` below pins
+        # that this surface still does not.
+        "local_tts_system",
         "none",
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_paths_route_never_reports_the_local_rung(
+    test_app_client, store_override
+) -> None:
+    """`local_tts_system` is opt-in: the generic surface keeps its three rungs."""
+    store_override(FakeStore({}))
+    result = (await test_app_client.get("/v1/tts/paths")).json()["result"]
+    assert [rung["path"] for rung in result["rungs"]] == [
+        "provider_tts_radient",
+        "provider_tts_elevenlabs",
+        "provider_tts_openai",
+    ]
+    assert result["path"] == "none"
 
 
 # -- the BYO legs, over a real transport -------------------------------------

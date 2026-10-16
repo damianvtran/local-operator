@@ -75,6 +75,7 @@ from local_operator.tts import (
     adapters,
 )
 from local_operator.tts import clients as tts_clients
+from local_operator.tts import local_say
 from local_operator.tts.descriptor import VoiceDescriptor
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,12 @@ TTS_RUNG_PATHS = (
     VoicePath.PROVIDER_TTS_ELEVENLABS,
     VoicePath.PROVIDER_TTS_OPENAI,
 )
+
+#: The key-free rung, ALWAYS last and only for a caller that opts in with
+#: ``include_local=True`` (see ``tts/local_say.py``: it is WAV-only, and the
+#: existing mp3 callers must not be handed it). Kept OUT of ``TTS_RUNG_PATHS``
+#: so every existing reader of that tuple keeps its three-rung meaning.
+LOCAL_RUNG_PATH = VoicePath.LOCAL_TTS_SYSTEM
 
 #: The hub's voicing headers this daemon will relay, as a FIXED SET rather than
 #: a ``X-Radient-Speech-`` prefix filter (voicing S2 security round 1, S-3). The
@@ -233,8 +240,13 @@ async def resolve_voice_path(
     base_url: str | None = None,
     session_id: str | None = None,
     store: AuthStore | None = None,
+    include_local: bool = False,
 ) -> VoicePathResolution:
-    """Decide which text-to-speech path a request would take. See the module docstring."""
+    """Decide which text-to-speech path a request would take. See the module docstring.
+
+    ``include_local`` appends the ``local_tts_system`` rung (macOS ``say``) last.
+    Off by default, so every existing caller's answer is unchanged.
+    """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
@@ -276,6 +288,16 @@ async def resolve_voice_path(
             "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
         ),
     )
+    if include_local:
+        local_available = local_say.available()
+        rungs = (
+            *rungs,
+            RungAvailability(
+                LOCAL_RUNG_PATH,
+                local_available,
+                local_say.AVAILABLE_REASON if local_available else local_say.UNAVAILABLE_REASON,
+            ),
+        )
     available = next((rung for rung in rungs if rung.available), None)
     if available is not None:
         return VoicePathResolution(
@@ -300,6 +322,7 @@ def _rung_label(path: VoicePath) -> str:
         VoicePath.PROVIDER_TTS_RADIENT: "Radient",
         VoicePath.PROVIDER_TTS_ELEVENLABS: "ElevenLabs",
         VoicePath.PROVIDER_TTS_OPENAI: "OpenAI",
+        VoicePath.LOCAL_TTS_SYSTEM: "The system voice",
     }.get(path, str(path))
 
 
@@ -466,6 +489,22 @@ async def _run_openai_rung(
     return result.audio, result.provider, _mapping_headers(attempt), []
 
 
+async def _run_local_rung(
+    text: str, *, timeout_s: float
+) -> tuple[bytes, str, list[tuple[str, str]], list[tuple[str, str]]]:
+    """The key-free rung: the system voice. No mapping and no charge headers.
+
+    A ``LocalSayError`` becomes an ``APIError`` with no status, the shape every
+    other rung's transport failure takes, so the route's refusal ladder needs no
+    new arm.
+    """
+    try:
+        audio = await local_say.synthesize(text, timeout_s=timeout_s)
+    except local_say.LocalSayError as error:
+        raise APIError(str(error), status_code=None) from error
+    return audio, local_say.PROVIDER, [], []
+
+
 def _mapping_headers(attempt: adapters.Attempt) -> list[tuple[str, str]]:
     """The ``X-Radient-Speech-*`` family for a leg THIS daemon mapped.
 
@@ -505,6 +544,7 @@ async def synthesize_speech(
     timeout_s: float = TTS_OVERALL_TIMEOUT_S,
     correlation_session_id: str | None = None,
     client_request_id: str | None = None,
+    include_local: bool = False,
 ) -> TtsOutcome:
     """Synthesize ``text`` down the cascade. See the module docstring.
 
@@ -519,6 +559,11 @@ async def synthesize_speech(
     question, answered by the store), while these are per-call attribution
     (answered by the route). A BYO rung reads neither — the vendors do not
     have this header family.
+
+    ``include_local`` adds the ``local_tts_system`` rung after OpenAI, for the
+    voice routes only. It needs no descriptor (the system voice has nothing to
+    map) and always answers WAV, whatever ``response_format`` asked for, so its
+    caller must read the container from the bytes.
     """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
@@ -530,6 +575,7 @@ async def synthesize_speech(
                 base_url=radient_base,
                 session_id=session_id,
                 store=store,
+                include_local=include_local,
             )
 
         attempts: list[TtsAttempt] = []
@@ -541,7 +587,8 @@ async def synthesize_speech(
         failures: list[tuple[VoicePath, BaseException]] = []
         deadline = asyncio.get_running_loop().time() + timeout_s
 
-        for path in TTS_RUNG_PATHS:
+        walk = (*TTS_RUNG_PATHS, LOCAL_RUNG_PATH) if include_local else TTS_RUNG_PATHS
+        for path in walk:
             rung = next((r for r in resolution.rungs if r.path == path), None)
             if rung is None or not rung.available:
                 continue
@@ -564,6 +611,8 @@ async def synthesize_speech(
                         client_request_id=client_request_id,
                         client=radient_client,
                     )
+                elif path == LOCAL_RUNG_PATH:
+                    call = _run_local_rung(text, timeout_s=attempt_timeout)
                 elif descriptor is None:
                     # A BYO leg has nothing to map without a descriptor, and an
                     # absent descriptor means "behave as before" — which the
