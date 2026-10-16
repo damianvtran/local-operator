@@ -10157,6 +10157,41 @@ class OperatorApp(App[None]):
             return ""
         return liveness_text(verdict, now=now, verified_at=getattr(session, "verified_at", None))
 
+    def _liveness_fill_text(
+        self, source: SessionInteraction, *, verdict: OwnerLiveness | None = None
+    ) -> str:
+        """The EXACT connection-field string the liveness fill would paint.
+
+        THE GATE REMEMBERS THIS STRING AND THE PAINT USES IT, because the
+        liveness tail is not the whole row: a pending fork keeps its own prefix
+        in front of the tail (``forking · esc``), and it keeps it while the
+        reader is SUPPRESSED — the composition the startup flash fix added. A
+        gate that watched only the tail stored ``""`` over a row that read
+        ``forking · esc``; the next due tick compared ``"" == ""``, skipped,
+        and the takeover row outlived the bind, standing on a live session (a
+        row the unchanged gate could no longer clear in either direction).
+
+        So both callers go through this one composition:
+        ``_show_sidebar_connection`` paints what it returns and
+        ``_reprobe_liveness`` remembers it. The guards are the fill's own — a
+        non-viewer and a LIVE verdict paint nothing here (the widget carries
+        the fork cell for a live session) — so the string stays empty exactly
+        when the row does. ``verdict`` is accepted so the fill, which has just
+        classified the session to decide WHETHER to fill, does not classify it
+        a second time.
+        """
+        if not _is_viewer(source.session):
+            return ""
+        if verdict is None:
+            verdict = owner_liveness(source.session)
+        if verdict is OwnerLiveness.LIVE:
+            return ""
+        text = self._liveness_row_text(source)
+        fork_probe = getattr(source.session, "has_pending_fork", None)
+        if callable(fork_probe) and fork_probe():
+            return f"{_FORK_PENDING_TEXT} · {text}" if text else _FORK_PENDING_TEXT
+        return text
+
     async def _reprobe_liveness(self, source: SessionInteraction, session: Any) -> None:
         """One bounded probe, and a repaint when the row WOULD DIFFER FROM THE SCREEN.
 
@@ -10178,7 +10213,7 @@ class OperatorApp(App[None]):
         await self._liveness_probe.tick(session)
         if not self._is_current(source):
             return
-        current = self._liveness_row_text(source)
+        current = self._liveness_fill_text(source)
         if current == self._liveness_painted:
             return
         self._show_sidebar_connection(source)
@@ -10289,28 +10324,20 @@ class OperatorApp(App[None]):
         # so this branch never runs for them. A pending fork states a DIFFERENT
         # fact -- what you can do -- so the two compose, and the AGE STAYS LAST so
         # the row's ellipsis still eats the age rather than a word.
-        fork_probe = getattr(source.session, "has_pending_fork", None)
-        fork_pending = bool(fork_probe()) if callable(fork_probe) else False
         if not status and _is_viewer(source.session):
             verdict = owner_liveness(source.session)
             if verdict is not OwnerLiveness.LIVE:
-                # THE READER, NOT A SECOND COMPOSITION OF IT: this is the same
-                # call the probe's gate compares against (`_liveness_row_text`),
-                # so the string remembered and the string painted cannot
-                # disagree -- including that reader's in-flight suppression,
-                # which yields an empty string while a bring-up for THIS
-                # conversation is arriving (see `_bring_up_in_flight`).
-                text = self._liveness_row_text(source)
-                # A pending fork still renders while the liveness tail is
-                # suppressed, with no tail: it states a DIFFERENT fact (what
-                # the user can do), and the precedence above is what keeps it
-                # visible next to a verdict of the same length.
-                if fork_pending and text:
-                    status = f"{_FORK_PENDING_TEXT} · {text}"
-                elif fork_pending:
-                    status = _FORK_PENDING_TEXT
-                else:
-                    status = text
+                # THE ONE COMPOSITION, asked of the helper the probe's gate also
+                # compares against (`_liveness_fill_text`), so the string
+                # remembered and the string painted cannot disagree -- including
+                # that reader's in-flight suppression, which yields an empty
+                # string while a bring-up for THIS conversation is arriving (see
+                # `_bring_up_in_flight`), AND the fork prefix that a pending fork
+                # keeps visible under it: a pending fork still renders while the
+                # liveness tail is suppressed, with no tail, because it states a
+                # DIFFERENT fact (what the user can do), and the precedence above
+                # is what keeps it visible next to a verdict of the same length.
+                status = self._liveness_fill_text(source, verdict=verdict)
                 # STALE is PROVISIONAL — a long turn ends, a SIGCONT lands, a
                 # starved loop catches up — so it takes the muted register and NOT
                 # `danger`, which stays the latch's terminal verdict. The same
