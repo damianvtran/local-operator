@@ -390,6 +390,19 @@ _LANGUAGE_NAMES = {
 }
 
 
+def locale_direction(locale: str | None) -> str:
+    """Recognized text direction, not permission to render or mirror a client.
+
+    Use the same normalization vocabulary as language resolution so OS aliases
+    cannot disagree with their canonical tag. Urdu is the only RTL language in
+    this v1 supported set (RFC §2.7); unknown tags safely inherit English's LTR.
+    Callers negotiating live copy must pass the SHIPPED resolved language, not
+    the raw preference: held Urdu still renders English, whose direction is LTR.
+    This metadata does not claim TUI shaping or client RTL layout is implemented.
+    """
+    return "rtl" if normalise_locale(locale) == "ur" else "ltr"
+
+
 def language_name(locale: str) -> str:
     """The English display name for a supported locale (falls back to ``en``)."""
     return _LANGUAGE_NAMES.get(locale, _LANGUAGE_NAMES["en"])
