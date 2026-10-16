@@ -33331,10 +33331,14 @@ class OperatorApp(App[None]):
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.
 
-        Monotonic and not ``time.time``: the only reader is the re-title
-        throttle, and a wall clock stepped backwards by NTP would silently
-        widen its window. A method rather than a direct call so a test can
-        cross a two-minute gap without sleeping through it.
+        Monotonic and not ``time.time``: the re-title throttle is its longest
+        standing reader and a wall clock stepped backwards by NTP would silently
+        widen its window. It is NOT single-reader — ``_check_terminal_frontend``
+        reads it too, for the reaper's gate/clean-exit grace windows — so a test
+        that must cross either window patches this seam rather than the shared
+        ``time`` module (which would rewrite every consumer in the process). A
+        method rather than a direct call so such a test can cross a multi-second
+        gap without sleeping through it.
         """
         return time.monotonic()
 
