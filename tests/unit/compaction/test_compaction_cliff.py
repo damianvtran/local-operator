@@ -22,6 +22,8 @@ pass with the carry.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from local_operator.compaction.snapcompact import (
     Archive,
     compact_to_archive,
@@ -53,7 +55,11 @@ def _messages(serialized: str) -> list[Message]:
     msgs: list[Message] = []
     for block in serialized.split("[")[1:]:
         header, _, body = block.partition("]\n")
-        role = {"User": "user", "Assistant": "assistant"}.get(header.split(" tool", 1)[0], "tool")
+        role: Literal["user", "assistant", "tool"] = "tool"
+        if header.split(" tool", 1)[0] == "User":
+            role = "user"
+        elif header.split(" tool", 1)[0] == "Assistant":
+            role = "assistant"
         msgs.append(Message(role=role, content=[TextContent(text=body)]))
     return msgs
 
@@ -123,12 +129,12 @@ def test_retention_does_not_degrade_with_more_passes():
 
 
 def test_identifiers_survive_to_the_final_pass():
-    """Tier 1: identifiers are the retention anchors and never evicted inside
-    the cap — the newest AND oldest must both be readable at the end."""
+    """Tier 1: identifiers are carried forward across passes — the newest AND
+    oldest readable at the end, tagged so the digest is self-identifying."""
     archive, _ = _run(10)
     carry = archive.carry
     assert carry, "a run of 10 passes must have mined a carry"
-    assert "## Identifiers" in carry
+    assert "- Identifiers: " in carry
 
 
 def test_replayed_archive_stays_under_the_token_bar():

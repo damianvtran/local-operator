@@ -58,14 +58,13 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "CARRY_CHAR_BUDGET",
-    "CARRY_TOKEN_BUDGET",
     "CARRY_FRESH_TOKEN_ALLOWANCE",
     "CARRY_ASK_ITEMS",
     "CARRY_DECISION_ITEMS",
     "CARRY_IDENTIFIER_ITEMS",
     "ASK_ITEM_CHARS",
     "DECISION_ITEM_CHARS",
-    "CARRY_HEADINGS",
+    "CARRY_TAGS",
     "LOCATOR_PATTERN",
     "Carry",
     "carry_digest_lines",
@@ -83,20 +82,31 @@ __all__ = [
 #: operator's "under 100k" bar next to the ~42k a replay already costs.
 CARRY_CHAR_BUDGET = 30_000
 
+#: The estimator's own fallback char/token density, restated here so this
+#: stdlib-only leaf need not import ``compaction.tokens`` (which pulls the
+#: package's tokenizer path). ``tests/unit/compaction/test_mine.py`` pins it equal
+#: to ``tokens._CHARS_PER_TOKEN_FALLBACK`` so the two cannot drift.
+_CARRY_CHARS_PER_TOKEN = 4
+
 #: The token reservation the archive's own drop-budget loop honours, so the
 #: carry's cost is priced BEFORE pages are kept (see ``compact_to_archive``).
-#: Charged as the ACTUAL size of a carried-forward digest plus a bounded
-#: allowance for what this pass may mine: a fixed charge over-reserved a fresh
-#: pass (prose-only content the miner keeps nothing from still gave up pages)
-#: and could drive a small window's budget negative. The allowance is a fraction
-#: of the char budget and is a genuine upper bound on a newly-minted carry.
+#: Charged as the ACTUAL size of a carried-forward digest plus the
+#: :data:`CARRY_FRESH_TOKEN_ALLOWANCE` mint ceiling. Kept as a named constant for
+#: callers that want the reservation a carry-heavy archive can occupy; the budget
+#: loop computes its own figure from the live prior carry.
 CARRY_TOKEN_BUDGET = 8_000
 
-#: Fresh-mint allowance, consumed only when there is no carried digest to price.
-#: One third of :data:`CARRY_TOKEN_BUDGET`: a same-session carry converges well
-#: under the char budget (measured ~2.4k chars on dense real segments), so this
-#: keeps the pass clearing its own target while barely touching the page budget.
-CARRY_FRESH_TOKEN_ALLOWANCE = 2_500
+#: Fresh-mint allowance, charged only when there is no carried digest to price
+#: and the pass has pages to mine. It must be an UPPER BOUND on what this pass can
+#: mint, because the whole point of the reservation is that a pass meant to get
+#: under the line cannot commit above it once the carry is counted. A converged
+#: same-session carry mints ~0.7k tokens on real segments, but a pathologically
+#: instruction-dense segment mints far more, and an estimate below the true mint
+#: let a small window overshoot ``window/2`` (review round 2, MAJOR B). So charge
+#: the mint's own ceiling: the rendered carry cannot exceed
+#: :data:`CARRY_CHAR_BUDGET` characters, i.e. ``CARRY_CHAR_BUDGET / 4`` tokens at
+#: the estimator's fallback density.
+CARRY_FRESH_TOKEN_ALLOWANCE = CARRY_CHAR_BUDGET // _CARRY_CHARS_PER_TOKEN
 
 #: Per-tier item caps. Tier 1 is the widest because an identifier line is
 #: short; tier 2/3 are narrower because a sentence is long.
@@ -109,10 +119,17 @@ CARRY_DECISION_ITEMS = 40
 ASK_ITEM_CHARS = 240
 DECISION_ITEM_CHARS = 220
 
-#: The carry's section headings. ``memory_capture.extract`` recognises these as
-#: semantic sections (its ``_HEADINGS`` set is widened to match), which is how a
-#: mined decision/ask becomes a memory://session fact without a second scan.
-CARRY_HEADINGS = ("Operator asks", "Decisions / constraints", "Identifiers")
+#: The tier tags the digest's rows carry (``- Asks: …``). The tagged form is the
+#: digest's structural marker: it is what makes a replayed digest refuse to be
+#: re-mined as history without a heading that real prose can also contain.
+CARRY_TAGS = ("Asks", "Decisions", "Identifiers")
+
+#: Tag -> the ``Carry`` attribute a tagged row feeds on :func:`parse_carry`.
+_TIER_ATTRIBUTE: dict[str, str] = {
+    "Asks": "asks",
+    "Decisions": "decisions",
+    "Identifiers": "identifiers",
+}
 
 #: Locator grammar — DELIBERATELY IDENTICAL to ``memory_capture._LOCATOR``.
 #: Kept as a module constant so the drift-pin test can compare the two source
@@ -153,24 +170,26 @@ _ROLE_HEADER = re.compile(
 #: is worse than a miss).
 _MAX_LINE_SCAN = 8192
 
-#: The rendered carry's own headings and bullet prefixes, so a replayed digest
-#: is never re-mined as history (see ``_is_carry_digest_line``).
-_CARRY_HEADING_RE = re.compile(r"^#{1,4}\s*" + "(?:" + "|".join(CARRY_HEADINGS) + r")\b")
+#: A digest row: ``- Asks: <item>`` / ``- Decisions: <item>`` /
+#: ``- Identifiers: <item>``. This TAGGED form is the carry's structural marker —
+#: :func:`render_carry` emits one such row per item, and ``archive_summary``'s
+#: bounded digest emits the same shape. It is what makes a replayed digest
+#: distinguishable from real history: a plain ``## Identifiers`` heading in a
+#: dropped report is NOT a tagged row and must still be mined (review round 2,
+#: MAJOR A), while the digest's own rows always are, so re-mining it is refused
+#: (review round 1, MAJOR 2).
+_CARRY_TAGGED_ROW_RE = re.compile(
+    r"^-[ \t]+(?P<tag>Asks|Decisions|Identifiers):[ \t]+(?P<item>.+)$"
+)
 
 
 def _is_carry_digest_line(line: str) -> bool:
     """True for a line belonging to a carried digest rather than real history.
 
-    Recognises the digest's own headings and any bullet row already tagged with
-    a tier label (``- Identifiers: …`` / ``- Asks: …`` / ``- Decisions: …``),
-    which is how ``carry_digest_lines`` and ``archive_summary`` render them. The
-    headings alone are ambiguous — a real transcript can contain ``# Goal`` — so
-    the structural signal is the tagged bullet, which the digest always emits.
+    ONLY the tagged row (``- Identifiers: …`` etc.) counts — see
+    :data:`_CARRY_TAGGED_ROW_RE` for why the heading alone is not a signal.
     """
-    return bool(_CARRY_HEADING_RE.match(line)) or bool(_CARRY_TAGGED_ROW_RE.match(line))
-
-
-_CARRY_TAGGED_ROW_RE = re.compile(r"^-\s+(?:Asks|Decisions|Identifiers):\s")
+    return bool(_CARRY_TAGGED_ROW_RE.match(line))
 
 
 @dataclass
@@ -215,9 +234,7 @@ def mine_carry(text: str) -> Carry:
             # mining it as one wrote a commitment the assistant never made
             # (review round 1, NIT 9).
             role = (
-                "user"
-                if title == "User"
-                else ("tool" if title.startswith("Tool") else "assistant")
+                "user" if title == "User" else ("tool" if title.startswith("Tool") else "assistant")
             )
             in_carry = False  # a role header always ends a carried section
             continue
@@ -230,9 +247,12 @@ def mine_carry(text: str) -> Carry:
         # would re-mine its own headings and rows — every ``- `` line under the
         # replayed block would be re-classified as an operator ask and the carry
         # would echo and nest itself (``- - - <ask>``), evicting the genuine asks
-        # it exists to retain (review round 1, MAJOR 2). Once a carry heading is
-        # seen, every following line is skipped until a role header: the section
-        # is not history, whether or not a line carries the tagged-row marker.
+        # it exists to retain (review round 1, MAJOR 2). Only TAGGED digest rows
+        # latch the skip (see ``_is_carry_digest_line``); a bare section heading
+        # does NOT, because a real dropped report can carry one and latching on
+        # it darkened a whole section of genuine history (review round 2, MAJOR
+        # A). Once a tagged row starts a carried section, the rest is skipped
+        # until a role header.
         if in_carry or _is_carry_digest_line(line):
             in_carry = True
             continue
@@ -279,63 +299,41 @@ def mine_carry(text: str) -> Carry:
 def parse_carry(text: str) -> Carry:
     """Revive a rendered carry so a later pass can merge into it rather than restart.
 
-    Parses :func:`render_carry`'s own plain-heading form (``## Operator asks`` /
-    ``## Decisions / constraints`` / ``## Identifiers``). The caller always hands
-    the archive's exact ``carry`` field, so no narrowing is needed — and the
-    headings themselves are what :func:`_is_carry_digest_line` recognises to keep
-    a replayed digest from being re-mined.
+    Reads :func:`render_carry`'s tagged-row form; a line that is not a tagged row
+    is ignored, so a caller that hands archive text alongside the digest cannot
+    invent asks from it.
     """
     carry = Carry()
-    section = ""
     for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
+        match = _CARRY_TAGGED_ROW_RE.match(raw.strip())
+        if match is None:
             continue
-        # Headings and bullets use ``elif`` rather than ``continue`` so a
-        # fragment that a cut left WITHOUT its newline — ``… - Identifiers:``
-        # glued onto the tail of the last edge row — is still recovered: the
-        # tagged-literal match in ``_as_prior_carry`` can hand ``parse_carry``
-        # text whose heading trails a row.
-        if line.startswith("## "):
-            section = line[3:].strip()
-            continue
-        if not line.startswith("- "):
-            continue
-        value = line[2:].strip()
-        if not value:
-            continue
-        attribute = _CARRY_TIER_SECTIONS.get(section)
+        attribute = _TIER_ATTRIBUTE.get(match.group("tag"))
         if attribute:
-            getattr(carry, attribute).append(value)
+            getattr(carry, attribute).append(match.group("item").strip())
     return carry
 
 
 def render_carry(carry: Carry) -> str:
-    """Render the digest. Sections that are empty are omitted entirely so an
-    empty carry renders as the empty string (never a heading with no rows)."""
+    """Render the digest as tagged rows (see :data:`_CARRY_TAGGED_ROW_RE`).
+
+    One row per item, grouped asks → decisions → identifiers. Empty tiers are
+    omitted entirely so an empty carry renders as the empty string. The tagged
+    form is load-bearing: it is how a replayed digest is recognised and refused
+    as history on the next pass.
+    """
     lines: list[str] = []
-    if carry.asks:
-        lines.append("## Operator asks")
-        lines.extend(f"- {item}" for item in carry.asks)
-    if carry.decisions:
-        lines.append("## Decisions / constraints")
-        lines.extend(f"- {item}" for item in carry.decisions)
-    if carry.identifiers:
-        lines.append("## Identifiers")
-        lines.extend(f"- {item}" for item in carry.identifiers)
+    for tag, items in (
+        ("Asks", carry.asks),
+        ("Decisions", carry.decisions),
+        ("Identifiers", carry.identifiers),
+    ):
+        lines.extend(f"- {tag}: {item}" for item in items)
     return "\n".join(lines)
 
 
 def carry_is_empty(carry: Carry) -> bool:
     return not (carry.asks or carry.decisions or carry.identifiers)
-
-
-#: Rendered section heading -> the ``Carry`` attribute it feeds on ``parse_carry``.
-_CARRY_TIER_SECTIONS: dict[str, str] = {
-    "Operator asks": "asks",
-    "Decisions / constraints": "decisions",
-    "Identifiers": "identifiers",
-}
 
 
 def merge_carry(previous: Carry, fresh: Carry) -> Carry:

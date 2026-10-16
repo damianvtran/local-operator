@@ -163,9 +163,9 @@ def test_carry_is_never_re_mined_as_history():
     ask and the digest nests and evicts the genuine asks.
     """
     carried = (
-        "[User]\n## Operator asks\n- old ask one\n- old ask two\n"
-        "## Identifiers\n- /keep/me.py\n"
-        "[Assistant]\nreminder note\n"
+        "[User]\n"
+        + render_carry(Carry(asks=["old ask one", "old ask two"], identifiers=["/keep/me.py"]))
+        + "\n[Assistant]\nreminder note\n"
     )
     carry = mine_carry(carried)
     assert carry.asks == []
@@ -205,28 +205,65 @@ def test_tool_error_line_is_not_an_assistant_decision():
     assert carry.decisions == []
 
 
+def test_plain_history_heading_is_not_a_carry_section():
+    """MAJOR A (round 2): a real ``## Identifiers`` heading must NOT go dark.
+
+    Only a TAGGED digest row (``- Identifiers: …``) marks a carried section; a
+    bare ``## Identifiers`` heading in a real dropped report must still mine.
+    """
+    text = (
+        "[Assistant]\n## Identifiers\nsee /Users/damian/real_a.py and /Users/damian/real_b.py\n"
+        "[Tool result: bash]\n/Users/damian/c.py\n"
+    )
+    carry = mine_carry(text)
+    assert "/Users/damian/real_a.py" in carry.identifiers
+    assert "/Users/damian/real_b.py" in carry.identifiers
+    assert "/Users/damian/c.py" in carry.identifiers
+
+
+def test_tagged_digest_row_still_marks_a_carried_section():
+    """MAJOR 2 stays fixed: the tagged row is the digest signal."""
+    text = (
+        "[Assistant]\n- Identifiers: /old/one.py; /old/two.py\n"
+        "- Asks: old ask\n"
+        "[Tool result: bash]\n/Users/damian/new.py\n"
+    )
+    carry = mine_carry(text)
+    assert "/old/one.py" not in carry.identifiers
+    assert "/old/two.py" not in carry.identifiers
+    assert "old ask" not in carry.asks
+
+
+def test_carry_local_density_pins_the_estimator():
+    """The local char/token density must equal the estimator's fallback."""
+    from local_operator.compaction import mine
+    from local_operator.compaction.tokens import _CHARS_PER_TOKEN_FALLBACK
+
+    assert mine._CARRY_CHARS_PER_TOKEN == _CHARS_PER_TOKEN_FALLBACK
+
+
 def test_carry_rows_skips_refused_but_keeps_the_rest():
     """BLOCKER 1: one guard-refused candidate must not fail the whole capture.
 
     A single refused substring (an ordinary path the miner legitimately mines out
     of tool results, e.g. ``docs/.env``) made ``validate_fact`` raise inside
     ``finish`` and took the whole pass to a ``failed`` terminal with zero rows.
-    Every candidate is guarded and a refused one is skipped.
+    Every candidate is guarded (with the SAME ``opaque`` guard the write applies)
+    and a refused one is skipped.
     """
     from local_operator.memory_capture import carry_rows
 
     carry = (
-        "## Identifiers\n"
-        "- https://example.com/api?key=abcd docs/.env\n"
-        "- ~/.aws/credentials\n"
-        "- /Users/damian/local-operator/ok.py\n"
-        "## Operator asks\n"
-        "- keep the manager posting updates\n"
+        "- Identifiers: docs/.env\n"
+        "- Identifiers: ~/.aws/credentials\n"
+        "- Identifiers: /Users/damian/local-operator/ok.py\n"
+        "- Asks: keep the manager posting updates\n"
     )
     rows = carry_rows(carry)
     bodies = [row["body"] for row in rows]
     assert any("ok.py" in body for body in bodies)
     assert any("keep the manager posting updates" in body for body in bodies)
+    assert not any(".env" in body for body in bodies)
     assert all(body.strip() for body in bodies)
 
 

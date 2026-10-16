@@ -118,7 +118,12 @@ def carry_rows(carry: str, *, limit: int = 12) -> list[dict[str, Any]]:
                 continue
             seen.add(body)
             try:
-                guard(body)
+                # ``opaque=True``: ``validate_fact`` applies the opaque guard to
+                # a fact body, so a candidate that clears only the DEFAULT guard
+                # would still raise inside ``persist`` and take the whole capture
+                # to a ``failed`` terminal. Matching the guard the write applies
+                # is what actually closes BLOCKER 1 (review round 2, MAJOR C).
+                guard(body, opaque=True)
             except MemoryError:
                 # A refused candidate must never fail the whole capture: this is
                 # the BLOCKER-1 fix — one unguardable locator skips, the rest of
@@ -397,6 +402,13 @@ def persist(
         db.commit()
 
 
+#: Rows held for the carry arm inside the shared 52-row capture cap. The pass's
+#: carry is its marquee retention (the asks/decisions/identifiers a resumed
+#: session cannot re-derive), so it must not be starved by a locator scan that
+#: can fill the whole cap alone (review round 2, MINOR 3).
+_CARRY_ROW_RESERVE = 12
+
+
 async def finish(
     store: MemoryStore,
     marker_id: str,
@@ -408,14 +420,19 @@ async def finish(
     try:
         rows = await asyncio.wait_for(asyncio.shield(task), timeout=2)
         # Summary parsing is deterministic, not another provider request. The
-        # carry rows are added ONCE, guarded per candidate (see ``carry_rows``);
-        # the digest is NOT also fed through ``extract`` in the same pass, which
-        # would persist the same bodies twice under two tag sets and, after the
-        # shared 52-row cap, drop the second copy anyway.
+        # carry rows are added ONCE (see ``carry_rows``); the digest is NOT also
+        # fed through ``extract`` in the same pass, which would persist the same
+        # bodies twice under two tag sets.
         rows = rows + await asyncio.to_thread(extract, "", summary)
-        if carry:
-            rows = rows + carry_rows(carry)
-        await asyncio.to_thread(persist, store, marker_id, rows[:52], "ok", committed_at)
+        carry_arm = carry_rows(carry) if carry else []
+        # The carry is the pass's MARQUEE retention, so it gets its own bounded
+        # reserve inside the shared cap instead of sitting behind a locator scan
+        # that can fill all 52 rows by itself (measured: ``rows[:52]`` kept 0 of
+        # 3 carry rows; review round 2, MINOR 3). The scan keeps the remainder.
+        reserved = min(len(carry_arm), _CARRY_ROW_RESERVE)
+        scan_rows = rows[: 52 - reserved] if reserved else rows[:52]
+        rows = (scan_rows + carry_arm[:_CARRY_ROW_RESERVE])[:52]
+        await asyncio.to_thread(persist, store, marker_id, rows, "ok", committed_at)
         return "ok"
     except asyncio.CancelledError:
         raise
