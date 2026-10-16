@@ -264,7 +264,9 @@ async def test_terminal_loss_settles_gate_without_exiting_during_active_work(wor
     with (
         patch.object(app, "_terminal_reader_alive", return_value=False),
         patch.object(app, "exit", side_effect=lambda: exits.append(True)),
-        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 100.0]),
+        # The app's own clock seam, not the shared ``time`` module — see
+        # ``_repeating_clock`` for the drained-iterator class this removes.
+        patch.object(app, "_clock", _repeating_clock([0.0, 100.0])),
     ):
         app._check_terminal_frontend()
         app._check_terminal_frontend()
@@ -284,7 +286,6 @@ async def test_pending_gate_waits_for_reconnect_then_settles_and_reaps_after_wor
     app._session = session
     exits: list[bool] = []
     readers = iter([False, True, False, False, False, False, False])
-    times = iter([0.0, 2.0, 3.0, 33.0, 34.0, 40.0, 43.0])
 
     def deny_and_resume() -> None:
         approval.resolve(False, answer="n")
@@ -296,7 +297,17 @@ async def test_pending_gate_waits_for_reconnect_then_settles_and_reaps_after_wor
         patch.object(app, "_settle_ask_picker"),
         patch.object(app, "_settle_key_prompt"),
         patch.object(app, "exit", side_effect=lambda: exits.append(True)),
-        patch("local_operator.tui.app.time.monotonic", side_effect=lambda: next(times)),
+        # THE APP'S OWN CLOCK SEAM, NOT THE SHARED ``time`` MODULE. Patching
+        # ``local_operator.tui.app.time.monotonic`` rewrites the clock for every
+        # consumer in the process, and one of them is an unrelated caller that
+        # drains this 7-item iterator into ``RuntimeError: coroutine raised
+        # StopIteration`` — the cell's actual failure (reproduced: the 8th
+        # caller on a finite clock raises). ``_clock`` is the seam the app
+        # already carries for a test that must cross a grace window, and
+        # ``_repeating_clock`` makes the fake repeat its last reading rather than
+        # raise, so neither the process-wide scope nor the drained-iterator class
+        # survives here.
+        patch.object(app, "_clock", _repeating_clock([0.0, 2.0, 3.0, 33.0, 34.0, 40.0, 43.0])),
     ):
         app._check_terminal_frontend()  # gate grace starts
         app._check_terminal_frontend()  # reconnect preserves the gate
@@ -331,7 +342,9 @@ async def test_terminal_loss_reaps_independently_of_remote_viewers(
     with (
         patch.object(app, "_terminal_reader_alive", return_value=False),
         patch.object(app, "exit", side_effect=lambda: exits.append(True)),
-        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 3.0]),
+        # The app's own seam, not the shared ``time`` module — the scope note on
+        # the cell above applies here for the same reason.
+        patch.object(app, "_clock", _repeating_clock([0.0, 3.0])),
     ):
         app._check_terminal_frontend()
         app._check_terminal_frontend()
@@ -789,6 +802,25 @@ class FakeSession:
 
 async def _factory(session: FakeSession) -> FakeSession:
     return session
+
+
+def _repeating_clock(values: Sequence[float]) -> Callable[[], float]:
+    """A fake clock that yields ``values`` in order, then REPEATS the last one.
+
+    WHY NOT A BARE ITERATOR. A ``side_effect=lambda: next(times)`` clock is a
+    finite sequence every caller in the process shares when the fake is installed
+    process-wide (``patch("local_operator.tui.app.time.monotonic")`` rewrites the
+    ``time`` module itself), and the caller that drains it is not always the one
+    the test aimed at — the eighth consumer raises ``RuntimeError: coroutine
+    raised StopIteration``. Repetition removes the drained-iterator class outright
+    so the fake can never fail for being asked one more time than it staged, and
+    the two cells that need a clock jump now patch it onto the app's own
+    ``_clock`` seam (one app instance) rather than the shared module.
+    """
+    staged = list(values)
+    if not staged:
+        raise ValueError("a repeating clock needs at least one reading")
+    return lambda: staged.pop(0) if len(staged) > 1 else staged[0]
 
 
 def _renderable_plain(renderable) -> str:
@@ -6742,7 +6774,16 @@ async def test_loop_goal_suppresses_turn_ended_toast() -> None:
     session = GoalSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        # WAIT ON THE BOOT WORKER BEFORE WRITING THE FLAG — a bare `pilot.pause()`
+        # does not. `_loop_suppress_completion` is a property on
+        # `self._interaction`, which is a placeholder `SessionInteraction(None)`
+        # until `_adopt_session` replaces it, and a replacement starts with
+        # `suppress_completion=False`. On a loaded worker the boot worker
+        # therefore lands AFTER a bare pause: the flag is written onto the
+        # placeholder and adoption resets it, so the held turn below notifies and
+        # `completion_notifies == []` fails (reproduced deterministically by
+        # awaiting the boot worker between the flag write and the settle).
+        await await_session_boot(app)
         completion_notifies: list[int | None] = []
         real_notify = app._notify
 

@@ -31956,7 +31956,15 @@ class OperatorApp(App[None]):
             busy=self._terminal_loss_busy(gate_pending=gate_pending),
             gate_pending=gate_pending,
             remote_holders=False,
-            now=time.monotonic(),
+            # THE APP'S OWN CLOCK SEAM, never a bare ``time.monotonic()``. A test
+            # that crosses one of these grace windows has to control the reading,
+            # and patching the shared ``time`` module to do it rewrites the clock
+            # for EVERY consumer in the process — including a finite
+            # ``side_effect`` iterator, which an unrelated caller then drains into
+            # ``RuntimeError: coroutine raised StopIteration``. ``_clock`` is the
+            # overridable seam this app already carries for exactly this
+            # (see its docstring), so the patch stays inside one app instance.
+            now=self._clock(),
         )
         if action == "settle":
             # Only grace expiry makes an unreachable front-end gate disposable.
