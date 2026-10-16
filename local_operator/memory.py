@@ -201,8 +201,13 @@ _WORK_STATUS = re.compile(
     r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
     r"\b"
     r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
-    r"\b(?:pr|(?-i:MRs?)|#\d|(?:in)?to main)\b"
-    r"|\b(?:pr|(?-i:MRs?))\b[^.\n]{0,20}\b(?:merged|rebase[sd]?|squash(?:ed)?)\b"
+    r"\b(?:pr|(?-i:MRs?)|#\d|into main)\b"
+    # Noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between:
+    # `PR`/`MR` are also permanent residency, public relations and a person
+    # (`My PR application merged into the family one`, `The PR agency merged with a rival`),
+    # while `the PR was merged` / `MRs rebased onto main` are real work text.
+    r"|\b(?:pr|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
+    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b"
     r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
     r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
     r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
