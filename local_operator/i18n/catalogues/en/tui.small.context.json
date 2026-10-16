@@ -73,5 +73,50 @@
     "role": "subagent panel header scope suffix",
     "tone": "plain, factual",
     "note": "The scope suffix appended to the subagent header when drilled into one child: 'Subagents of <label>', so the reader knows these rows are that child's children, not the top-level roster. {scope} is the already-truncated selected label (model-authored, kept verbatim). The LEADING SPACE is load-bearing — it is the only break within the sentence and borrows no other separator — do not trim it. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.waiting_clause": {
+    "role": "ask bar compact count clause",
+    "tone": "plain count",
+    "note": "The '<N> waiting' clause of the SOC (Space-Optimised Copy) of compact_headline. This is the emergency copy used when the full headline does not fit in the bar's width: it carries NO noun (never 'question'/'questions'), because the clause is dropped whole, not re-worded, when space runs out, and a noun here would be a THIRD count of the same thing the full headline states. '{shown}' is the RAW count as digits, never grouped or pluralised, so it prints '1', '11' and '1200' exactly as the pre-extraction f-string did. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.timed_out_clause": {
+    "role": "ask bar compact count clause",
+    "tone": "plain count",
+    "note": "The '<N> timed out' clause of compact_headline, joined to waiting_clause with ' · ' in code. No noun by design (see waiting_clause): the clause is a whole unit that the bar drops or keeps, and a bare count reads correctly beside the full headline's noun-bearing sentence. '{shown}' is the raw digit string, never grouped or pluralised. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.urgent_clause": {
+    "role": "ask bar / drawer urgency clause",
+    "tone": "plain count",
+    "note": "The '<N> urgent' clause stating URGENCY IN WORDS rather than only as the amber glyph ray (design round 2, D13): colour is not a channel a reader without colour has. '{shown}' is the raw digit string, never grouped or pluralised, matching the sibling clauses. It is appended to a mixed clause with ' · ' in code so the half-counts stay a prefix. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.question_waiting": {
+    "role": "ask queue headline (bar + list header)",
+    "tone": "plain count",
+    "note": "The bar/header count in the chip register, e.g. '2 questions waiting', carried as an ICU PLURAL singular/plural pair so the noun agrees with the count where the pre-extraction code wrote 'question' or 'questions' by hand. 'count' is the same number as '{shown}' and exists ONLY to SELECT the branch: '{shown}' is a separate RAW digit string, so the rendered number is never re-grouped or re-formatted ('1200' stays '1200', not '1,200'). Both halves carry the same value at the call site; a locale may reorder or rephrase the sentence but must keep both arguments. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.ask_queue.question_timed_out": {
+    "role": "ask queue headline (bar + list header)",
+    "tone": "plain count",
+    "note": "The '<N> questions timed out' clause of queue_headline, the chip register's word for the moved-on half (the list header says 'moved on' instead — see drawer_headline). ICU plural on 'count' selects 'question'/'questions'; '{shown}' is the raw digit string and must not be grouped. The two arguments are the same at the call site. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy_picker.title": {
+    "role": "copy picker card title",
+    "tone": "plain, instructional",
+    "note": "The /copy picker card's title row, drawn first in label ink. One short phrase naming the surface and the key action, not a sentence; it is a fixed value with zero ICU arguments. It shares the literal that the card's own width measurement also reads, so the two cannot disagree. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy_picker.from_line": {
+    "role": "copy picker preview header position marker",
+    "tone": "plain, factual",
+    "note": "The preview pane's position marker appended to the header once the pane is scrolled: ' · from line 3'. The LEADING ' · ' and its spaces are load-bearing — this fragment is appended to the same Rich Text row as the line count, so the separator is the only gap between them; do not trim. '{line}' is a RAW digit string (offset + 1), never grouped or formatted as a number, so a long document's marker reads 'from line 1200'. The header claims no position while unscrolled, so this key is only resolved when offset > 0. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.copy_picker.more_lines": {
+    "role": "copy picker preview overflow marker",
+    "tone": "plain count",
+    "note": "The '… N more lines' overflow marker on the preview's last drawn row, stating how many SOURCE lines sit below the pane. ICU plural on 'count' gives the singular '… 1 more line' the pre-extraction code wrote by hand; '{shown}' is the RAW digit string and is deliberately NOT the same formatting path as 'count' (no grouping, no locale number formatting), so 1200 prints '1200'. The leading ellipsis '…' and the space after it are part of the value. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.link_picker.title": {
+    "role": "link picker card title",
+    "tone": "plain, instructional",
+    "note": "The /links picker card's title row, drawn first in foreground ink: one short phrase naming the surface and the key action, not a sentence, with zero ICU arguments. The card's own width measurement reads the same literal via this key, so the title and the timing that reserves its row cannot disagree. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
   }
 }
