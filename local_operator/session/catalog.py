@@ -40,6 +40,31 @@ logger = logging.getLogger(__name__)
 #: asserted where they are built.
 WEDGED_STATUS = "Not answering · process alive"
 
+#: The status codes whose sessions are RUNNING: work in progress, and therefore
+#: the rows no listing may hide behind its own expander.
+#:
+#: THE SAME FIVE THE RENDERER USES, read off the same wire field this reads
+#: (``status.code``) — local-operator-ui's ``RUNNING_CODES``
+#: (``src/renderer/src/features/chat/chat-list-sections.ts``). Spelled here
+#: rather than taken from the client because the CATALOGUE has to decide
+#: membership on its own: which rows the first page must CARRY is an input to the
+#: page, so the set cannot be derived from a page the client has not received.
+#: The two sets must change together, and this half is pinned by
+#: ``tests/unit/session/test_catalog_scope.py``.
+#:
+#: IT LIVES HERE rather than beside its other consumer
+#: (``server.utils.desktop_sessions``, which imports it and also pays the row's
+#: ``last_user_at`` scan for these codes only): the catalogue is the lower layer
+#: and the one that must decide the page's membership with no client present.
+#:
+#: ``approval`` and ``answer`` are parked gates, ``busy`` and ``wedged`` are live
+#: runtimes, and ``delegating`` is work running one layer down. Deliberately NOT
+#: ``idle``/``attached`` (a resident terminal is not work in progress, and both
+#: are tier 5) and not the stored outcomes ``interrupted``/``scheduled``/``dormant``.
+RUNNING_STATUS_CODES: frozenset[str] = frozenset(
+    {"approval", "answer", "busy", "wedged", "delegating"}
+)
+
 
 @dataclass(frozen=True)
 class CatalogEntry:
@@ -888,13 +913,15 @@ class ScopeCensus:
 class CatalogPage:
     """One page of a scope, where to resume it, and the census when asked for.
 
-    ``entries`` is the PAGE followed by any off-page pinned rows, in that order --
-    the same concatenation :func:`load_catalog` returns, and the same shape the
-    desktop route already splits on ``limit``. ``next_cursor`` is minted from the
-    page's LAST row and never from an appended extra: an extra ranks below the
-    page by construction, so a cursor taken from one would re-serve the page.
-    The extras themselves are a FIRST-PAGE promise, appended only on the head
-    answer that carries no usable position -- see :func:`catalogue_page`.
+    ``entries`` is the PAGE followed by the off-page rows the first page carries
+    -- every RUNNING row below the window, and on the head answer the pins the
+    page does not carry; the same concatenation :func:`load_catalog` returns, and
+    the same shape the desktop route already splits on ``limit``. ``next_cursor``
+    is minted from the page's LAST row and never from an appended extra: an extra
+    ranks below the page by construction, so a cursor taken from one would
+    re-serve the page. The extras themselves are a FIRST-PAGE promise, appended
+    only on an answer that carries no usable position -- see
+    :func:`catalogue_page`.
 
     THERE IS NO SEPARATE TRUNCATION FLAG, deliberately: ``next_cursor`` IS the
     answer to "did this scope hold more than the page" (non-null exactly when it
@@ -2139,6 +2166,16 @@ def catalogue_page(
     it is on ``main`` -- because a zero-length page has no last row to mint a
     resume position from.
 
+    THE ANSWER MAY CARRY MORE ROWS THAN ``limit``, and the first page is the one
+    place the number is not a bound. Besides the page, a first page carries the
+    rows whose absence is the bug this guarantees against: every row below the
+    window whose ``status_code`` is in :data:`RUNNING_STATUS_CODES`, and -- on
+    the head answer only -- the pinned rows the page does not carry. ``truncated``,
+    ``next_cursor``, ``counts`` and ``limit`` keep describing the PAGE and nothing
+    else, exactly as they already did for the pins, so ``len(entries) > limit``
+    says nothing about any of them and a caller that reads the extras must take
+    them from the tail (they are appended in rank order, below every page row).
+
     THE FILTER SITS AFTER RANKING AND BEFORE THE SLICE, and that is the only
     correct place for it: filtering the LISTING first would re-derive the ordering
     (the rank is computed over all candidates, and a scope's top row is not the
@@ -2216,33 +2253,63 @@ def catalogue_page(
     # the emptiness check is here so a direct caller that ignored that
     # precondition gets no cursor rather than an ``IndexError``.
     next_cursor = encode_cursor(scope, entries[-1].rank) if entries and truncated else None
-    if pinned_off_page and scope is None and (position is None or cursor_missing):
-        # FIRST PAGE OF THE HEAD ONLY, and the position clause is the half QA's
-        # walk found missing: the extras are appended from ``ranked[limit:]``,
-        # and a later page's ``ranked`` is already filtered past its cursor -- so
-        # EVERY such page appended every pin still below it, and a walk served
-        # the same pinned row twice (once as an extra, once as a page row). The
-        # promise this list exists for is the one the pin store makes: the whole
-        # pinned set rides the page the client paints first, and each later page
-        # is only the scope's continuation.
+    # FIRST PAGE ONLY, and the position clause is the half QA's walk found
+    # missing: the extras are appended from ``ranked[limit:]``, and a later
+    # page's ``ranked`` is already filtered past its cursor -- so EVERY such page
+    # appended every pin still below it, and a walk served the same pinned row
+    # twice (once as an extra, once as a page row). What an extra promises is a
+    # fact about the page the client paints FIRST, and each later page is only
+    # the scope's continuation.
+    #
+    # GATED ON ``cursor_missing``, which is exactly the sentence "this answer
+    # IS the scope's first page" -- and that predicate has TWO halves: no
+    # usable position at all, and a position that decoded but is not usable
+    # HERE (unreadable, minted for another scope, or minted for the other
+    # request shape). ``position is None`` alone covers only the first half:
+    # a FOREIGN token decodes, so the resume filter is skipped and the page
+    # really is the first page, while the extras were omitted from it -- and
+    # because that same answer is what settles the client's pin facts, the
+    # Pinned section could lose the rows this list exists to keep. Reading
+    # the flag rather than re-deriving the disjunction is also why the two
+    # can never drift apart again.
+    if position is None or cursor_missing:
+        # TWO POPULATIONS RIDE THE FIRST PAGE, and they are different promises.
         #
-        # GATED ON ``cursor_missing``, which is exactly the sentence "this answer
-        # IS the scope's first page" -- and that predicate has TWO halves: no
-        # usable position at all, and a position that decoded but is not usable
-        # HERE (unreadable, minted for another scope, or minted for the other
-        # request shape). ``position is None`` alone covers only the first half:
-        # a FOREIGN token decodes, so the resume filter is skipped and the page
-        # really is the first page, while the extras were omitted from it -- and
-        # because that same answer is what settles the client's pin facts, the
-        # Pinned section could lose the rows this list exists to keep. Reading
-        # the flag rather than re-deriving the disjunction is also why the two
-        # can never drift apart again.
+        # EVERY RUNNING ROW, whichever scope asked. A row whose ``status_code``
+        # is in :data:`RUNNING_STATUS_CODES` is work in progress, and the ranking
+        # puts it behind every unread completion (tier 4 against tiers 1-3, the
+        # documented "completed outcomes outrank work in progress"), so a store
+        # with more unread completions than ``limit`` buries a live turn behind
+        # the client's own "Show more" control -- measured on the operator's
+        # store: 46 unread completions and 5 busy rows in a 50-row head, with a
+        # busy session at rank 51. The client cannot compensate for that: it
+        # holds one page, and ``counts.active`` counts unread completions rather
+        # than running rows (52 against 5 there), so it has no way to know a
+        # running row exists to fetch. Appended here instead, in rank order, so
+        # the guarantee holds for whatever order ``ranked`` is in force -- this
+        # rule reads the rows, never the sort key (see #2527, the complementary
+        # activity-sort change, which still cuts when the active set alone
+        # exceeds ``limit``).
         #
-        # HEAD SCOPE ONLY. A scoped answer cannot speak for the pinned set -- the
-        # client gates its pin facts on the head answer for exactly this reason --
-        # and an extra here would be a row outside the scope it asked for.
-        wanted = set(pinned_off_page)
-        entries += [entry for entry in ranked[limit:] if entry.id in wanted]
+        # THE PINS ARE STILL THE HEAD ANSWER'S ALONE. A scoped answer cannot
+        # speak for the pinned set -- the client gates its pin facts on the head
+        # answer for exactly this reason -- and a pinned extra there would be a
+        # row outside the scope it asked for. A running row is the opposite
+        # case: it belongs to the scope by construction, since ``ranked`` is
+        # already scope-filtered, and hiding it is the bug.
+        #
+        # ONE ROW, ONE APPEND: the comprehension visits each row of
+        # ``ranked[limit:]`` once and keeps it on either arm, so a pinned row
+        # that is also running is appended exactly once. A row the PAGE already
+        # carries is not a duplicate either way -- the client's row union is
+        # id-keyed, which is the design's own "a pinned row may additionally be
+        # in the head".
+        wanted = set(pinned_off_page) if scope is None else set()
+        entries += [
+            entry
+            for entry in ranked[limit:]
+            if entry.id in wanted or entry.status_code in RUNNING_STATUS_CODES
+        ]
     return CatalogPage(
         entries=_hydrate(directory, source, entries),
         next_cursor=next_cursor,

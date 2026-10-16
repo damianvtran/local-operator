@@ -878,7 +878,7 @@ def _append_transcript(session_dir: Path, *entries: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_last_user_key_is_on_every_local_row_and_pinned_off_page(tmp_path):
+async def test_the_last_user_key_is_on_every_local_row_and_off_page(tmp_path):
     """The key is ALWAYS PRESENT on every local row — `pinned`'s rule.
 
     Both populations come from ONE projection (see ``list()``'s comment), so the
@@ -901,8 +901,8 @@ async def test_the_last_user_key_is_on_every_local_row_and_pinned_off_page(tmp_p
 
     page = await DesktopSessions(tmp_path).list(2)
 
-    assert [row["id"] for row in page.pinned_off_page] == [pinned_sid]
-    for row in (*page.rows, *page.pinned_off_page):
+    assert [row["id"] for row in page.off_page] == [pinned_sid]
+    for row in (*page.rows, *page.off_page):
         assert "last_user_at" in row
         assert row["last_user_at"] is None, (
             "no live record on any row: the value is not computed, and null is "
