@@ -943,9 +943,7 @@ def decode_cursor(token: str) -> CatalogueCursor | None:
             or not isinstance(session_id, str)
         ):
             return None
-        return CatalogueCursor(
-            scope, (cold, -float(mtime), session_id), CURSOR_ORDER_ACTIVITY
-        )
+        return CatalogueCursor(scope, (cold, -float(mtime), session_id), CURSOR_ORDER_ACTIVITY)
     # An unknown version -- including one a NEWER build minted -- is answered as
     # a first page, exactly as every unreadable token is.
     return None
@@ -2330,9 +2328,7 @@ def catalogue_page(
     # resume and the mint below -- a resume predicate that disagreed with the
     # sort would skip or repeat rows at every page edge, which is why the key
     # function is ONE local rather than an expression restated per use.
-    order = (
-        CURSOR_ORDER_ACTIVITY if sort == CATALOGUE_SORT_ACTIVITY else CURSOR_ORDER_RANK
-    )
+    order = CURSOR_ORDER_ACTIVITY if sort == CATALOGUE_SORT_ACTIVITY else CURSOR_ORDER_RANK
 
     def key_of(
         entry: CatalogEntry,
