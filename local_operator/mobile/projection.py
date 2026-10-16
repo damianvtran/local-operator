@@ -1304,9 +1304,13 @@ def cap_projection_frame(
     return data, True
 
 
-def fold_messages_to_entries(history: list[AgentMessage], *, session_id: str | None = None,
-                             peer_cycle_display_records: Any = None,
-                             proof_transcript: Any = None) -> list[TranscriptEntry]:
+def fold_messages_to_entries(
+    history: list[AgentMessage],
+    *,
+    session_id: str | None = None,
+    peer_cycle_display_records: Any = None,
+    proof_transcript: Any = None,
+) -> list[TranscriptEntry]:
     """Fold a message history into transcript entries — THE phone's row fold.
 
     UNCAPPED and pure. Both phone surfaces come through here: the daemon's
@@ -1823,15 +1827,26 @@ def fold_messages_to_entries(history: list[AgentMessage], *, session_id: str | N
     # Keep the old default fold byte-shaped; only the owner-context path marks
     # an incomplete tool body so the private exception can refuse it.
     if session_id:
-        incomplete = {message.tool_call_id for message in history
-                      if isinstance(message, Message) and message.role == "tool"
-                      and len(message.text) > TOOL_OUTPUT_TAIL_CHARS}
+        incomplete = {
+            message.tool_call_id
+            for message in history
+            if isinstance(message, Message)
+            and message.role == "tool"
+            and len(message.text) > TOOL_OUTPUT_TAIL_CHARS
+        }
         for entry in entries:
             if entry.kind == "tool" and entry.tool_call_id in incomplete:
                 entry.text_complete = False
     from local_operator.mobile.peer_cycles import project_peer_cycles
-    return project_peer_cycles(entries, session_id=session_id, records=peer_cycle_display_records,
-                               history=history, transcript=proof_transcript, child_row=_peer_cycle_child_row)
+
+    return project_peer_cycles(
+        entries,
+        session_id=session_id,
+        records=peer_cycle_display_records,
+        history=history,
+        transcript=proof_transcript,
+        child_row=_peer_cycle_child_row,
+    )
 
 
 def _peer_cycle_child_row(child: dict[str, Any]) -> TranscriptEntry:
@@ -1843,15 +1858,22 @@ def _peer_cycle_child_row(child: dict[str, Any]) -> TranscriptEntry:
     before it truncates transcript text, so an oversized frame loses proof.
     """
     from local_operator.harness.types import ToolResult
+
     result = ToolResult.model_validate(child["result"])
     arguments = child["arguments"]
     details = _tool_row_details(arguments, result.text, result.details)
     details["args"] = {key: str(value) for key, value in arguments.items()}
     details["output"] = result.text
-    return TranscriptEntry(id=f"tc-{child['tool_call_id']}", kind="tool",
-        tool_call_id=child["tool_call_id"], tool_name=child["tool_name"], tool_state="done",
-        summary=_summarize_args(child["tool_name"], arguments), details=details,
-        elapsed_s=result.duration_s if result.duration_s is not None else 0.0)
+    return TranscriptEntry(
+        id=f"tc-{child['tool_call_id']}",
+        kind="tool",
+        tool_call_id=child["tool_call_id"],
+        tool_name=child["tool_name"],
+        tool_state="done",
+        summary=_summarize_args(child["tool_name"], arguments),
+        details=details,
+        elapsed_s=result.duration_s if result.duration_s is not None else 0.0,
+    )
 
 
 class ProjectionFold:
@@ -1863,6 +1885,7 @@ class ProjectionFold:
         # reconstructing a projection with raw details is not authentication.
         projection.peer_cycles = None
         from local_operator.harness.peer_cycles import PeerCycleReplay
+
         self._peer_epoch = 0
         self._peer_owner_epoch: str | None = None
         self._peer_replay = PeerCycleReplay((projection.session_id, self._peer_epoch))
@@ -1988,12 +2011,20 @@ class ProjectionFold:
         subject out of the seed.
         """
         from local_operator.harness.peer_cycle_display import discover_records
-        records = (discover_records(self._peer_transcript, history[-4096:], self.projection.session_id)
-                   if self._peer_transcript is not None else self._peer_records)
-        entries = fold_messages_to_entries(history,
+
+        records = (
+            discover_records(self._peer_transcript, history[-4096:], self.projection.session_id)
+            if self._peer_transcript is not None
+            else self._peer_records
+        )
+        entries = fold_messages_to_entries(
+            history,
             session_id=self.projection.session_id if self.projection.peer_cycles == 1 else None,
-            peer_cycle_display_records=records, proof_transcript=self._peer_transcript)
+            peer_cycle_display_records=records,
+            proof_transcript=self._peer_transcript,
+        )
         from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
+
         self._peer_replay._reset()
         self._peer_certificates.clear()
         for message in history[-4096:]:
@@ -2024,7 +2055,10 @@ class ProjectionFold:
         self._pending_user_echoes.clear()
         self.projection.transcript = self._cap_tail(entries)
         from local_operator.mobile.peer_cycles import retained_peer_graphs
-        self._peer_retained = retained_peer_graphs(self.projection.transcript, self.projection.session_id)
+
+        self._peer_retained = retained_peer_graphs(
+            self.projection.transcript, self.projection.session_id
+        )
         self._peer_join_key = None
         # Prune the correlation maps to the surviving tail: a long history
         # pairs every historical tool call, and keeping ids whose rows were
@@ -2050,6 +2084,7 @@ class ProjectionFold:
             return
         if owner_epoch != self._peer_owner_epoch:
             from local_operator.harness.peer_cycles import PeerCycleReplay
+
             self._peer_owner_epoch = owner_epoch
             self._peer_epoch += 1
             self._peer_replay = PeerCycleReplay((self.projection.session_id, self._peer_epoch))
@@ -2061,21 +2096,44 @@ class ProjectionFold:
 
     def _join_peer_cycles(self) -> None:
         from local_operator.mobile.peer_cycles import project_peer_cycles
+
         p = self.projection
-        signature = tuple((row.id, row.kind, row.tool_call_id, row.tool_name, row.tool_state,
-                           bool(row.error), bool(row.images), bool(row.videos), row.text_complete)
-                          for row in p.transcript)
-        key = (self._peer_owner_epoch, getattr(self._peer_transcript, "_history_generation", None),
-               tuple(item.get("id") for item in (self._peer_records or {}).get("records", ())),
-               tuple(self._peer_certificates), signature)
+        signature = tuple(
+            (
+                row.id,
+                row.kind,
+                row.tool_call_id,
+                row.tool_name,
+                row.tool_state,
+                bool(row.error),
+                bool(row.images),
+                bool(row.videos),
+                row.text_complete,
+            )
+            for row in p.transcript
+        )
+        key = (
+            self._peer_owner_epoch,
+            getattr(self._peer_transcript, "_history_generation", None),
+            tuple(item.get("id") for item in (self._peer_records or {}).get("records", ())),
+            tuple(self._peer_certificates),
+            signature,
+        )
         if key == self._peer_join_key:
             return
         self._peer_join_key = key
-        rows = project_peer_cycles(p.transcript, session_id=p.session_id, records=self._peer_records,
-            transcript=self._peer_transcript, child_row=_peer_cycle_child_row,
-            certificates=self._peer_certificates.values(), retained=self._peer_retained,
-            view_epoch=self._peer_epoch)
+        rows = project_peer_cycles(
+            p.transcript,
+            session_id=p.session_id,
+            records=self._peer_records,
+            transcript=self._peer_transcript,
+            child_row=_peer_cycle_child_row,
+            certificates=self._peer_certificates.values(),
+            retained=self._peer_retained,
+            view_epoch=self._peer_epoch,
+        )
         from local_operator.mobile.peer_cycles import retained_peer_graphs
+
         self._peer_retained = retained_peer_graphs(rows, p.session_id)
         changed = rows != p.transcript or p.peer_cycles != 1
         p.transcript = rows
@@ -2087,10 +2145,13 @@ class ProjectionFold:
         self._fold_event(event)
         if self.projection.peer_cycles != 1:
             return
-        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
         from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
-        if isinstance(event, ToolExecutionEndEvent) and (not isinstance(event.result, ToolResult) or
-                len(event.result.text) > TOOL_OUTPUT_TAIL_CHARS):
+        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
+
+        if isinstance(event, ToolExecutionEndEvent) and (
+            not isinstance(event.result, ToolResult)
+            or len(event.result.text) > TOOL_OUTPUT_TAIL_CHARS
+        ):
             entry_id = self._tool_rows.get(event.tool_call_id)
             row = self._find(entry_id) if entry_id else None
             if row is not None:
@@ -2104,12 +2165,15 @@ class ProjectionFold:
             # visible through the notice row below either way.
             if event.custom_type in ("", PEER_MESSAGE_MESSAGE_TYPE):
                 if event.message_id:
-                    self.note_peer_message(event.body, sender=event.sender, message_id=event.message_id)
+                    self.note_peer_message(
+                        event.body, sender=event.sender, message_id=event.message_id
+                    )
                     self._peer_replay.delivered_peer(event.message_id, event.sender)
             else:
                 self._peer_replay.reset_pending()
-                self.note_nonpeer_delivery(event.body, sender=event.sender,
-                                           message_id=event.message_id)
+                self.note_nonpeer_delivery(
+                    event.body, sender=event.sender, message_id=event.message_id
+                )
         elif isinstance(event, ToolExecutionEndEvent):
             # The live stream settles a call with a typed END EVENT; the
             # persisted ``role="tool"`` Message never reaches this fold, so the
@@ -2665,8 +2729,9 @@ class ProjectionFold:
             self._pending_user_echoes[message_id] = entry
         self._bump()
 
-    def note_nonpeer_delivery(self, text: str, *, sender: dict[str, Any] | None = None,
-                              message_id: str | None = None) -> None:
+    def note_nonpeer_delivery(
+        self, text: str, *, sender: dict[str, Any] | None = None, message_id: str | None = None
+    ) -> None:
         """Keep a NON-peer typed delivery visible as its own boundary row.
 
         A ``team_bridge_message`` (or any future custom kind) travels the same
@@ -2693,8 +2758,9 @@ class ProjectionFold:
         )
         self._bump()
 
-    def note_peer_message(self, text: str, *, sender: dict[str, Any] | None = None,
-                          message_id: str | None = None) -> None:
+    def note_peer_message(
+        self, text: str, *, sender: dict[str, Any] | None = None, message_id: str | None = None
+    ) -> None:
         """Optimistic echo of an inbound cross-session (`lop send`) message.
 
         Same reason as ``note_user_message``: the handle calls this the instant

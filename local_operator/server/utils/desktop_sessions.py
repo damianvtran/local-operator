@@ -4338,6 +4338,7 @@ class DesktopSessionBridge:
         """
         from local_operator.harness.peer_cycle_display import discover_records
         from local_operator.session.transcript import Transcript, _entry_to_message
+
         selected = {row.get("id") for row in answer.get("entries", ())}
         messages = []
         seen: set[str] = set()
@@ -4352,8 +4353,12 @@ class DesktopSessionBridge:
             return answer
         baseline = len(json.dumps(answer, ensure_ascii=False).encode())
         budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
-        records = discover_records(Transcript(self.root / "sessions" / self.session_id),
-                                   messages, self.session_id, max_bytes=budget)
+        records = discover_records(
+            Transcript(self.root / "sessions" / self.session_id),
+            messages,
+            self.session_id,
+            max_bytes=budget,
+        )
         if records is None:
             return answer
         candidate = {**answer, "peer_cycle_display_records": records}
@@ -4362,8 +4367,14 @@ class DesktopSessionBridge:
             # fit, expose an explicit refusal/count, never a partial certificate.
             pending = set(records.get("remaining", ())) | set(records.get("unavailable", ()))
             pending.update(record["id"] for record in records.get("records", ()))
-            records = {"records": [], "remaining": [], "unavailable": [],
-                       "state": "page_cap", "remaining_count": len(pending), "bytes": 0}
+            records = {
+                "records": [],
+                "remaining": [],
+                "unavailable": [],
+                "state": "page_cap",
+                "remaining_count": len(pending),
+                "bytes": 0,
+            }
             candidate = {**answer, "peer_cycle_display_records": records}
         return candidate
 

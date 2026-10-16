@@ -4,17 +4,23 @@ The neutral validator owns source/outcome proof. This adapter owns only mapping
 those exact source IDs onto the phone's EXISTING row IDs and payload mapper.
 Default folds receive no records and keep their old wire shape.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any, Callable
 
-from local_operator.harness.peer_cycle_display import validate_indexed_record, validate_record
-from local_operator.mobile.types import TranscriptEntry
+from local_operator.harness.peer_cycle_display import (
+    validate_indexed_record,
+    validate_record,
+)
 from local_operator.harness.peer_cycles import PeerCycleReplay
+from local_operator.mobile.types import TranscriptEntry
 
 
-def bind_owner_peer_cycles(fold: Any, session: Any, notify: Callable[[], None], loop: Any) -> Callable[[], None]:
+def bind_owner_peer_cycles(
+    fold: Any, session: Any, notify: Callable[[], None], loop: Any
+) -> Callable[[], None]:
     """Observe the existing frontend publication, including metadata-only close.
 
     ToolEnd fan-out precedes the asynchronous display-record append. Watching
@@ -37,12 +43,16 @@ def bind_owner_peer_cycles(fold: Any, session: Any, notify: Callable[[], None], 
         context["epoch"] = getattr(update, "epoch", context["epoch"])
         before = fold.projection.version
         try:
-            fold.set_peer_cycle_source(context["records"], transcript=session.transcript,
-                                       owner_epoch=context["epoch"])
+            fold.set_peer_cycle_source(
+                context["records"], transcript=session.transcript, owner_epoch=context["epoch"]
+            )
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
             # Optional display failure cannot abort the agent or print payloads.
             import logging
-            logging.getLogger(__name__).warning("phone peer display refused (%s)", type(error).__name__)
+
+            logging.getLogger(__name__).warning(
+                "phone peer display refused (%s)", type(error).__name__
+            )
             return
         if fold.projection.version != before:
             notify()
@@ -53,19 +63,23 @@ def bind_owner_peer_cycles(fold: Any, session: Any, notify: Callable[[], None], 
 
     subscription = store.subscribe_threadsafe(enqueue)
     snapshot = subscription.sync.snapshot
-    if snapshot.session_id != fold.projection.session_id or not hasattr(snapshot, "peer_cycle_display"):
+    if snapshot.session_id != fold.projection.session_id or not hasattr(
+        snapshot, "peer_cycle_display"
+    ):
         subscription.unsubscribe()
         return lambda: None
     context.update(records=snapshot.peer_cycle_display, epoch=snapshot.epoch)
     # Apply the captured snapshot before any queued post-join delta, never a
     # second independently timed snapshot of the store's mutable whole state.
-    fold.set_peer_cycle_source(context["records"], transcript=session.transcript,
-                               owner_epoch=context["epoch"])
+    fold.set_peer_cycle_source(
+        context["records"], transcript=session.transcript, owner_epoch=context["epoch"]
+    )
 
     def unsubscribe() -> None:
         nonlocal closed
         closed = True
         subscription.unsubscribe()
+
     return unsubscribe
 
 
@@ -75,27 +89,55 @@ def retained_peer_graphs(rows: list[TranscriptEntry], session_id: str) -> list[d
     retained = []
     for row in rows:
         stamp = row.details.get("peer_cycle")
-        if (not isinstance(stamp, dict) or stamp.get("session_id") != session_id or
-                any(key not in by_id for key in stamp.get("member_ids", ()))):
+        if (
+            not isinstance(stamp, dict)
+            or stamp.get("session_id") != session_id
+            or any(key not in by_id for key in stamp.get("member_ids", ()))
+        ):
             continue
         members = [by_id[key] for key in stamp["member_ids"]]
-        retained.append({"session_id": session_id, "quiet_call_id": stamp["quiet_call_id"],
-            "member_ids": [f"{member.id}:0" if member.kind == "peer_message" else
-                           f"tool:{member.tool_call_id}:0" for member in members]})
+        retained.append(
+            {
+                "session_id": session_id,
+                "quiet_call_id": stamp["quiet_call_id"],
+                "member_ids": [
+                    (
+                        f"{member.id}:0"
+                        if member.kind == "peer_message"
+                        else f"tool:{member.tool_call_id}:0"
+                    )
+                    for member in members
+                ],
+            }
+        )
     return retained
 
 
 def project_peer_cycles(
-    entries: list[TranscriptEntry], *, session_id: str | None = None,
-    records: Any = None, history: Any = (), transcript: Any = None,
+    entries: list[TranscriptEntry],
+    *,
+    session_id: str | None = None,
+    records: Any = None,
+    history: Any = (),
+    transcript: Any = None,
     child_row: Callable[[dict[str, Any]], TranscriptEntry] | None = None,
-    certificates: Any = (), retained: Any = (), view_epoch: int = 0,
+    certificates: Any = (),
+    retained: Any = (),
+    view_epoch: int = 0,
 ) -> list[TranscriptEntry]:
     # A custom producer can supply arbitrary details. Strip the RESERVED key
     # from a COPY before considering separately delivered, validated evidence.
-    rows = [replace(row, details={key: value for key, value in row.details.items()
-                                 if key != "peer_cycle"})
-            if "peer_cycle" in row.details else row for row in entries]
+    rows = [
+        (
+            replace(
+                row,
+                details={key: value for key, value in row.details.items() if key != "peer_cycle"},
+            )
+            if "peer_cycle" in row.details
+            else row
+        )
+        for row in entries
+    ]
     if not session_id:
         return rows
     graphs = []
@@ -121,7 +163,8 @@ def project_peer_cycles(
             break
         if transcript is not None:
             record, consumed = validate_indexed_record(
-                transcript, candidate, session_id, max_bytes=remaining_bytes)
+                transcript, candidate, session_id, max_bytes=remaining_bytes
+            )
             remaining_bytes -= consumed
         else:
             record = validate_record(candidate, history[-4096:], session_id)
@@ -134,8 +177,15 @@ def project_peer_cycles(
         source_rows: dict[str, TranscriptEntry] = {}
         duplicate = False
         for row in rows:
-            source = (f"{row.id}:0" if row.kind == "peer_message" else
-                      f"tool:{row.tool_call_id}:0" if row.kind == "tool" and row.tool_call_id else None)
+            source = (
+                f"{row.id}:0"
+                if row.kind == "peer_message"
+                else (
+                    f"tool:{row.tool_call_id}:0"
+                    if row.kind == "tool" and row.tool_call_id
+                    else None
+                )
+            )
             if source is not None:
                 if source in source_rows:
                     duplicate = True
@@ -148,11 +198,16 @@ def project_peer_cycles(
         for child in child_rows:
             if child["source_id"] in available:
                 existing = available[child["source_id"]]
-                if (child_row is not None and existing.kind == "tool" and
-                        existing.tool_state == "done" and not existing.error and
-                        not existing.images and not existing.videos and
-                        existing.tool_name == child["tool_name"] and
-                        existing.tool_call_id == child["tool_call_id"]):
+                if (
+                    child_row is not None
+                    and existing.kind == "tool"
+                    and existing.tool_state == "done"
+                    and not existing.error
+                    and not existing.images
+                    and not existing.videos
+                    and existing.tool_name == child["tool_name"]
+                    and existing.tool_call_id == child["tool_call_id"]
+                ):
                     # The bounded post-redaction child is the only FULL source
                     # for this row. Replace an 8k preview, never the identity or
                     # reader-owned state, and never hide a conflicting failure.
@@ -166,7 +221,8 @@ def project_peer_cycles(
                 continue
             restored = child_row(child)
             if any(row.id == restored.id for row in rows) or any(
-                    row.id == restored.id for group in additions.values() for row in group):
+                row.id == restored.id for group in additions.values() for row in group
+            ):
                 continue
             available[child["source_id"]] = restored
             additions.setdefault(root.id, []).append(restored)
@@ -182,18 +238,32 @@ def project_peer_cycles(
         positions = [index for index, row in enumerate(proposed) if row.id in set(ids)]
         # No jumping over a public answer, attention, unknown row or page gap.
         # The complete finite graph must be one ordered physical interval.
-        if (len(ids) != len(set(ids)) or not positions or
-                positions != list(range(positions[0], positions[0] + len(ids))) or
-                [proposed[index].id for index in positions] != ids or
-                members[0].kind != "peer_message" or
-                any(row.kind != "tool" or row.tool_state != "done" or row.error or
-                    not row.text_complete or
-                    row.images or row.videos or row.tool_name not in {"send", "eval"}
-                    for row in members[1:])):
+        if (
+            len(ids) != len(set(ids))
+            or not positions
+            or positions != list(range(positions[0], positions[0] + len(ids)))
+            or [proposed[index].id for index in positions] != ids
+            or members[0].kind != "peer_message"
+            or any(
+                row.kind != "tool"
+                or row.tool_state != "done"
+                or row.error
+                or not row.text_complete
+                or row.images
+                or row.videos
+                or row.tool_name not in {"send", "eval"}
+                for row in members[1:]
+            )
+        ):
             continue
-        stamp = {"version": 1, "session_id": session_id, "first_id": ids[0],
-                 "last_id": ids[-1], "member_ids": ids,
-                 "quiet_call_id": quiet_call_id}
+        stamp = {
+            "version": 1,
+            "session_id": session_id,
+            "first_id": ids[0],
+            "last_id": ids[-1],
+            "member_ids": ids,
+            "quiet_call_id": quiet_call_id,
+        }
         first = replace(members[0], details={**members[0].details, "peer_cycle": stamp})
         rows = [first if row.id == first.id else row for row in proposed]
         claimed.update(member_ids)

@@ -8036,7 +8036,9 @@ class OperatorApp(App[None]):
                 bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
-                display_records=self._peer_display_records_for(history, session, bound=_viewport_message_budget(self.size.height)),
+                display_records=self._peer_display_records_for(
+                    history, session, bound=_viewport_message_budget(self.size.height)
+                ),
                 proof_transcript=getattr(session, "_transcript", None),
                 # The width the revealed view WILL have, asked of the view it
                 # replaces: both are `1fr` children of `#session-conversation`
@@ -12548,23 +12550,32 @@ class OperatorApp(App[None]):
         ):
             self._fast_choice = False
 
-    def _peer_display_records_for(self, history: list[Any], session: Any = None, *,
-                                  bound: int | None = None, start: int | None = None) -> dict[str, Any] | None:
+    def _peer_display_records_for(
+        self,
+        history: list[Any],
+        session: Any = None,
+        *,
+        bound: int | None = None,
+        start: int | None = None,
+    ) -> dict[str, Any] | None:
         session = session if session is not None else self._session
         # Derive candidates from the requested render slice, not the session's
         # full replay. Cross-page raw dependencies use the existing file index.
         if start is not None:
             history = history[start:]
         elif bound is not None and len(history) > bound:
-            history = history[_resume_tail_start(history, bound):]
+            history = history[_resume_tail_start(history, bound) :]
         history = history[-4096:]
         transcript = getattr(session, "_transcript", None)
         if transcript is not None:
             from local_operator.harness.peer_cycle_display import discover_records
+
             return discover_records(transcript, history, str(getattr(session, "session_id", "")))
         # An attached viewer reads only the owner-selected, capability-gated
         # page metadata. A raw Message.details stamp is never authority here.
-        return getattr(getattr(session, "_display_history", None), "peer_cycle_display_records", None)
+        return getattr(
+            getattr(session, "_display_history", None), "peer_cycle_display_records", None
+        )
 
     def _apply_peer_display_records(self, state: Any = None) -> None:
         if state is None:
@@ -12573,7 +12584,9 @@ class OperatorApp(App[None]):
         if not isinstance(display, dict):
             return
         for record in display.get("records", ()):
-            if not isinstance(record, dict) or record.get("producer_epoch") != getattr(state, "epoch", None):
+            if not isinstance(record, dict) or record.get("producer_epoch") != getattr(
+                state, "epoch", None
+            ):
                 continue  # Old persisted refs/bodies require the cold raw-source validator.
             self._transcript_view()._quiet_groups.apply_display_record(record)
 
@@ -14874,14 +14887,23 @@ class OperatorApp(App[None]):
             loaded_history = getattr(session, "display_history_window", None)
             # Remote validation may use already-loaded page neighbors; local
             # replay never asks for another whole history to join proof rows.
-            loaded_proof = loaded_history() if local_transcript is None and callable(loaded_history) else None
+            loaded_proof = (
+                loaded_history() if local_transcript is None and callable(loaded_history) else None
+            )
             # A callable alone promises no sequence. Unknown facade responses
             # cannot authorise proof; keep the existing loaded-window fallback.
-            proof_history = loaded_proof[-4096:] if isinstance(loaded_proof, (list, tuple)) else history[-4096:]
+            proof_history = (
+                loaded_proof[-4096:] if isinstance(loaded_proof, (list, tuple)) else history[-4096:]
+            )
             projected = project_settled_rows(
-                self, history, bound=bound, start=start, fold_width=fold_width,
+                self,
+                history,
+                bound=bound,
+                start=start,
+                fold_width=fold_width,
                 display_records=self._peer_display_records_for(history, bound=bound, start=start),
-                proof_history=proof_history, proof_transcript=local_transcript,
+                proof_history=proof_history,
+                proof_transcript=local_transcript,
             )
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
@@ -15831,6 +15853,7 @@ class OperatorApp(App[None]):
         """
         collected: list[Any] = []
         from local_operator.tui.internal_work_membership import WorkProjector
+
         prior_work = getattr(self, "_projection_work", None)
         # Older pages are not appends to the live tail. A fresh local context
         # must see the page's own loaded opener, never the current tail's user.
@@ -37849,7 +37872,11 @@ class OperatorApp(App[None]):
         # `transcript.conversation_started`.
         block.ends_empty_state = ends_empty_state
         if self._block_sink is not None:
-            from local_operator.tui.widgets.transcript import sync_work_dormancy, work_record_of_block
+            from local_operator.tui.widgets.transcript import (
+                sync_work_dormancy,
+                work_record_of_block,
+            )
+
             block.work_view_identity = self._transcript_view().work_identity
             projector = getattr(self, "_projection_work", None)
             if projector is not None:
@@ -56387,7 +56414,10 @@ class OperatorApp(App[None]):
             # S1 still paints no sentinel. The separate display-only cycle
             # proof requires actual no_reply name/call/start and finite owner.
             self._transcript_view()._quiet_groups.finish_peer_cycle(
-                event.tool_call_id, event.tool_name, event.result, message.origin,
+                event.tool_call_id,
+                event.tool_name,
+                event.result,
+                message.origin,
                 event_failed=event.is_error,
             )
             self._refresh_working_activity()

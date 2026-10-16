@@ -77,7 +77,15 @@ from local_operator.tui.composer_focus import (
     focus_is_claimed,
     return_focus_to_composer,
 )
-from local_operator.tui.internal_work_membership import WorkGroupIdentity, WorkGroupSnapshot, WorkMembership, WorkProjector, WorkRecord, capture_work_groups, retained_work_group
+from local_operator.tui.internal_work_membership import (
+    WorkGroupIdentity,
+    WorkGroupSnapshot,
+    WorkMembership,
+    WorkProjector,
+    WorkRecord,
+    capture_work_groups,
+    retained_work_group,
+)
 from local_operator.tui.quiet_groups import (
     QuietGroup,
     QuietGroupRecord,
@@ -3583,7 +3591,9 @@ class QuietGroupBlock(ExpandableActionBlock):
         if not self._expanded:
             block.display = False
 
-    def adopt_members(self, members: Sequence[TranscriptBlock], *, expanded: bool | None = None) -> None:
+    def adopt_members(
+        self, members: Sequence[TranscriptBlock], *, expanded: bool | None = None
+    ) -> None:
         """Take the run's member blocks and fold them away.
 
         Called once at formation (by the tracker or the replay fold); the bar
@@ -3599,16 +3609,26 @@ class QuietGroupBlock(ExpandableActionBlock):
             self.set_class(expanded, self.EXPANDED_CLASS)
         self._refresh_work_identity()
         self._sync_member_visibility()
-        if any(getattr(getattr(member, "internal_work_membership", None), "owner_evidence", None) == "loaded-user-tool-interval" for member in members):
+        if any(
+            getattr(getattr(member, "internal_work_membership", None), "owner_evidence", None)
+            == "loaded-user-tool-interval"
+            for member in members
+        ):
             # Formation and adoption complete before paint; a contextual tool-only
             # group must never paint the legacy receipt-count placeholder.
             self._refresh_row()
 
     def _refresh_work_identity(self) -> None:
-        self._work_identity = identity_of_work_group(self.group, self._members, expanded=self._expanded)
+        self._work_identity = identity_of_work_group(
+            self.group, self._members, expanded=self._expanded
+        )
         # "mixed" is the shipped receipt-family label. A tool-only owned
         # stretch must not claim to be messages; use neutral local chrome.
-        self.tool_name = "work" if self._work_identity is not None and self._work_identity.user_id is not None else self.group.family
+        self.tool_name = (
+            "work"
+            if self._work_identity is not None and self._work_identity.user_id is not None
+            else self.group.family
+        )
 
     def _sync_member_visibility(self) -> None:
         """Members follow the bar's expansion state, in both directions."""
@@ -3718,8 +3738,13 @@ class QuietGroupBlock(ExpandableActionBlock):
         count carries the shared minimum marker when the head is cut.
         """
         from local_operator.tui.internal_work_membership import owned_work_clauses
+
         records = [work_record_of_block(block) for block in self._members]
-        memberships = {record.source_id: block.internal_work_membership for record, block in zip(records, self._members, strict=True) if block.internal_work_membership is not None}
+        memberships = {
+            record.source_id: block.internal_work_membership
+            for record, block in zip(records, self._members, strict=True)
+            if block.internal_work_membership is not None
+        }
         clauses = owned_work_clauses(records, memberships, partial=self.partial)
         if clauses is not None:
             return " · ".join(clauses)
@@ -3975,7 +4000,9 @@ def _base_quiet_group_record_of(
     return QuietGroupRecord(kind="other", id=record_id)
 
 
-def identity_of_work_group(group: QuietGroup, members: Sequence[TranscriptBlock], *, expanded: bool = False) -> WorkGroupIdentity | None:
+def identity_of_work_group(
+    group: QuietGroup, members: Sequence[TranscriptBlock], *, expanded: bool = False
+) -> WorkGroupIdentity | None:
     if not members:
         return None
     stamps = {member.work_view_identity for member in members}
@@ -3983,20 +4010,61 @@ def identity_of_work_group(group: QuietGroup, members: Sequence[TranscriptBlock]
     facts = [member.internal_work_membership for member in members]
     users = {fact.scope_id for fact in facts if fact is not None and fact.scope_id is not None}
     owned = facts[0] if facts else None
-    authorised = owned is not None and owned.scope_id is not None and owned.stretch_id is not None and all(fact is not None and fact.role != "boundary" and fact.scope_id == owned.scope_id and fact.stretch_id == owned.stretch_id for fact in facts)
+    authorised = (
+        owned is not None
+        and owned.scope_id is not None
+        and owned.stretch_id is not None
+        and all(
+            fact is not None
+            and fact.role != "boundary"
+            and fact.scope_id == owned.scope_id
+            and fact.stretch_id == owned.stretch_id
+            for fact in facts
+        )
+    )
     anchor = group.key[3:]
     certificate = getattr(members[0], "peer_cycle_certificate", None)
     if certificate is not None:
-        from local_operator.tui.closed_peer_cycles import PeerCycleCertificate, closed_peer_cycle_candidate
-        if isinstance(certificate, PeerCycleCertificate) and closed_peer_cycle_candidate(peer_cycle_rows_of_blocks(members), certificate) is not None:
-            return WorkGroupIdentity(group.key, group.row_ids, anchor,
-                certificate.session_id, certificate.view_epoch, None, certificate.first_peer_source_id,
-                expanded, None, False, "peer_cycle", certificate.quiet_call_id)
-    return WorkGroupIdentity(group.key, group.row_ids, anchor,
-        stamp[0] if stamp is not None else None, stamp[1] if stamp is not None else 0,
+        from local_operator.tui.closed_peer_cycles import (
+            PeerCycleCertificate,
+            closed_peer_cycle_candidate,
+        )
+
+        if (
+            isinstance(certificate, PeerCycleCertificate)
+            and closed_peer_cycle_candidate(peer_cycle_rows_of_blocks(members), certificate)
+            is not None
+        ):
+            return WorkGroupIdentity(
+                group.key,
+                group.row_ids,
+                anchor,
+                certificate.session_id,
+                certificate.view_epoch,
+                None,
+                certificate.first_peer_source_id,
+                expanded,
+                None,
+                False,
+                "peer_cycle",
+                certificate.quiet_call_id,
+            )
+    return WorkGroupIdentity(
+        group.key,
+        group.row_ids,
+        anchor,
+        stamp[0] if stamp is not None else None,
+        stamp[1] if stamp is not None else 0,
         owned.scope_id if authorised and owned is not None else None,
-        owned.stretch_id if authorised and owned is not None and owned.stretch_id is not None else anchor,
-        expanded, next(iter(users)) if len(users) == 1 else None, len(stamps) > 1 or len(users) > 1)
+        (
+            owned.stretch_id
+            if authorised and owned is not None and owned.stretch_id is not None
+            else anchor
+        ),
+        expanded,
+        next(iter(users)) if len(users) == 1 else None,
+        len(stamps) > 1 or len(users) > 1,
+    )
 
 
 def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
@@ -4016,6 +4084,7 @@ def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
     if isinstance(source, WorkRecord):
         if getattr(block, "notice_kind", None) in ("warning", "error"):
             from dataclasses import replace
+
             return replace(source, level=str(getattr(block, "notice_kind")))
         return source
     if isinstance(block, UserBlock):
@@ -4023,23 +4092,38 @@ def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
         # scope. Its actual source stamp will be re-read before the next append.
         return WorkRecord(anchor or source_id, "user", provisional=not bool(anchor))
     if isinstance(block, ToolCard):
-        return WorkRecord(source_id, "tool", tool_name=block.tool_name,
-            is_error=block.state == "error", stopped=block.state == "interrupted",
-            not_run=block.state == "waiting", never_sent=block.never_sent,
-            real_tool=block.state not in ("composing", "queued", "waiting"), material=block.tool_name == "generate_image",
+        return WorkRecord(
+            source_id,
+            "tool",
+            tool_name=block.tool_name,
+            is_error=block.state == "error",
+            stopped=block.state == "interrupted",
+            not_run=block.state == "waiting",
+            never_sent=block.never_sent,
+            real_tool=block.state not in ("composing", "queued", "waiting"),
+            material=block.tool_name == "generate_image",
             launched_job_id=getattr(block, "internal_work_job_id", None),
-            launched_job_ids=getattr(block, "internal_work_job_ids", ()))
+            launched_job_ids=getattr(block, "internal_work_job_ids", ()),
+        )
     if isinstance(block, AssistantBlock):
-        return WorkRecord(source_id, "assistant", streaming=not block._settled,
-            final=block._settled and not block._narration)
+        return WorkRecord(
+            source_id,
+            "assistant",
+            streaming=not block._settled,
+            final=block._settled and not block._narration,
+        )
     if isinstance(block, HubMessageBlock):
         facts = block.hub_details
         reply, steer, job_id = facts.get("expects_reply"), facts.get("steer"), facts.get("job_id")
-        return WorkRecord(source_id, "custom", custom_type="hub_message",
+        return WorkRecord(
+            source_id,
+            "custom",
+            custom_type="hub_message",
             direction=str(facts.get("direction", "")),
             expects_reply=reply if isinstance(reply, bool) else None,
             steer=steer if isinstance(steer, bool) else None,
-            job_id=job_id if isinstance(job_id, str) else None)
+            job_id=job_id if isinstance(job_id, str) else None,
+        )
     if isinstance(block, PeerMessageBlock):
         return WorkRecord(source_id, "peer")
     if isinstance(block, AskResponseBlock):
@@ -4058,7 +4142,9 @@ def work_record_of_block(block: TranscriptBlock) -> WorkRecord:
     return WorkRecord(source_id, "notice")
 
 
-def project_work_blocks(blocks: Sequence[TranscriptBlock], identity: tuple[str | None, int] | None = None) -> WorkProjector:
+def project_work_blocks(
+    blocks: Sequence[TranscriptBlock], identity: tuple[str | None, int] | None = None
+) -> WorkProjector:
     """Replay/page/source-change entrypoint; one ordered pass, bars excluded.
 
     Live appends use WorkProjector.step instead. Existing per-span scanners only
@@ -4073,7 +4159,11 @@ def project_work_blocks(blocks: Sequence[TranscriptBlock], identity: tuple[str |
     for block in blocks:
         if isinstance(block, QuietGroupBlock) or getattr(block, "SPACING_TRANSIENT", False):
             continue
-        foreign = mixed_views or (identity is not None and identity[0] is not None and block.work_view_identity != identity)
+        foreign = mixed_views or (
+            identity is not None
+            and identity[0] is not None
+            and block.work_view_identity != identity
+        )
         block.work_foreign = foreign
         record = work_record_of_block(block)
         member = projector.step(WorkRecord(record.source_id, "foreign") if foreign else record)
@@ -4095,10 +4185,13 @@ def sync_work_dormancy(block: TranscriptBlock, member: WorkMembership) -> None:
 
 
 def quiet_group_record_of(
-    block: TranscriptBlock, *, prev_kind: str | None = None,
+    block: TranscriptBlock,
+    *,
+    prev_kind: str | None = None,
     prev_owner: tuple[str, int] | None = None,
 ) -> QuietGroupRecord:
     from dataclasses import replace
+
     raw = _base_quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=prev_owner)
     if block.work_foreign or getattr(block, "peer_cycle_closed", None) is not None:
         # Contextual closure is a permanent latch; absent metadata leaves the
@@ -4107,7 +4200,11 @@ def quiet_group_record_of(
     if block.work_dormant:
         return replace(raw, kind="inside", work=None)
     member = getattr(block, "internal_work_membership", None)
-    contextual = member is not None and member.scope_id is not None and (member.owner_evidence == "loaded-user-tool-interval" or member.attention != "none")
+    contextual = (
+        member is not None
+        and member.scope_id is not None
+        and (member.owner_evidence == "loaded-user-tool-interval" or member.attention != "none")
+    )
     return replace(raw, work=member) if contextual else raw
 
 
@@ -4186,21 +4283,42 @@ def peer_cycle_rows_of_blocks(blocks: Sequence[TranscriptBlock]):
     from local_operator.harness.peer_cycles import is_peer_communication_call
     from local_operator.tui.closed_peer_cycles import PeerCycleRow
     from local_operator.tui.widgets.tool_card import ToolCard
+
     rows = []
     for block in blocks:
         identity = block.work_view_identity or (None, 0)
         source_id = work_record_of_block(block).source_id
         if isinstance(block, PeerMessageBlock) and not isinstance(block, TeamBridgeBlock):
             rows.append(PeerCycleRow(source_id, "peer", *identity, sender=block._sender))
-        elif (isinstance(block, ToolCard) and getattr(block, "peer_display_carrier_owner", None) == identity):
-            rows.append(PeerCycleRow(source_id, "carrier", *identity,
-                successful=block.state == "success" and not block._partial,
-                never_sent=block.never_sent))
-        elif isinstance(block, ToolCard) and is_peer_communication_call(block.tool_name, block._args):
-            rows.append(PeerCycleRow(source_id, "send", *identity,
-                successful=(block.state == "success" and not block._partial
-                            and block.peer_cycle_communication_succeeded is True),
-                never_sent=block.never_sent))
+        elif (
+            isinstance(block, ToolCard)
+            and getattr(block, "peer_display_carrier_owner", None) == identity
+        ):
+            rows.append(
+                PeerCycleRow(
+                    source_id,
+                    "carrier",
+                    *identity,
+                    successful=block.state == "success" and not block._partial,
+                    never_sent=block.never_sent,
+                )
+            )
+        elif isinstance(block, ToolCard) and is_peer_communication_call(
+            block.tool_name, block._args
+        ):
+            rows.append(
+                PeerCycleRow(
+                    source_id,
+                    "send",
+                    *identity,
+                    successful=(
+                        block.state == "success"
+                        and not block._partial
+                        and block.peer_cycle_communication_succeeded is True
+                    ),
+                    never_sent=block.never_sent,
+                )
+            )
         else:
             rows.append(PeerCycleRow(source_id, "boundary", *identity))
     return rows
@@ -4267,20 +4385,30 @@ def quiet_group_plan(
     # Contextual closure owns only a complete, already certified finite source
     # interval. Mask it from the DEFAULT scanner, so it cannot absorb a future
     # cycle or overlap a second bar. No certificate means unchanged S5 behavior.
-    from local_operator.tui.closed_peer_cycles import PeerCycleCertificate, closed_peer_cycle_candidate
+    from local_operator.tui.closed_peer_cycles import (
+        PeerCycleCertificate,
+        closed_peer_cycle_candidate,
+    )
+
     positions = {work_record_of_block(block).source_id: index for index, block in enumerate(kept)}
     occupied: set[int] = set()
     for index, block in enumerate(kept):
         certificate = getattr(block, "peer_cycle_certificate", None)
         if not isinstance(certificate, PeerCycleCertificate) or len(positions) != len(kept):
             continue  # A duplicate source ID cannot certify one owner interval.
-        if not certificate.member_ids or any(source_id not in positions for source_id in certificate.member_ids):
+        if not certificate.member_ids or any(
+            source_id not in positions for source_id in certificate.member_ids
+        ):
             continue
         indices = [positions[source_id] for source_id in certificate.member_ids]
         start, end = indices[0], indices[-1]
-        if start != index or indices != list(range(start, end + 1)) or any(position in occupied for position in indices):
+        if (
+            start != index
+            or indices != list(range(start, end + 1))
+            or any(position in occupied for position in indices)
+        ):
             continue
-        members = kept[start:end + 1]
+        members = kept[start : end + 1]
         group = closed_peer_cycle_candidate(peer_cycle_rows_of_blocks(members), certificate)
         if group is None:
             continue
@@ -4357,7 +4485,9 @@ def fold_quiet_group_list(
         members = run[planned.span[0] : planned.span[1] + 1]
         certificate = getattr(members[0], "peer_cycle_certificate", None)
         if certificate is not None and tuple(planned.group.row_ids) == certificate.member_ids:
-            members = [member for member in members if not getattr(member, "SPACING_TRANSIENT", False)]
+            members = [
+                member for member in members if not getattr(member, "SPACING_TRANSIENT", False)
+            ]
         bar = QuietGroupBlock(
             planned.group, partial=not planned.span_head_loaded, fold_width=fold_width
         )
@@ -4449,6 +4579,7 @@ class QuietGroupTracker:
 
     def _peer_cycle_tail(self) -> list[TranscriptBlock]:
         from local_operator.tui.closed_peer_cycles import MAX_PEER_CYCLE_ROWS
+
         members: list[TranscriptBlock] = []
         for block in reversed(self._view._blocks):
             if getattr(block, "SPACING_TRANSIENT", False) or isinstance(block, QuietGroupBlock):
@@ -4463,48 +4594,88 @@ class QuietGroupTracker:
         return list(reversed(members))
 
     def start_peer_cycle(self, call_id: str, origin: object = None) -> None:
-        from local_operator.tui.closed_peer_cycles import MAX_PENDING_PEER_CYCLES, begin_peer_cycle
+        from local_operator.tui.closed_peer_cycles import (
+            MAX_PENDING_PEER_CYCLES,
+            begin_peer_cycle,
+        )
+
         if call_id in self._peer_cycle_pending:
             return  # A duplicated start cannot move the finite captured end.
-        start = begin_peer_cycle(peer_cycle_rows_of_blocks(self._peer_cycle_tail()), self._view.work_identity, call_id)
+        start = begin_peer_cycle(
+            peer_cycle_rows_of_blocks(self._peer_cycle_tail()), self._view.work_identity, call_id
+        )
         if start is not None:
             if len(self._peer_cycle_pending) >= MAX_PENDING_PEER_CYCLES:
                 self._peer_cycle_pending.pop(next(iter(self._peer_cycle_pending)))
             self._peer_cycle_pending[call_id] = (start, origin)
 
-    def finish_peer_cycle(self, call_id: str, tool_name: str, result: Any, origin: object = None, *, event_failed: bool = False) -> bool:
+    def finish_peer_cycle(
+        self,
+        call_id: str,
+        tool_name: str,
+        result: Any,
+        origin: object = None,
+        *,
+        event_failed: bool = False,
+    ) -> bool:
         from local_operator.tui.closed_peer_cycles import close_peer_cycle
+
         pending = self._peer_cycle_pending.pop(call_id, None)
         if event_failed or pending is None or pending[1] is not origin:
             return False
         members = self._peer_cycle_tail()
         records = peer_cycle_rows_of_blocks(members)
-        certificate = close_peer_cycle(pending[0], records, self._view.work_identity, call_id, tool_name, result)
+        certificate = close_peer_cycle(
+            pending[0], records, self._view.work_identity, call_id, tool_name, result
+        )
         return self._apply_peer_cycle(certificate, members)
 
     def consume_replayed_peer_cycle(self, certificate: Any, result: Any = None) -> bool:
         """A raw quiet pair already certified this finite, not necessarily tail interval."""
-        from local_operator.tui.closed_peer_cycles import MAX_PEER_CYCLE_ROWS, PeerCycleCertificate, close_peer_cycle
-        if not isinstance(certificate, PeerCycleCertificate) or (certificate.session_id, certificate.view_epoch) != self._view.work_identity:
+        from local_operator.tui.closed_peer_cycles import (
+            MAX_PEER_CYCLE_ROWS,
+            PeerCycleCertificate,
+            close_peer_cycle,
+        )
+
+        if (
+            not isinstance(certificate, PeerCycleCertificate)
+            or (certificate.session_id, certificate.view_epoch) != self._view.work_identity
+        ):
             return False
-        source = [block for block in self._view._blocks[-(MAX_PEER_CYCLE_ROWS * 2 + 16):]
-                  if not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False)]
+        source = [
+            block
+            for block in self._view._blocks[-(MAX_PEER_CYCLE_ROWS * 2 + 16) :]
+            if not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+        ]
         ids = [work_record_of_block(block).source_id for block in source]
         if len(set(ids)) != len(ids):
             return False
         positions = {source_id: index for index, source_id in enumerate(ids)}
-        if not certificate.member_ids or any(source_id not in positions for source_id in certificate.member_ids):
+        if not certificate.member_ids or any(
+            source_id not in positions for source_id in certificate.member_ids
+        ):
             return False
         indices = [positions[source_id] for source_id in certificate.member_ids]
         if indices != list(range(indices[0], indices[-1] + 1)):
             return False
-        members = source[indices[0]:indices[-1] + 1]
+        members = source[indices[0] : indices[-1] + 1]
         # An offscreen replay carries the local immutable certificate AFTER
         # its raw-pair prepass, not a fake result or copied message body. A raw
         # mounted result is checked again when that ordered seat is available.
-        verified = certificate if result is None else close_peer_cycle(
-            certificate, peer_cycle_rows_of_blocks(members), self._view.work_identity,
-            certificate.quiet_call_id, getattr(result, "tool_name", ""), result)
+        verified = (
+            certificate
+            if result is None
+            else close_peer_cycle(
+                certificate,
+                peer_cycle_rows_of_blocks(members),
+                self._view.work_identity,
+                certificate.quiet_call_id,
+                getattr(result, "tool_name", ""),
+                result,
+            )
+        )
         return self._apply_peer_cycle(verified, members)
 
     def apply_display_record(self, record: Any) -> bool:
@@ -4517,25 +4688,41 @@ class QuietGroupTracker:
         from local_operator.harness.peer_cycle_display import MAX_SOURCE_IDS
         from local_operator.tui.closed_peer_cycles import PeerCycleCertificate
         from local_operator.tui.widgets.tool_card import ToolCard
+
         identity = self._view.work_identity
-        if (not isinstance(record, dict) or type(record.get("version")) is not int or record.get("version") != 1
-                or not isinstance(record.get("quiet_call_id"), str) or not record["quiet_call_id"]
-                or record.get("session_id") != identity[0]):
+        if (
+            not isinstance(record, dict)
+            or type(record.get("version")) is not int
+            or record.get("version") != 1
+            or not isinstance(record.get("quiet_call_id"), str)
+            or not record["quiet_call_id"]
+            or record.get("session_id") != identity[0]
+        ):
             return False
         ids = record.get("member_ids")
         roles = record.get("members")
-        if (not isinstance(ids, list) or not 2 <= len(ids) <= MAX_SOURCE_IDS
-                or any(not isinstance(key, str) or not key for key in ids)
-                or len(set(ids)) != len(ids) or not isinstance(roles, list)
-                or any(not isinstance(role, dict) for role in roles)
-                or [role.get("source_id") for role in roles] != ids):
+        if (
+            not isinstance(ids, list)
+            or not 2 <= len(ids) <= MAX_SOURCE_IDS
+            or any(not isinstance(key, str) or not key for key in ids)
+            or len(set(ids)) != len(ids)
+            or not isinstance(roles, list)
+            or any(not isinstance(role, dict) for role in roles)
+            or [role.get("source_id") for role in roles] != ids
+        ):
             return False
-        source = [block for block in self._view._blocks[-(MAX_SOURCE_IDS * 2 + 16):]
-                  if not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False)]
-        positions = [i for i, block in enumerate(source) if work_record_of_block(block).source_id in ids]
-        if (len(positions) != len(ids) or positions != list(range(positions[0], positions[-1] + 1))):
+        source = [
+            block
+            for block in self._view._blocks[-(MAX_SOURCE_IDS * 2 + 16) :]
+            if not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        positions = [
+            i for i, block in enumerate(source) if work_record_of_block(block).source_id in ids
+        ]
+        if len(positions) != len(ids) or positions != list(range(positions[0], positions[-1] + 1)):
             return False
-        members = source[positions[0]:positions[-1] + 1]
+        members = source[positions[0] : positions[-1] + 1]
         if [work_record_of_block(block).source_id for block in members] != ids:
             return False
         for block, role in zip(members, roles, strict=True):
@@ -4545,8 +4732,12 @@ class QuietGroupTracker:
                 if not isinstance(block, PeerMessageBlock) or isinstance(block, TeamBridgeBlock):
                     return False
             elif role["role"] in {"send", "carrier"}:
-                if (not isinstance(block, ToolCard) or block.state != "success"
-                        or block._partial or block.never_sent):
+                if (
+                    not isinstance(block, ToolCard)
+                    or block.state != "success"
+                    or block._partial
+                    or block.never_sent
+                ):
                     return False
                 if role["role"] == "carrier" and block.tool_name != "eval":
                     return False
@@ -4557,8 +4748,16 @@ class QuietGroupTracker:
         session_id, view_epoch = identity
         if not session_id:
             return False
-        certificate = PeerCycleCertificate(session_id, view_epoch, record["quiet_call_id"], tuple(ids), owner_kind="peer_cycle_display")
-        carriers = [block for block, role in zip(members, roles, strict=True) if role["role"] == "carrier"]
+        certificate = PeerCycleCertificate(
+            session_id,
+            view_epoch,
+            record["quiet_call_id"],
+            tuple(ids),
+            owner_kind="peer_cycle_display",
+        )
+        carriers = [
+            block for block, role in zip(members, roles, strict=True) if role["role"] == "carrier"
+        ]
         for block in carriers:
             block.peer_display_carrier_owner = identity
         if self._apply_peer_cycle(certificate, members):
@@ -4569,20 +4768,34 @@ class QuietGroupTracker:
 
     def _apply_peer_cycle(self, certificate: Any, members: list[TranscriptBlock]) -> bool:
         from local_operator.tui.closed_peer_cycles import closed_peer_cycle_candidate
+
         group = closed_peer_cycle_candidate(peer_cycle_rows_of_blocks(members), certificate)
         if group is None:
             return False
         # Exact inventory (not any overlap) permits in-place closure of an
         # existing default bar. Its actual reader-open bit is never OR-merged.
         from local_operator.tui.closed_peer_cycles import MAX_PEER_CYCLE_ROWS
-        window = self._view._blocks[-(MAX_PEER_CYCLE_ROWS * 2 + 16):]
-        source_ids = [work_record_of_block(block).source_id for block in window
-                      if not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False)]
+
+        window = self._view._blocks[-(MAX_PEER_CYCLE_ROWS * 2 + 16) :]
+        source_ids = [
+            work_record_of_block(block).source_id
+            for block in window
+            if not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+        ]
         if len(set(source_ids)) != len(source_ids):
             return False
-        old = [block for block in window if isinstance(block, QuietGroupBlock)
-               and any(member in block._members for member in members)]
-        if len(old) > 1 or (old and tuple(work_record_of_block(member).source_id for member in old[0]._members) != certificate.member_ids):
+        old = [
+            block
+            for block in window
+            if isinstance(block, QuietGroupBlock)
+            and any(member in block._members for member in members)
+        ]
+        if len(old) > 1 or (
+            old
+            and tuple(work_record_of_block(member).source_id for member in old[0]._members)
+            != certificate.member_ids
+        ):
             return False
         members[0].peer_cycle_certificate = certificate
         if old:
@@ -4593,7 +4806,16 @@ class QuietGroupTracker:
             bar.restate_group(group)
         else:
             focused = self._view.app.focused
-            self._form(members, group, False, reader_open=any(member is focused or member in focused.ancestors for member in members) if focused is not None else False)
+            self._form(
+                members,
+                group,
+                False,
+                reader_open=(
+                    any(member is focused or member in focused.ancestors for member in members)
+                    if focused is not None
+                    else False
+                ),
+            )
             bar = self._open
         if bar is None:
             return False
@@ -4636,8 +4858,12 @@ class QuietGroupTracker:
             self._close()
         from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
         from local_operator.tui.closed_peer_cycles import PeerCycleCertificate
+
         certificate = getattr(block, "peer_cycle_certificate", None)
-        if isinstance(certificate, PeerCycleCertificate) and (certificate.session_id, certificate.view_epoch) == self._view.work_identity:
+        if (
+            isinstance(certificate, PeerCycleCertificate)
+            and (certificate.session_id, certificate.view_epoch) == self._view.work_identity
+        ):
             remember_peer_cycle_certificate(self._peer_cycle_certificates, certificate)
         source_id = work_record_of_block(block).source_id
         for certificate in tuple(self._peer_cycle_certificates.values()):
@@ -4824,12 +5050,26 @@ class QuietGroupTracker:
         # the member block objects persist across the re-plan (visibility is
         # the fold's switch, never a remount), and the bar's own flag is
         # carried forward below.
-        group = quiet_group_of_segment(span_records, (0, len(span_records) - 1), span_head_loaded=not partial, open=end >= len(source))
+        group = quiet_group_of_segment(
+            span_records,
+            (0, len(span_records) - 1),
+            span_head_loaded=not partial,
+            open=end >= len(source),
+        )
         candidate = identity_of_work_group(group, span) if group is not None else None
-        contextual = candidate is not None and candidate.user_id is not None or any(bar._work_identity is not None and bar._work_identity.user_id is not None for bar in touched)
+        contextual = (
+            candidate is not None
+            and candidate.user_id is not None
+            or any(
+                bar._work_identity is not None and bar._work_identity.user_id is not None
+                for bar in touched
+            )
+        )
         if contextual and candidate is not None:
             outside = [quiet_group_record_of(block).id for block in source[:start] + source[end:]]
-            owner = retained_work_group(previous_identity, candidate, outside, current_ids_unique=True)
+            owner = retained_work_group(
+                previous_identity, candidate, outside, current_ids_unique=True
+            )
             reader_open = owner is not None and previous_identity.groups[owner].expanded
         elif contextual:
             reader_open = False
@@ -4837,7 +5077,9 @@ class QuietGroupTracker:
             reader_open = any(bar._expanded for bar in touched)  # unchanged standalone qg policy
         focused = self._view.app.focused if self._view.is_mounted else None
         focused_ancestors = set(focused.ancestors_with_self) if focused is not None else set()
-        focus_refusal = contextual and not reader_open and any(member in focused_ancestors for member in span)
+        focus_refusal = (
+            contextual and not reader_open and any(member in focused_ancestors for member in span)
+        )
         for bar in touched:
             for member in bar._members:
                 member.display = True
@@ -4914,7 +5156,8 @@ class QuietGroupTracker:
         blocks: list[TranscriptBlock],
         group: QuietGroup,
         partial: bool,
-        *, reader_open: bool = False,
+        *,
+        reader_open: bool = False,
     ) -> None:
         index = self._view_index(blocks[0])
         if index is None:
@@ -5076,14 +5319,25 @@ class QuietGroupTracker:
         span = source[start:]
         if not span:
             return
-        group = quiet_group_of_segment(records, (start, len(records) - 1), span_head_loaded=start > 0 or not self._head_cut, open=True)
+        group = quiet_group_of_segment(
+            records,
+            (start, len(records) - 1),
+            span_head_loaded=start > 0 or not self._head_cut,
+            open=True,
+        )
         span_objects = {id(member) for member in span}
-        owners = [bar for bar in mounted if isinstance(bar, QuietGroupBlock) and any(id(member) in span_objects for member in bar._members)]
+        owners = [
+            bar
+            for bar in mounted
+            if isinstance(bar, QuietGroupBlock)
+            and any(id(member) in span_objects for member in bar._members)
+        ]
         if group is None:
             if not owners:
                 self._trailing = _QuietTrailingSpan(blocks=span)
             return
         from dataclasses import replace
+
         if len(owners) != 1 or list(owners[0]._members) != span:
             return  # a split/merge/collision is not an ownership certificate
         bar = owners[0]
@@ -5116,7 +5370,9 @@ class QuietGroupTracker:
             block for block in self._view.blocks() if not getattr(block, "SPACING_TRANSIENT", False)
         ]
         self._work_projector = project_work_blocks(blocks, self._view.work_identity)
-        self._last_work_block = next((block for block in reversed(blocks) if not isinstance(block, QuietGroupBlock)), None)
+        self._last_work_block = next(
+            (block for block in reversed(blocks) if not isinstance(block, QuietGroupBlock)), None
+        )
         records = _records_of_blocks(blocks)
         # The trailing stretch: everything after the last splitter.
         last_splitter = _last_splitter_index(records)
@@ -6320,7 +6576,9 @@ class TranscriptView(ScrollableContainer):
         tracker._last_record = None
         tracker._last_owner = None
 
-    def prepare_owned_head_page(self, blocks: list[TranscriptBlock], index: int, *, head_cut: bool) -> list[TranscriptBlock]:
+    def prepare_owned_head_page(
+        self, blocks: list[TranscriptBlock], index: int, *, head_cut: bool
+    ) -> list[TranscriptBlock]:
         """Reclassify ONLY newly authorised stretches before the page mounts.
 
         Old bodies stay siblings; only synthetic bars are replaced. The complete
@@ -6330,19 +6588,51 @@ class TranscriptView(ScrollableContainer):
         """
         previous = self.capture_work_identity()
         old_bars = [block for block in self._blocks if isinstance(block, QuietGroupBlock)]
-        old_source = [block for block in self._blocks if not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False)]
-        authorised_before = {quiet_group_record_of(block).id for block in old_source if block.internal_work_membership is not None and block.internal_work_membership.owner_evidence == "loaded-user-tool-interval"}
-        source_at = sum(not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False) for block in self._blocks[:index])
-        new_source = [block for block in blocks if not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False)]
+        old_source = [
+            block
+            for block in self._blocks
+            if not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        authorised_before = {
+            quiet_group_record_of(block).id
+            for block in old_source
+            if block.internal_work_membership is not None
+            and block.internal_work_membership.owner_evidence == "loaded-user-tool-interval"
+        }
+        source_at = sum(
+            not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+            for block in self._blocks[:index]
+        )
+        new_source = [
+            block
+            for block in blocks
+            if not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+        ]
         combined = [*old_source[:source_at], *new_source, *old_source[source_at:]]
         project_work_blocks(combined, self.work_identity)
-        newly_owned = {quiet_group_record_of(block).id for block in old_source if block.internal_work_membership is not None and block.internal_work_membership.owner_evidence == "loaded-user-tool-interval"} - authorised_before
+        newly_owned = {
+            quiet_group_record_of(block).id
+            for block in old_source
+            if block.internal_work_membership is not None
+            and block.internal_work_membership.owner_evidence == "loaded-user-tool-interval"
+        } - authorised_before
         from local_operator.tui.closed_peer_cycles import PeerCycleCertificate
+
         old_ids = {work_record_of_block(block).source_id for block in old_source}
         new_ids = {work_record_of_block(block).source_id for block in new_source}
-        cycle_anchors = {certificate.first_peer_source_id for block in combined
-            if isinstance((certificate := getattr(block, "peer_cycle_certificate", None)), PeerCycleCertificate)
-            and old_ids.intersection(certificate.member_ids) and new_ids.intersection(certificate.member_ids)}
+        cycle_anchors = {
+            certificate.first_peer_source_id
+            for block in combined
+            if isinstance(
+                (certificate := getattr(block, "peer_cycle_certificate", None)),
+                PeerCycleCertificate,
+            )
+            and old_ids.intersection(certificate.member_ids)
+            and new_ids.intersection(certificate.member_ids)
+        }
         if not newly_owned and not cycle_anchors:
             return self.fold_quiet_group_page(blocks, index, head_cut=head_cut)
         self._quiet_groups._pending_owned_page = (self.work_identity, head_cut)
@@ -6355,15 +6645,21 @@ class TranscriptView(ScrollableContainer):
         focused_ancestors = set(focused.ancestors_with_self) if focused is not None else set()
         used_owners: set[int] = set()
         for (start, end), group, loaded in plans:
-            span = combined[start:end + 1]
+            span = combined[start : end + 1]
             ids = tuple(quiet_group_record_of(block).id for block in span)
             candidate = identity_of_work_group(group, span)
-            peer_cycle = candidate is not None and candidate.owner_kind == "peer_cycle" and candidate.anchor_id in cycle_anchors
+            peer_cycle = (
+                candidate is not None
+                and candidate.owner_kind == "peer_cycle"
+                and candidate.anchor_id in cycle_anchors
+            )
             if not newly_owned.intersection(ids) and not peer_cycle:
                 continue
             if candidate is None or (candidate.user_id is None and not peer_cycle):
                 continue
-            outside = [quiet_group_record_of(block).id for block in combined[:start] + combined[end + 1:]]
+            outside = [
+                quiet_group_record_of(block).id for block in combined[:start] + combined[end + 1 :]
+            ]
             retained = retained_work_group(previous, candidate, outside, current_ids_unique=True)
             if retained in used_owners:
                 retained = None
@@ -6384,7 +6680,9 @@ class TranscriptView(ScrollableContainer):
                 reader_open = True
             if not reader_open and focused_member:
                 continue  # refused proof never hides the reader's focused child
-            bar = QuietGroupBlock(group, partial=not loaded, fold_width=self.scrollable_content_region.width)
+            bar = QuietGroupBlock(
+                group, partial=not loaded, fold_width=self.scrollable_content_region.width
+            )
             bar.adopt_members(span, expanded=reader_open)
             if peer_cycle:
                 certificate = span[0].peer_cycle_certificate
@@ -6401,8 +6699,18 @@ class TranscriptView(ScrollableContainer):
 
     def capture_work_identity(self) -> WorkGroupSnapshot:
         from dataclasses import replace
-        groups = [replace(block._work_identity, expanded=block.expanded) for block in self._blocks if isinstance(block, QuietGroupBlock) and block._work_identity is not None]
-        source_ids = [quiet_group_record_of(block).id for block in self._blocks if not isinstance(block, QuietGroupBlock) and not getattr(block, "SPACING_TRANSIENT", False)]
+
+        groups = [
+            replace(block._work_identity, expanded=block.expanded)
+            for block in self._blocks
+            if isinstance(block, QuietGroupBlock) and block._work_identity is not None
+        ]
+        source_ids = [
+            quiet_group_record_of(block).id
+            for block in self._blocks
+            if not isinstance(block, QuietGroupBlock)
+            and not getattr(block, "SPACING_TRANSIENT", False)
+        ]
         return capture_work_groups(groups, source_ids)
 
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:

@@ -1822,7 +1822,9 @@ class ToolCard(ExpandableActionBlock):
             # passes: the value crossed a socket, so a NaN or a negative must
             # degrade to the blank column rather than print nonsense.
             self._duration = parse_duration(measured_s)
-        self._set_peer_cycle_communication(current_peer_communication_succeeded(result, self.tool_call_id))
+        self._set_peer_cycle_communication(
+            current_peer_communication_succeeded(result, self.tool_call_id)
+        )
         self._state = "success"
         self._absorb_result(result_text, details)
         self.remove_class("tool-running")
@@ -2249,7 +2251,10 @@ class ToolCard(ExpandableActionBlock):
         """
         self._settle_live()
         self._set_peer_cycle_communication(
-            current_peer_communication_succeeded(result, self.tool_call_id) if state == "success" else None)
+            current_peer_communication_succeeded(result, self.tool_call_id)
+            if state == "success"
+            else None
+        )
         self._state = state
         self._started = None
         # Replay stays blank for legacy rows, while newly persisted executions
@@ -2945,9 +2950,21 @@ class ToolCard(ExpandableActionBlock):
         # command output or nested eval body is inspected to invent one.
         job_id = details.get("job_id") if isinstance(details, dict) else None
         if self.tool_name in ("task", "bash", "eval"):
-            self.internal_work_job_id = job_id if isinstance(job_id, str) and job_id.strip() else None
+            self.internal_work_job_id = (
+                job_id if isinstance(job_id, str) and job_id.strip() else None
+            )
             jobs = details.get("jobs", ()) if isinstance(details, dict) else ()
-            self.internal_work_job_ids = tuple(job["job_id"] for job in jobs if isinstance(job, dict) and isinstance(job.get("job_id"), str) and job["job_id"].strip()) if isinstance(jobs, (list, tuple)) else ()
+            self.internal_work_job_ids = (
+                tuple(
+                    job["job_id"]
+                    for job in jobs
+                    if isinstance(job, dict)
+                    and isinstance(job.get("job_id"), str)
+                    and job["job_id"].strip()
+                )
+                if isinstance(jobs, (list, tuple))
+                else ()
+            )
         self._added, self._removed = _diff_counts(details)
         # Reset per result, like the flags below and for the same reason: a card
         # written once is still rebuilt from a payload, and neither of these may

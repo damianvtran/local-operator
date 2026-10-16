@@ -4236,13 +4236,19 @@ def _bound_peer_cycle_display_in_place(
         # only source/validation conflicts, never this byte cap, belong there.
         # Use the archive/page metadata-budget and remaining-ID vocabulary.
         budgeted: dict[str, Any] = {"records": [], "status": "metadata_budget"}
-        if (isinstance(refs, list) and len(refs) <= HOT_RECORDS
-                and all(isinstance(ref, str) and ref for ref in refs)):
+        if (
+            isinstance(refs, list)
+            and len(refs) <= HOT_RECORDS
+            and all(isinstance(ref, str) and ref for ref in refs)
+        ):
             budgeted["refs"] = list(refs)
             budgeted["remaining"] = list(refs)
         if _live_row_cost(budgeted) > PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES:
-            budgeted = {"records": [], "status": "metadata_budget",
-                        "remaining_count": len(budgeted.get("remaining", ()))}
+            budgeted = {
+                "records": [],
+                "status": "metadata_budget",
+                "remaining_count": len(budgeted.get("remaining", ())),
+            }
         fields["peer_cycle_display"] = budgeted
     if payload is not None and _frame_line_bytes(payload) > _MODEL_CATALOGUE_LINE_LIMIT:
         fields.pop("peer_cycle_display", None)
@@ -8205,25 +8211,43 @@ class FrontendStateStore:
         # needs installing against a reader.
         self._install(self._state.model_copy(update={"live_events": live}))
 
-    def _refuse_peer_cycle_display(self, error: Exception, stage: str, event_type: str = "") -> None:
+    def _refuse_peer_cycle_display(
+        self, error: Exception, stage: str, event_type: str = ""
+    ) -> None:
         # Display evidence is optional; its failure must not abort the agent or
         # hide a real final. Report a structured body-free refusal, retire the
         # candidate, and preserve previously sealed facts. Never log payloads or
         # a validation exception's potentially secret-bearing repr.
         self._peer_display_fold = None
         self._peer_display_pending = []
-        logger.warning("peer display proof refused at %s (%s)", stage, type(error).__name__,
-                       extra={"peer_display_refusal": {"stage": stage, "event_type": event_type,
-                                                      "error_type": type(error).__name__}})
+        logger.warning(
+            "peer display proof refused at %s (%s)",
+            stage,
+            type(error).__name__,
+            extra={
+                "peer_display_refusal": {
+                    "stage": stage,
+                    "event_type": event_type,
+                    "error_type": type(error).__name__,
+                }
+            },
+        )
 
     def _observe_peer_cycle_display(self, session: Any, event: AgentEvent[Any]) -> None:
         from local_operator.harness.peer_cycle_display import DisplayCycleAccumulator
+
         state = self._state
         try:
-            if (self._peer_display_fold is None or self._peer_display_fold.session_id != state.session_id
-                    or self._peer_display_fold.epoch != state.epoch):
+            if (
+                self._peer_display_fold is None
+                or self._peer_display_fold.session_id != state.session_id
+                or self._peer_display_fold.epoch != state.epoch
+            ):
                 self._peer_display_fold = DisplayCycleAccumulator(
-                    state.session_id, state.epoch, getattr(session, "_redact_tool_result_text", None))
+                    state.session_id,
+                    state.epoch,
+                    getattr(session, "_redact_tool_result_text", None),
+                )
                 self._peer_display_pending = []
             record = self._peer_display_fold.observe(event)
             if record is not None:
@@ -8238,18 +8262,37 @@ class FrontendStateStore:
         Cold readers independently require those actual parents/outcomes; an
         orphan display record is not proof of crash durability.
         """
-        from local_operator.harness.peer_cycle_display import HOT_RECORDS, persist_record
+        from local_operator.harness.peer_cycle_display import (
+            HOT_RECORDS,
+            persist_record,
+        )
+
         pending, self._peer_display_pending = self._peer_display_pending, []
         for record in pending:
             try:
                 if not await persist_record(transcript, record):
-                    logger.warning("peer display archive collision/unavailable: %s", record["id"],
-                                   extra={"peer_display_refusal": {"stage": "archive", "reason": "collision_or_unavailable"}})
+                    logger.warning(
+                        "peer display archive collision/unavailable: %s",
+                        record["id"],
+                        extra={
+                            "peer_display_refusal": {
+                                "stage": "archive",
+                                "reason": "collision_or_unavailable",
+                            }
+                        },
+                    )
                     continue
                 previous = self._state.peer_cycle_display or {}
-                records = [item for item in previous.get("records", []) if item.get("id") != record["id"]]
+                records = [
+                    item for item in previous.get("records", []) if item.get("id") != record["id"]
+                ]
                 records = [*records, record][-HOT_RECORDS:]
-                self.mutate(peer_cycle_display={"refs": [item["id"] for item in records], "records": records})
+                self.mutate(
+                    peer_cycle_display={
+                        "refs": [item["id"] for item in records],
+                        "records": records,
+                    }
+                )
             except Exception as error:
                 self._refuse_peer_cycle_display(error, "archive")
                 break
@@ -8284,8 +8327,11 @@ class FrontendStateStore:
         durable = state.model_copy(
             update={
                 "live_events": [],
-                "peer_cycle_display": ({"refs": list((state.peer_cycle_display or {}).get("refs", []))}
-                                       if state.peer_cycle_display is not None else None),
+                "peer_cycle_display": (
+                    {"refs": list((state.peer_cycle_display or {}).get("refs", []))}
+                    if state.peer_cycle_display is not None
+                    else None
+                ),
                 # The live-batch anchor is transient by construction, exactly
                 # like the seed above: it describes calls executing RIGHT NOW
                 # in this process, and there is nothing for a later reader to

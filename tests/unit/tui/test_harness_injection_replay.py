@@ -397,12 +397,15 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
         await await_session_boot(app)
         await pilot.pause()
         from tests.unit.tui.test_app_pilot import _renderable_plain
+
         blocks = app.query_one(TranscriptView).blocks()
         # Delivered payload now has a dormant source seat for later head-load
         # reclassification; it still paints nothing in this standalone state.
         notices = [block for block in blocks if isinstance(block, NoticeBlock) and block.display]
         dormant = [block for block in blocks if getattr(block, "work_dormant", False)]
-        shown = "\n".join(_renderable_plain(getattr(block, "renderable", "")) for block in blocks if block.display)
+        shown = "\n".join(
+            _renderable_plain(getattr(block, "renderable", "")) for block in blocks if block.display
+        )
 
     assert len(dormant) == 1
     assert dormant[0].internal_work_payload is not None

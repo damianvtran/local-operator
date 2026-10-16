@@ -1222,6 +1222,7 @@ def _send_card(app, call_id: str, message: str) -> ToolCard:
     # this fixture represents; the acceptance test's members/assertions stay
     # unchanged, while manual state-only cards intentionally remain UNKNOWN.
     from local_operator.harness.types import ToolResult
+
     result = ToolResult(tool_call_id=call_id, tool_name="send")
     card.mark_done("delivered", result=result)
     return card
@@ -1552,7 +1553,9 @@ class TestQuietGroupFold:
             assert bars[0] is first and bars[0].group == frozen, "closed facts moved"
 
     @pytest.mark.asyncio
-    async def test_one_completed_peer_exchange_quiet_close_folds_at_idle_without_user_opener(self) -> None:
+    async def test_one_completed_peer_exchange_quiet_close_folds_at_idle_without_user_opener(
+        self,
+    ) -> None:
         """One received note plus its successful send is the original idle case.
 
         Two incoming receipts already satisfy the default quiet-group threshold;
@@ -1590,7 +1593,10 @@ class TestQuietGroupFold:
             peers = _peer_blocks(app)
             assert len(peers) == 1
             peer = peers[0]
-            expected_ids = [work_record_of_block(peer).source_id, work_record_of_block(send).source_id]
+            expected_ids = [
+                work_record_of_block(peer).source_id,
+                work_record_of_block(send).source_id,
+            ]
 
             def capture(phase: str) -> None:
                 # Export before assertions too: a missing bar must leave evidence
@@ -1604,40 +1610,64 @@ class TestQuietGroupFold:
                     # expansion/payload APIs: first prove whether a bar exists.
                     facts["exchange"] = {
                         "bar_count": len(_quiet_bars(app)),
-                        "visible_block_types": [type(block).__name__ for block in view.blocks() if block.display],
+                        "visible_block_types": [
+                            type(block).__name__ for block in view.blocks() if block.display
+                        ],
                         "delivered_message_ids": sorted(app._live_peer_receipts),
                         "original_source_ids": expected_ids,
                     }
                     path.write_text(json.dumps(facts, indent=2))
 
             capture("single-before-quiet-close")
-            assert not any(isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks())
+            assert not any(
+                isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks()
+            )
             assert "single-peer" in app._live_peer_receipts
             assert send.state == "success"
             assert app._welcome is not None
             assert not app._welcome_visible and app._welcome.region.height == 0
-            app.post_message(ToolStarted(ToolExecutionStartEvent(
-                tool_call_id="single-quiet", tool_name="no_reply", args={},
-            )))
-            app.post_message(ToolEnded(ToolExecutionEndEvent(
-                tool_call_id="single-quiet", tool_name="no_reply",
-                result=ToolResult(
-                    tool_call_id="single-quiet", tool_name="no_reply",
-                    content=[TextContent(text="Quiet.")], details={QUIET_TURN_KEY: True},
-                ),
-            )))
+            app.post_message(
+                ToolStarted(
+                    ToolExecutionStartEvent(
+                        tool_call_id="single-quiet",
+                        tool_name="no_reply",
+                        args={},
+                    )
+                )
+            )
+            app.post_message(
+                ToolEnded(
+                    ToolExecutionEndEvent(
+                        tool_call_id="single-quiet",
+                        tool_name="no_reply",
+                        result=ToolResult(
+                            tool_call_id="single-quiet",
+                            tool_name="no_reply",
+                            content=[TextContent(text="Quiet.")],
+                            details={QUIET_TURN_KEY: True},
+                        ),
+                    )
+                )
+            )
             await pilot.pause()
             capture("single-quiet-close-immediate")
             for _ in range(10):
                 await pilot.pause()
             capture("single-settled-idle")
             bars = _quiet_bars(app)
-            assert len(bars) == 1, "one completed peer exchange must condense at idle without another receipt or USER"
+            assert (
+                len(bars) == 1
+            ), "one completed peer exchange must condense at idle without another receipt or USER"
             bar = bars[0]
             assert (bar.group.count, bar.group.actions) == (1, 1)
             assert not bar._expanded
-            assert [work_record_of_block(member).source_id for member in bar._members] == expected_ids
-            assert [type(member).__name__ for member in bar._members] == ["PeerMessageBlock", "ToolCard"]
+            assert [
+                work_record_of_block(member).source_id for member in bar._members
+            ] == expected_ids
+            assert [type(member).__name__ for member in bar._members] == [
+                "PeerMessageBlock",
+                "ToolCard",
+            ]
             assert not peer.display and not send.display
             assert not any(card.tool_name == "no_reply" for card in app.query(ToolCard))
             assert [block for block in view.blocks() if block.display][-1] is bar
@@ -1647,7 +1677,9 @@ class TestQuietGroupFold:
             assert bar._expanded and peer.display and send.display
             assert peer.text() == body and send.retained_payloads()[0]["message"] == ack
             assert send.tool_call_id == "single-send"
-            assert not any(isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks())
+            assert not any(
+                isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks()
+            )
 
     @pytest.mark.asyncio
     async def test_the_idle_shape_folds_to_one_bar_with_nothing_after_it(self) -> None:

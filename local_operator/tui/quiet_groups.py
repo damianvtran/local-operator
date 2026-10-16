@@ -308,8 +308,10 @@ def quiet_group_of_segment(
     members = [records[i].work for i in range(span_from, span_to + 1)]
     owned = members[0] if members else None
     contextual = owned is not None and all(
-        member is not None and member.scope_id == owned.scope_id
-        and member.stretch_id == owned.stretch_id and member.role != "boundary"
+        member is not None
+        and member.scope_id == owned.scope_id
+        and member.stretch_id == owned.stretch_id
+        and member.role != "boundary"
         for member in members
     )
     # Contextual user work has the existing action threshold; standalone quiet

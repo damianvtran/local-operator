@@ -3,6 +3,7 @@
 Source-only authoring. These require the isolated, bounded pytest allocation;
 construction-only checks are not mounted TUI or native UI evidence.
 """
+
 from __future__ import annotations
 
 import json
@@ -13,50 +14,91 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import AgentMessage, CustomMessage, Message, TextContent, ToolCall
-from local_operator.tui.internal_work_membership import WorkRecord, owned_work_clauses, project_internal_work
+from local_operator.harness.types import (
+    AgentMessage,
+    CustomMessage,
+    Message,
+    TextContent,
+    ToolCall,
+)
+from local_operator.tui.internal_work_membership import (
+    WorkRecord,
+    owned_work_clauses,
+    project_internal_work,
+)
 from local_operator.tui.quiet_groups import QuietGroupRecord, quiet_groups_of
 from local_operator.tui.session_presentation import PreparedReplay, project_settled_rows
-from local_operator.tui.widgets.transcript import NoticeBlock, QuietGroupBlock, fold_quiet_group_list, project_work_blocks
-
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    QuietGroupBlock,
+    fold_quiet_group_list,
+    project_work_blocks,
+)
 
 CORPUS = json.loads((Path(__file__).parent / "fixtures/owned-work.context.json").read_text())
 
 
 def _mounted_geometry(app, view) -> dict[str, object]:
     """Read primitive source-owned state; never format a widget on failure."""
+
     def source(block):
-        return getattr(block, "tool_call_id", None) or getattr(block, "navigation_anchor_id", None) or type(block).__name__
+        return (
+            getattr(block, "tool_call_id", None)
+            or getattr(block, "navigation_anchor_id", None)
+            or type(block).__name__
+        )
 
     def box(block):
-        return None if block is None else {
-            "kind": type(block).__name__, "id": block.id,
-            "display": block.display, "height": block.region.height,
-            "relative_y": block.region.y - view.scrollable_content_region.y,
-        }
+        return (
+            None
+            if block is None
+            else {
+                "kind": type(block).__name__,
+                "id": block.id,
+                "display": block.display,
+                "height": block.region.height,
+                "relative_y": block.region.y - view.scrollable_content_region.y,
+            }
+        )
 
     return {
         "work_identity": list(view.work_identity),
         "view_size": [view.size.width, view.size.height],
         "virtual_size": [view.virtual_size.width, view.virtual_size.height],
-        "scroll_y": view.scroll_y, "max_scroll_y": view.max_scroll_y,
+        "scroll_y": view.scroll_y,
+        "max_scroll_y": view.max_scroll_y,
         "scroll_target_y": view.scroll_target_y,
         "is_following_tail": view.is_following_tail,
-        "insert_anchor": None if view._insert_anchor is None else {
-            "source": source(view._insert_anchor[0]), "gap": view._insert_anchor[1],
-        },
+        "insert_anchor": (
+            None
+            if view._insert_anchor is None
+            else {
+                "source": source(view._insert_anchor[0]),
+                "gap": view._insert_anchor[1],
+            }
+        ),
         # This property means the CURRENT source still owes a painted page;
         # release_gate clears it only after the second restoration callback.
         "page_gate": app._resume_paging,
         "resume_fill_active": app._resume_fill_active,
         "welcome_visible": app._welcome_visible,
-        "welcome": box(app._welcome), "head_notice": box(app._resume_head_notice),
+        "welcome": box(app._welcome),
+        "head_notice": box(app._resume_head_notice),
         "children": [box(child) for child in view.children],
-        "source_relative_rows": [[source(block), block.region.y - view.scrollable_content_region.y, block.display] for block in view.blocks()],
+        "source_relative_rows": [
+            [source(block), block.region.y - view.scrollable_content_region.y, block.display]
+            for block in view.blocks()
+        ],
         "focused_source": source(app.focused) if app.focused is not None else None,
-        "focused_relative_y": app.focused.region.y - view.scrollable_content_region.y if app.focused is not None else None,
+        "focused_relative_y": (
+            app.focused.region.y - view.scrollable_content_region.y
+            if app.focused is not None
+            else None
+        ),
         "conversation_started": view.conversation_started(),
-        "rows": [[type(block).__name__, block.display, block.ends_empty_state] for block in view.blocks()],
+        "rows": [
+            [type(block).__name__, block.display, block.ends_empty_state] for block in view.blocks()
+        ],
     }
 
 
@@ -79,13 +121,20 @@ def _capture_mounted_frame(app, view, name: str) -> None:
 def _record(raw: dict[str, Any]) -> WorkRecord:
     details = raw.get("details", {})
     return WorkRecord(
-        source_id=raw["id"], kind=raw["kind"], tool_name=raw.get("toolName", ""),
-        custom_type=raw.get("customType", ""), final=raw.get("final", False),
-        launched_job_id=raw.get("launchedJobId"), level=raw.get("level", "info"),
+        source_id=raw["id"],
+        kind=raw["kind"],
+        tool_name=raw.get("toolName", ""),
+        custom_type=raw.get("customType", ""),
+        final=raw.get("final", False),
+        launched_job_id=raw.get("launchedJobId"),
+        level=raw.get("level", "info"),
         producer="job_result" if raw.get("customType") == "job_result" else raw.get("producer", ""),
-        job_id=details.get("job_id", raw.get("jobId")), status=details.get("status", raw.get("status")),
-        direction=details.get("direction", ""), expects_reply=details.get("expects_reply"),
-        steer=details.get("steer"), held=details.get("held", False),
+        job_id=details.get("job_id", raw.get("jobId")),
+        status=details.get("status", raw.get("status")),
+        direction=details.get("direction", ""),
+        expects_reply=details.get("expects_reply"),
+        steer=details.get("steer"),
+        held=details.get("held", False),
     )
 
 
@@ -93,8 +142,11 @@ def _record(raw: dict[str, Any]) -> WorkRecord:
 def test_bridge_subclass_keeps_its_boundary_in_contextual_projection(is_bridge) -> None:
     from local_operator.tui.quiet_groups import group_splitter_of
     from local_operator.tui.widgets.transcript import (
-        PeerMessageBlock, TeamBridgeBlock, peer_cycle_rows_of_blocks,
-        quiet_group_record_of, work_record_of_block,
+        PeerMessageBlock,
+        TeamBridgeBlock,
+        peer_cycle_rows_of_blocks,
+        quiet_group_record_of,
+        work_record_of_block,
     )
 
     block = (TeamBridgeBlock if is_bridge else PeerMessageBlock)("Original typed receipt")
@@ -104,11 +156,13 @@ def test_bridge_subclass_keeps_its_boundary_in_contextual_projection(is_bridge) 
     assert isinstance(block, PeerMessageBlock)  # The actual upstream inheritance collision.
     assert quiet_group_record_of(block).kind == ("bridge" if is_bridge else "peer")
     record = work_record_of_block(block)
-    members = project_internal_work([
-        WorkRecord("human-opener", "user"),
-        WorkRecord("real-tool", "tool", tool_name="bash"),
-        record,
-    ])
+    members = project_internal_work(
+        [
+            WorkRecord("human-opener", "user"),
+            WorkRecord("real-tool", "tool", tool_name="bash"),
+            record,
+        ]
+    )
     block.internal_work_membership = members[record.source_id]
     contextual = quiet_group_record_of(block)
     assert contextual.kind == ("bridge" if is_bridge else "peer")
@@ -118,8 +172,15 @@ def test_bridge_subclass_keeps_its_boundary_in_contextual_projection(is_bridge) 
 
 
 @pytest.mark.parametrize("is_bridge", [False, True])
-def test_tracker_peer_role_admission_excludes_the_typed_bridge_subclass(monkeypatch, is_bridge) -> None:
-    from local_operator.tui.widgets.transcript import PeerMessageBlock, QuietGroupTracker, TeamBridgeBlock, TranscriptView
+def test_tracker_peer_role_admission_excludes_the_typed_bridge_subclass(
+    monkeypatch, is_bridge
+) -> None:
+    from local_operator.tui.widgets.transcript import (
+        PeerMessageBlock,
+        QuietGroupTracker,
+        TeamBridgeBlock,
+        TranscriptView,
+    )
 
     view = TranscriptView()
     view.bind_work_source("bridge-admission-test")
@@ -141,8 +202,13 @@ def test_tracker_peer_role_admission_excludes_the_typed_bridge_subclass(monkeypa
 
     monkeypatch.setattr(tracker, "_apply_peer_cycle", renderer_boundary)
     ids = ["first:0", "second:0"]
-    record = {"version": 1, "session_id": identity[0], "quiet_call_id": "typed-quiet",
-              "member_ids": ids, "members": [{"source_id": key, "role": "peer"} for key in ids]}
+    record = {
+        "version": 1,
+        "session_id": identity[0],
+        "quiet_call_id": "typed-quiet",
+        "member_ids": ids,
+        "members": [{"source_id": key, "role": "peer"} for key in ids],
+    }
     assert tracker.apply_display_record(record) is (not is_bridge)
     assert len(admitted) == (0 if is_bridge else 1)
     if admitted:
@@ -154,7 +220,16 @@ def test_context_corpus_is_one_ordered_group_and_receipts_are_not_actions() -> N
     records = [_record(raw) for raw in CORPUS["records"]]
     members = project_internal_work(records)
     assert [members[r.source_id].role for r in records] == CORPUS["roles"]
-    quiet = [QuietGroupRecord(kind=r.kind, id=r.source_id, tool_name=r.tool_name, tool_state="success", work=members[r.source_id] if members[r.source_id].scope_id is not None else None) for r in records]
+    quiet = [
+        QuietGroupRecord(
+            kind=r.kind,
+            id=r.source_id,
+            tool_name=r.tool_name,
+            tool_state="success",
+            work=members[r.source_id] if members[r.source_id].scope_id is not None else None,
+        )
+        for r in records
+    ]
     groups = quiet_groups_of(quiet)
     assert len(groups) == 1
     assert groups[0].row_ids == tuple(r.source_id for r in records[1:9])
@@ -166,22 +241,55 @@ def test_context_corpus_is_one_ordered_group_and_receipts_are_not_actions() -> N
 
 
 def _history(*, held: bool = False, failed: bool = False, with_user: bool = True):
-    rows: list[AgentMessage] = [Message(role="user", id="user-replay", content=[TextContent(text="Investigate the sanitised deployment.")])] if with_user else []
+    rows: list[AgentMessage] = (
+        [
+            Message(
+                role="user",
+                id="user-replay",
+                content=[TextContent(text="Investigate the sanitised deployment.")],
+            )
+        ]
+        if with_user
+        else []
+    )
     for at in range(3):
-        rows.extend([
-            Message(role="assistant", id=f"decl-{at}", tool_calls=[ToolCall(id=f"call-{at}", name="bash", arguments={"command": "printf safe"})]),
-            Message(role="tool", id=f"result-{at}", tool_call_id=f"call-{at}", tool_name="bash", content=[TextContent(text="safe")]),
-        ])
-    details: dict[str, object] = {"job_id": "job-replay", "text": "Sanitised ORIGINAL child report.\nEvery original line remains available."}
+        rows.extend(
+            [
+                Message(
+                    role="assistant",
+                    id=f"decl-{at}",
+                    tool_calls=[
+                        ToolCall(id=f"call-{at}", name="bash", arguments={"command": "printf safe"})
+                    ],
+                ),
+                Message(
+                    role="tool",
+                    id=f"result-{at}",
+                    tool_call_id=f"call-{at}",
+                    tool_name="bash",
+                    content=[TextContent(text="safe")],
+                ),
+            ]
+        )
+    details: dict[str, object] = {
+        "job_id": "job-replay",
+        "text": "Sanitised ORIGINAL child report.\nEvery original line remains available.",
+    }
     if held:
         details["held"] = True
     if failed:
         details["status"] = "failed"
-    rows.append(CustomMessage(id="job-source", custom_type="job_result", attribution="user", details=details))
+    rows.append(
+        CustomMessage(
+            id="job-source", custom_type="job_result", attribution="user", details=details
+        )
+    )
     return rows, details
 
 
-def test_real_replay_preserves_delivered_payload_inside_owned_scope_without_inventing_an_answer() -> None:
+def test_real_replay_preserves_delivered_payload_inside_owned_scope_without_inventing_answer() -> (
+    None
+):
     history, details = _history()
     replay = PreparedReplay()
     project_settled_rows(replay, history, fold_width=100)
@@ -213,7 +321,10 @@ def test_missing_opener_keeps_delivered_policy_and_held_failure_attention_stays_
         reports = [b for b in replay.blocks if getattr(b, "internal_work_source", None) is not None]
         assert len(reports) == 1
         assert reports[0].display
-        assert not any(isinstance(b, QuietGroupBlock) and reports[0] in b._members for b in fold_quiet_group_list(replay.blocks))
+        assert not any(
+            isinstance(b, QuietGroupBlock) and reports[0] in b._members
+            for b in fold_quiet_group_list(replay.blocks)
+        )
 
 
 def test_typed_failed_result_and_unknown_generic_notice_split_context_not_payload() -> None:
@@ -234,7 +345,11 @@ def test_typed_failed_result_and_unknown_generic_notice_split_context_not_payloa
 
 def test_page_adoption_uses_current_closed_owner_and_refuses_stale_epoch_or_user() -> None:
     from local_operator.tui.widgets.tool_card import ToolCard
-    from local_operator.tui.widgets.transcript import TranscriptView, UserBlock, quiet_group_plan
+    from local_operator.tui.widgets.transcript import (
+        TranscriptView,
+        UserBlock,
+        quiet_group_plan,
+    )
 
     view = TranscriptView()
     view.bind_work_source("synthetic-adoption")
@@ -281,7 +396,11 @@ def test_page_adoption_uses_current_closed_owner_and_refuses_stale_epoch_or_user
 
 def test_tool_adapter_keeps_never_sent_faults_distinct_from_executed_failures() -> None:
     from local_operator.tui.widgets.tool_card import ToolCard
-    from local_operator.tui.widgets.transcript import UserBlock, project_work_blocks, work_record_of_block
+    from local_operator.tui.widgets.transcript import (
+        UserBlock,
+        project_work_blocks,
+        work_record_of_block,
+    )
 
     for sent in (False, True):
         user = UserBlock("Loaded authority")
@@ -293,7 +412,9 @@ def test_tool_adapter_keeps_never_sent_faults_distinct_from_executed_failures() 
             tool.mark_not_run("Unknown tool")
         assert work_record_of_block(tool).never_sent is not sent
         report = NoticeBlock("Original report")
-        report.internal_work_source = WorkRecord("report", "custom", custom_type="job_result", producer="job_result", job_id="job")
+        report.internal_work_source = WorkRecord(
+            "report", "custom", custom_type="job_result", producer="job_result", job_id="job"
+        )
         report.owned_delivery_only = True
         identity = ("synthetic-unsent", 1)
         for block in (user, tool, report):
@@ -306,14 +427,33 @@ def test_tool_adapter_keeps_never_sent_faults_distinct_from_executed_failures() 
 
 def test_bounded_core_upgrade_refuses_owner_epoch_topology_and_pinned_changes() -> None:
     from dataclasses import replace
-    from local_operator.tui.internal_work_membership import WorkGroupIdentity, capture_work_groups, retained_work_group
-    old = WorkGroupIdentity("qg:t1", ("t1", "receipt", "t2"), "t1", "synthetic", 1, None, "t1", True)
+
+    from local_operator.tui.internal_work_membership import (
+        WorkGroupIdentity,
+        capture_work_groups,
+        retained_work_group,
+    )
+
+    old = WorkGroupIdentity(
+        "qg:t1", ("t1", "receipt", "t2"), "t1", "synthetic", 1, None, "t1", True
+    )
     prior = capture_work_groups([old], [*old.ids, "pinned-final"])
-    current = WorkGroupIdentity("qg:new-tool", ("new-tool", *old.ids), "new-tool", "synthetic", 1, "loaded-user", "new-tool")
+    current = WorkGroupIdentity(
+        "qg:new-tool", ("new-tool", *old.ids), "new-tool", "synthetic", 1, "loaded-user", "new-tool"
+    )
     assert retained_work_group(prior, current, ["loaded-user", "pinned-final"]) == 0
-    for changed in (replace(current, session_id=None), replace(current, session_id="other"), replace(current, view_generation=2), replace(current, ids=("new-tool", "receipt", "t1", "t2")), replace(current, ids=("new-tool", "t1", "receipt")), replace(current, ids=(*current.ids, "pinned-final"))):
+    for changed in (
+        replace(current, session_id=None),
+        replace(current, session_id="other"),
+        replace(current, view_generation=2),
+        replace(current, ids=("new-tool", "receipt", "t1", "t2")),
+        replace(current, ids=("new-tool", "t1", "receipt")),
+        replace(current, ids=(*current.ids, "pinned-final")),
+    ):
         assert retained_work_group(prior, changed, ["loaded-user", "pinned-final"]) is None
-    constrained = capture_work_groups([replace(old, known_user_id="different-user")], [*old.ids, "pinned-final"])
+    constrained = capture_work_groups(
+        [replace(old, known_user_id="different-user")], [*old.ids, "pinned-final"]
+    )
     assert retained_work_group(constrained, current, ["loaded-user", "pinned-final"]) is None
     closed = capture_work_groups([replace(old, expanded=False)], [*old.ids, "pinned-final"])
     owner = retained_work_group(closed, current, ["loaded-user", "pinned-final"])
@@ -322,11 +462,16 @@ def test_bounded_core_upgrade_refuses_owner_epoch_topology_and_pinned_changes() 
     merged = capture_work_groups([old, other], [*old.ids, *other.ids])
     assert retained_work_group(merged, replace(current, ids=(*current.ids, *other.ids)), []) is None
     assert not capture_work_groups([old], [str(at) for at in range(4097)]).complete
-    assert not capture_work_groups([old, replace(other, key=old.key)], [*old.ids, *other.ids]).complete
+    assert not capture_work_groups(
+        [old, replace(other, key=old.key)], [*old.ids, *other.ids]
+    ).complete
 
 
-def test_prepend_reclassifies_dormant_original_report_before_mount_without_duplicate_payload() -> None:
+def test_prepend_reclassifies_dormant_original_report_before_mount_without_duplicate_payload() -> (
+    None
+):
     from local_operator.tui.widgets.transcript import UserBlock
+
     history, details = _history(with_user=False)
     replay = PreparedReplay()
     replay.view.bind_work_source("synthetic-owned-page")
@@ -355,6 +500,7 @@ def test_prepend_reclassifies_dormant_original_report_before_mount_without_dupli
 
 def test_source_generation_changes_only_for_real_clear_or_session_change(monkeypatch) -> None:
     from local_operator.tui.widgets.transcript import TranscriptView
+
     view = TranscriptView()
     # Only the scroll animator needs an app; keep the real clear/generation
     # path here. The mounted case below exercises that final scroll too.
@@ -375,11 +521,17 @@ async def test_mounted_dormant_report_keeps_empty_state_extent_and_source_once()
     from local_operator.tui.widgets.transcript import TranscriptView
     from tests.unit.tui.conftest import await_session_boot
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
     session = FakeSession()
     session._history = []
     app = OperatorApp(lambda: _factory(session))
-    row = CustomMessage(id="dormant-only", custom_type="job_result", attribution="user", details={"job_id":"synthetic-job","text":"Original dormant report."})
-    async with app.run_test(size=(100,30)) as pilot:
+    row = CustomMessage(
+        id="dormant-only",
+        custom_type="job_result",
+        attribution="user",
+        details={"job_id": "synthetic-job", "text": "Original dormant report."},
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
         await await_session_boot(app)
         await pilot.pause()
         view = app.query_one(TranscriptView)
@@ -408,44 +560,62 @@ async def test_mounted_dormant_report_keeps_empty_state_extent_and_source_once()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("overlap_page", [False, True], ids=["settled-page", "overlapping-page"])
-async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and_keeps_focused_child(overlap_page, monkeypatch) -> None:
+async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_keeps_focused_child(
+    overlap_page, monkeypatch
+) -> None:
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.tool_card import ToolCard
     from local_operator.tui.widgets.transcript import PeerMessageBlock, TranscriptView
     from tests.unit.tui.conftest import await_session_boot
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     scenario = "overlapping-page" if overlap_page else "settled-page"
     evidence_root = os.environ.get("OWNED_WORK_EVIDENCE_DIR")
     if evidence_root:
         monkeypatch.setenv("OWNED_WORK_EVIDENCE_DIR", str(Path(evidence_root) / scenario))
-    async with app.run_test(size=(100,30)) as pilot:
+    async with app.run_test(size=(100, 30)) as pilot:
         await await_session_boot(app)
         view = app.query_one(TranscriptView)
         # Loaded-tail content goes through the REAL app append edge. It both
         # retires Welcome and binds this existing fake session's synthetic ID;
         # a second manually invented binding would make page stamps foreign.
-        tools = [ToolCard(f"scope-tool-{at}","bash",{"command":"printf safe"}) for at in range(3)]
+        tools = [
+            ToolCard(f"scope-tool-{at}", "bash", {"command": "printf safe"}) for at in range(3)
+        ]
         for at, tool in enumerate(tools):
             # Real output inside an EXISTING member provides scrollroom below
             # the focused row. No fake spacer/extra USER changes ownership.
-            tool.mark_done("\n".join(f"Sanitised output line {line}" for line in range(48)) if at == 2 else "safe")
+            tool.mark_done(
+                "\n".join(f"Sanitised output line {line}" for line in range(48))
+                if at == 2
+                else "safe"
+            )
             app._append_block(tool)
-        peer1 = PeerMessageBlock("First sanitised incoming note", {"conversation_name":"peer"})
+        peer1 = PeerMessageBlock("First sanitised incoming note", {"conversation_name": "peer"})
         peer1.navigation_anchor_id = "peer-1"
         app._append_block(peer1)
         report = NoticeBlock("Original report remains available.")
         report.navigation_anchor_id = "report"
-        report.internal_work_source = WorkRecord("report","custom",custom_type="job_result",producer="job_result",job_id="synthetic-job")
-        report.internal_work_payload = {"job_id":"synthetic-job","text":"Original report remains available."}
+        report.internal_work_source = WorkRecord(
+            "report",
+            "custom",
+            custom_type="job_result",
+            producer="job_result",
+            job_id="synthetic-job",
+        )
+        report.internal_work_payload = {
+            "job_id": "synthetic-job",
+            "text": "Original report remains available.",
+        }
         report.owned_delivery_only = True
         app._append_block(report)
-        peer2 = PeerMessageBlock("Second sanitised incoming note", {"conversation_name":"peer"})
+        peer2 = PeerMessageBlock("Second sanitised incoming note", {"conversation_name": "peer"})
         peer2.navigation_anchor_id = "peer-2"
         app._append_block(peer2)
         await pilot.pause()
-        old = next(b for b in view.blocks() if isinstance(b,QuietGroupBlock))
+        old = next(b for b in view.blocks() if isinstance(b, QuietGroupBlock))
         old.toggle_expanded()
         await pilot.pause()
         assert not report.display and report.work_dormant
@@ -467,18 +637,32 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
             await pilot.wait_for_scheduled_animations()
             await pilot.pause()
         _capture_mounted_frame(app, view, "upgrade-reader-preconditions")
-        assert view.virtual_size.height > view.scrollable_content_region.height, "reader fixture must actually overflow"
+        assert (
+            view.virtual_size.height > view.scrollable_content_region.height
+        ), "reader fixture must actually overflow"
         assert view.max_scroll_y > 0, "reader anchoring needs real scrollroom"
-        assert 0 <= view.scroll_y < view.max_scroll_y, "the detached reader must remain before the tail"
+        assert (
+            0 <= view.scroll_y < view.max_scroll_y
+        ), "the detached reader must remain before the tail"
         assert not app._welcome_visible and app._welcome is not None and not app._welcome.display
-        assert app._welcome.region.height == 0, "a loaded conversation cannot retain boot-layout height"
+        assert (
+            app._welcome.region.height == 0
+        ), "a loaded conversation cannot retain boot-layout height"
         assert view.conversation_started()
-        assert view.work_identity[0] == session.session_id, "app/page/live must share the actual synthetic session identity"
-        assert view._insert_anchor is None, "no previous insertion may supply the anchor precondition"
+        assert (
+            view.work_identity[0] == session.session_id
+        ), "app/page/live must share the actual synthetic session identity"
+        assert (
+            view._insert_anchor is None
+        ), "no previous insertion may supply the anchor precondition"
         assert not view.is_following_tail, "an actual reader gesture must detach the tail"
         assert view.scroll_y == view.scroll_target_y, "the reader gesture must settle before paging"
         assert tools[1].has_focus
-        assert 0 <= tools[1].region.y - view.scrollable_content_region.y < view.scrollable_content_region.height, "the pinned focused row must be on screen"
+        assert (
+            0
+            <= tools[1].region.y - view.scrollable_content_region.y
+            < view.scrollable_content_region.height
+        ), "the pinned focused row must be on screen"
         _capture_mounted_frame(app, view, "upgrade-before")
         page_gap = tools[1].region.y - view.scrollable_content_region.y
         generation = view.work_identity
@@ -490,8 +674,13 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
         def observed_schedule(callback, *args, **kwargs):
             nonlocal callback_count
             name = getattr(callback, "__name__", "")
-            is_welcome_refresh = name == "refresh" and getattr(callback, "__self__", None) is app._welcome
-            if name not in {"settle_then_restore", "restore_anchor", "_settle_gap"} and not is_welcome_refresh:
+            is_welcome_refresh = (
+                name == "refresh" and getattr(callback, "__self__", None) is app._welcome
+            )
+            if (
+                name not in {"settle_then_restore", "restore_anchor", "_settle_gap"}
+                and not is_welcome_refresh
+            ):
                 return original_schedule(callback, *args, **kwargs)
             callback_count += 1
             label = f"callback-{callback_count:02d}-{name}"
@@ -518,13 +707,19 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
             _capture_mounted_frame(app, view, f"{label}-after")
 
         monkeypatch.setattr(view, "_remeasure_empty_state", observed_remeasure)
-        app._resume_pending_head = [Message(role="user", id="loaded-user", content=[TextContent(text="The real loaded user opener")])]
+        app._resume_pending_head = [
+            Message(
+                role="user",
+                id="loaded-user",
+                content=[TextContent(text="The real loaded user opener")],
+            )
+        ]
         app._resume_mounted_ids.discard("loaded-user")
         # The real load-older path owns its paging lease, projects the raw USER,
         # captures/restores the viewport anchor and inserts the prepared page.
         # Calling prepare + insert ourselves would miss those interactions.
         app._mount_older_resume_page()
-        new = next(b for b in view.blocks() if isinstance(b,QuietGroupBlock))
+        new = next(b for b in view.blocks() if isinstance(b, QuietGroupBlock))
         _capture_mounted_frame(app, view, "upgrade-page-immediate")
         assert new.expanded and report.display and not report.work_dormant
         assert tools[1].has_focus, "no closed destination briefly hides the focused child"
@@ -543,7 +738,21 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
                 await pilot.pause(0.05)
                 _capture_mounted_frame(app, view, f"page-readiness-{refresh:02d}")
                 geometry = _mounted_geometry(app, view)
-                signature = json.dumps({key: geometry[key] for key in ("view_size", "virtual_size", "scroll_y", "max_scroll_y", "focused_relative_y", "source_relative_rows", "children")}, sort_keys=True)
+                signature = json.dumps(
+                    {
+                        key: geometry[key]
+                        for key in (
+                            "view_size",
+                            "virtual_size",
+                            "scroll_y",
+                            "max_scroll_y",
+                            "focused_relative_y",
+                            "source_relative_rows",
+                            "children",
+                        )
+                    },
+                    sort_keys=True,
+                )
                 ready = view._insert_anchor is None and not app._resume_paging
                 stable = stable + 1 if ready and signature == previous else (1 if ready else 0)
                 previous = signature
@@ -554,7 +763,9 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
             assert stable >= 2, "BLOCKED: paging readiness did not converge within 2s/10 refreshes"
             _capture_mounted_frame(app, view, "page-fully-settled")
         _capture_mounted_frame(app, view, "upgrade-after")
-        assert tools[1].region.y - view.scrollable_content_region.y == page_gap, "real paging must preserve the focused row's viewport anchor"
+        assert (
+            tools[1].region.y - view.scrollable_content_region.y == page_gap
+        ), "real paging must preserve the focused row's viewport anchor"
         assert view.work_identity == generation, "paging is not a new view epoch"
         assert new.expanded and tools[1].has_focus
         assert sum(b is report for b in view.blocks()) == 1
@@ -564,17 +775,22 @@ async def test_mounted_open_legacy_qg_upgrades_on_loaded_opener_before_mount_and
         # not introduce a second tail group. No new USER authorises that append.
         from local_operator.tui.widgets.assistant import AssistantBlock
         from local_operator.tui.widgets.transcript import work_record_of_block
+
         next_tool = ToolCard("scope-tool-next", "bash", {"command": "printf safe"})
         app._append_block(next_tool)
         immediate_gap = tools[1].region.y - view.scrollable_content_region.y
         _capture_mounted_frame(app, view, "upgrade-next-live-immediate")
-        assert immediate_gap == page_gap, "a live append must not move the detached reader even immediately"
+        assert (
+            immediate_gap == page_gap
+        ), "a live append must not move the detached reader even immediately"
         assert tools[1].has_focus and tools[1].display
         await pilot.pause()
         expected = [*tools, peer1, report, peer2, next_tool]
         bars = [b for b in view.blocks() if isinstance(b, QuietGroupBlock)]
         assert len(bars) == 1
-        assert [work_record_of_block(b).source_id for b in bars[0]._members] == [work_record_of_block(b).source_id for b in expected]
+        assert [work_record_of_block(b).source_id for b in bars[0]._members] == [
+            work_record_of_block(b).source_id for b in expected
+        ]
         assert new.expanded and tools[1].has_focus
         memberships = {}
         for block in expected:

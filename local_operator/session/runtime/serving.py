@@ -3367,8 +3367,10 @@ class ServingSessionHandle(SessionHandle):
                 self._maybe_supplement(event)
 
         from local_operator.mobile.peer_cycles import bind_owner_peer_cycles
+
         unsubscribe_peer_source = bind_owner_peer_cycles(
-            self._fold, self._session, self._notify, self._loop)
+            self._fold, self._session, self._notify, self._loop
+        )
         unsubscribe_events = self._session.subscribe(handler)
 
         def unsubscribe() -> None:

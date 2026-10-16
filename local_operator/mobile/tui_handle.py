@@ -439,8 +439,10 @@ class TuiSessionHandle(SessionHandle):
                 self._on_projection()
 
         from local_operator.mobile.peer_cycles import bind_owner_peer_cycles
+
         unsubscribe_peer_source = bind_owner_peer_cycles(
-            self._fold, session, on_projection, getattr(self._app, "_loop", None))
+            self._fold, session, on_projection, getattr(self._app, "_loop", None)
+        )
         unsubscribe_events = session.subscribe(handler)
 
         def unsubscribe() -> None:

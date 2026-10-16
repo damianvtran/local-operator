@@ -251,8 +251,12 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
 
     class SlowTranscript(Transcript):
         async def append_custom(
-            self, custom_type: str, details: dict[str, Any], *,
-            preserve_mtime: bool = False, entry_id: str | None = None
+            self,
+            custom_type: str,
+            details: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+            entry_id: str | None = None,
         ):
             await asyncio.sleep(0.15)  # the payload was read BEFORE this
             return await super().append_custom(
@@ -294,8 +298,12 @@ async def test_teardown_costs_one_budget_not_two(tmp_path, monkeypatch, caplog) 
 
     class WedgedTranscript(Transcript):
         async def append_custom(
-            self, custom_type: str, details: dict[str, Any], *,
-            preserve_mtime: bool = False, entry_id: str | None = None
+            self,
+            custom_type: str,
+            details: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+            entry_id: str | None = None,
         ):
             await asyncio.sleep(3600)
             raise AssertionError("unreachable: the sleep outlives the test")
@@ -346,8 +354,12 @@ async def test_a_slow_but_real_write_keeps_its_title(tmp_path, monkeypatch) -> N
 
     class SlowTranscript(Transcript):
         async def append_custom(
-            self, custom_type: str, details: dict[str, Any], *,
-            preserve_mtime: bool = False, entry_id: str | None = None
+            self,
+            custom_type: str,
+            details: dict[str, Any],
+            *,
+            preserve_mtime: bool = False,
+            entry_id: str | None = None,
         ):
             await asyncio.sleep(delay)
             return await super().append_custom(

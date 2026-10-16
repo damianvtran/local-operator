@@ -1,4 +1,5 @@
 """Owner-certified phone disclosure, separate from raw model history."""
+
 import copy
 
 import pytest
@@ -14,10 +15,12 @@ def test_phone_certified_cycle_keeps_every_physical_row_and_original_raw_input(w
     # the negative visibility assertion a REAL subsequent public answer; the
     # consumer must not invent one on the renderer's behalf.
     from local_operator.harness.types import Message
+
     history.append(Message.assistant("A genuine subsequent answer stays visible."))
     original = [message.model_dump(mode="json") for message in history]
-    rows = fold_messages_to_entries(history, session_id=record["session_id"],
-                                    peer_cycle_display_records={"records": [record]})
+    rows = fold_messages_to_entries(
+        history, session_id=record["session_id"], peer_cycle_display_records={"records": [record]}
+    )
     peer = next(row for row in rows if row.kind == "peer_message")
     stamp = peer.details["peer_cycle"]
     assert stamp["session_id"] == record["session_id"] and stamp["version"] == 1
@@ -37,19 +40,22 @@ def test_phone_never_trusts_raw_reserved_stamp_or_foreign_record():
     forged = copy.deepcopy(record)
     forged["session_id"] = "foreign-session"
     from local_operator.harness.types import CustomMessage
+
     peer = history[0]
     assert isinstance(peer, CustomMessage)
     peer.details["peer_cycle"] = {"version": 1, "member_ids": ["forged"]}
     original = copy.deepcopy(peer.details)
     for metadata in (None, {"records": [forged]}):
-        rows = fold_messages_to_entries(history, session_id=record["session_id"],
-                                        peer_cycle_display_records=metadata)
+        rows = fold_messages_to_entries(
+            history, session_id=record["session_id"], peer_cycle_display_records=metadata
+        )
         assert all("peer_cycle" not in row.details for row in rows)
         assert peer.details == original
 
 
 def test_default_phone_wire_omits_negotiation_and_certificates():
     from local_operator.mobile.types import SessionProjection
+
     _, history, _ = make_cycle(wrapped_send=True)
     rows = fold_messages_to_entries(history)
     assert all("peer_cycle" not in row.details for row in rows)
@@ -59,7 +65,9 @@ def test_default_phone_wire_omits_negotiation_and_certificates():
 @pytest.mark.parametrize("send_count", [0, 65])
 def test_phone_truthful_zero_and_sixty_five_logical_communications(send_count):
     _, history, record = make_cycle(send_count=send_count)
-    rows = fold_messages_to_entries(history, session_id="sess", peer_cycle_display_records={"records": [record]})
+    rows = fold_messages_to_entries(
+        history, session_id="sess", peer_cycle_display_records={"records": [record]}
+    )
     stamp = next(row.details["peer_cycle"] for row in rows if "peer_cycle" in row.details)
     members = [row for row in rows if row.id in stamp["member_ids"]]
     assert sum(row.kind == "tool" and row.tool_name == "send" for row in members) == send_count
@@ -67,13 +75,17 @@ def test_phone_truthful_zero_and_sixty_five_logical_communications(send_count):
 
 
 @pytest.mark.asyncio
-async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_or_user_event(tmp_path):
+async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_or_user_event(
+    tmp_path,
+):
     import asyncio
+
     from local_operator.harness.peer_cycle_display import persist_record
     from local_operator.mobile.peer_cycles import bind_owner_peer_cycles
     from local_operator.mobile.projection import ProjectionFold
     from local_operator.mobile.types import SessionProjection
-    from tests.unit.session.test_session import make_session, ScriptedStream
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
     _, history, record = make_cycle(wrapped_send=True)
     stream = ScriptedStream([])
     session = make_session(tmp_path / "sessions", stream)
@@ -83,13 +95,17 @@ async def test_actual_frontend_late_publication_bumps_idle_phone_without_final_o
     notifications = []
     events = []
     unlisten = session.subscribe(events.append)
-    unsubscribe = bind_owner_peer_cycles(fold, session, lambda: notifications.append(projection.version), asyncio.get_running_loop())
+    unsubscribe = bind_owner_peer_cycles(
+        fold, session, lambda: notifications.append(projection.version), asyncio.get_running_loop()
+    )
     try:
         fold.fold_history(history)
         assert not any("peer_cycle" in row.details for row in projection.transcript)
         before = projection.version
         assert await persist_record(session.transcript, record)
-        session._frontend_state_store.mutate(peer_cycle_display={"refs": [record["id"]], "records": [record]})
+        session._frontend_state_store.mutate(
+            peer_cycle_display={"refs": [record["id"]], "records": [record]}
+        )
         await asyncio.sleep(0)
         assert projection.version > before and notifications
         assert any("peer_cycle" in row.details for row in projection.transcript)
@@ -107,30 +123,50 @@ def test_shared_context_corpus_phone_aliases_and_closed_members(case_index):
     # producer admission is independently exercised by the real Session suite.
     import json
     from pathlib import Path
+
     from local_operator.harness.peer_cycles import PeerCycleCertificate
     from local_operator.mobile.peer_cycles import project_peer_cycles
     from local_operator.mobile.types import TranscriptEntry
-    corpus = json.loads((Path(__file__).parents[3] / "local_operator/mobile/web/src/lib/peer-cycles.context.json").read_text())
+
+    corpus = json.loads(
+        (
+            Path(__file__).parents[3] / "local_operator/mobile/web/src/lib/peer-cycles.context.json"
+        ).read_text()
+    )
     case = corpus["cases"][case_index]
     rows = [TranscriptEntry(**raw, tool_state="done") for raw in case["rows"]]
-    sources = tuple(f"{row.id}:0" if row.kind == "peer_message" else f"tool:{row.tool_call_id}:0"
-                    for row in rows if row.id in case["members"])
-    proof = PeerCycleCertificate(corpus["session_id"], 0, "actual-typed-quiet", sources,
-                                 owner_kind="peer_cycle_display")
-    projected = project_peer_cycles(rows, session_id=corpus["session_id"], records=None, certificates=[proof])
+    sources = tuple(
+        f"{row.id}:0" if row.kind == "peer_message" else f"tool:{row.tool_call_id}:0"
+        for row in rows
+        if row.id in case["members"]
+    )
+    proof = PeerCycleCertificate(
+        corpus["session_id"], 0, "actual-typed-quiet", sources, owner_kind="peer_cycle_display"
+    )
+    projected = project_peer_cycles(
+        rows, session_id=corpus["session_id"], records=None, certificates=[proof]
+    )
     assert projected[0].details["peer_cycle"]["member_ids"] == case["members"]
-    assert sum(row.tool_name == "send" for row in projected if row.id in case["members"]) == case["actions"]
+    assert (
+        sum(row.tool_name == "send" for row in projected if row.id in case["members"])
+        == case["actions"]
+    )
     assert "public-final" not in projected[0].details["peer_cycle"]["member_ids"]
     assert not any("peer_cycle" in row.details for row in rows)
-    assert not any("peer_cycle" in row.details for row in project_peer_cycles(
-        rows, session_id=corpus["session_id"], records=None, certificates=[proof], view_epoch=1))
+    assert not any(
+        "peer_cycle" in row.details
+        for row in project_peer_cycles(
+            rows, session_id=corpus["session_id"], records=None, certificates=[proof], view_epoch=1
+        )
+    )
 
 
 def test_phone_missing_parent_outcome_or_public_boundary_cannot_certify():
     _, history, record = make_cycle(wrapped_send=True)
     for raw in (history[:2], history[:-2]):
-        rows = fold_messages_to_entries(raw, session_id=record["session_id"],
-                                        peer_cycle_display_records={"records": [record]})
+        rows = fold_messages_to_entries(
+            raw, session_id=record["session_id"], peer_cycle_display_records={"records": [record]}
+        )
         assert all("peer_cycle" not in row.details for row in rows)
 
 
@@ -143,24 +179,47 @@ def _live_close(fold):
     live path, not the history walk.
     """
     from local_operator.harness.types import (
-        Message, MessageEndEvent, ToolCall, ToolExecutionEndEvent,
-        ToolExecutionStartEvent, ToolResult, TextContent,
+        Message,
+        MessageEndEvent,
+        TextContent,
+        ToolCall,
+        ToolExecutionEndEvent,
+        ToolExecutionStartEvent,
+        ToolResult,
     )
+
     for call_id, name, args, quiet in [
         ("qa-send", "send", {"message": "Synthetic ack"}, False),
         ("qa-quiet", "no_reply", {}, True),
     ]:
-        fold.fold_event(MessageEndEvent(message=Message(id="decl-" + call_id, role="assistant",
-            tool_calls=[ToolCall(id=call_id, name=name, arguments=args)])))
+        fold.fold_event(
+            MessageEndEvent(
+                message=Message(
+                    id="decl-" + call_id,
+                    role="assistant",
+                    tool_calls=[ToolCall(id=call_id, name=name, arguments=args)],
+                )
+            )
+        )
         fold.fold_event(ToolExecutionStartEvent(tool_name=name, tool_call_id=call_id, args=args))
-        fold.fold_event(ToolExecutionEndEvent(tool_name=name, tool_call_id=call_id, result=ToolResult(
-            tool_name=name, tool_call_id=call_id, content=[TextContent(text="Synthetic outcome")],
-            details={"__quiet_turn": True} if quiet else {})))
+        fold.fold_event(
+            ToolExecutionEndEvent(
+                tool_name=name,
+                tool_call_id=call_id,
+                result=ToolResult(
+                    tool_name=name,
+                    tool_call_id=call_id,
+                    content=[TextContent(text="Synthetic outcome")],
+                    details={"__quiet_turn": True} if quiet else {},
+                ),
+            )
+        )
 
 
 def _bound_fold(*, peer_cycles=True):
     from local_operator.mobile.projection import ProjectionFold
     from local_operator.mobile.types import SessionProjection
+
     projection = SessionProjection(session_id="qa-live-session", pid=0)
     fold = ProjectionFold(projection)
     if peer_cycles:
@@ -170,9 +229,13 @@ def _bound_fold(*, peer_cycles=True):
 
 def test_live_phone_certifies_a_genuine_direct_peer_from_typed_tool_events():
     from local_operator.harness.types import PeerMessageDeliveredEvent
+
     projection, fold = _bound_fold()
-    fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-real", body="Synthetic peer",
-        sender={}, custom_type="peer_message"))
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            message_id="qa-real", body="Synthetic peer", sender={}, custom_type="peer_message"
+        )
+    )
     _live_close(fold)
     stamped = [row for row in projection.transcript if "peer_cycle" in row.details]
     assert len(stamped) == 1, [row.kind for row in projection.transcript]
@@ -187,13 +250,20 @@ def test_live_phone_certifies_a_genuine_direct_peer_from_typed_tool_events():
 @pytest.mark.parametrize("position", ["opener", "pending"])
 def test_live_phone_keeps_a_nonpeer_delivery_visible_and_uncertified(custom_type, position):
     from local_operator.harness.types import PeerMessageDeliveredEvent
+
     projection, fold = _bound_fold()
     if position == "pending":
-        fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-real", body="Synthetic peer",
-            sender={}, custom_type="peer_message"))
+        fold.fold_event(
+            PeerMessageDeliveredEvent(
+                message_id="qa-real", body="Synthetic peer", sender={}, custom_type="peer_message"
+            )
+        )
     body = "Synthetic non-peer boundary " + custom_type
-    fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-boundary", body=body,
-        sender={"name": "qa"}, custom_type=custom_type))
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            message_id="qa-boundary", body=body, sender={"name": "qa"}, custom_type=custom_type
+        )
+    )
     _live_close(fold)
     rows = projection.transcript
     assert not any("peer_cycle" in row.details for row in rows), [r.kind for r in rows]
@@ -203,8 +273,12 @@ def test_live_phone_keeps_a_nonpeer_delivery_visible_and_uncertified(custom_type
 
 def test_live_phone_legacy_empty_custom_type_still_reads_as_a_peer():
     from local_operator.harness.types import PeerMessageDeliveredEvent
+
     projection, fold = _bound_fold()
-    fold.fold_event(PeerMessageDeliveredEvent(message_id="qa-legacy", body="Synthetic legacy peer",
-        sender={}, custom_type=""))
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            message_id="qa-legacy", body="Synthetic legacy peer", sender={}, custom_type=""
+        )
+    )
     _live_close(fold)
     assert any("peer_cycle" in row.details for row in projection.transcript)
