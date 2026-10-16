@@ -29,9 +29,13 @@ from rich.text import Text
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 #: How many settled goals the panel lists before it says how many it did not.
 #: The record itself holds `GOAL_HISTORY_MAX`; a card that printed all of them
@@ -154,13 +158,13 @@ def judge_line(judge: dict[str, Any] | None, *, cap: int) -> Text:
     `— ` painted `· —` (same finding).
     """
     if not judge:
-        return Text("judge: —", style="dim")
+        return Text(_t(_x.goal_panel_judge_absent()), style="dim")
     state = str(judge.get("state") or "idle")
     words = _JUDGE_WORDS.get(state, state)
-    parts = [f"judge: {words}"]
+    parts = [_t(_x.goal_panel_judge_line(words=words))]
     run = judge.get("run")
     if isinstance(run, int) and run:
-        parts.append(f"run {run}/{cap}")
+        parts.append(_t(_x.goal_panel_judge_run(run=str(run), cap=str(cap))))
     line = " · ".join(parts)
     reason = str(judge.get("reason") or "").strip()
     if reason:
@@ -249,7 +253,7 @@ def build_goal_body(
     out.append("─" * inner, style="dim")
     out.append("\n")
     if not goal:
-        out.append("no goal set — /goal <text> to set one", style="dim")
+        out.append(_t(_x.goal_panel_no_goal_hint()), style="dim")
     else:
         # The transcript's own user-block spine, so the standing objective reads
         # as the human's words rather than as app chrome.
@@ -265,16 +269,16 @@ def build_goal_body(
         )
         out.append(text, style=_DONE_STYLE if done else "")
         if done:
-            out.append("  — done", style="dim")
+            out.append(_t(_x.goal_panel_done_suffix()), style="dim")
     out.append("\n")
     out.append_text(judge_line(judge, cap=cap))
     out.append("\n\n")
-    out.append("settled", style="bold")
+    out.append(_t(_x.goal_panel_settled_heading()), style="bold")
     # `none yet` is a claim about the RECORD, so it is withheld when the record
     # itself was clipped: the card cannot say there are none when it has been
     # told some were dropped.
     if not history and not history_truncated:
-        out.append("  none yet", style="dim")
+        out.append(_t(_x.goal_panel_none_yet()), style="dim")
     shown = history[: max(0, max_rows)]
     hidden = len(history) - len(shown)
     if hidden and not shown:
@@ -283,7 +287,7 @@ def build_goal_body(
         # notice exists to remove, and inlining it costs one row instead of two —
         # which is precisely the row that made the notice fall off a 14-line
         # terminal, where the old card printed `none yet` over eleven goals.
-        out.append(f"  … {hidden} more settled", style="dim")
+        out.append(_t(_x.goal_panel_more_settled_indent(hidden=str(hidden))), style="dim")
     for entry in shown:
         out.append("\n")
         entry_status = str(entry.get("status") or "")
@@ -306,7 +310,7 @@ def build_goal_body(
     hidden = len(history) - len(shown)
     if hidden and shown:
         out.append("\n")
-        out.append(f"… {hidden} more settled", style="dim")
+        out.append(_t(_x.goal_panel_more_settled(hidden=str(hidden))), style="dim")
     if history_truncated:
         out.append("\n")
         out.append(_HISTORY_CLIPPED_NOTE, style="dim")
