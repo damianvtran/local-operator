@@ -58,13 +58,17 @@ def _recall_reference(name: str, path: Any) -> str | None:
     STORED rather than looked up — keeps the refusal it has today.
 
     A path that does not parse is left to the caller's own ``parse_url``, which refuses
-    it in the same order as before this exemption existed.
+    it in the same order as before this exemption existed: ``ValueError`` here means
+    only "not classifiable as a reference", so the caller's guard still speaks first.
     """
     if name != "read" or not isinstance(path, str):
         return None
     try:
         _, _, query = parse_url(path.strip())
-    except MemoryError:
+    except (MemoryError, ValueError):
+        # ValueError: ``parse_url`` parses its query with strict_parsing=True, which
+        # rejects a field with no "=". Both are that same refusal by the caller's own
+        # parser — catching them here keeps the guard ahead of it, as it was before.
         return None
     value = query.get("q")
     return value if structural_reference(value) else None
