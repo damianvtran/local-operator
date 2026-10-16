@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from local_operator.agent_profiles import load_seed, load_seed_version, resolve_profile
+from local_operator.agent_profiles import (
+    load_seed,
+    load_seed_version,
+    profile_from_agent,
+    resolve_profile,
+)
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.harness.types import ToolContext
@@ -1636,3 +1641,159 @@ async def test_sync_reports_no_credential_for_an_organization_row(
 
     assert "hunter: hub unavailable" in body
     assert "no Radient credential" in body
+
+
+# ---------------------------------------------------------------------------
+# #2509 — a specialist row carries no role fields, so a call that sets one is
+# REFUSED. It used to be dropped at the ``seed_tags`` gate
+# (``tags = list(seed_tags(profile)) if kind == "role" else []``) and reported
+# as a successful write, which is how a roster came to look tier-pinned while
+# nothing was stored. Refusing is the shape that ships: nothing reads a
+# specialist's field either — ``resolve_profile`` honours an ``effort:`` tag
+# only for a role — so storing one would trade a silent drop for a stored value
+# no launch consults.
+# ---------------------------------------------------------------------------
+
+#: The three fields a specialist may not carry, each with a value that ASKS for
+#: something. The values the desktop editor STARTS these controls at
+#: (``'inherit'``/``[]``/``False``) are the no-op case and have their own test
+#: below: they must stay writes that succeed, not refusals with nothing to fix.
+_ROLE_FIELD_REQUESTS = [
+    ("effort", "hi"),
+    ("tools", ["read", "grep"]),
+    ("delegate", True),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("field", "value"), _ROLE_FIELD_REQUESTS)
+async def test_a_specialist_create_refuses_a_role_field(context, registry, field, value) -> None:
+    body = await call(
+        context,
+        op="create",
+        kind="specialist",
+        name="zz-spec-probe",
+        description="probe",
+        instructions="probe",
+        **{field: value},
+    )
+
+    assert "carry no role fields" in body
+    assert repr(field) in body
+    assert registry.get_agent_by_name("zz-spec-probe") is None, "nothing may be written"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("field", "value"), _ROLE_FIELD_REQUESTS)
+async def test_a_specialist_update_refuses_a_role_field_and_leaves_the_row_alone(
+    context, registry, field, value
+) -> None:
+    await call(
+        context,
+        op="create",
+        kind="specialist",
+        name="solution-architect",
+        description="Designs systems",
+        instructions="Design systems.",
+    )
+    before = registry.get_agent_by_name("solution-architect")
+    assert before is not None
+
+    body = await call(context, op="update", name="solution-architect", **{field: value})
+
+    # The receipt is where the lie used to be: it said "updated specialist".
+    assert "carry no role fields" in body
+    assert "updated specialist" not in body
+    after = registry.get_agent_by_name("solution-architect")
+    assert after is not None
+    assert after.tags == before.tags
+    assert not [tag for tag in after.tags or [] if str(tag).startswith(("effort:", "tools:"))]
+    profile = profile_from_agent(registry, after)
+    assert profile.effort is None and profile.tools is None and profile.may_delegate is False
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_names_every_field_the_call_set(context) -> None:
+    """One sentence, and every offending field in it: a caller fixing one at a
+    time should not have to make three refused round trips."""
+    body = await call(
+        context,
+        op="create",
+        kind="specialist",
+        name="zz-spec-probe",
+        description="probe",
+        instructions="probe",
+        effort="hi",
+        tools=["read"],
+        delegate=True,
+    )
+
+    assert "'effort', 'tools' and 'delegate' cannot be set on one" in body
+    assert "a launch honours only a role's tier pin" in body
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_editors_specialist_defaults_are_a_no_op_not_a_refusal(
+    context, registry
+) -> None:
+    """An ordinary specialist save must not become a 409.
+
+    The editor sends these keys only when the operator CHANGED the control, but
+    the values it starts them at are legal payloads a hand-written client may
+    send anyway: ``tools: []`` is the wire's "every tool", ``'inherit'`` is the
+    no-pin sentinel, and ``delegate: false`` asks for the state a specialist is
+    already in. Each is a no-op — nothing to store and nothing to fix — so each
+    is accepted.
+    """
+    await call(
+        context,
+        op="create",
+        kind="specialist",
+        name="scout",
+        description="Surveys",
+        instructions="Survey.",
+    )
+    before = registry.get_agent_by_name("scout")
+    assert before is not None
+
+    body = await call(
+        context, op="update", name="scout", effort="inherit", tools=[], delegate=False
+    )
+
+    assert "updated specialist" in body
+    after = registry.get_agent_by_name("scout")
+    assert after is not None and after.tags == before.tags
+
+
+@pytest.mark.asyncio
+async def test_a_role_still_stores_the_role_fields_it_is_asked_for(context, registry) -> None:
+    """The refusal is scoped to specialists: the role path is untouched."""
+    await call(
+        context,
+        op="create",
+        kind="role",
+        name="pinned",
+        description="Pinned",
+        instructions="Work.",
+        effort="hi",
+        tools=["read", "grep"],
+        delegate=True,
+    )
+
+    row = registry.get_agent_by_name("pinned")
+    assert row is not None
+    profile = profile_from_agent(registry, row)
+    assert profile.effort == "hi"
+    assert profile.may_delegate is True
+    assert set(profile.tools or ()) == {"read", "grep"}
+
+
+def test_the_authoring_schema_says_which_fields_are_role_only(context) -> None:
+    """The model reads this schema, so the rule has to be visible BEFORE the
+    call rather than only in the refusal that follows it."""
+    tool = build_agent_tool(context)
+    assert tool is not None
+    properties = tool.parameters["properties"]
+
+    for field in ("tools", "effort", "delegate"):
+        assert "ROLE" in properties[field]["description"], field
