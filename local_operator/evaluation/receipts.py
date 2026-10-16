@@ -46,6 +46,19 @@ MAX_MODALITIES = 16
 MAX_TOOLS = 128
 MAX_REASON_LENGTH = 2_000
 MAX_CANARIES = 256
+# Minimum UTF-8 byte length for a value to be canaried at all. A substring
+# canary shorter than this cannot distinguish a credential from ordinary
+# evidence: short non-secret constants routinely transported through the
+# sealed store (a volume size "120", a flag "false", a TTL "18900") would
+# refuse the first bundle write that merely mentions them, killing the
+# episode. The encoded variants have always skipped below this floor for
+# exactly that collision reason; plaintext gets the same floor so the rule
+# is one rule, not per-encoding exceptions. The trade-off is deliberate: a
+# genuine credential shorter than the floor receives no substring canary,
+# so its protection must come from never emitting it (structured
+# redaction / withholding), not from a check that would false-fire on
+# unrelated content.
+_MIN_CANARY_BYTES = 8
 ZERO_DIGEST = "0" * 64
 StrictIdentifier = Annotated[
     str,
@@ -563,9 +576,9 @@ class RedactionSet:
         hex_variants: set[str] = set()
         for value in snapshot:
             raw = value.encode("utf-8")
-            # Short encoded fragments collide too readily with ordinary evidence;
-            # plaintext is still checked regardless of this conservative floor.
-            if len(raw) < 8:
+            # Short fragments collide too readily with ordinary evidence, in
+            # every encoding including plaintext: see _MIN_CANARY_BYTES.
+            if len(raw) < _MIN_CANARY_BYTES:
                 continue
             standard = base64.b64encode(raw).decode("ascii")
             urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
@@ -576,8 +589,18 @@ class RedactionSet:
             # not. Raw hexadecimal has no literal/plaintext distinction.
             percent_variants.add(_canonical_percent_escapes(quote(value, safe="")))
             hex_variants.add(raw.hex().casefold())
+        # Plaintext canaries obey the same floor as the encoded ones: only
+        # values at or above it are distinctive enough to refuse evidence
+        # over. Dropping (not truncating) keeps assert_clear a pure
+        # substring check over exactly the canaried set.
+        plaintext_canaries = tuple(
+            sorted(
+                {value for value in snapshot if len(value.encode("utf-8")) >= _MIN_CANARY_BYTES},
+                key=lambda value: (-len(value), value),
+            )
+        )
         return cls(
-            tuple(sorted(set(snapshot), key=lambda value: (-len(value), value))),
+            plaintext_canaries,
             tuple(sorted(exact_encoded_variants, key=lambda value: (-len(value), value))),
             tuple(sorted(percent_variants, key=lambda value: (-len(value), value))),
             tuple(sorted(hex_variants, key=lambda value: (-len(value), value))),
