@@ -295,7 +295,7 @@ describe("AsksSheet", () => {
 			asks: [ask({ ask_id: "t", status: "timed_out" })],
 		});
 		const { unmount } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() => expect(screen.getByText("asks · 1 lapsed")).toBeTruthy());
+		await waitFor(() => expect(screen.getByText("asks · 1 timed out")).toBeTruthy());
 		/* Collapsed behind its badge (D11): the sheet lists it, the user opens it. */
 		expect(screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded")).toBe(
 			"false",
@@ -320,7 +320,7 @@ describe("AsksSheet", () => {
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
 		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
-		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.getByText("Timed out — the agent goes ahead without your answer")).toBeTruthy();
 		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
 	});
 
