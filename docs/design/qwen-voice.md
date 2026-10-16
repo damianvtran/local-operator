@@ -45,9 +45,11 @@ and returns text.
   mode (drops updates outside a prompt, paraphrases results).
 - **Q2 No language model in the rig's loop.** The Qwen3-4B is removed. A
   deterministic relay endpoint answers a user turn with
-  `spawn_thinking({objective: <last user message, byte for byte>})`, a tool
-  result with empty text, and anything unrecognised with empty text. The
-  failure mode is silence. The admitted text is the transcript.
+  `spawn_thinking({objective: <last user message>})` — the objective is the
+  admitted text verbatim, up to whitespace normalisation (the Gateway collapses
+  runs of whitespace) — a tool result with empty text, and anything unrecognised
+  with empty text. The failure mode is silence. The admitted text is the
+  transcript.
 - **Q3 Verbatim speech goes through a token.** The rig's provider is a copy of
   the s2s profile (which the custom-provider contract above permits) and puts
   only `⟦lop-say:<uuid>⟧` into the instructions it builds for a spoken reply, a
@@ -84,8 +86,9 @@ and returns text.
 - **Q11 Fresh branches.** `feat/qwen-voice` cut from `origin/main`; only the
   carried pieces move across from the earlier `feat/session-voice` work.
 - **Q12 The rig directory supplies the runtime only** (its virtualenv, node
-  modules and model cache), located by the UI setting `voice.qwen_rig_dir`. The
-  integration code lives in local-operator-ui.
+  modules and model cache). It is located by the environment variable
+  `LOP_QWEN_RIG_DIR`, default `~/.local/share/qwen-voice-rig`; there is no
+  setting for it. The integration code lives in local-operator-ui.
 
 ## Frozen contract
 
@@ -124,9 +127,17 @@ renderer) are part of the same contract and do not touch this repository:
   only texts main sent it, plus the Q7 phrases.
 - Main ↔ renderer: event `voice.qwen.take {taskId, text}`; invokes
   `voice.qwen.result {taskId, ok | code}`, `voice.qwen.speak {text, kind}` and
-  `voice.qwen.start` (UI-only: starts the rig when the slot is held but the rig
-  is stopped, for example after an app relaunch); status `voice.qwen.status
-  {rig: stopped | starting | ready | error, webui_url}`.
+  `voice.qwen.start` (UI-only); status `voice.qwen.status {rig: stopped |
+  starting | ready | error, webui_url, clients?, cause?}`, where `clients` is
+  the number of voice pages connected to the Gateway right now and `cause` is
+  `unexpected_exit` when a rig process died while the rig was ready, else null.
+  The status phases distinguish "ready, no page connected" (nothing can hear
+  the operator, so a UI must not say "listening") from "listening" (ready with
+  at least one page connected). `voice.qwen.start` starts the rig when the slot
+  is held but the rig is stopped, for example after an app relaunch; on an
+  already-ready rig it reopens the voice page instead. `voice.qwen.speak`
+  returns `no_client` when no page is connected, so a reply is not lost to a
+  closed tab.
 
 Approved deviations the UI makes from this contract (each one narrows it):
 
@@ -137,6 +148,15 @@ Approved deviations the UI makes from this contract (each one narrows it):
 - An empty task result is confirmed without being spoken.
 - A take is refused before it is sent while a card is pending, which is V13
   enforced client-side as well as here.
+
+The echo guard, client-side (Q8's risk): a take that is one of the rig's own
+Q7 phrases, or a reply or gate text this window had spoken in the last 30 s, is
+dropped unsent and silently — the microphone heard the rig — so the rig's own
+speech never steers the session or answers itself. The match is word-based: a
+take of 6 words or more is an echo when one CONTIGUOUS run it shares with the
+spoken text is at least 6 words long and covers at least 80% of the take; a
+shorter take is an echo only when it equals one whole sentence of the spoken
+text, or all of it.
 
 ## Carried forward from session voice
 
