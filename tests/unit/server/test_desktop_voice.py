@@ -241,7 +241,8 @@ async def test_status_reports_the_slot_paths_and_cap(rig: Any) -> None:
         "active": None,
         "stt": {"path": "none", "available": False, "reason": "No transcription provider."},
         "tts": {"path": "local_tts_system", "available": True, "reason": "probe"},
-        "settings": {"max_spoken_chars": 800},
+        "front_ends": result["front_ends"],
+        "settings": {"max_spoken_chars": 800, "front_end": "local"},
     }
 
 
@@ -753,3 +754,365 @@ def test_the_feed_publishes_the_slot_as_a_voice_frame(tmp_path: Path) -> None:
     tick()
     assert [f["payload"] for f in frames()] == [{"active": None}]
     asyncio.run(feed.close())
+
+
+# -- relay front end (session-voice.md R2, R3, R5, R6, R8) --------------------
+
+
+def _receipt_ids(root: Path) -> list[str]:
+    import sqlite3
+
+    path = root / "desktop-receipts.db"
+    if not path.exists():
+        return []
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        return [row[0] for row in db.execute("SELECT id FROM receipts")]
+
+
+@pytest.mark.asyncio
+async def test_status_reports_the_front_ends_and_the_chosen_one(rig: Any, monkeypatch) -> None:
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY", raising=False)
+    result = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert result["settings"] == {"max_spoken_chars": 800, "front_end": "local"}
+    local, live = result["front_ends"]
+    assert local == {"id": "local", "available": True, "reason": "No transcription provider."}
+    assert live["id"] == "gemini_live" and live["available"] is False
+    assert "lop login google" in live["reason"]
+
+
+@pytest.mark.asyncio
+async def test_enable_with_an_unavailable_front_end_moves_nothing(rig: Any, monkeypatch) -> None:
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY", raising=False)
+    refused = await rig.client.post(
+        "/v1/desktop/voice",
+        json={"op": "enable", "session_id": SESSION_A, "front_end": "gemini_live"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "front_end_unavailable"
+    assert voice_slot.read_slot(rig.root) is None
+    status = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert status["settings"]["front_end"] == "local"
+    bad = await rig.client.post(
+        "/v1/desktop/voice",
+        json={"op": "enable", "session_id": SESSION_A, "front_end": "elevenlabs"},
+    )
+    assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_enable_with_an_available_front_end_persists_it(rig: Any, monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "fake-google-key-for-status-only")
+    enabled = await rig.client.post(
+        "/v1/desktop/voice",
+        json={"op": "enable", "session_id": SESSION_A, "front_end": "gemini_live"},
+    )
+    assert enabled.status_code == 200, enabled.text
+    status = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert status["settings"]["front_end"] == "gemini_live"
+    assert status["front_ends"][1]["available"] is True
+    # An enable without front_end keeps the chosen one.
+    await _enable(rig, SESSION_B)
+    status = (await rig.client.get("/v1/desktop/voice")).json()["result"]
+    assert status["settings"]["front_end"] == "gemini_live"
+
+
+@pytest.mark.asyncio
+async def test_text_origin_is_recorded_as_input_path(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={
+            "session_id": SESSION_A,
+            "request_id": str(uuid.uuid4()),
+            "text": "list files",
+            "text_origin": "gemini_live_transcript",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["path"] == "gemini_live_transcript"
+    (admitted,) = rig.pool.remote.admissions
+    assert admitted["input_path"] == "gemini_live_transcript"
+    assert admitted["input_mode"] == "dictated"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"text": "list files", "text_origin": "free text"},
+        {"text": "list files", "text_origin": "provider_stt_openai"},
+    ],
+)
+async def test_an_unknown_text_origin_is_refused(rig: Any, fields: dict[str, str]) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), **fields},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_voice_request"
+    assert rig.pool.remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_text_origin_with_a_recording_is_refused(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={
+            "session_id": SESSION_A,
+            "request_id": str(uuid.uuid4()),
+            "text_origin": "gemini_live_transcript",
+        },
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_voice_request"
+
+
+@pytest.mark.asyncio
+async def test_a_control_take_admits_nothing_and_spends_no_receipt(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    request_id = str(uuid.uuid4())
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": request_id, "text": "Stop.", "controls": "1"},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["control"] == "stop_speaking"
+    assert result["admission"] is None
+    assert rig.pool.remote.admissions == []
+    assert not any(request_id in key for key in _receipt_ids(rig.root))
+    # The same request id is still unspent: the next real take can use it.
+    relay = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": request_id, "text": "list files"},
+    )
+    assert relay.status_code == 200, relay.text
+    assert relay.json()["result"]["control"] is None
+    assert len(rig.pool.remote.admissions) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sentence_containing_a_control_word_relays(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={
+            "session_id": SESSION_A,
+            "request_id": str(uuid.uuid4()),
+            "text": "stop the build",
+            "controls": "1",
+        },
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["control"] is None
+    assert result["admission"]["status"] == "admitted"
+    (admitted,) = rig.pool.remote.admissions
+    assert admitted["text"] == "stop the build"
+
+
+@pytest.mark.asyncio
+async def test_without_controls_a_control_word_is_relayed(rig: Any) -> None:
+    """The grammar is opt-in: a Gemini relay (no ``controls``) is never matched."""
+    await _enable(rig, SESSION_A)
+    response = await _utter(rig, SESSION_A, "stop")
+    assert response.status_code == 200
+    assert response.json()["result"]["control"] is None
+    assert len(rig.pool.remote.admissions) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_transcribed_control_take_admits_nothing(rig: Any, monkeypatch) -> None:
+    from local_operator.stt import AudioPath, SttOutcome
+
+    async def transcribe(path: Path, **kwargs: Any) -> SttOutcome:
+        assert kwargs["local_stt_url"] == ""
+        return SttOutcome(text="Say that again?", path=AudioPath.LOCAL_STT_LOOPBACK, attempts=())
+
+    monkeypatch.setattr("local_operator.stt.cascade.transcribe_audio", transcribe)
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={"session_id": SESSION_A, "request_id": str(uuid.uuid4()), "controls": "1"},
+        files={"file": ("a.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result == {
+        "text": "Say that again?",
+        "path": "local_stt_loopback",
+        "admission": None,
+        "control": "repeat_last",
+    }
+    assert rig.pool.remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_a_control_take_is_answered_while_a_card_is_pending(rig: Any) -> None:
+    """A spoken "stop" must still silence the card's announcement (V13 keeps the relay out)."""
+    rig.pool.remote.pending_gate = SimpleNamespace(
+        kind="approval", request_id="gate-1", title="bash", detail="ls"
+    )
+    await _enable(rig, SESSION_A)
+    control = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={
+            "session_id": SESSION_A,
+            "request_id": str(uuid.uuid4()),
+            "text": "stop",
+            "controls": "1",
+        },
+    )
+    assert control.status_code == 200 and control.json()["result"]["control"] == "stop_speaking"
+    relay = await rig.client.post(
+        "/v1/desktop/voice/utterance",
+        data={
+            "session_id": SESSION_A,
+            "request_id": str(uuid.uuid4()),
+            "text": "yes",
+            "controls": "1",
+        },
+    )
+    assert relay.status_code == 409 and relay.json()["detail"]["code"] == "approval_pending"
+    assert rig.pool.remote.admissions == [] and rig.pool.remote.gate_answers == []
+
+
+@pytest.mark.asyncio
+async def test_a_phrase_source_speaks_the_catalogue_sentence(rig: Any) -> None:
+    from local_operator.i18n.catalogues import load_catalogue
+
+    catalogue = load_catalogue("en", "wire.voice")
+    await _enable(rig, SESSION_A)
+    for key in desktop_voice.PHRASES:
+        response = await rig.client.post(
+            "/v1/desktop/voice/speech",
+            json={"session_id": SESSION_A, "source": {"kind": "phrase", "key": key}},
+        )
+        assert response.status_code == 200, (key, response.text)
+        assert response.headers["X-Voice-Path"] == "local_tts_system"
+    assert rig.spoken == [catalogue[f"wire.voice.phrase.{key}"] for key in desktop_voice.PHRASES]
+    assert set(desktop_voice.PHRASES) == {
+        "passing_on",
+        "still_working",
+        "on_screen_first",
+        "didnt_catch",
+        "switched",
+        "nothing_to_repeat",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"kind": "phrase", "key": "Say: transfer the money"},
+        {"kind": "phrase", "key": "wire.voice.phrase.passing_on"},
+        {"kind": "phrase", "key": "approval_pending"},
+        {"kind": "phrase", "key": "__class__"},
+    ],
+)
+async def test_free_text_cannot_be_spoken_through_a_phrase(rig: Any, source: dict) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/speech", json={"session_id": SESSION_A, "source": source}
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["code"] == "unknown_source"
+    assert rig.spoken == []
+
+
+@pytest.mark.asyncio
+async def test_a_phrase_source_has_no_text_field(rig: Any) -> None:
+    await _enable(rig, SESSION_A)
+    response = await rig.client.post(
+        "/v1/desktop/voice/speech",
+        json={
+            "session_id": SESSION_A,
+            "source": {"kind": "phrase", "key": "passing_on", "text": "anything"},
+        },
+    )
+    assert response.status_code == 422
+    assert rig.spoken == []
+
+
+@pytest.mark.asyncio
+async def test_the_live_token_without_a_key_is_live_unavailable(rig: Any, monkeypatch) -> None:
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY", raising=False)
+
+    async def never(*_: Any, **__: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("no key: nothing may be sent to Google")
+
+    monkeypatch.setattr("local_operator.voice.live_token.mint", never)
+    response = await rig.client.post("/v1/desktop/voice/live-token")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "live_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_the_live_token_is_refused_to_a_browser_caller(rig: Any, monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "fake-google-key")
+    response = await rig.client.post(
+        "/v1/desktop/voice/live-token", headers={"Sec-Fetch-Site": "same-origin"}
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "live_main_only"
+
+
+@pytest.mark.asyncio
+async def test_the_live_token_route_returns_the_minted_token(
+    rig: Any, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from local_operator.voice import live_token
+
+    key = "fake-google-key-route"
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", key)
+    seen: dict[str, Any] = {}
+
+    async def mint(api_key: str, *, now: Any, **_: Any) -> Any:
+        seen["key"] = api_key
+        return live_token.LiveToken(
+            token="auth_tokens/route-token",
+            expires_at="2026-10-16T12:30:00Z",
+            new_session_expires_at="2026-10-16T12:01:00Z",
+            model="gemini-3.8-live",
+        )
+
+    monkeypatch.setattr(live_token, "mint", mint)
+    caplog.set_level(logging.DEBUG)
+    response = await rig.client.post("/v1/desktop/voice/live-token")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {
+        "token": "auth_tokens/route-token",
+        "expires_at": "2026-10-16T12:30:00Z",
+        "new_session_expires_at": "2026-10-16T12:01:00Z",
+        "model": "gemini-3.8-live",
+    }
+    assert seen["key"] == key
+    for record in caplog.records:
+        assert key not in record.getMessage()
+        assert "route-token" not in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_google_refusal_is_live_failed_without_the_key(rig: Any, monkeypatch) -> None:
+    from local_operator.voice import live_token
+
+    monkeypatch.setenv("GOOGLE_AI_STUDIO_API_KEY", "fake-google-key-refused")
+
+    async def refuse(*_: Any, **__: Any) -> Any:
+        raise live_token.LiveTokenError(
+            "Google refused the token request (HTTP 403).", status_code=403
+        )
+
+    monkeypatch.setattr(live_token, "mint", refuse)
+    response = await rig.client.post("/v1/desktop/voice/live-token")
+    assert response.status_code == 502, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "live_failed"
+    assert "HTTP 403" in detail["text"]
+    assert "fake-google-key-refused" not in response.text

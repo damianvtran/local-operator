@@ -5,17 +5,22 @@ The frozen contract, which both repositories build against:
     GET  /v1/desktop/voice
         200 {active: {session_id, enabled_at} | null,
              stt: {path, available, reason}, tts: {path, available, reason},
-             settings: {max_spoken_chars}}
-    POST /v1/desktop/voice             body {op: enable|disable, session_id}
+             front_ends: [{id: local|gemini_live, available, reason}],
+             settings: {max_spoken_chars, front_end}}
+    POST /v1/desktop/voice             body {op: enable|disable, session_id, front_end?}
         200 {active, replaced}; 404 unknown_session;
-        409 voice_unavailable | voice_store_busy
+        409 voice_unavailable | voice_store_busy | front_end_unavailable
     POST /v1/desktop/voice/utterance   multipart session_id, request_id (dashed UUID),
-                                       file | text
-        200 {text, path, admission}; 422 invalid_voice_request | empty_transcript;
-        409 voice_not_enabled | approval_pending | stt_unavailable
+                                       file | text, text_origin?, controls?
+        200 {text, path, admission | null, control}; 422 invalid_voice_request |
+        empty_transcript; 409 voice_not_enabled | approval_pending | stt_unavailable
     POST /v1/desktop/voice/speech      body {session_id, source}
+        source {kind: message|gate|ask|phrase}
         200 audio, X-Voice-Path, X-Voice-Spoken-Chars;
         409 voice_not_enabled; 404 unknown_source
+    POST /v1/desktop/voice/live-token  (Electron main only) no body
+        200 {token, expires_at, new_session_expires_at, model};
+        409 live_unavailable; 403 live_main_only; 502 live_failed
 
 and the ``type: "voice"`` frame on ``GET /v1/desktop/events`` (published by
 ``server/utils/desktop_feed.py``), ``{active}``, on every slot change.
@@ -61,6 +66,19 @@ flag (design V13), so it is deferred; the race is pinned, not hidden, by
 ``tests/unit/server/test_desktop_voice.py`` pins the static absence of any
 answer path.
 
+THE RELAY FRONT END ADDS NO NEW DOOR (R1-R8). A front end (``local``, or
+``gemini_live`` in Electron main) only HEARS a take and decides relay or
+control. A relay's words still enter through ``/utterance`` and the ``_admit``
+door above; ``text_origin`` names where a front end's words came from and is
+recorded as ``input_path`` (R3). A control (``controls=1``, the
+``voice/controls.py`` grammar, R6) admits nothing and writes no receipt. The
+Live token's tool list has no gate or answer tool (``voice/live_config.py``,
+R7), so the relay keeps V7 by construction rather than by a check here.
+
+R5: ``/speech`` also speaks ``{kind: "phrase", key}``, a key from the closed
+``wire.voice.phrase.*`` catalogue. The server renders the catalogue sentence;
+an unknown key is ``unknown_source``, so free text still cannot be spoken.
+
 THE SERVER DECIDES WHAT IS SPOKEN (V8). ``/speech`` takes a source reference,
 never text: a message id resolved from the session's own durable journal, or the
 pending approval card as the server resolves it (its title and description).
@@ -98,9 +116,12 @@ from local_operator.server.dependencies import (
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import MessageAdmission
 from local_operator.server.models.desktop_voice import (
+    FrontEndId,
     VoiceActive,
     VoiceControl,
     VoiceControlResult,
+    VoiceFrontEnd,
+    VoiceLiveToken,
     VoicePathState,
     VoiceSettings,
     VoiceSpeechRequest,
@@ -119,6 +140,7 @@ from local_operator.server.routes.desktop_sessions import reply
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath
 from local_operator.stt import audio as stt_audio
+from local_operator.voice import controls as voice_controls
 from local_operator.voice import slot as voice_slot
 from local_operator.voice import speakable as voice_speakable
 
@@ -143,6 +165,28 @@ _STT_PROVIDERS = {
 }
 
 _REQUEST_ID = TypeAdapter(RequestID)
+
+#: Registry defaults for the relay rows, beside their only reader so
+#: ``tests/unit/test_settings_io.py`` can pin the registry literal against them.
+DEFAULT_LOCAL_STT_URL = ""
+DEFAULT_FRONT_END: FrontEndId = "local"
+
+#: Where a FRONT END's words came from, when it supplied them as text (R3).
+#: The transcript is authoritative; the tool argument is the fallback. Recorded
+#: as the message's ``input_path``, the slot the STT rungs already write.
+TEXT_ORIGINS = frozenset({"gemini_live_transcript", "gemini_live_tool_arg"})
+
+#: The R5 phrase catalogue: the source key -> the catalogue function. CLOSED:
+#: ``/speech`` resolves a phrase only through this table, so a key outside it
+#: (or any free text in its place) is ``unknown_source``.
+PHRASES = {
+    "passing_on": _wv.phrase_passing_on,
+    "still_working": _wv.phrase_still_working,
+    "on_screen_first": _wv.phrase_on_screen_first,
+    "didnt_catch": _wv.phrase_didnt_catch,
+    "switched": _wv.phrase_switched,
+    "nothing_to_repeat": _wv.phrase_nothing_to_repeat,
+}
 
 
 def _refuse(status: int, code: str, message: Any) -> HTTPException:
@@ -172,6 +216,66 @@ def _max_spoken_chars(config_manager: ConfigManager) -> int:
     except Exception:  # noqa: BLE001 - a hand-broken config.yml must not break voice
         value = voice_speakable.DEFAULT_MAX_SPOKEN_CHARS
     return voice_speakable.normalise_max_chars(value)
+
+
+def _voice_setting(config_manager: ConfigManager, key: str, default: Any) -> Any:
+    """One ``voice.*`` row as it is on DISK now (see :func:`_max_spoken_chars`).
+
+    An unreadable file reads as the default: voice never fails on a setting.
+    """
+    from local_operator import settings_io
+
+    try:
+        return settings_io.read_setting(
+            ConfigManager(config_manager.config_dir), settings_io.BY_KEY[key]
+        )
+    except Exception:  # noqa: BLE001 - a hand-broken config.yml must not break voice
+        return default
+
+
+def _local_stt_url(config_manager: ConfigManager) -> str:
+    value = _voice_setting(config_manager, "voice.local_stt_url", DEFAULT_LOCAL_STT_URL)
+    return value.strip() if isinstance(value, str) else DEFAULT_LOCAL_STT_URL
+
+
+def _front_end(config_manager: ConfigManager) -> FrontEndId:
+    value = _voice_setting(config_manager, "voice.front_end", DEFAULT_FRONT_END)
+    return "gemini_live" if value == "gemini_live" else "local"
+
+
+def _google_key(config_manager: ConfigManager) -> str | None:
+    """The AI Studio key the Live mint would use, by the image rung's rule.
+
+    ``imagegen.availability.google_key``: ``lop login google`` rows, then the
+    stored ``GOOGLE_AI_STUDIO_API_KEY`` secret, then the exported variable. One
+    rule, so "a Google key is stored" means the same thing on both surfaces.
+    """
+    from local_operator.imagegen.availability import google_key
+
+    return google_key(Path(str(config_manager.config_dir)))
+
+
+def _front_ends(
+    config_manager: ConfigManager, stt_reason: str, stt_ok: bool
+) -> list[VoiceFrontEnd]:
+    """Both front ends' availability (R8).
+
+    ``local`` is ALWAYS available: it is the slice-1 pipeline, whose text door
+    works with no STT rung at all; its reason is the STT state, so the client
+    can say why push-to-talk would be refused. ``gemini_live`` needs a stored
+    Google key (the mint's credential); whether Google will mint is a call-time
+    fact, like every rung's.
+    """
+    has_key = bool(_google_key(config_manager))
+    live_reason = _wv.front_end_live_available() if has_key else _wv.front_end_live_no_key()
+    return [
+        VoiceFrontEnd(
+            id="local",
+            available=True,
+            reason=_wv.front_end_local_available().envelope()["text"] if stt_ok else stt_reason,
+        ),
+        VoiceFrontEnd(id="gemini_live", available=has_key, reason=live_reason.envelope()["text"]),
+    ]
 
 
 def _live_slot(config_dir: Path) -> voice_slot.VoiceSlot | None:
@@ -229,12 +333,19 @@ async def _resolve_tts(config_manager: ConfigManager, env_config: EnvConfig, sto
 
 
 async def _resolve_stt(config_manager: ConfigManager, env_config: EnvConfig, store: AuthStore):
+    """The voice routes' STT resolution: the cascade WITH the loopback rung (R8).
+
+    The voice routes are the only callers that opt in, so ``/v1/stt/paths`` and
+    every other surface resolve exactly as before. An empty setting still
+    passes ``""``, which lists the rung as unavailable with its reason.
+    """
     from local_operator.stt.cascade import resolve_audio_path
 
     return await resolve_audio_path(
         config_dir=config_manager.config_dir,
         base_url=env_config.radient_api_base_url,
         store=store,
+        local_stt_url=_local_stt_url(config_manager),
     )
 
 
@@ -257,14 +368,18 @@ async def voice_status(
     """
     tts = await _resolve_tts(config_manager, env_config, store)
     stt = await _resolve_stt(config_manager, env_config, store)
+    stt_ok = stt.path != AudioPath.NONE
+    front_ends = await asyncio.to_thread(_front_ends, config_manager, stt.reason, stt_ok)
     return reply(
         VoiceStatus(
             active=_active(_config_dir(request)),
-            stt=VoicePathState(
-                path=stt.path.value, available=stt.path != AudioPath.NONE, reason=stt.reason
-            ),
+            stt=VoicePathState(path=stt.path.value, available=stt_ok, reason=stt.reason),
             tts=VoicePathState(path=tts.path.value, available=tts.servable, reason=tts.reason),
-            settings=VoiceSettings(max_spoken_chars=_max_spoken_chars(config_manager)),
+            front_ends=front_ends,
+            settings=VoiceSettings(
+                max_spoken_chars=_max_spoken_chars(config_manager),
+                front_end=_front_end(config_manager),
+            ),
         ),
     )
 
@@ -289,6 +404,11 @@ async def voice_control(
     ``disable`` of a session that does not hold the slot is a no-op that answers
     the slot as it is. A stale window cannot switch off the conversation another
     window just enabled.
+
+    ``front_end`` (enable only, R8) is checked BEFORE the slot moves, so an
+    unavailable one (``front_end_unavailable``) leaves both the slot and the
+    setting as they were; it is persisted to ``voice.front_end`` only once the
+    slot write succeeded.
     """
     from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
 
@@ -299,6 +419,16 @@ async def voice_control(
         tts = await _resolve_tts(config_manager, env_config, store)
         if not tts.servable:
             raise _refuse(409, "voice_unavailable", _wv.unavailable(reason=tts.reason))
+        if body.front_end is not None:
+            stt = await _resolve_stt(config_manager, env_config, store)
+            offered = await asyncio.to_thread(
+                _front_ends, config_manager, stt.reason, stt.path != AudioPath.NONE
+            )
+            chosen = next(item for item in offered if item.id == body.front_end)
+            if not chosen.available:
+                raise _refuse(
+                    409, "front_end_unavailable", _wv.front_end_unavailable(reason=chosen.reason)
+                )
     try:
         if body.op == "enable":
             change = await asyncio.to_thread(
@@ -312,6 +442,8 @@ async def voice_control(
     except (WakeLockBusy, WakeLockUnavailable) as exc:
         logger.info("voice slot write refused: %s", exc)
         raise _refuse(409, "voice_store_busy", _wv.store_busy()) from None
+    if body.op == "enable" and body.front_end is not None:
+        await asyncio.to_thread(_write_front_end, config_manager, body.front_end)
     # A deleted conversation is not a slot holder (B3): neither the slot it left
     # behind nor a "replaced" naming it is news the renderer can act on.
     active = change.active
@@ -325,6 +457,15 @@ async def voice_control(
             active=VoiceActive(**active.public()) if active is not None else None,
             replaced=replaced,
         ),
+    )
+
+
+def _write_front_end(config_manager: ConfigManager, front_end: FrontEndId) -> None:
+    """Persist the chosen front end through the settings write facade."""
+    from local_operator import settings_io
+
+    settings_io.write_setting(
+        ConfigManager(config_manager.config_dir), settings_io.BY_KEY["voice.front_end"], front_end
     )
 
 
@@ -385,6 +526,7 @@ async def _transcribe(
                 base_url=env_config.radient_api_base_url,
                 store=store,
                 correlation_session_id=session_id,
+                local_stt_url=_local_stt_url(config_manager),
             )
         except SttUnavailable as exc:
             if not exc.attempts:
@@ -422,11 +564,24 @@ async def voice_utterance(
     request_id: str = Form(...),
     file: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None, max_length=200_000),
+    text_origin: Optional[str] = Form(None, max_length=64),
+    controls: int = Form(0, ge=0, le=1),
 ) -> CRUDResponse[VoiceUtteranceResult]:
     """Transcribe (or take ``text``) and admit it to the slot's session as a prompt.
 
     The text door has the same authority as ``/messages``: the slot check, the
     pool's door and the receipt journal all apply. Only the STT step is skipped.
+
+    ``text_origin`` (R3) names a FRONT END's source for ``text`` and becomes the
+    message's ``input_path``; it is refused with a recording, whose path is the
+    STT rung's. ``controls=1`` (R6) matches the WHOLE utterance against
+    ``voice/controls.py``: a match answers ``control`` with ``admission: null``
+    and nothing is admitted or journalled.
+
+    A control take on the TEXT door is matched before the V13 card check,
+    because it never reaches the session and a spoken "stop" must still stop
+    the announcement of the card. A recorded take cannot be: it is a control
+    only once transcribed, and V13 refuses a recording before STT runs.
     """
     try:
         _REQUEST_ID.validate_python(request_id)
@@ -434,7 +589,15 @@ async def voice_utterance(
         raise _refuse(422, "invalid_voice_request", _wv.invalid_request_id()) from None
     if (file is None) == (text is None):
         raise _refuse(422, "invalid_voice_request", _wv.invalid_request())
+    if text_origin is not None and (file is not None or text_origin not in TEXT_ORIGINS):
+        raise _refuse(422, "invalid_voice_request", _wv.invalid_text_origin())
     require_slot(_config_dir(request), session_id)
+    if controls and text is not None:
+        action = voice_controls.match(text)
+        if action is not None:
+            return reply(
+                VoiceUtteranceResult(text=text.strip(), path=None, admission=None, control=action)
+            )
     # V13, before STT: a refused recording must cost nothing.
     if await _card_pending(request, session_id):
         raise _refuse(409, "approval_pending", _wv.approval_pending())
@@ -452,8 +615,16 @@ async def voice_utterance(
         # by now; the card is not, so check again before the steer can cancel it.
         if await _card_pending(request, session_id):
             raise _refuse(409, "approval_pending", _wv.approval_pending())
+        if controls:
+            action = voice_controls.match(spoken)
+            if action is not None:
+                return reply(
+                    VoiceUtteranceResult(
+                        text=spoken.strip(), path=path, admission=None, control=action
+                    )
+                )
     else:
-        spoken, path = text or "", None
+        spoken, path = text or "", text_origin
     spoken = spoken.strip()
     if not spoken:
         raise _refuse(422, "empty_transcript", _wv.empty_transcript())
@@ -638,6 +809,9 @@ async def voice_speech(
         raw = await _message_text(request, body.session_id, source.message_id)
     elif source.kind == "gate":
         raw = await _gate_text(request, body.session_id, source.request_id)
+    elif source.kind == "phrase":
+        phrase = PHRASES.get(source.key)
+        raw = phrase().envelope()["text"] if phrase is not None else None
     else:
         # Asks are spoken in slice 2 (design "Order"); until then the reference
         # resolves to nothing rather than to an unvetted question text.
@@ -696,4 +870,59 @@ async def voice_speech(
             "X-Voice-Spoken-Chars": str(len(spoken.text)),
             "Cache-Control": "no-store",
         },
+    )
+
+
+# -- POST /v1/desktop/voice/live-token ------------------------------------------
+
+
+@router.post("/v1/desktop/voice/live-token", response_model=CRUDResponse[VoiceLiveToken])
+async def voice_live_token(
+    request: Request,
+    config_manager: Annotated[ConfigManager, Depends(get_config_manager)],
+) -> CRUDResponse[VoiceLiveToken]:
+    """Mint ONE locked, single-use Gemini Live token for Electron main (R2).
+
+    MAIN ONLY. The token is a credential, and R2 keeps it off IPC the way the
+    bearer is kept off it, so a browser-shaped request (one carrying the
+    unforgeable ``Sec-Fetch-Site``, i.e. the renderer or any page) is refused
+    403 ``live_main_only`` even with a valid bearer.
+
+    409 ``live_unavailable`` when no Google AI Studio key is stored; 502
+    ``live_failed`` when Google refuses or cannot be reached, with a sentence
+    from which both secrets are masked. The key is never logged and the token
+    never is either (``voice/live_token.py``).
+
+    No slot check: main mints on the first push-to-talk press, before or
+    independent of which session holds the slot, and the token carries no
+    session context (R4/R9). The relay itself still goes through
+    ``/utterance``, which is slot-gated.
+    """
+    from datetime import datetime, timezone
+
+    from local_operator.server.desktop import _is_non_browser_caller
+    from local_operator.voice import live_token
+
+    if not _is_non_browser_caller(request):
+        raise _refuse(403, "live_main_only", _wv.live_main_only())
+    api_key = await asyncio.to_thread(_google_key, config_manager)
+    if not api_key:
+        raise _refuse(
+            409,
+            "live_unavailable",
+            _wv.live_unavailable(reason=_wv.front_end_live_no_key().envelope()["text"]),
+        )
+    try:
+        minted = await live_token.mint(api_key, now=datetime.now(timezone.utc))
+    except live_token.LiveTokenError as exc:
+        # ``str(exc)`` is built to be safe (no key, no token); see the module.
+        logger.info("voice live token refused: %s", exc)
+        raise _refuse(502, "live_failed", _wv.live_failed(reason=str(exc))) from None
+    return reply(
+        VoiceLiveToken(
+            token=minted.token,
+            expires_at=minted.expires_at,
+            new_session_expires_at=minted.new_session_expires_at,
+            model=minted.model,
+        )
     )

@@ -464,6 +464,11 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.voice import speakable as voice_speakable
 
     consumers["voice.max_spoken_chars"] = voice_speakable.DEFAULT_MAX_SPOKEN_CHARS
+    # The relay rows (session-voice.md R8): both read by the desktop voice route.
+    from local_operator.server.routes import desktop_voice
+
+    consumers["voice.local_stt_url"] = desktop_voice.DEFAULT_LOCAL_STT_URL
+    consumers["voice.front_end"] = desktop_voice.DEFAULT_FRONT_END
     return consumers
 
 
@@ -986,6 +991,8 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # arbitrary "round-trip-probe" spelling would do fine — but a real name
     # keeps the sample honest about what the field carries).
     settings_io._validate_aida_name: "Sovereign",
+    # Loopback only (R8): the rung's whole promise is that audio stays local.
+    settings_io._validate_voice_local_stt_url: "http://127.0.0.1:8000",
 }
 
 

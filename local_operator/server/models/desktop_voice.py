@@ -35,8 +35,22 @@ class VoicePathState(BaseModel):
     reason: str
 
 
+#: The listening front ends (R8). ``elevenlabs`` joins later; the vocabulary is
+#: closed so an unknown id is a 422, not a silently ignored field.
+FrontEndId = Literal["local", "gemini_live"]
+
+
+class VoiceFrontEnd(BaseModel):
+    """One front end's availability, as the status read reports it (R8)."""
+
+    id: FrontEndId
+    available: bool
+    reason: str
+
+
 class VoiceSettings(BaseModel):
     max_spoken_chars: int
+    front_end: FrontEndId
 
 
 class VoiceStatus(BaseModel):
@@ -45,6 +59,7 @@ class VoiceStatus(BaseModel):
     active: VoiceActive | None
     stt: VoicePathState
     tts: VoicePathState
+    front_ends: list[VoiceFrontEnd]
     settings: VoiceSettings
 
 
@@ -55,6 +70,9 @@ class VoiceControl(BaseModel):
 
     op: Literal["enable", "disable"]
     session_id: str = Field(min_length=1, max_length=128)
+    #: Optional on enable: chooses (and persists) the front end. Absent keeps
+    #: the configured one. Ignored on disable.
+    front_end: FrontEndId | None = None
 
 
 class VoiceControlResult(BaseModel):
@@ -67,13 +85,16 @@ class VoiceControlResult(BaseModel):
 class VoiceUtteranceResult(BaseModel):
     """``POST /v1/desktop/voice/utterance`` 200.
 
-    ``path`` is the STT rung that produced ``text``, or ``None`` when the
-    caller used the text door (no transcription ran).
+    ``path`` is the STT rung that produced ``text``, the front end's
+    ``text_origin`` when it supplied the words, or ``None`` for the plain text
+    door. ``control`` is the R6 action a ``controls=1`` take matched; a control
+    take has ``admission: null`` because nothing was admitted.
     """
 
     text: str
     path: str | None
-    admission: MessageAdmission
+    admission: MessageAdmission | None
+    control: str | None = None
 
 
 class MessageSource(BaseModel):
@@ -97,7 +118,29 @@ class AskSource(BaseModel):
     ask_id: str = Field(min_length=1, max_length=128)
 
 
-SpeechSource = Annotated[Union[MessageSource, GateSource, AskSource], Field(discriminator="kind")]
+class PhraseSource(BaseModel):
+    """A fixed catalogue phrase (R5). ``key`` is checked against the closed
+    ``wire.voice.phrase.*`` set by the route: an unknown key is 404
+    ``unknown_source``, so this source cannot carry free text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["phrase"]
+    key: str = Field(min_length=1, max_length=64)
+
+
+SpeechSource = Annotated[
+    Union[MessageSource, GateSource, AskSource, PhraseSource], Field(discriminator="kind")
+]
+
+
+class VoiceLiveToken(BaseModel):
+    """``POST /v1/desktop/voice/live-token`` 200 (R2). Main only; never logged."""
+
+    token: str
+    expires_at: str
+    new_session_expires_at: str
+    model: str
 
 
 class VoiceSpeechRequest(BaseModel):

@@ -22,6 +22,46 @@ def empty_transcript() -> Msg:
     return Msg("wire.voice.empty_transcript", {})
 
 
+def front_end_choice_gemini_live_description() -> Msg:
+    return Msg("wire.voice.front_end.choice.gemini_live.description", {})
+
+
+def front_end_choice_gemini_live_label() -> Msg:
+    return Msg("wire.voice.front_end.choice.gemini_live.label", {})
+
+
+def front_end_choice_local_description() -> Msg:
+    return Msg("wire.voice.front_end.choice.local.description", {})
+
+
+def front_end_choice_local_label() -> Msg:
+    return Msg("wire.voice.front_end.choice.local.label", {})
+
+
+def front_end_help() -> Msg:
+    return Msg("wire.voice.front_end.help", {})
+
+
+def front_end_label() -> Msg:
+    return Msg("wire.voice.front_end.label", {})
+
+
+def front_end_live_available() -> Msg:
+    return Msg("wire.voice.front_end.live_available", {})
+
+
+def front_end_live_no_key() -> Msg:
+    return Msg("wire.voice.front_end.live_no_key", {})
+
+
+def front_end_local_available() -> Msg:
+    return Msg("wire.voice.front_end.local_available", {})
+
+
+def front_end_unavailable(*, reason: str) -> Msg:
+    return Msg("wire.voice.front_end_unavailable", {"reason": reason})
+
+
 def invalid_message(*, reason: str) -> Msg:
     return Msg("wire.voice.invalid_message", {"reason": reason})
 
@@ -34,6 +74,30 @@ def invalid_request_id() -> Msg:
     return Msg("wire.voice.invalid_request_id", {})
 
 
+def invalid_text_origin() -> Msg:
+    return Msg("wire.voice.invalid_text_origin", {})
+
+
+def live_failed(*, reason: str) -> Msg:
+    return Msg("wire.voice.live_failed", {"reason": reason})
+
+
+def live_main_only() -> Msg:
+    return Msg("wire.voice.live_main_only", {})
+
+
+def live_unavailable(*, reason: str) -> Msg:
+    return Msg("wire.voice.live_unavailable", {"reason": reason})
+
+
+def local_stt_url_help() -> Msg:
+    return Msg("wire.voice.local_stt_url.help", {})
+
+
+def local_stt_url_label() -> Msg:
+    return Msg("wire.voice.local_stt_url.label", {})
+
+
 def max_spoken_chars_help() -> Msg:
     return Msg("wire.voice.max_spoken_chars.help", {})
 
@@ -44,6 +108,30 @@ def max_spoken_chars_label() -> Msg:
 
 def not_enabled() -> Msg:
     return Msg("wire.voice.not_enabled", {})
+
+
+def phrase_didnt_catch() -> Msg:
+    return Msg("wire.voice.phrase.didnt_catch", {})
+
+
+def phrase_nothing_to_repeat() -> Msg:
+    return Msg("wire.voice.phrase.nothing_to_repeat", {})
+
+
+def phrase_on_screen_first() -> Msg:
+    return Msg("wire.voice.phrase.on_screen_first", {})
+
+
+def phrase_passing_on() -> Msg:
+    return Msg("wire.voice.phrase.passing_on", {})
+
+
+def phrase_still_working() -> Msg:
+    return Msg("wire.voice.phrase.still_working", {})
+
+
+def phrase_switched() -> Msg:
+    return Msg("wire.voice.phrase.switched", {})
 
 
 def store_busy() -> Msg:
