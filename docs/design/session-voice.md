@@ -127,7 +127,7 @@ not a separate voice model with its own personality. "Aida only first" is droppe
 
 ## Relay front end (R1–R13)
 
-*Added 2026-10-16 from the architect's relay record. The R rows replace V1 and change V2, V9, V10, V11 and V12 as each row says; every V row not named stays in force. R1 and R4 are PROPOSED and await the operator (R4: who speaks replies; and the order of slices A and B), so nothing built so far depends on them.*
+*Added 2026-10-16 from the architect's relay record. The R rows replace V1 and change V2, V9, V10, V11 and V12 as each row says; every V row not named stays in force. R4 was ACCEPTED by the operator on 2026-10-16. R1 stays PROPOSED: the operator's slice answer reopened it (see R1), so nothing built so far depends on it.*
 
 The relay is a FRONT END bolted onto the slice-1 pipeline, not a replacement for it. Slice 1 already does the back half: the one-session slot (V3), the utterance door (V5), take-to-turn binding (V14/V15), exact reply speech by source reference (V8) and no approval by voice (V7/V13). The live model's only new job is to HEAR a take and decide RELAY or CONTROL.
 
@@ -136,6 +136,8 @@ The relay is a FRONT END bolted onto the slice-1 pipeline, not a replacement for
   **Why:** the operator's request, with V1's objection removed by R4.
   **Overturned by:** R13's measurement favouring the model's own voice for content (not expected).
   **Owner:** manager.
+  **Operator's slice answer (2026-10-16), verbatim:** "In the earlier version 1, you had it so that we were able to use a live audio agent or something like that. That essentially is what I want to continue using, like that same exact setup. However, have it so that the responses that the agent, the audio agent is reading or pulling from is the responses from the agent in the local operator session."
+  R1, R8's rejection of the Qwen rig, and R10 are reopened; the architect's v2 record is pending.
 - **R2 — Who owns what (changes V2).**
   **Taken:**
   - Electron main owns the Live WebSocket (`src/main/voice-live.ts`).
@@ -155,8 +157,8 @@ The relay is a FRONT END bolted onto the slice-1 pipeline, not a replacement for
   **Commits us to:** a closed `text_origin` set (anything else is 422 `invalid_voice_request`), refused alongside a recording.
   **Overturned by:** `inputTranscription` arriving after the tool call, or missing, on 3.8 Live (unverified). R3 then degrades to the tool argument; if more than 5% of takes need the fallback, show the admitted text for a 2 s cancel window before sending.
   **Owner:** coder.
-- **R4 — Outbound speech: exact recitation, model voice muted.** **PROPOSED — pending operator decision.**
-  **Proposed:** session replies, gate announcements and asks are spoken ONLY by `/voice/speech {source}` (V8): server-resolved text → `speakable.clean/cap` → the TTS cascade. The Live model's audio output is discarded by main, and its tool responses use `scheduling: SILENT`. Session text is never sent to the Live model, so it has no content to paraphrase. Google's docs make the same split: TTS "is tailored for … exact text recitation", while Live is for "unstructured" audio.
+- **R4 — Outbound speech: exact recitation, model voice muted.** **ACCEPTED by the operator, 2026-10-16:** "Text-to-speech reads it exactly; the audio agent's own voice stays muted".
+  **Taken:** session replies, gate announcements and asks are spoken ONLY by `/voice/speech {source}` (V8): server-resolved text → `speakable.clean/cap` → the TTS cascade. The Live model's audio output is discarded by main, and its tool responses use `scheduling: SILENT`. Session text is never sent to the Live model, so it has no content to paraphrase. Google's docs make the same split: TTS "is tailored for … exact text recitation", while Live is for "unstructured" audio.
   **Residual:** none for content. The remaining risks are a misheard take (R3) and a wrong RELAY/CONTROL call (R6).
   **Owner:** reviewer (checks that no path speaks free text or reaches `answer_gate`).
   *Built so far without depending on R4:* the system instruction and tool list live as data in `voice/live_config.py`, so an R4 change is a data edit there plus its pinned test.
