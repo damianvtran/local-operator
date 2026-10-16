@@ -1696,14 +1696,11 @@ def _plan_guard_arguments(name: str, arguments: Any) -> Any:
     position — every other op, name and shape — is returned BY IDENTITY, which is what
     lets the caller keep today's inputs, and today's verdict, exactly.
 
-    A masked copy is handed over only if the guard can WALK it, which is what
-    ``_plan_guard_copy_encodable`` decides: ``guard()`` encodes every string the walk
-    reaches (its byte-cap arm is ``len(value.encode("utf-8"))``), and a document carrying
-    a lone-surrogate escape decodes to a character the re-serialization writes back
-    unwrapped, so the walk can raise ``UnicodeEncodeError`` — a ``ValueError``, which
-    ``retained_arguments``' ``except MemoryError`` does NOT cover — instead of answering.
-    A copy that cannot be walked is not used, and the caller's ORIGINALS go to the guard
-    instead: that is the copy, and therefore the verdict, of the tree before this change.
+    A masked copy is handed over only if the guard's own walk of it ANSWERS, which is what
+    ``_plan_guard_copy_encodable`` decides by ASKING that walk — read it for why no check
+    of a serialization can answer this question. A copy the walk cannot be asked about is
+    not used, and the caller's ORIGINALS go to the guard instead: that is the copy, and
+    therefore the verdict, of the tree before this change.
     """
     if not isinstance(arguments, dict):
         return arguments
@@ -1729,30 +1726,48 @@ def _plan_guard_arguments(name: str, arguments: Any) -> Any:
 
 
 def _plan_guard_copy_encodable(value: Any) -> bool:
-    """Whether ``guard()`` can walk ``value`` at all, rather than raising out of it.
+    """Whether the guard's own walk over ``value`` ANSWERS, rather than raising out of it.
 
-    ``guard()``'s byte-cap arm is ``len(value.encode("utf-8"))``, so every string it
-    reaches is ENCODED, and ``guard_encoded`` re-serializes a dict with
-    ``ensure_ascii=False`` for the same reason. A wire document carrying a lone-surrogate
-    escape (``"\\ud800"``) decodes to a bare surrogate character, and that spelling is
-    written back UNWRAPPED, so encoding it raises ``UnicodeEncodeError``. Nothing on the
-    path catches it — it is a ``ValueError``, and ``retained_arguments`` catches
-    ``MemoryError`` — so it would leave the planning loop and abort the rest of the
-    batch's planning rather than produce a verdict.
+    ``retained_arguments`` walks a memory call with ``memory_privacy.guard_encoded``, and
+    that walk ENCODES every string it reaches (``guard()``'s byte-cap arm is
+    ``len(value.encode("utf-8"))``) and re-serializes every dict/list with
+    ``ensure_ascii=False``. A wire document carrying a lone-surrogate escape (``"\\ud800"``)
+    decodes to a bare surrogate character, which the re-serialization writes back
+    UNWRAPPED, so encoding it raises ``UnicodeEncodeError``. Nothing on the path catches
+    it — it is a ``ValueError``, and ``retained_arguments`` catches ``MemoryError`` — so
+    it would leave the planning loop and abort the rest of the batch's planning rather
+    than produce a verdict.
 
-    Only a DECODED copy can acquire such a character (the wire spelling of it is plain
-    ASCII escapes, which encode fine), which is why the question is asked of the copy
-    about to be handed to the guard. ``json.dumps`` cannot raise on it — the encoder
-    emits the character bare — so the check is the ENCODE of the dump, which covers every
-    string the walk will reach, keys included.
+    The walk is MORE than a serialization of ``value``: it also ``json.loads``es any
+    string that ``lstrip()``s to ``{``/``[`` and walks the DECODED copy (depth <= 4, see
+    ``memory_privacy.guard_encoded``). That decoded copy is where a wire document can carry
+    the character as PLAIN ASCII text — ``{"a": "\\ud800"}`` is thirteen characters that
+    encode fine, and only the string's own re-DECODE reaches the bare surrogate. MEASURED
+    on ``d259fb91d``: for a read whose admitted ``q`` reference was blanked and which
+    carried that spelling as a sibling, a check of the copy's JSON spelling answered
+    ``True``, the masked copy was handed over, and the walk raised ``UnicodeEncodeError``
+    out of the seam two frames later.
+
+    Which is why this helper asks the question OF the walk instead of re-spelling its
+    reach: the copy it approves is the copy the walk then gets, so the two cannot
+    disagree about which strings are reached. The cost is one extra walk, paid only by the
+    calls that HAVE an admitted reference position.
     """
+    from local_operator.memory import MemoryError
+    from local_operator.memory_privacy import guard_encoded
+
     try:
-        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError):
-        # UnicodeEncodeError (a ValueError) = a string the guard cannot encode; TypeError
-        # = a value with no JSON spelling at all (unreachable from a decoded wire
-        # document, but the conservative answer is the same one).
+        guard_encoded(value)
+    except UnicodeEncodeError:
+        # The one failure this helper screens for: a string the walk must encode holds a
+        # character UTF-8 cannot carry, and the walk has no verdict to give about it.
         return False
+    except MemoryError:
+        # The walk stopped with an ANSWER (the byte cap, or a recognised sensitive
+        # value). That is the outcome this helper exists to secure, and the verdict it
+        # belongs to is ``retained_arguments``' to make, on this same copy, a moment
+        # later — never this helper's to pre-empt.
+        return True
     return True
 
 
@@ -1829,8 +1844,9 @@ def _plan_guard_raw(name: str, raw: str) -> str:
     own copy holds an admitted reference is re-serialized, and only when the decoder
     and the encoder can carry the rest of it ACROSS UNCHANGED (see
     ``_decode_plan_guard_raw``) — an unparseable ``raw``, a non-object one, one whose
-    own value is NOT an admitted reference, and one whose round trip is lossy are all
-    returned untouched, so the fail-closed refusal each produces today is unchanged.
+    own value is NOT an admitted reference, one whose masked copy the guard's walk cannot
+    be asked about (``_plan_guard_copy_encodable``), and one whose round trip is lossy are
+    all returned untouched, so the fail-closed refusal each produces today is unchanged.
     """
     try:
         decoded, lossless = _decode_plan_guard_raw(raw)
@@ -1863,12 +1879,20 @@ def _plan_guard_inputs(name: str, arguments: Any, raw: str | None) -> tuple[Any,
     copies for history/events from those originals. A masked copy that still trips
     the guard — a secret in a sibling parameter, a secret-shaped value in either of
     the two positions, an unparseable raw — refuses through the very same branch,
-    byte-identically to today.
+    byte-identically to today. A masked copy the guard's walk cannot be ASKED about
+    (see ``_plan_guard_copy_encodable``) is not handed over at all, in either carrier.
     """
     masked_arguments = _plan_guard_arguments(name, arguments)
     if masked_arguments is arguments:
         return arguments, raw
-    return masked_arguments, _plan_guard_raw(name, raw) if raw else raw
+    masked_raw = _plan_guard_raw(name, raw) if raw else raw
+    # The wire JSON is a SECOND carrier of the same call and the walk re-decodes it too,
+    # so a masked raw the walk cannot be asked about makes the pair no more usable than
+    # an unwalkable argument copy: BOTH go back, and the guard is then asked exactly what
+    # the tree before this change asked it.
+    if raw and not _plan_guard_copy_encodable(masked_raw):
+        return arguments, raw
+    return masked_arguments, masked_raw
 
 
 #: User-facing copy for the input-refusal recovery tokens the failover walk

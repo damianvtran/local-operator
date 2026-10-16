@@ -29,6 +29,18 @@ reference rows — a colliding id in a read's ``q`` (with and without a raw JSON
 and beside ``limit=5``) and an id in a recall's ``text`` (colliding or not) — and on
 nothing else.
 
+**The gate asks the guard's own WALK about a copy, never a spelling of the copy.** A check
+of the copy's JSON spelling cannot answer this question, and that is measured, not argued:
+``memory_privacy.guard_encoded`` re-decodes any string that ``lstrip()``s to ``{``/``[`` and
+walks the DECODED copy (depth <= 4), so a wire document can carry an unencodable lone
+surrogate as PLAIN ASCII TEXT — thirteen characters that encode fine — and produce the bare
+character only one re-decode later. BOTH carriers (the argument dict and the streamed wire)
+are therefore masked only while the walk can still be asked about them, and a copy it cannot
+be asked about is not handed over at all: the caller's own inputs are, which is the copy,
+and therefore the verdict, of the tree before this change. Three session-level cases and one
+seam-level case (the native flow parses arguments FROM the raw, so no streamed wire can
+carry the spelling that only the raw holds) pin that below.
+
 RED (the same tests over the base tree, ``PYTHONPATH`` pointed at it) and GREEN (here)
 are both session-level: a real ``Session``, the real builtin tools, a scripted provider,
 and the assertion is on the session's own events and retained rows — never on the
@@ -49,6 +61,7 @@ from local_operator.harness.loop import (
     _decode_plan_guard_raw,
     _plan_guard_copy_encodable,
     _plan_guard_inputs,
+    _plan_guard_raw,
 )
 from local_operator.harness.types import (
     AbortSignal,
@@ -434,6 +447,108 @@ async def test_a_value_the_guard_cannot_encode_is_refused_rather_than_raising(
     details = (run.row.get("provider_payload") or {}).get("details") or {}
     assert details == {"__fault": "invalid_arguments", "__synthetic": True}, details
     assert run.row["tool_name"] == "read"
+
+
+#: A lone surrogate carried as PLAIN ASCII TEXT: the sibling's own text IS a JSON document
+#: (``{"a": "\\ud800"}``). Thirteen characters that encode fine — no check of the wire, of
+#: the argument dict, or of the masked copy's own spelling can see the character, because it
+#: does not exist until the walk re-DECODES that string (``memory_privacy.guard_encoded``,
+#: depth <= 4). It is the arm the round-2 fix's spelling check could not reach, one level
+#: deeper than the flat sibling above.
+NESTED_SURROGATE = json.dumps({"a": "\ud800"})
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        pytest.param(NESTED_SURROGATE, id="depth-1"),
+        pytest.param(json.dumps({"a": NESTED_SURROGATE}), id="depth-2"),
+        pytest.param([NESTED_SURROGATE], id="inside-a-list"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_nested_json_surrogate_in_a_sibling_is_refused_rather_than_raising(
+    tmp_path, monkeypatch, sibling: Any
+):
+    """A nested document is WALKED THROUGH, so the gate must ask the walk, not a spelling.
+
+    ``guard_encoded`` re-decodes every string whose own text is a ``{``/``[`` document and
+    walks the DECODED copy, so the unencodable character can ride the wire as plain ASCII
+    and appear only one re-decode later. MEASURED on ``d259fb91d``, the head this fix
+    replaces: the gate's check of the masked copy's own JSON spelling answers ``True``
+    (everything in that spelling is ASCII), the masked copy is handed over, and the walk
+    raises ``UnicodeEncodeError`` — out of ``session.prompt``, for the whole turn — where
+    the base tree refuses this same call cleanly, because base's walk never gets past the
+    reference-bearing ``path`` value the mask blanks.
+
+    RED, measured at the previous head (``d259fb91d``) with THIS file, at the seam::
+
+        _plan_guard_copy_encodable({"s": <the nested text>}) is True   # the spelling check
+        _plan_guard_inputs("read", args, raw) -> a MASKED copy, both carriers
+        retained_arguments(...) -> UnicodeEncodeError: 'utf-8' codec can't encode
+            character '\\ud800' in position 0: surrogates not allowed
+
+    and at session level the exception left ``session.prompt``. This head answers with the
+    base tree's own refusal: ``0`` starts, ``__synthetic``/``__fault=invalid_arguments``,
+    the plan gate's sentence, and the turn completes.
+    """
+    args = {"path": f"memory://global?q={DEVICE_ID}", "s": sibling}
+    raw = json.dumps(args)
+    # The trap, spelled out: this wire is ASCII throughout, so a check of any SPELLING of
+    # it answers "the guard can encode this" — and the character is not a character here.
+    assert raw.isascii()
+    assert json.dumps(args, ensure_ascii=False).encode("utf-8").isascii()
+    # Asked of the walk — the copy the guard is actually handed — the answer is the other
+    # one. The six-character TEXT ``\\ud800`` is the control: it is walked, not decoded.
+    assert _plan_guard_copy_encodable({"s": sibling}) is False
+    assert _plan_guard_copy_encodable({"s": "\\ud800"}) is True
+
+    guarded = _plan_guard_inputs("read", args, raw)
+    assert guarded[0] is args and guarded[1] is raw, (
+        "a copy the walk cannot be asked about must fall back to the caller's own inputs",
+        guarded,
+    )
+    assert (
+        retained_arguments("read", *guarded)[2] is True
+    ), "and the guard must answer, not raise: this is the base tree's own refusal"
+
+    run = await _run_one_call(tmp_path, monkeypatch, "read", args, raw=raw)
+    assert len(run.starts) == 0, run.result_text
+    assert run.synthetic and run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    details = (run.row.get("provider_payload") or {}).get("details") or {}
+    assert details == {"__fault": "invalid_arguments", "__synthetic": True}, details
+    assert run.row["tool_name"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_a_nested_json_surrogate_riding_only_the_raw_is_refused(tmp_path, monkeypatch):
+    """The wire is a SECOND carrier: when only IT holds the nest, neither copy goes over.
+
+    The two copies are masked on their OWN contents (see the corpus note above), so a raw
+    can be the only carrier of a spelling. No streamed provider wire can disagree with
+    itself — the native flow parses a call's arguments FROM its raw — which is why QA round
+    3 measured this spelling at the seam and so does this test; the seam still owes an
+    answer, and the one it owes is the base tree's refusal.
+
+    MEASURED on ``d259fb91d``: the argument copy was clean, ``_plan_guard_raw`` handed over a
+    re-serialized wire whose own spelling is ASCII, and the walk raised ``UnicodeEncodeError``
+    out of the seam. MEASURED here now: the raw falls back to the caller's own wire and
+    ``retained_arguments`` answers with the base tree's refusal — the walk's own
+    ``MemoryError``, taken at the reference-bearing ``path`` the unmasked wire still carries.
+    """
+    args = {"path": f"memory://global?q={DEVICE_ID}", "s": "clean"}
+    raw = json.dumps({"path": f"memory://global?q={DEVICE_ID}", "s": NESTED_SURROGATE})
+    assert raw != json.dumps(args), "the two carriers disagree, which is the whole case"
+    assert raw.isascii()
+    assert (
+        _plan_guard_raw("read", raw) is raw
+    ), "an unmaskable wire copy must not be handed over in place of the caller's own"
+
+    guarded = _plan_guard_inputs("read", args, raw)
+    assert guarded[1] is raw, guarded
+    assert (
+        retained_arguments("read", *guarded)[2] is True
+    ), "the guard must answer, not raise: this is the base tree's own refusal"
 
 
 @pytest.mark.asyncio
