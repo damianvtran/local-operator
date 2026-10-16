@@ -4086,13 +4086,29 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # "package pattern(s) … not found in workspace".
     #
     # The invocation reading is what the rule always MEANT (see "the client
-    # binary" above): the word must begin a command — the string start, or just
-    # after whitespace (a space, a tab, or a LINE BREAK, which is a command
-    # boundary in a multi-line result) or a shell separator — and must be
-    # followed by whitespace, so a filename stem or a hyphenated slug cannot
-    # anchor it. A path-qualified invocation is admitted on purpose (see the
-    # leading class), because a client reached by an absolute path IS being
-    # invoked; what the class refuses is a name that is not being invoked at all.
+    # binary" above): the name must not be a FRAGMENT of a longer token, and it
+    # must be followed by whitespace. The negative lookbehind states the first
+    # half — the name may not be preceded by a word character, a dot or a hyphen,
+    # which is what "a NAME" means here — and the `(?=[ \t])` lookahead states the
+    # second, which is what "being INVOKED" means: `<name>.rs`, `<name>/main.rs`,
+    # `<name>-driver` and `login-<name>` are all fragments, and none of them can
+    # anchor the rule any more.
+    #
+    # The lookbehind replaces an ENUMERATED leading class (`^`, space, tab, and
+    # the shell separators) that leaked, twice, in review round 1: a client at the
+    # start of a line inside a multi-line result (`\n` missing) and one inside a
+    # BACKTICK substitution both stopped masking, each measured as a true positive
+    # the old anchor caught. Enumerating the ways a command can be reached is a
+    # losing game — the separators are unbounded — so the class is now stated as
+    # the NEGATIVE space instead (everything that is not a fragment continues to
+    # work: `$(`, `|`, `&&`, `;`, a backtick, `--`, `exec(`, a quote, an absolute
+    # path, and the string start).
+    #
+    # Every true positive keeps its mask: the inline-password spellings pinned in
+    # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
+    # redis-cli, clickhouse-client, influx) match the anchored form, and the
+    # published-port negatives (``docker run -p``, ``ssh -p``) were never in this
+    # alternation.
     #
     # Every true positive keeps its mask: the inline-password spellings pinned in
     # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
@@ -4102,7 +4118,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "client-inline-password",
         re.compile(
-            r"(?i)((?:^|[ \t\n\r(;|&/])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
+            r"(?i)((?<![A-Za-z0-9_.\-])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
             r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
             r"(?=[ \t])"
             r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"

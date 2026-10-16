@@ -8806,6 +8806,13 @@ def test_a_client_name_that_is_not_an_invocation_never_anchors_the_rule(line: st
         "line one\n" + "mysql -p " + "s3cr3tPw",
         "line one\r\n" + "psql -p " + "s3cr3tPw",
         "line one\n" + "redis-cli -a " + "s3cr3tPw",
+        # ...and a BACKTICK substitution is a command too: review round 1's second
+        # leak. The enumerated leading class missed it; the negative lookbehind
+        # that replaced the class admits every separator by construction.
+        "`" + "mysql -p " + "s3cr3tPw" + "`",
+        "$(" + "psql -p " + "s3cr3tPw" + ")",
+        "x || " + "redis-cli -a " + "s3cr3tPw",
+        "-- " + "mysqldump -p " + "s3cr3tPw",
     ],
 )
 def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> None:
