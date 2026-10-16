@@ -14892,7 +14892,7 @@ class OperatorApp(App[None]):
             )
             # A callable alone promises no sequence. Unknown facade responses
             # cannot authorise proof; keep the existing loaded-window fallback.
-            proof_history = (
+            proof_history = list(
                 loaded_proof[-4096:] if isinstance(loaded_proof, (list, tuple)) else history[-4096:]
             )
             projected = project_settled_rows(
