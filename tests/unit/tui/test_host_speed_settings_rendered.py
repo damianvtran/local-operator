@@ -289,6 +289,17 @@ async def capture_pair(proof, pilot, case: str, phase: str) -> set[str]:
 
     proof.output.mkdir(exist_ok=True)
     generated: set[str] = set()
+    # Settle ONCE before either sample. The observed two-row motion is the
+    # transcript tail's scroll animator reacting to a row arriving (design round
+    # 3, D2 and its viewed frames), and this primitive is the harness's own sync
+    # for exactly that class: it waits for animator completion plus the
+    # message/callback-scheduled reflow that follows. ``pilot.pause()`` already
+    # drains the ``call_later`` pump, so the added value here is animator
+    # completion. LIMIT, stated plainly: this does NOT await a not-yet-completed
+    # async task -- an in-flight ``to_thread`` or provider call can still land
+    # between the samples. It is NOT polling until the two geometries agree, and
+    # it adds no tolerance or dropped field.
+    await pilot.wait_for_scheduled_animations()
     for frame in ("post-pause-1", "post-pause-2"):
         await pilot.pause()
         stem = f"{case}-{phase}-{frame}"
@@ -308,6 +319,8 @@ def publish_proof(
     Privacy, provenance and the combined job quota still precede EVERY copy.
     The private target argument isolates pure publisher controls from the real
     CI artifact directory; it is not an App/exporter/renderer substitution.
+    The strict verdict that follows compares two POST-SETTLE samples; see the
+    narrowed claim at its assertion.
     """
     assert re.fullmatch(r"(?:host-speed|ownership)-(?:100|60)x30", case)
     assert phase in proof.expected_phases and re.fullmatch(r"[a-z-]+", phase)
@@ -412,7 +425,69 @@ def publish_proof(
         manifest_path.write_bytes(manifest_bytes)
     # This is the SAME complete grid/screen/widgets equality. Publishing safe
     # failing evidence must never turn the call or final teardown into PASS.
+    # NARROWED CLAIM: with both samples now post-settle, this measures "two
+    # post-settle frames are identical". A reflow that lands BEFORE sample 1 is
+    # therefore no longer observed here, while motion BETWEEN the two samples is
+    # still detected. It is not a "no motion from first paint" guarantee.
     assert measured[0] == measured[1], "consecutive frames changed geometry"
+
+
+@pytest.mark.asyncio
+async def test_capture_pair_settles_before_sampling_both_frames(monkeypatch, tmp_path):
+    """Ordered control for the sampling ORDER/contract only.
+
+    No clock, no App, no exporter: a stub pilot records call order and a stub
+    writer records each export, so this pins that the settle precedes BOTH
+    samples and fails if it is moved after the first sample or dropped. SCOPE
+    LIMIT: because it stubs the primitive, it CANNOT detect whether the real
+    ``wait_for_scheduled_animations`` returns before a receipt has arrived -- it
+    proves placement, never completion. Design round 3's viewed frames are the
+    separate evidence for the benign motion itself.
+    """
+    import scripts.visual_capture as visual_capture
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    order: list[str] = []
+
+    class _OrderPilot:
+        async def wait_for_scheduled_animations(self) -> None:
+            order.append("settle")
+
+        async def pause(self) -> None:
+            order.append("sample")
+
+    def fake_save_capture(_app, target) -> str:
+        order.append("export")
+        Path(target).write_text("<svg/>")
+        Path(target).with_suffix(".geometry.json").write_text(
+            json.dumps(
+                {
+                    "grid": [100, 30],
+                    "css_path": ["local_operator.tcss"],
+                    "screen": {"class": "SyntheticOrderControl"},
+                    "widgets": [{"region": [0, 0, 100, 30]}],
+                }
+            )
+        )
+        return str(target)
+
+    monkeypatch.setattr(visual_capture, "save_capture", fake_save_capture)
+    proof = SimpleNamespace(
+        root=tmp_path / "synthetic-order",
+        output=tmp_path / "order",
+        app=SimpleNamespace(size=(100, 30)),
+        expected_phases={"happy"},
+        violations=[],
+        case_note="Synthetic ordered control; not rendered evidence.",
+    )
+    generated = await capture_pair(proof, _OrderPilot(), "host-speed-100x30", "happy")
+    assert order == ["settle", "sample", "export", "sample", "export"]
+    assert generated == {
+        "host-speed-100x30-happy-post-pause-1.svg",
+        "host-speed-100x30-happy-post-pause-1.geometry.json",
+        "host-speed-100x30-happy-post-pause-2.svg",
+        "host-speed-100x30-happy-post-pause-2.geometry.json",
+    }
 
 
 @pytest.mark.parametrize("fault", ["second-private", "combined-quota", "safe-unstable"])
