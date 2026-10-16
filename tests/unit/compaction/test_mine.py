@@ -205,6 +205,31 @@ def test_tool_error_line_is_not_an_assistant_decision():
     assert carry.decisions == []
 
 
+def test_carry_rows_skips_refused_but_keeps_the_rest():
+    """BLOCKER 1: one guard-refused candidate must not fail the whole capture.
+
+    A single refused substring (an ordinary path the miner legitimately mines out
+    of tool results, e.g. ``docs/.env``) made ``validate_fact`` raise inside
+    ``finish`` and took the whole pass to a ``failed`` terminal with zero rows.
+    Every candidate is guarded and a refused one is skipped.
+    """
+    from local_operator.memory_capture import carry_rows
+
+    carry = (
+        "## Identifiers\n"
+        "- https://example.com/api?key=abcd docs/.env\n"
+        "- ~/.aws/credentials\n"
+        "- /Users/damian/local-operator/ok.py\n"
+        "## Operator asks\n"
+        "- keep the manager posting updates\n"
+    )
+    rows = carry_rows(carry)
+    bodies = [row["body"] for row in rows]
+    assert any("ok.py" in body for body in bodies)
+    assert any("keep the manager posting updates" in body for body in bodies)
+    assert all(body.strip() for body in bodies)
+
+
 def test_digest_lines_are_bounded_and_tier_labelled():
     carry = Carry(asks=["ask one"], decisions=["dec one"], identifiers=["#9"])
     lines = carry_digest_lines(carry, max_chars=1000)
