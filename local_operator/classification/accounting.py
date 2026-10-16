@@ -63,10 +63,12 @@ THE RULES THE ROWS KEEP (inherited from ``channel_spend``, restated where they b
 
 ``cost_source`` is ``server_reported`` for the Radient leg (first-party server figure)
 and ``provider_reported`` for the others (a third party's own ``usage.cost``). The
-shared ``radient_cost.channel_record_from_cost`` converter is deliberately NOT used:
-it stamps ``server_reported`` on every row that carries an amount, which would
-mislabel two of the three legs, and its input is the Radient ``cost`` wire object
-this route does not (yet) send — the decision routes report ``usage.cost``.
+shared ``radient_cost.channel_record_from_cost`` converter is still deliberately NOT
+used: it stamps ``server_reported`` on every row that carries an amount, which would
+mislabel two of the three legs. (Its PARSER, ``cost_from_payload``, IS the one
+adapter for the Radient ``cost`` object — ``vendors._parse_response`` reads the
+amount and basis through it, since measured 2026-10-16 the Radient decision route
+does send that object; only the record-stamping converter is bypassed.)
 
 This module is a LEAF over ``channel_spend`` (itself a leaf), so importing it does
 not drag the session package in. It is imported only by the service, which the
@@ -186,12 +188,20 @@ def _cost_source(vendor: str) -> str:
 
 
 def answered_record(response: DecisionResponse, *, posts: int) -> ChannelSpendRecord:
-    """The row for a leg that answered: the vendor's own ``usage.cost``, or unknown.
+    """The row for a leg that answered: the vendor's own figure, or unknown.
 
-    ``response.cost_usd is None`` (the vendor sent no ``usage.cost``) stays an unknown
+    ``response.cost_usd is None`` (neither source stated an amount) stays an unknown
     amount — never ``0`` — so the session total is a lower bound rather than a
-    claim. ``billed`` because ``usage.cost`` is what THIS request was charged.
+    claim.
+
+    ``billing_basis`` is the leg's OWN basis when it stated one (Radient's
+    top-level ``cost`` object labels a settled charge ``billed`` and an unsettled
+    one ``estimated`` — a quote must never print as a charge), else today's
+    ``billed`` default, which is what a third-party ``usage.cost`` is: the request's
+    own receipt. Kept additive: ``cost_basis`` is optional on
+    :class:`DecisionResponse`, so nothing that predates it changes behaviour.
     """
+
     # Channel rows persist in SQLite's signed INTEGER column. Decimal conversion
     # avoids float multiplication overflow, but an integer beyond the storage range
     # is still not a usable receipt. Keep it unknown, never truncate or invent zero.
@@ -207,7 +217,7 @@ def answered_record(response: DecisionResponse, *, posts: int) -> ChannelSpendRe
         units=posts,
         unit=CALL_UNIT,
         amount_micro=amount,
-        billing_basis=BASIS_BILLED,
+        billing_basis=response.cost_basis or BASIS_BILLED,
         cost_source=_cost_source(response.vendor) if amount is not None else COST_SOURCE_NONE,
         status=STATUS_OK,
     )
