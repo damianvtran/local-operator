@@ -251,7 +251,11 @@ MEASURED_TOKENS: dict[str, int] = {
     "bridge": 559,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
-    "browser": 1327,
+    # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
+    # the field's own description to the doc — the deliberate cost of the value
+    # never appearing in the transcript (incident: a literal password in `type`
+    # reached a subagent's transcript, where no shape pass could see it).
+    "browser": 1424,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
