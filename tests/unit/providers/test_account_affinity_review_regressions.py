@@ -63,8 +63,18 @@ async def test_actual_api_mode_change_rejects_incompatible_lease_in_both_directi
     ]
     remaining = [0.9, 0.2]
 
+    # Captured ONCE, before any request: the product treats a report stamped
+    # after its own now-snapshot as no evidence (a future-dated report cannot
+    # testify), and a call-time stamp can cross the next millisecond and flip
+    # BOTH rows unknown — silently exercising the crc32 fallback order instead
+    # of the headroom ranking this test exists to pin
+    # (crc32("synthetic-mode") % 2 == 1 starts that fallback at rows[1],
+    # inverting the account order). A single capture cannot date after the
+    # snapshot. The sibling test below takes the same single capture; do not
+    # key this to one parametrisation.
+    now = int(time.time() * 1000)
+
     def report(row, provider):
-        now = int(time.time() * 1000)
         return UsageReport(
             provider,
             fetched_at=now,
