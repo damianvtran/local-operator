@@ -36,7 +36,13 @@ WHAT EACH FRAME IS FOR (design §5.0/§5.3, R7):
 * ``-ended``    — an ENDED (stopped) conversation's own screen: the dock, from
   the session's asks in the index, and its sheet showing the timed-out ask as
   lapsed — dismiss, no options. ``-ended-bar`` is the screen before the tap,
-  and shows the sheet did not open by itself over a queue of lapsed asks.
+  and shows the sheet did not open by itself over a queue of lapsed asks: the
+  quiet "1 lapsed question" entry, dim rather than accent.
+* ``-stale-bar`` / ``-stale`` — a STOPPED conversation whose index row still
+  says ``open`` past its deadline: the relay re-derives it to ``timed_out``, so
+  the same quiet entry, and a lapsed card WITH Dismiss.
+* ``-sheet`` is the MIXED sheet: open asks beside the lapsed ``qa-deadline``,
+  with the title counting only the open ones as questions.
 * ``-sheet`` also carries the LAPSED card (``qa-deadline``, timed out): the
   question read-only under "Lapsed — the agent took its default and moved on",
   with dismiss and no options.
@@ -441,6 +447,23 @@ def main() -> None:
             time.sleep(0.6)
             page.shot(outdir / f"{label}-{vp}-ended.png")
             report[f"{vp}-ended"].update(json.loads(page.js(SHEET_PROBE)))
+
+            # 2b3. A STALE `open` past its deadline on a stopped conversation (review
+            #      round 1, R1; QA Q1): re-derived on the runtime's host to
+            #      `timed_out`, so the card carries Dismiss and nothing calls it waiting.
+            page.goto(f"{base}/#/s/asks-stale")
+            time.sleep(2.5)
+            report[f"{vp}-stale-settle"] = {
+                "autoOpened": page.js("document.querySelector('[role=\"dialog\"]') !== null")
+            }
+            report[f"{vp}-stale-bar"] = json.loads(page.js(BAR_PROBE))
+            page.shot(outdir / f"{label}-{vp}-stale-bar.png")
+            report[f"{vp}-stale"] = {"tap": page.js(TAP_ROW)}
+            time.sleep(1.2)
+            report[f"{vp}-stale"]["drag"] = scroll_to_card(page, "sa-open")
+            time.sleep(0.6)
+            page.shot(outdir / f"{label}-{vp}-stale.png")
+            report[f"{vp}-stale"].update(json.loads(page.js(SHEET_PROBE)))
 
             # 2c. The BUSIEST STACK (design round 1, D6): todos, a running roster,
             #     an approval card AND the ask chip sharing one column.

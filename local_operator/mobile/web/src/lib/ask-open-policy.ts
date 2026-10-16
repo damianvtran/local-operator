@@ -108,8 +108,6 @@ export const OPEN_WINDOW_MS = 45_000;
 export interface PolicyAskRow {
 	ask_id: string;
 	status?: string;
-	/** Epoch ms; absent or 0 means no deadline. */
-	expires_at?: number;
 }
 
 /** An ask the user can still act on: open, or timed out and still answerable.
@@ -121,18 +119,13 @@ function isAnswerableStatus(status: string | undefined): boolean {
 	return value === "open" || value === "timed_out";
 }
 
-/** An ask whose deadline has passed: the agent took its default and moved on.
+/** An ask whose deadline has passed: the agent goes ahead without it.
  *
- *  The same rule as ``lib/asks.ts`` ``isLapsed`` (``timed_out``, or ``open`` with
- *  a deadline at or before the phone's clock — the index keeps reporting
- *  ``open`` for a runtime stopped before its deadline), restated over the two
- *  fields for the same reason as above. */
-function isLapsedRow(row: PolicyAskRow, nowMs: number): boolean {
-	const value = row.status ?? "open";
-	if (value === "timed_out") return true;
-	if (value !== "open") return false;
-	const expires = Number(row.expires_at) || 0;
-	return expires > 0 && expires <= nowMs;
+ *  The same rule as ``lib/asks.ts`` ``isLapsed`` — the status alone, judged on the
+ *  runtime's host, never the phone's clock — restated for the same reason as
+ *  above. */
+function isLapsedRow(row: PolicyAskRow): boolean {
+	return (row.status ?? "open") === "timed_out";
 }
 
 /**
@@ -166,12 +159,11 @@ function isLapsedRow(row: PolicyAskRow, nowMs: number): boolean {
 export function readQueue(
 	rows: readonly PolicyAskRow[] | undefined | null,
 	tally: number | undefined | null,
-	nowMs: number = Date.now(),
 ): QueueReading {
 	const published = Array.isArray(rows) ? rows : [];
 	if (published.length > 0) {
 		const outstanding = published.filter((row) => isAnswerableStatus(row?.status));
-		if (outstanding.some((row) => !isLapsedRow(row, nowMs))) return "pending";
+		if (outstanding.some((row) => !isLapsedRow(row))) return "pending";
 		// Rows, and none of them answerable now. That is "everything addressed" only
 		// if the tally agrees: ``asks_open`` counts outstanding asks BEFORE the wire's
 		// text bound drops rows, and the drop order keeps newer settled rows over an

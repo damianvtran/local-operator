@@ -60,12 +60,11 @@ describe("AskDock", () => {
 		expect(open).toHaveBeenCalledTimes(1);
 	});
 
-	it("counts a timed-out ask too, and still NAMES it", () => {
+	it("still NAMES a timed-out ask when it is the only one left", () => {
 		/* U7 (UX round 1): with only a timed-out ask left the chip counted it but
-		   previewed nothing — the count and the preview disagreed about which
-		   question was waiting, in the one state R7 keeps answerable. */
+		   previewed nothing. The count is now the lapsed one (design round 1, D1,
+		   pinned below); the preview must still name the question. */
 		render(<AskDock rows={[ask({ status: "timed_out" })]} onOpen={() => {}} />);
-		expect(screen.getByText("1 question waiting")).toBeTruthy();
 		expect(screen.getByText(/ship the fix\?/)).toBeTruthy();
 	});
 

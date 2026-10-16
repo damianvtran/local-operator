@@ -56,7 +56,7 @@ import {
 	useRouteTitle,
 	useSessions,
 } from "../store";
-import { blockingPending, outstandingAsks } from "../lib/asks";
+import { blockingPending, outstandingAsks, questionTally } from "../lib/asks";
 import { askOpenPolicy, namesEveryOutstanding, readQueue } from "../lib/ask-open-policy";
 import type { SessionProjection } from "../types";
 
@@ -108,7 +108,7 @@ function Header({
 	projection,
 	sessionId,
 	onOpenAsks,
-	askQuestionCount,
+	askTally,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
@@ -119,7 +119,7 @@ function Header({
 	/** The session's outstanding questions, derived ONCE by the screen and handed
 	    to both doors (the header entry and the minimized bar), so the two cannot
 	    state one queue two ways. */
-	askQuestionCount: number;
+	askTally: { waiting: number; lapsed: number };
 }) {
 	const [gateOpen, setGateOpen] = useState(false);
 	/* THE LOOSENING RECEIPT, held HERE rather than in the sheet (design round 6,
@@ -253,17 +253,27 @@ function Header({
 			    1, N3; agent review round 1, R3): it used to live only in the
 			    aria-label, so the eye saw "? asks" while the bar beside it said
 			    "4 questions waiting" — one screen stating one queue two ways. Both
-			    now read the outstanding set in questions. */}
-			{askQuestionCount > 0 ? (
+			    now read the outstanding set in questions.
+
+			    A LAPSED-ONLY QUEUE KEEPS A QUIET ENTRY (design round 1, D1): the sheet
+			    behind it is where Dismiss lives, so the door stays, in the dim register
+			    and labelled for what it holds rather than as a question waiting. */}
+			{askTally.waiting > 0 || askTally.lapsed > 0 ? (
 				<button
 					type="button"
 					onClick={onOpenAsks}
-					aria-label={`queued asks in this session (${askQuestionCount} question${
-						askQuestionCount === 1 ? "" : "s"
-					} waiting)`}
-					className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-accent")}
+					aria-label={`queued asks in this session (${
+						askTally.waiting > 0
+							? `${askTally.waiting} question${askTally.waiting === 1 ? "" : "s"} waiting)`
+							: `${askTally.lapsed} lapsed)`
+					}`}
+					className={cn(
+						HEADER_CONTROL,
+						"!min-w-0 px-2 text-meta",
+						askTally.waiting > 0 ? "text-accent" : "text-ink-dim",
+					)}
 				>
-					? {askQuestionCount}
+					? {askTally.waiting > 0 ? askTally.waiting : askTally.lapsed}
 				</button>
 			) : null}
 			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
@@ -487,13 +497,12 @@ export function SessionScreen({
 	const blocking = blockingPending(projection?.pending, projection?.asks);
 	/* ONE NUMBER FOR THE WHOLE SCREEN: the header entry and the minimized bar are
 	   two doors to one sheet, so they state the same population in the same unit
-	   (the outstanding set — open plus still-answerable timeouts — counted in
-	   QUESTIONS, which is what §5.0's own bar copy counts). */
+	   (QUESTIONS, which is what §5.0's own bar copy counts), split the same way
+	   (`questionTally`: offered questions are waiting, lapsed ones are not — design
+	   round 1, D1). `answerableAsks` stays the whole outstanding set: it is what
+	   the open policy's dismissal memory records. */
 	const answerableAsks = outstandingAsks(projection?.asks);
-	const askQuestionCount = answerableAsks.reduce(
-		(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
-		0,
-	);
+	const askTally = questionTally(projection?.asks);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	/* THE ONE-SHOT FOCUS INTENT (see ``lib/pending-focus.ts``). Consumed at MOUNT
@@ -641,14 +650,11 @@ export function SessionScreen({
 		if (jobId || !projection || !connected) return;
 		if (!askOpenPolicy.awaiting(sessionId)) return;
 		const ids = answerableAsks.map((row) => row.ask_id);
-		/* ONE clock for both: the lapse test in `readQueue` and the policy's own
-		   open window must judge the same instant. */
-		const now = Date.now();
 		const decision = askOpenPolicy.decide(
 			sessionId,
-			readQueue(projection.asks, projection.asks_open, now),
+			readQueue(projection.asks, projection.asks_open),
 			{
-				nowMs: now,
+				nowMs: Date.now(),
 				occupied:
 					blocking !== null || aTextFieldHoldsTheKeyboard() || anotherSheetIsOpen(),
 				surfaceOpen: asksOpen,
@@ -854,7 +860,7 @@ export function SessionScreen({
 					projection={projection}
 					sessionId={sessionId}
 					onOpenAsks={openAsks}
-					askQuestionCount={askQuestionCount}
+					askTally={askTally}
 				/>
 				{/* The spend + context glance (phase 1), read-only and self-hiding:
 				    it renders nothing until either reading has something to state. */}

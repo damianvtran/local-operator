@@ -1029,6 +1029,43 @@ def _ended_ask_projection() -> SessionProjection:
     return projection
 
 
+def _stale_open_ask_projection() -> SessionProjection:
+    """A STOPPED conversation whose index row still says ``open`` past its deadline.
+
+    The shape of the D0 repro (review round 1, R1; QA Q1): the runtime stopped
+    before the deadline, so it never wrote the fold again and the index keeps the
+    stale ``open``. The relay's index readers now re-derive it to ``timed_out``
+    against their own clock, so this conversation's screen carries a lapsed ask
+    with Dismiss (``-stale``), under the quiet lapsed entry (``-stale-bar``), and
+    no legacy mirror card.
+    """
+    projection = SessionProjection(
+        session_id="asks-stale",
+        pid=900016,
+        kind="tui",
+        conversation_name="Stale elsewhere",
+        streaming=False,
+        transcript=[TranscriptEntry(id="sa-1", kind="user", text="Ask me before you stop.")],
+        version=3,
+    )
+    projection.asks = [
+        _ask(
+            "sa-open",
+            created_s=-600,
+            expires_in_s=-240,
+            questions=[
+                _question(
+                    "sa1",
+                    "Stopped before the deadline — does this still need an answer?",
+                    options=[("yes", "the index still says open"), ("no", "let it lapse")],
+                )
+            ],
+        )
+    ]
+    projection.asks_open = 1
+    return projection
+
+
 def _spend_projection(
     session_id: str,
     pid: int,
@@ -1371,7 +1408,7 @@ def _asks_stacked_projection() -> SessionProjection:
 #: it carries ``transcript.jsonl``. Marking the entry ended WITHOUT the transcript
 #: removes the row altogether (measured: 13 rows -> 12), so the sentence D8 asked
 #: for cannot be framed with the flag alone.
-ENDED_SESSIONS = {"asks-ended"}
+ENDED_SESSIONS = {"asks-ended", "asks-stale"}
 
 #: Sessions seeded with a durable transcript. The ended ones need it (above), and
 #: so does ``asks-foreign``: the aggregate marks a row ``durable`` only when its
@@ -1491,6 +1528,9 @@ async def main() -> None:
         _asks_stacked_projection(),
         # The ENDED conversation (D6/D8): its own sheet carries the ended strip.
         _ended_ask_projection(),
+        # A stopped conversation whose index row is a stale `open` past its
+        # deadline (review round 1, R1 / QA Q1): the relay re-derives it.
+        _stale_open_ask_projection(),
         # PR-2's session-status spend states: the published object populated,
         # an untracked conversation, and an unknown total — the three readings
         # the phone's second line and its marks exist for — plus the states

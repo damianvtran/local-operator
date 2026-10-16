@@ -307,19 +307,16 @@ describe("AsksSheet", () => {
 	});
 
 	it("promises no bring-up above a lapsed ask, which offers nothing to answer", async () => {
-		/* A lapsed card (deadline passed, or `timed_out`) shows its question
-		   read-only, so "answering will bring it up" would promise a tap the card
-		   one element below does not have. */
+		/* A lapsed (`timed_out`) card shows its question read-only, so
+		   "answering will bring it up" would promise a tap the card one element
+		   below does not have. */
 		rows = [summary({ ended: false })];
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [
-				ask({ ask_id: "t", status: "timed_out", runtime_live: false }),
-				ask({ ask_id: "o", expires_at: Date.now() - 60_000, runtime_live: false }),
-			],
+			asks: [ask({ ask_id: "t", status: "timed_out", runtime_live: false })],
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
-		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
-		expect(screen.getAllByText("Lapsed — the agent took its default and moved on").length).toBe(2);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
+		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
 		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
 	});
 });
