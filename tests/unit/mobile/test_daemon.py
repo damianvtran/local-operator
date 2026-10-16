@@ -2927,7 +2927,9 @@ def test_durable_projection_carries_the_stopped_session_s_asks_from_the_index(
     that screen is the durable projection, which no runtime folds. The index
     (``asks/store``) is what outlives the runtime, so the projection reads it:
     the same rows the aggregate would serve for this session (a dismissed row
-    dropped), and the tally counting the outstanding ones.
+    dropped), and the tally counting the outstanding ones — none here, because
+    a timed-out ask is settled (#2388) while its row stays so Dismiss is still
+    reachable.
     """
     import time
 
@@ -2970,7 +2972,7 @@ def test_durable_projection_carries_the_stopped_session_s_asks_from_the_index(
     asks = projection.asks or []
     assert [row.ask_id for row in asks] == ["lapsed-1"]
     assert asks[0].status == "timed_out"
-    assert projection.asks_open == 1
+    assert projection.asks_open == 0
 
 
 def test_durable_projection_leaves_asks_absent_without_an_index_entry(
@@ -3137,7 +3139,9 @@ def test_a_viewed_stopped_screen_drops_its_lapsed_asks_when_the_window_hides_the
 
     first = asyncio.run(daemon._capture_durable_projection("viewed-stopped"))
     assert first is not None and [row.ask_id for row in first.asks or []] == ["stale-2h"]
-    assert first.asks_open == 1
+    # The lapsed row is shown but settled (#2388), so the tally is already 0;
+    # what the window change moves is the ROWS.
+    assert first.asks_open == 0
 
     _set_window(cfg, "at_expiry")
     process_watcher(cfg).poll_now()
@@ -3162,7 +3166,8 @@ def test_the_daemon_repaints_an_open_stopped_screen_when_the_window_changes(
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
         daemon.table.session_subscribers["open-stopped"] = {queue}
         seeded = await daemon._capture_durable_projection("open-stopped")
-        assert seeded is not None and seeded.asks_open == 1
+        assert seeded is not None and [row.ask_id for row in seeded.asks or []] == ["stale-2h"]
+        assert seeded.asks_open == 0  # shown, but settled (#2388)
         daemon.watch_ask_visibility()
         _set_window(cfg, "at_expiry")
         process_watcher(cfg).poll_now()

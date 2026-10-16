@@ -157,11 +157,12 @@ def read_queue(
 
     A LAPSED ROW IS NOT PENDING AND NEVER OPENS A SURFACE (decision D12): no
     surface offers an answer to it (D10), so there is nothing to put in front of
-    the user. But the wire's tally still COUNTS it — ``asks_open`` is the store's
-    outstanding set, lapsed rows included — so the dropped-row test below has to
-    compare the tally with every outstanding row the frame NAMES, answerable and
-    lapsed alike. Comparing it with the answerable rows alone read a lapsed-only
-    queue as "a pending ask the bound dropped" and waited instead of settling.
+    the user. A current runtime's tally leaves it out (#2388: ``asks_open`` counts
+    open asks only), but a runtime from before #2388 still COUNTS it, so the
+    dropped-row test below has to compare the tally with every outstanding row the
+    frame NAMES, answerable and lapsed alike. Comparing it with the answerable rows
+    alone read a lapsed-only queue from such a runtime as "a pending ask the bound
+    dropped" and waited instead of settling.
 
     The rows decide whenever they name an outstanding ask. With none, only an explicit
     ``0`` tally is an answer ("nothing is queued"); ``None`` (unsupported) and
@@ -226,8 +227,9 @@ def names_every_outstanding(*, tally: int | None, named_outstanding: int) -> boo
 
     ONE RESIDUAL LIMIT, and it is not closable on the client. The runtime projects at
     most ``PROJECTION_CAP`` (20) rows BEFORE it computes the tally, so past 20
-    outstanding asks (reachable only by timed-out asks piling up: the open cap is 8)
-    the surplus is on neither field and no client can name it. The residue is one
+    asks the surplus is on neither field and no client can name it. A current runtime
+    cannot reach it (the open cap is 8 and a lapsed ask is not in the tally); a
+    runtime from before #2388 could, by timed-out asks piling up. The residue is one
     extra auto-open — the ids the user waved off were all visible to them, so they
     leave the queue, the dismissal is forgotten and the surplus reads as a fresh
     batch — which is harmless: it is the surface the feature exists to show.

@@ -94,9 +94,10 @@ describe("readQueue — what ONE frame says about the queue", () => {
 		   since moved on. The card shows them read-only, so opening the modal
 		   sheet over the conversation for them would spend the view's one open
 		   on a queue with nothing to answer. Every row is addressed as far as an
-		   answer goes, and the tally (which counts them outstanding) is the
-		   store's word for "not settled", so the reading is the one clause 3
-		   gives settled rows: SETTLED, and the view stays closed. */
+		   answer goes, so the reading is the one clause 3 gives settled rows:
+		   SETTLED, and the view stays closed — beside a tally of 0 (#2388) or
+		   of the lapsed rows themselves (a runtime from before it). */
+		expect(readQueue([row("t", "timed_out")], 0)).toBe("settled");
 		expect(readQueue([row("t", "timed_out")], 1)).toBe("settled");
 		expect(readQueue([row("t1", "timed_out"), row("t2", "timed_out")], 2)).toBe("settled");
 		/* The dropped-rows guard still holds: a tally larger than the lapsed rows
