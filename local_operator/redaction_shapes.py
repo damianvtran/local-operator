@@ -4110,11 +4110,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # published-port negatives (``docker run -p``, ``ssh -p``) were never in this
     # alternation.
     #
-    # Every true positive keeps its mask: the inline-password spellings pinned in
-    # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
-    # redis-cli, clickhouse-client, influx) match the anchored form, and the
-    # published-port negatives (``docker run -p``, ``ssh -p``) were never in this
-    # alternation.
+    # RESIDUAL (QA round 1, Q1 — deliberately NOT closed here). The flag still has
+    # to belong to the CLIENT, and a bare client WORD in ordinary prose satisfies
+    # this anchor: `the <client> driver … <another tool> -p <token>` inside 200
+    # characters still masks the token and registers it, which reaches the same
+    # operator-visible failure through a prose trigger. Closing it needs the
+    # flag's OWNER to be decided (candidate measured by the manager: refuse a gap
+    # that names a build/test tool — closes the class at zero true-positive cost,
+    # 0 lost / 0 new corpus negatives, but it ENUMERATES tool names, which is the
+    # losing bet this rule's own review round already made twice). That is its own
+    # change with its own round, not a widening of this one.
     Shape(
         "client-inline-password",
         re.compile(

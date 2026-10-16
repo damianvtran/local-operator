@@ -8749,7 +8749,10 @@ def test_the_identifier_release_ceiling_is_exactly_fifteen_letters() -> None:
 # The reported symptom was a cargo command whose package argument had become the
 # marker, failing with "package pattern(s) … not found in workspace".
 #
-# FAIL-ON-REVERT: restoring the bare ``\b`` anchor reds every row below.
+# FAIL-ON-REVERT: restoring the bare ``\b`` anchor reds the rows whose input
+# carries a `-p`/`-a` flag after the stem (measured: 5 of the 6 non-invocation
+# rows red; the slug row passes on the reverted source because it carries no
+# flag for the old rule to reach, and it is kept as a boundary row).
 
 #: The client name that anchored the false positive, built so this test file
 #: itself stays legible to the scanner it exercises.
