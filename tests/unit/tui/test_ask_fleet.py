@@ -1622,15 +1622,17 @@ async def test_leaving_the_ask_surface_stops_the_clock_when_no_rows_remain(enabl
 
 
 async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, isolated_index):
-    """``asks.lapsed_visible_for`` (decision D8, review round 1 R1-1): the tally
-    behind the sidebar marks and the picker's ``asks: N`` must hide the rows the
-    fleet LIST hides, or "asks: 1" opens an empty list. Under ``at_expiry`` a
-    timed-out row 2 h past its deadline (and a stale ``open`` past its deadline,
-    which the readers judge as lapsed) is out of both; an open ask is in both.
+    """``asks.lapsed_visible_for`` (decision D8, review round 1 R1-1) through the
+    APP's own readers: the fleet LIST (``_load_fleet_asks`` and the post-answer
+    ``_reload_fleet_rows``) shows a lapsed row under the 7 d default and hides it
+    under ``at_expiry``. A stale ``open`` past its deadline is judged lapsed too.
 
-    The TALLY never counts a lapsed row, under any window (#2481 design D3: a
-    timed-out ask owes no answer, so it marks nothing); the window decides
-    whether the LIST still shows it. Parity is therefore over answerable rows."""
+    The TALLY behind the sidebar marks and ``asks: N`` counts answerable rows
+    only, under any window (#2481 design D3: a timed-out ask owes no answer), so
+    it is the open row alone either way and never names a row the list hides.
+    Asserted through ``_ask_fleet_rows`` rather than ``store.index_asks``, so a
+    call site that stopped passing the window fails here (#2481 review round 4,
+    m1)."""
     from local_operator import settings_io
     from local_operator.config import ConfigManager
     from local_operator.config_watch import process_watcher
@@ -1643,13 +1645,18 @@ async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, 
     )
     _seed(isolated_index, "s-stale", [_row("s1", created_at=created_at, expires_at=expires_at)])
     _seed(isolated_index, "s-open", [_row("o1")])
+
+    def listed(app: OperatorApp) -> set[str]:
+        return {row.session_id for row in app._ask_fleet_rows}
+
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
+        await app._load_fleet_asks()
+        await _settle(pilot)
+        assert listed(app) == {"s-lapsed", "s-stale", "s-open"}, "the 7 d window lists all three"
         counts, total = app._read_fleet_asks()
         assert counts == {"s-open": 1} and total == 1
-        shown = {str(row["session_id"]) for row in store.index_asks(isolated_index)}
-        assert shown == {"s-lapsed", "s-stale", "s-open"}, "the 7 d window lists all three"
 
         settings_io._store(
             ConfigManager(isolated_index),
@@ -1657,13 +1664,14 @@ async def test_the_fleet_tally_applies_the_lapsed_window_like_the_list(enabled, 
             "at_expiry",
         )
         process_watcher(isolated_index).poll_now()
+        await app._reload_fleet_rows()
+        await _settle(pilot)
+        assert listed(app) == {"s-open"}, "the reload after an answer kept a hidden row"
+        app._collapse_asks()
+        await _settle(pilot)
+        await app._load_fleet_asks()
+        await _settle(pilot)
+        assert listed(app) == {"s-open"}, "the fleet list showed a row past the window"
         counts, total = app._read_fleet_asks()
-        listed = store.index_asks(isolated_index, lapsed_visible_ms=0)
         assert counts == {"s-open": 1} and total == 1
-        listed_counts: dict[str, int] = {}
-        for row in listed:
-            status = row.get("status")
-            if store.is_outstanding(status) and not store.is_lapsed(status):
-                sid = str(row["session_id"])
-                listed_counts[sid] = listed_counts.get(sid, 0) + 1
-        assert counts == listed_counts
+        assert set(counts) <= listed(app), "the tally names a row the list hides"
