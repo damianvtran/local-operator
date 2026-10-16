@@ -1,11 +1,13 @@
 """Compaction memory follows committed history, not speculative model calls."""
 
 import asyncio
+import sqlite3
+import threading
 
 import pytest
 
 from local_operator.harness.types import Message, TextContent
-from local_operator.memory import MemoryIdentity, MemoryStore
+from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore
 from local_operator.memory_capture import (
     extract,
     finish,
@@ -101,6 +103,112 @@ def test_capture_never_turns_a_long_token_or_scan_cut_into_a_path():
     assert {row["body"] for row in extract(long_uri + " docs/real.md")} == {"docs/real.md"}
     assert extract("https://example.invalid/" + "x" * 500) == []
     assert extract("/repo/" + "x" * 500) == []
+
+
+# Value-free stage witness for the restart-recovery diagnostic below. It only
+# counts entries/returns/raises at existing function boundaries and records a
+# fixed exception category plus already-sized row counts. It must never record
+# text, IDs, exception messages, locals or timestamps: captured content is
+# untrusted, and printing it on failure would leak exactly what capture refuses.
+_STAGE_NAMES = ("recovery_text", "extract_text", "extract_summary", "persist_ok", "persist_failed")
+
+
+def _exception_category(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.CancelledError):
+        return "CancelledError"
+    if isinstance(exc, MemoryError):
+        return "SensitiveMemoryError"
+    if isinstance(exc, TimeoutError):
+        return "TimeoutError"
+    if isinstance(exc, sqlite3.Error):
+        return "SQLiteError"
+    return "Other"
+
+
+class _StageWitness:
+    """Thread-safe finite observer; recovery/extract run in worker threads."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events = {name: {"enter": 0, "return": 0, "raise": 0} for name in _STAGE_NAMES}
+        self._category = {name: "none" for name in _STAGE_NAMES}
+        self._rows: dict[str, int | None] = {name: None for name in _STAGE_NAMES}
+
+    def enter(self, stage: str, rows: int | None = None) -> None:
+        with self._lock:
+            self._events[stage]["enter"] += 1
+            if rows is not None:
+                self._rows[stage] = rows
+
+    def complete(self, stage: str, rows: int | None = None) -> None:
+        with self._lock:
+            self._events[stage]["return"] += 1
+            if rows is not None:
+                self._rows[stage] = rows
+
+    def fail(self, stage: str, exc: BaseException) -> None:
+        with self._lock:
+            self._events[stage]["raise"] += 1
+            self._category[stage] = _exception_category(exc)
+
+    def report(self) -> str:
+        # Evaluated only as an assert message, so a passing run stays silent.
+        with self._lock:
+            return "stages=" + ";".join(
+                f"{name}:enter={self._events[name]['enter']},"
+                f"return={self._events[name]['return']},raise={self._events[name]['raise']},"
+                f"category={self._category[name]},rows={self._rows[name]}"
+                for name in _STAGE_NAMES
+            )
+
+
+def _witnessed_recovery(witness: _StageWitness, real):
+    def call(*args, **kwargs):
+        witness.enter("recovery_text")
+        try:
+            result = real(*args, **kwargs)
+        except BaseException as exc:
+            witness.fail("recovery_text", exc)
+            raise
+        witness.complete("recovery_text")
+        return result
+
+    return call
+
+
+def _witnessed_extract(witness: _StageWitness, real):
+    def call(*args, **kwargs):
+        text = args[0] if args else kwargs.get("text", "")
+        # finish() is the only extract("", summary) caller; recovery text is the
+        # only non-empty first argument. Classify by that boundary, not content.
+        stage = "extract_summary" if text == "" else "extract_text"
+        witness.enter(stage)
+        try:
+            result = real(*args, **kwargs)
+        except BaseException as exc:
+            witness.fail(stage, exc)
+            raise
+        witness.complete(stage, len(result) if isinstance(result, list) else None)
+        return result
+
+    return call
+
+
+def _witnessed_persist(witness: _StageWitness, real):
+    def call(*args, **kwargs):
+        status = args[3] if len(args) > 3 else kwargs.get("status")
+        rows = args[2] if len(args) > 2 else kwargs.get("rows")
+        stage = "persist_ok" if status == "ok" else "persist_failed"
+        witness.enter(stage, len(rows) if isinstance(rows, list) else None)
+        try:
+            result = real(*args, **kwargs)
+        except BaseException as exc:
+            witness.fail(stage, exc)
+            raise
+        witness.complete(stage)
+        return result
+
+    return call
 
 
 @pytest.fixture
@@ -279,12 +387,21 @@ async def test_real_committed_compaction_finishes_capture_while_idle_without_wak
 
 
 @pytest.mark.asyncio
-async def test_restart_recovers_committed_marker_without_waking(tmp_path):
+async def test_restart_recovers_committed_marker_without_waking(tmp_path, monkeypatch):
     import local_operator.memory_capture as capture
     from local_operator.harness.types import ModelSpec, StreamEndEvent
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
 
+    # Diagnostic only: transparent wrappers always call the real functions once
+    # and return/re-raise unchanged. They do not preseed a terminal identity,
+    # retry, poll or force "ok"; the strict assertions below remain the oracle.
+    witness = _StageWitness()
+    monkeypatch.setattr(
+        capture, "recovery_text", _witnessed_recovery(witness, capture.recovery_text)
+    )
+    monkeypatch.setattr(capture, "extract", _witnessed_extract(witness, capture.extract))
+    monkeypatch.setattr(capture, "persist", _witnessed_persist(witness, capture.persist))
     root = tmp_path / "config"
     root.mkdir()
     (root / "config.yml").write_text(
@@ -320,8 +437,8 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path):
     pending = list(reopened._background_tasks)
     await asyncio.wait_for(asyncio.gather(*pending), 3)
     memory = MemoryStore(root, MemoryIdentity("restart-session", "", "main"), transcript.directory)
-    assert (state := watermark(memory, marker.id)) is not None
-    assert state[0] == "ok"
+    assert (state := watermark(memory, marker.id)) is not None, witness.report()
+    assert state[0] == "ok", witness.report()
     assert memory.search("recovered")
     assert state == ("ok", 6)  # recovered path + four locators + reused semantic goal
     assert {item["body"] for item in memory.search("proof")} == {"~/tools/widget/docs/proof.md"}
