@@ -603,9 +603,8 @@ class PlacementDocument:
         re-grant of an existing holder resets it to the owner — an explicit share
         supersedes a derived grant.
         """
-        from local_operator.network.types import MeshRefusal
-
         from local_operator.network.credentials import github
+        from local_operator.network.types import MeshRefusal
 
         entry = self.entries.get(key)
         if entry is None:
@@ -975,11 +974,10 @@ def grant_key_set(
     THE CALLER HOLDS THE LOCK: wrap this in :func:`mutate` so all keys land
     under one read-modify-write. Returns ``(granted, skipped)``.
     """
-    from local_operator.network.types import MeshRefusal
-
     from local_operator.network.credentials import consent
     from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod
+    from local_operator.network.types import MeshRefusal
 
     granted: list[str] = []
     skipped: list[dict[str, str]] = []

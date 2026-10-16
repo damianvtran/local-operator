@@ -30,10 +30,10 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import pytest
-from local_operator.network.types import MemberRecord, MeshRefusal, NetworkRecord
 
 from local_operator.network import approvals, identity, store
 from local_operator.network.credentials import consent, inheritance, placement
+from local_operator.network.types import MemberRecord, MeshRefusal, NetworkRecord
 from tests.unit.network.test_credential_inherit import (
     software_signer,
     with_owner_transport,
@@ -199,7 +199,6 @@ def guarded_rig(write_envelope: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     from local_operator.operator import trust
     from local_operator.providers import registry
     from local_operator.providers.auth_store import AuthStore
-
     from tests.unit.network.test_approvals_store import _make_key
 
     root = write_envelope / "isolated-owner"
