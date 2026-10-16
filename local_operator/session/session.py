@@ -89,6 +89,7 @@ from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
     AsyncJobManager,
+    effort_fallback_clause,
     is_model_fallback,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
@@ -19508,13 +19509,38 @@ class Session:
         # the RUNTIME-only reason rides along when the live row still carries
         # one — after a restart it is gone and the labels still answer (see
         # ``AsyncJob.model_fallback_reason``).
+        #
+        # THE EFFORT CLAUSE (design §6), the same disclosure one field deeper:
+        # a substituted model is not the whole loss — a hop keeps the requested
+        # reasoning level only where the target's ladder accepts it, so a child
+        # pinned at ``xhigh`` can come back thinking at its substitute's default
+        # with the pin clause alone still reading as an ordinary substitution.
+        # Rides INSIDE the pin clause, between the model pair and the cause,
+        # because it is a property of the same move and reads in the same order
+        # as the live notice (one renderer builds the phrase:
+        # ``jobs.effort_fallback_clause``). Gated on the runtime
+        # ``model_fallback`` flag rather than on the labels, and that asymmetry
+        # with the clause above is deliberate: the labels can also diverge for
+        # reasons this row should NOT blame on a fallback (an operator's own
+        # ``/model`` switch leaves the flag False), while ``None`` as a level is
+        # a real answer — the substitute's own default — that a comparison
+        # cannot tell from "no fallback recorded". Both facts are runtime-only,
+        # so a restored row states neither, exactly like the reason above.
         requested = str(getattr(job, "requested_model_label", "") or "").strip()
         effective = str(getattr(job, "model_label", "") or "").strip()
         pin_clause = ""
         if is_model_fallback(requested, effective):
             reason = str(getattr(job, "model_fallback_reason", "") or "").strip()
             cause = f" — {reason}" if reason else ""
-            pin_clause = f" (pinned {requested}, ran on {effective}{cause})"
+            effort = (
+                effort_fallback_clause(
+                    getattr(job, "requested_effort", None),
+                    getattr(job, "model_fallback_effort", None),
+                )
+                if getattr(job, "model_fallback", False)
+                else ""
+            )
+            pin_clause = f" (pinned {requested}, ran on {effective}{effort}{cause})"
         delivery = (
             f"background job '{label}' {status}{pin_clause}:\n{summary}"
             if summary
