@@ -524,6 +524,16 @@ _DSN_PATTERN = re.compile(
 #: the run to slip past it, and a whole ``<…>``/``[[…]]``/``${…}`` reference is
 #: handed INTACT to the guard, which correctly leaves it unmasked.
 #:
+#: **The whitespace run over-masks same-line PROSE, and that is accepted.** The
+#: run cannot tell a multi-word passphrase from a credential followed by running
+#: text, so a userinfo password that continues into a sentence masks that
+#: trailing text too. It fails toward masking -- no credential is published -- and
+#: the alternative (stopping at the first space) is the R2-1 leak, so the bound is
+#: the whole line and this is the recorded residual. (The example is DESCRIBED,
+#: not spelled, because this file documents the shapes and a literal spelling in
+#: its own prose would be a live match -- see
+#: ``test_the_shape_table_never_matches_its_own_source``.)
+#:
 #: **What it deliberately does NOT decide.** A bare ``x:y`` with no scheme — a
 #: host and port and a user and password are the same spelling with no in-band
 #: signal between them — is left alone, as is an all-digit password
@@ -1208,15 +1218,24 @@ def _is_structural_placeholder_reference(value: str) -> bool:
 def _is_complete_brace_reference(value: str) -> bool:
     """A WHOLE ``${...}`` token, whitespace inside its braces included.
 
-    The truncated-DSN rule must hand a COMPLETE reference to the release path
-    rather than mask a prefix of it (agent review round 2, R2-1). The general
-    predicate above spells the braced form as a bare identifier, so a reference
-    written with a space inside -- ``${CI TOKEN}`` -- fails it and would be
-    masked. The assignment rule already releases that exact string, so refusing
-    it here would be STRICTER than the policy this shape sits beside; this helper
-    only makes the two agree. It is deliberately narrow: a single balanced
-    ``${...}`` with no nested brace, so an unterminated ``${`` or a nested one
-    stays a credential-shaped value.
+    The DSN rules must hand a COMPLETE reference to the release path rather than
+    mask a prefix of it (agent review round 2, R2-1). The general predicate above
+    spells the braced form as a bare identifier, so a reference written with a
+    space inside -- ``${CI TOKEN}`` -- fails it and would be masked. The
+    assignment rule already releases that exact string, so refusing it in the DSN
+    shapes would be STRICTER than the policy they sit beside; this helper only
+    makes the two agree.
+
+    **Blast radius (stated because an earlier comment here claimed "this shape
+    only" and was wrong).** It is OR'd into the guard of EVERY DSN drawing the
+    userinfo value from group 2: :data:`dsn-password`,
+    :data:`dsn-password-plain` and :data:`dsn-password-truncated`. Only the
+    values those shapes were ALREADY going to mask can be affected, and only the
+    whitespace/empty brace forms are newly released (``${CI TOKEN}``, ``${ }``,
+    ``${}``); ``${ident}``, ``<…>`` and ``[[…]]`` were already released by the
+    general predicate, and a nested or unterminated brace still is not. The
+    helper is deliberately narrow for that reason: a single balanced ``${...}``
+    with no nested brace.
     """
     return (
         value.startswith("${")
