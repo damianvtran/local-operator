@@ -45,7 +45,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from scripts import ci_scope, run_bounded, shard_tests
 
 REPO = Path(__file__).resolve().parents[2]
@@ -2273,15 +2272,12 @@ def test_windows_root_input_only_changes_select_the_native_job(path: str, select
     """
     entrypoint = "tests/unit/network/test_credentials_private_paths.py::"
     assert any(
-        entrypoint in str(step.get("run") or "")
-        for step in _steps("filesystem-boundaries-windows")
+        entrypoint in str(step.get("run") or "") for step in _steps("filesystem-boundaries-windows")
     ), "the ROOT nodes left the Windows command; revisit its curated inputs"
     scope = _scope()
     flags = scope.classify([path])
     assert flags["windows"] is selected
-    assert scope.job_plan(flags)["filesystem-boundaries-windows"] == (
-        "run" if selected else "skip"
-    )
+    assert scope.job_plan(flags)["filesystem-boundaries-windows"] == ("run" if selected else "skip")
 
 
 def test_the_xplat_input_set_covers_what_the_battery_reads() -> None:
