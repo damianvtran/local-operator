@@ -89,8 +89,11 @@ class FakeBridge:
                 "ts_source": "entry",
                 "payload": {
                     "role": "assistant",
+                    # No ``type`` key: the journal stores a text block WITHOUT it
+                    # (``exclude_defaults``), and a reader keyed on ``type`` must
+                    # fail here, not only on a live session (review M1).
                     "content": [
-                        {"type": "text", "text": "Here are the files. ```\nls\n``` Done."},
+                        {"text": "Here are the files. ```\nls\n``` Done."},
                     ],
                 },
             },
@@ -538,7 +541,11 @@ def test_desktop_voice_imports_no_speech_code() -> None:
 
 
 def test_desktop_voice_has_no_import_or_call_path_to_answer_gate() -> None:
-    """V7, statically: no name in the module reaches a gate answer."""
+    """V7, statically: no name in the module reaches a gate answer.
+
+    It matches NAMES, so a dynamic ``getattr(remote, "answer_" + kind)`` would
+    evade it; review covers that shape, and this pin catches the plain one.
+    """
     source = Path(desktop_voice.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
     forbidden = {"answer_gate", "answer", "approval_answer", "ask_answer", "Answer"}

@@ -110,7 +110,7 @@ def cap(text: str, max_chars: int) -> Speakable:
     """Step 6: cut ``text`` to ``max_chars`` at the best boundary inside it.
 
     The closing sentence counts against the cap, so the spoken total never
-    exceeds it: ``X-Voice-Spoken-Chars`` is a promise the renderer can trust.
+    exceeds it: ``/voice/text``'s ``spoken_chars`` is a promise the caller can trust.
     """
     if len(text) <= max_chars:
         return Speakable(text=text, truncated=False)
