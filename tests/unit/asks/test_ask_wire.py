@@ -1004,39 +1004,99 @@ def _ask_row(index: int, *, questions: int = 1, text: str = "Which one?") -> dic
     }
 
 
-def test_the_bound_caps_counts_and_never_cuts_text() -> None:
-    """The counts bound how much rides; they must not touch the strings.
+def test_the_bound_keeps_a_row_whole_and_never_cuts_text() -> None:
+    """A shipped row carries every question, every option and every string.
 
     The first revision clipped every question to 200 characters, each option
     label to 60 and each description to 80. A label is the ANSWER the surface
     submits verbatim, so that cap corrupted answers (see
-    ``test_a_long_option_label_reaches_the_ledger_whole``); the fix bounds the
-    NUMBER of things carried and leaves every string the model wrote intact.
+    ``test_a_long_option_label_reaches_the_ledger_whole``). The next revision
+    capped question and option COUNTS instead, which corrupted the answer a
+    different way: ``AskQueue.respond`` refuses a partial answer, so a card
+    shown 12 of 16 questions could never submit (see
+    ``test_a_sixteen_question_ask_is_answerable_from_the_wire``). A bound may
+    drop whole ROWS; it never trims part of one.
     """
-    from local_operator.session.frontend_state import (
-        ASK_WIRE_OPTIONS_MAX,
-        ASK_WIRE_QUESTIONS_MAX,
-        bound_ask_rows,
-    )
+    from local_operator.session.frontend_state import bound_ask_rows
 
     row = _ask_row(0, questions=400, text="x" * 500)
     row["questions"][0]["options"] = [
         {"label": "y" * 300, "description": "z" * 300} for _ in range(200)
     ]
     kept, dropped = bound_ask_rows([row])
-    assert dropped is True
     questions = kept[0]["questions"]
-    assert len(questions) <= ASK_WIRE_QUESTIONS_MAX
+    assert len(questions) == 400
+    assert [question["id"] for question in questions] == [f"q{index}" for index in range(400)]
     for question in questions:
-        # Whole, not clipped: the text is exactly what ``_ask_row`` wrote — the
-        # 400-question source is the only reason a question is missing.
+        # Whole, not clipped: the text is exactly what ``_ask_row`` wrote.
         assert question["question"] == f"{'x' * 500} {int(question['id'][1:])}"
         assert not question["question"].endswith("…")
-        assert len(question["options"]) <= ASK_WIRE_OPTIONS_MAX
-    # Every option that rides keeps its FULL label and description.
+    assert len(questions[0]["options"]) == 200
+    # Every option keeps its FULL label and description.
     for option in questions[0]["options"]:
         assert option["label"] == "y" * 300
         assert option["description"] == "z" * 300
+    assert dropped is False, "the head row rides whole, so nothing was left out"
+
+
+def test_a_sixteen_question_head_row_rides_with_every_question_and_option() -> None:
+    """The live failure's shape: 16 questions, the first with 14 options.
+
+    The count caps shipped 12 questions and 10 options, and the card answered
+    the 12 it was shown — which ``AskQueue.respond`` refuses atomically.
+    """
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    row = _ask_row(0, questions=16)
+    row["questions"][0]["options"] = [
+        {"label": f"option {index}", "description": ""} for index in range(14)
+    ]
+    kept, dropped = bound_ask_rows([row])
+    questions = kept[0]["questions"]
+    assert [question["id"] for question in questions] == [f"q{index}" for index in range(16)]
+    assert [option["label"] for option in questions[0]["options"]] == [
+        f"option {index}" for index in range(14)
+    ]
+    assert dropped is False
+
+
+def test_a_sixteen_question_ask_is_answerable_from_the_wire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """enqueue → ``ask_wire`` → ``bound_ask_rows`` → answer what rode → ``respond``.
+
+    The surface can only answer the questions the wire carried, and the queue
+    refuses an answer that leaves any question out. Seen live on a 16-question
+    ask: "every question must be answered at once: … has no entry".
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session, queue = _live_session(tmp_path)
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    questions = _questions(16)
+    questions[0]["options"] = [{"label": f"option {index}"} for index in range(14)]
+    outcome = queue.enqueue(questions, None)
+    assert outcome["ok"] is True, outcome
+    ask_id = outcome["details"]["ask_id"]
+
+    rows, _outstanding = ask_wire(session)
+    assert rows, "a live session publishes its queued ask"
+    kept, dropped = bound_ask_rows(rows)
+    shown = kept[0]["questions"]
+    # The card answers every question it was shown, with the LAST option it was
+    # shown — so a clipped option list would surface as a wrong answer too.
+    answers = {question["id"]: [question["options"][-1]["label"]] for question in shown}
+    result = queue.respond(ask_id, answers)
+    assert result.get("ok") is True, result
+    answered = [
+        event
+        for event in store.read_events(queue.session_dir)
+        if event["kind"] == store.EVENT_ANSWERED
+    ]
+    assert len(answered) == 1
+    assert answered[0]["answers"]["q0"] == ["option 13"]
+    assert sorted(answered[0]["answers"]) == sorted(f"q{index}" for index in range(16))
+    assert dropped is False
 
 
 def test_the_first_row_rides_whole_when_it_exceeds_the_budget() -> None:
