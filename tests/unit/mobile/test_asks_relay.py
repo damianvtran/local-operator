@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import cast
 
 import httpx
 import pytest
@@ -808,7 +809,7 @@ def test_a_cold_dismiss_republishes_the_conversation_s_own_asks(monkeypatch) -> 
     assert [row.ask_id for row in before.asks or ()] == ["ask-lapsed"]
 
     client, daemon = _client_and_daemon()
-    subscriber: asyncio.Queue = asyncio.Queue()
+    subscriber: "asyncio.Queue[dict[str, object]]" = asyncio.Queue()
     daemon.table.session_subscribers[SESSION_A] = {subscriber}
     reply = client.post(
         f"/api/sessions/{SESSION_A}/command",
@@ -818,7 +819,9 @@ def test_a_cold_dismiss_republishes_the_conversation_s_own_asks(monkeypatch) -> 
 
     frame = subscriber.get_nowait()
     assert frame["session_id"] == SESSION_A
-    assert [row["ask_id"] for row in frame.get("asks") or ()] == []
+    # PRESENT and empty: the rows are gone from the frame the screen paints, and
+    # the tally rides beside them (the client's capability proxy is either field).
+    assert cast("list[dict[str, object]]", frame.get("asks")) == []
     # Still the cold door: nothing was dialled and nothing was started.
     assert daemon.table.entries == {}
 

@@ -613,9 +613,22 @@ def fold(
             # accepted on a lapsed ask, so this can only fail for a hand-written
             # log — and then the dismissal really did arrive before anything was
             # owed, and inventing a notice would be the lie.
+            #
+            # AND THE FIELD SAYS "A ROW IS STILL OWED", so a notice already durable
+            # in the transcript clears it (agent review round 1, MINOR-2): read off
+            # the dates alone, ``notice_owed`` stayed True the moment the row landed,
+            # while ``expected_row_ids``, the queue's reconcile and every future
+            # reader take the field at its word. ``delivered`` is the any-row form
+            # (``delivered_hint``): a settled row a dismissal arrived AFTER is the
+            # answer the model already has, which the notice's own N8 rule lets
+            # stand.
             record["dismissed_at"] = dismissed_at
             record["notice_owed"] = bool(
-                dismissed_at and expires_at and dismissed_at >= expires_at and now <= window_end
+                dismissed_at
+                and expires_at
+                and dismissed_at >= expires_at
+                and now <= window_end
+                and not record["delivered"]
             )
         if answered is not None:
             answers = answered.get("answers")

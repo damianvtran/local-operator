@@ -24,7 +24,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from local_operator.asks import render, store
 from local_operator.asks.dismiss import dismiss_cold
@@ -311,7 +311,10 @@ def test_a_cold_dismiss_leaves_a_parked_sessions_stop_marker_alone(tmp_path: Pat
     assert _stopped_marker(directory) is True
     from local_operator.session.attached import AttachedSession
 
-    assert _run(AttachedSession.session_was_stopped(_StoppedProbe(tmp_path))) is True
+    # The REAL method, on the smallest object that can carry it: a marker no
+    # reader consults is not the property the review asked about.
+    probe = cast(Any, _StoppedProbe(tmp_path))
+    assert _run(AttachedSession.session_was_stopped(probe)) is True
 
 
 def test_a_cold_dismiss_still_drops_the_wake_row_when_nothing_parks_it(tmp_path: Path):

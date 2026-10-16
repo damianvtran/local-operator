@@ -408,9 +408,7 @@ def test_a_dismissed_notice_already_in_the_transcript_is_not_owed():
     the model already has, which the notice's own N8 rule lets stand.
     """
     events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
-    (record,) = store.fold(
-        events, BASE + 200_001, present_ids=[store.timeout_row_id("a-1")]
-    )
+    (record,) = store.fold(events, BASE + 200_001, present_ids=[store.timeout_row_id("a-1")])
     assert record["status"] == store.STATUS_DISMISSED
     assert record["delivered"] is True
     assert record["notice_owed"] is False
