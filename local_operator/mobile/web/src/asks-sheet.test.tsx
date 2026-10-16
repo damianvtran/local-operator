@@ -296,7 +296,10 @@ describe("AsksSheet", () => {
 		});
 		const { unmount } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByText("asks · 1 lapsed")).toBeTruthy());
-		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
+		/* Collapsed behind its badge (D11): the sheet lists it, the user opens it. */
+		expect(screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded")).toBe(
+			"false",
+		);
 		unmount();
 
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -316,7 +319,22 @@ describe("AsksSheet", () => {
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
 		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
 		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("keeps a timed-out ask collapsed beside an open one, which stays fully offered", async () => {
+		/* D11: only the lapsed row collapses; the open card keeps its controls. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "o" }), ask({ ask_id: "t", status: "timed_out" })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		const badges = screen.getAllByRole("button", { name: /Timed out/ });
+		expect(badges.length).toBe(1);
+		expect(badges[0].getAttribute("aria-expanded")).toBe("false");
+		expect(screen.getByPlaceholderText("your answer")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
 	});
 });
