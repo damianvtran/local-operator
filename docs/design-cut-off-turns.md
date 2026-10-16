@@ -354,7 +354,7 @@ CUT_OFF_CAUSES: dict[str, str] = {
 and `_HINTS["cut-off"]` (the same shape as the existing entries at
 `incidents.py:217-241`):
 
-> "The runtime was cut off before this turn produced a result. The transcript
+> "The previous turn was cut off before it produced a result. The transcript
 > holds whatever was written before it stopped and nothing after. Check the
 > state of anything it was mid-way through before repeating the work; do not
 > assume the request completed."
@@ -790,7 +790,7 @@ Rendered by `_default_convert_to_llm` (`session/session.py:675-697`) from the
 
 > [session incident] cut-off: the runtime retired so the next engage would run a
 > newer build (0.54.11@b133eba → 0.54.12@402af7f).
-> suggested action: The runtime was cut off before this turn produced a result.
+> suggested action: The previous turn was cut off before it produced a result.
 > The transcript holds whatever was written before it stopped and nothing after.
 > Check the state of anything it was mid-way through before repeating the work;
 > do not assume that work finished.

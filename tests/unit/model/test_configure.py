@@ -103,10 +103,23 @@ def test_configure_model_openai(mock_credential_manager, monkeypatch):
 
 
 def test_configure_model_openai_unknown_model_uses_defaults(mock_credential_manager):
-    """Unknown models get sensible ModelSpec defaults, not a KeyError."""
+    """Unknown models get sensible ModelSpec defaults, not a KeyError.
+
+    ``max_output_tokens`` is ``0``, and the assertion was ``> 0`` until the
+    no-data-is-not-a-cap fix (see ``build_model_spec``): the old seed was
+    ``UNKNOWN_MAX_OUTPUT`` (8192), a NUMBER in a field whose contract is "the
+    ceiling the PROVIDER publishes". A spec built from that placeholder was
+    indistinguishable from a model really stating an 8k cap, and
+    ``turn_output_budget`` clamped every router route to it -- a reasoning-heavy
+    turn spent all 8192 thinking and returned empty at ``stop_reason='length'``.
+    ``0`` is the codebase's no-data value: the budget routes it to the 131072
+    policy ceiling, and the picker renders it as "output unknown". The context
+    window keeps a positive default, because a window is what compaction needs
+    and 0 there would disable it.
+    """
     config = configure_model("openai", "gpt-9-turbo-invented", mock_credential_manager)
     assert config.spec.context_window > 0
-    assert config.spec.max_output_tokens > 0
+    assert config.spec.max_output_tokens == 0
 
 
 def test_configure_model_ollama(mock_credential_manager):
@@ -5481,6 +5494,59 @@ def test_the_router_ladder_is_scoped_to_the_router_route_not_the_hosting() -> No
     local_auto = build_model_spec("ollama", "auto")
     assert local_auto.reasoning_efforts == ()
     assert local_auto.reasoning_effort is None
+
+
+def test_a_no_data_route_publishes_no_output_cap() -> None:
+    """The router routes are the measured case: no data is NOT an 8k cap.
+
+    The registry's ``aggregator_router_model_info`` carries the legacy sentinel
+    ``max_tokens = -1`` -- "the SELECTED model's cap is unknown" -- because a
+    router dispatches per request and none of its routes is fixed. That fact has
+    to survive into the spec, and it did not: the builder seeded
+    ``UNKNOWN_MAX_OUTPUT`` (8192), so ``turn_output_budget``
+    (``min(131072, advertised)``) put 8192 on the wire for EVERY router request.
+    A reasoning-heavy turn spent the whole budget thinking, emitted no text and
+    no calls, and returned ``stop_reason='length'`` -- measured across the fleet
+    at 138 stops with ``output_tokens == reasoning_tokens == 8192``, 141 of those
+    stops on ``radient/auto``, and 140 of the 149 silent ones inside child
+    sessions. So this is
+    not a rendering nit: the number decided whether a delegated child produced
+    anything at all.
+
+    ``0`` then means "no data" to the budget, which routes it to the 131072
+    policy ceiling rather than to a stand-in.
+    """
+    from local_operator.model.registry import get_model_info
+
+    # The sentinel itself, first: the spec assertion below is only meaningful if
+    # the row really is a no-data row rather than one this test happens to know.
+    assert get_model_info("radient", "auto").max_tokens == -1
+    for hosting in ("radient", "radient-key", "openrouter"):
+        spec = build_model_spec(hosting, "auto")
+        assert spec.max_output_tokens == 0, (hosting, spec.max_output_tokens)
+
+    # The CONTROL that makes the change a no-data rule and not a blanket zero: a
+    # shipped row that STATES a cap keeps its number, so a real provider limit is
+    # still honoured (and still lowers the ask -- that is the narrowing arm the
+    # budget is built on).
+    stated = build_model_spec("anthropic", "claude-opus-5-5")
+    assert stated.max_output_tokens == 128_000
+
+
+def test_a_no_data_route_is_not_clamped_by_the_policy_budget() -> None:
+    """End to end, across the two modules: the no-data spec gets the POLICY.
+
+    The unit pins in ``tests/unit/harness/test_types.py`` state the budget rule;
+    this one states that the rule and the builder now agree, which is the actual
+    defect -- either half alone passed before the fix.
+    """
+    from local_operator.harness.types import (
+        DEFAULT_TURN_OUTPUT_TOKENS,
+        turn_output_budget,
+    )
+
+    router = build_model_spec("radient", "auto")
+    assert turn_output_budget(router) == DEFAULT_TURN_OUTPUT_TOKENS
 
 
 def test_the_router_seed_is_the_routes_own_default_per_provider() -> None:
