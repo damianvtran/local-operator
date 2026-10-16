@@ -1589,11 +1589,16 @@ class EpisodeRunner:
                 # attempt, so the recorded diagnostic names the real fault
                 # rather than the recovery that could not fix it.
                 #
-                # ``_rebindable_failure`` admits a pre-dispatch refusal
-                # (``invalid_state``) alongside the committed class: the worker
-                # answered before any adapter code ran, so a read-only re-bind
-                # is safe there too (see ``_refused_before_dispatch``).
-                if attempt == attempts or not _rebindable_failure(error):
+                # COMMITTED-ONLY, deliberately. This loop's recovery call is
+                # ``resume_observation``, whose contract is "the batch committed,
+                # skip the re-apply" (see the docstring above). A pre-dispatch
+                # refusal (``invalid_state``) did NOT commit, so resuming would
+                # be the wrong recovery -- and, if the worker returned to a live
+                # state, could return a never-applied batch's observation as the
+                # committed sequence. The refusal is handled one level up, at
+                # the BRIDGE (``ActionBridge._after_failed_execute``), which
+                # re-reads via the read-only ``observe`` seam instead.
+                if attempt == attempts or not _observation_phase_failure(error):
                     raise
                 self._record_observation_retry(error, attempt + 1, attempts)
                 if self._config.observation_retry_delay > 0:
@@ -2976,9 +2981,12 @@ def _rebindable_failure(error: BaseException) -> bool:
     adapter code ran (``_refused_before_dispatch``). Everything else stays
     ambiguous, poisons the session and ends the episode exactly as before.
 
-    Kept beside its two clauses rather than folded into one predicate so the
-    committed-class meaning stays legible where the wedge sentence and the
-    supervisor mirror read it.
+    THE ONLY CONSUMER is ``ActionBridge._after_failed_execute``, whose recovery
+    is a fresh read-only ``observe``. It must NOT gate ``resume_observation``
+    (``_execute_with_observation_recovery``): a refusal did not commit, so
+    "skip the re-apply and resume" is the wrong recovery and could accept a
+    never-applied batch's observation as committed. The retry loop therefore
+    keeps the committed-only predicate.
     """
 
     return _observation_phase_failure(error) or _refused_before_dispatch(error)

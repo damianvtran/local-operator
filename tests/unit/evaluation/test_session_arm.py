@@ -302,6 +302,58 @@ def _invalid_state_error() -> RpcRemoteError:
     )
 
 
+class TestExecuteLoopStaysCommittedOnly:
+    """The read-back RETRY LOOP must never resume a pre-dispatch refusal.
+
+    ``_make_execute`` (and its runner twin) recovers with
+    ``resume_observation``, whose contract is "the batch COMMITTED, skip the
+    re-apply". A refusal did not commit, so resuming is the wrong recovery and
+    a latent correctness bug. The bridge's read-only ``observe`` re-bind is the
+    only correct consumer of ``_rebindable_failure``; the loop stays
+    committed-only. This is the negative control review round 1 named.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_first_attempt_refusal_never_issues_resume_observation(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.protocol import ActionBatch, WaitAction
+        from local_operator.evaluation.runner.episode import EpisodeConfig
+        from local_operator.evaluation.session_arm import _make_execute
+
+        calls: list[str] = []
+
+        class Session:
+            async def execute(self, params: Any, *, timeout: float) -> Any:
+                calls.append("execute")
+                raise _invalid_state_error()
+
+            async def resume_observation(self, params: Any, *, timeout: float) -> Any:
+                calls.append("resume_observation")
+                raise AssertionError("a refusal must never be resumed")
+
+        config = EpisodeConfig(
+            evidence_root=tmp_path / "evidence",
+            artifact_root=tmp_path / "artifacts",
+            rescue_root=tmp_path / "rescue",
+            observation_retry_attempts=3,
+            observation_retry_delay=0.0,
+        )
+        execute = _make_execute(cast("Any", Session()), config, cast("Any", SimpleNamespace()))
+        batch = ActionBatch(
+            protocol_version="1.0",
+            task_id="task",
+            episode_id="episode",
+            observation_id="obs-0",
+            actions=(WaitAction(observation_id="obs-0", duration_ms=1),),
+        )
+
+        with pytest.raises(RpcRemoteError):
+            await execute(batch)
+        # Exactly ONE execute attempt, no resume: the refusal propagates at once.
+        assert calls == ["execute"]
+
+
 def _deadline_error() -> RpcRemoteError:
     """The ambiguous class: the failure declares nothing about the batch, so
     no re-read is safe."""

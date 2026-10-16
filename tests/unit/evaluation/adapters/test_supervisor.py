@@ -1027,6 +1027,42 @@ def test_a_predispatch_refusal_keeps_the_session_usable(
     assert not raw.terminated and rescue_required == []
 
 
+def test_a_predispatch_refusal_on_a_non_execute_method_still_poisons(
+    tmp_path: Path,
+) -> None:
+    """Negative control: the refusal stay-usable rule is scoped to ``execute``.
+
+    Only the bridge's read-only ``observe`` re-bind consumes a refusal; a
+    refusal on any other mutating method must keep the pre-existing
+    poison-on-ambiguous-failure behaviour, or the supervisor widening would be
+    method-agnostic scope drift.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_invalid_state_error()])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.reset_start(
+                ResetStartParams(
+                    operation_id="reset",
+                    task_id="task",
+                    episode_id="episode",
+                    artifact_root=str(tmp_path),
+                ),
+                timeout=1,
+            )
+        # A refusal here is NOT the bridge's re-bind path: the session is poisoned.
+        with pytest.raises(SupervisionError, match="poisoned"):
+            await session.observe(ObserveParams(episode_id="episode"), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("phase", ["unknown", "observation"])
 def test_only_a_declared_observation_phase_escapes_the_poison(tmp_path: Path, phase: str) -> None:
     """An UNDECLARED failure stays ambiguous and must poison exactly as before.

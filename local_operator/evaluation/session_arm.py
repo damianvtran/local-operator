@@ -1638,11 +1638,22 @@ class ActionBridge:
         failure the ADAPTER declared committed, and the episode stays dead even
         when the environment is healthy again. So this method attempts exactly
         ONE re-bind through the driver's ``recover`` seam (a read-only fetch of
-        the environment's current observation), and only for that committed
-        class (``_observation_phase_failure``) -- the same predicate the
-        read-back retries trust. For any other failure the batch's state is
-        ambiguous, the supervisor has poisoned the session, and re-reading is
-        not safe; the episode ends legibly instead.
+        the environment's current observation).
+
+        WHICH FAILURES QUALIFY (``_rebindable_failure``). Either the adapter
+        declared the batch committed and only the read-back was lost
+        (``_observation_phase_failure``), OR the worker refused before any
+        adapter code ran (``_refused_before_dispatch`` -- ``invalid_state``, the
+        task_077 wedge): a refusal applied NOTHING, so a read-only re-read is
+        safe, and the episode continues instead of discarding its applied work.
+        For any OTHER failure the batch's state is ambiguous, the supervisor has
+        poisoned the session, and re-reading is not safe; the episode ends
+        legibly instead.
+
+        This is the ONLY consumer of ``_rebindable_failure``; the read-back
+        retry loops keep the committed-only predicate because their recovery is
+        ``resume_observation`` ("the batch committed, skip the re-apply"), which
+        a refusal must not trigger.
 
         THE BOUND AND ITS COST. One ``recover`` call per failed batch, and none
         at all on the healthy path; the call itself is bounded by the caller's
@@ -3439,7 +3450,11 @@ def _make_execute(
                     timeout=config.step_timeout,
                 )
             except Exception as error:
-                if attempt == attempts or not _rebindable_failure(error):
+                # COMMITTED-ONLY, mirroring ``episode._execute_with_observation_recovery``:
+                # the recovery here is ``resume_observation``, which resumes a
+                # batch the adapter declared COMMITTED. A pre-dispatch refusal is
+                # handled at the bridge's read-only re-bind instead.
+                if attempt == attempts or not _observation_phase_failure(error):
                     raise
                 record.write(
                     "observation_retry",
