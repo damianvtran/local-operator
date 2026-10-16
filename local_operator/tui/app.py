@@ -32168,7 +32168,15 @@ class OperatorApp(App[None]):
             busy=self._terminal_loss_busy(gate_pending=gate_pending),
             gate_pending=gate_pending,
             remote_holders=False,
-            now=time.monotonic(),
+            # THE APP'S OWN CLOCK SEAM, never a bare ``time.monotonic()``. A test
+            # that crosses one of these grace windows has to control the reading,
+            # and patching the shared ``time`` module to do it rewrites the clock
+            # for EVERY consumer in the process — including a finite
+            # ``side_effect`` iterator, which an unrelated caller then drains into
+            # ``RuntimeError: coroutine raised StopIteration``. ``_clock`` is the
+            # overridable seam this app already carries for exactly this
+            # (see its docstring), so the patch stays inside one app instance.
+            now=self._clock(),
         )
         if action == "settle":
             # Only grace expiry makes an unreachable front-end gate disposable.
@@ -33535,10 +33543,14 @@ class OperatorApp(App[None]):
     def _clock(self) -> float:
         """Monotonic seconds, as one overridable seam.
 
-        Monotonic and not ``time.time``: the only reader is the re-title
-        throttle, and a wall clock stepped backwards by NTP would silently
-        widen its window. A method rather than a direct call so a test can
-        cross a two-minute gap without sleeping through it.
+        Monotonic and not ``time.time``: the re-title throttle is its longest
+        standing reader and a wall clock stepped backwards by NTP would silently
+        widen its window. It is NOT single-reader — ``_check_terminal_frontend``
+        reads it too, for the reaper's gate/clean-exit grace windows — so a test
+        that must cross either window patches this seam rather than the shared
+        ``time`` module (which would rewrite every consumer in the process). A
+        method rather than a direct call so such a test can cross a multi-second
+        gap without sleeping through it.
         """
         return time.monotonic()
 
