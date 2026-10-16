@@ -122,6 +122,50 @@ def binding_zoom_out() -> Msg:
     return Msg("tui.projects.binding_zoom_out", {})
 
 
+def detail_no_description() -> Msg:
+    return Msg("tui.projects.detail.no_description", {})
+
+
+def detail_no_text() -> Msg:
+    return Msg("tui.projects.detail.no_text", {})
+
+
+def form_date_placeholder() -> Msg:
+    return Msg("tui.projects.form.date_placeholder", {})
+
+
+def form_estimate_placeholder() -> Msg:
+    return Msg("tui.projects.form.estimate_placeholder", {})
+
+
+def form_key_placeholder() -> Msg:
+    return Msg("tui.projects.form.key_placeholder", {})
+
+
+def form_owner_placeholder() -> Msg:
+    return Msg("tui.projects.form.owner_placeholder", {})
+
+
+def form_readback_error(*, label: str, error: str) -> Msg:
+    return Msg("tui.projects.form.readback_error", {"label": label, "error": error})
+
+
+def form_readback_hint(*, label: str, hint: str) -> Msg:
+    return Msg("tui.projects.form.readback_hint", {"label": label, "hint": hint})
+
+
+def form_tags_placeholder() -> Msg:
+    return Msg("tui.projects.form.tags_placeholder", {})
+
+
+def form_team_placeholder() -> Msg:
+    return Msg("tui.projects.form.team_placeholder", {})
+
+
+def form_title_placeholder() -> Msg:
+    return Msg("tui.projects.form.title_placeholder", {})
+
+
 def new_project() -> Msg:
     return Msg("tui.projects.new_project", {})
 

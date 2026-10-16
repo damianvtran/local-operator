@@ -75,7 +75,7 @@ describe("AskDock", () => {
 		   (it is the way to Dismiss), in the dim register, saying what it holds. */
 		const open = vi.fn();
 		render(<AskDock rows={[ask({ status: "timed_out" })]} onOpen={open} />);
-		expect(screen.getByText("1 lapsed question")).toBeTruthy();
+		expect(screen.getByText("1 question timed out")).toBeTruthy();
 		expect(screen.queryByText(/waiting/)).toBeNull();
 		const dock = screen.getByTestId("ask-dock");
 		expect(dock.className).not.toMatch(/border-accent|bg-accent-wash/);

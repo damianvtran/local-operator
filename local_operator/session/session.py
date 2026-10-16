@@ -26562,6 +26562,9 @@ class Session:
           the next session — the same boundary the comment on
           :data:`~local_operator.harness.subagent.CANONICAL_EFFORT_TIERS`
           documents for a hand-added tier.
+        * ``asks.lapsed_visible_for`` — republishes the ask state, because the
+          window is applied when the wire is built; also replaces the deadline
+          timer task so it wakes at the new ``expires_at + window``.
 
         Everything else the registry calls LIVE is already read per use
         (``fork.*``, ``web_*`` knobs, ``bash.shell``) and needs no apply here.
@@ -26663,6 +26666,16 @@ class Session:
         # transcript follow in the same breath.
         if getattr(self, "_aida_duty", False) and any(key.startswith("aida.") for key in changed):
             self._spawn_background(self._aida_reconcile_now())
+        if "asks.lapsed_visible_for" in changed and self._ask_queue is not None:
+            # The window is applied at publish time (``frontend_state.ask_wire``
+            # reads it per call), so republishing IS the apply: a narrower
+            # window hides a lapsed row on every attached surface now rather
+            # than at the next turn. ``rearm`` REPLACES the timer task, because a
+            # sleeping one holds a delay planned with the old window (QA round 1,
+            # Q2); its next wake is the new ``expires_at + window`` (decision D9).
+            # No queue built yet means nothing has been published to correct.
+            self.publish_ask_state()
+            self._ask_queue.rearm()
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.

@@ -93,7 +93,9 @@ def test_the_timeout_copy_changes_subject_too() -> None:
         _row([{"id": "q1", "question_id": "q-9"}], status=STATUS_TIMED_OUT)
     )
     assert "this ask timed out" in ordinary
-    assert "this request timed out" in bridge and "the sender moved on" in bridge
+    assert "this request timed out" in bridge and "the sender goes ahead" in bridge
+    # D10: a lapsed card is read-only, so neither title promises a late answer.
+    assert "still reaches" not in ordinary and "still reaches" not in bridge
 
 
 def test_a_malformed_question_is_not_a_bridge_carriage() -> None:

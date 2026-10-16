@@ -60,8 +60,8 @@ export function AskDock({
 	const quiet = waiting === 0;
 	const label = quiet
 		? lapsed === 1
-			? "1 lapsed question"
-			: `${lapsed} lapsed questions`
+			? "1 question timed out"
+			: `${lapsed} questions timed out`
 		: waiting === 1
 			? "1 question waiting"
 			: `${waiting} questions waiting`;

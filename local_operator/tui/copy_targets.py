@@ -18,6 +18,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, Sequence, runtime_checkable
 
+# i18n: the hint tallies below are user-facing picker copy, extracted so a
+# locale can carry them; the counts stay raw digit strings (no grouping,
+# no plural branch) because the pre-extraction f-strings printed them so.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
+
+_t = tr("tui.small")
+
 #: Cap on how many recent assistant messages the picker lists. Counted over
 #: messages with non-empty text, so an answer that was only tool calls does
 #: not consume budget.
@@ -265,9 +273,9 @@ def _message_hint(text: str, code_count: int, quote_count: int, truncated: bool)
     parts = ["truncated"] if truncated else []
     parts.append(plural_lines(text))
     if code_count > 0:
-        parts.append(f"{code_count} code")
+        parts.append(_t(_x.copy_code_count(shown=str(code_count))))
     if quote_count > 0:
-        parts.append(f"{quote_count} quote")
+        parts.append(_t(_x.copy_quote_count(shown=str(quote_count))))
     return " · ".join(parts)
 
 

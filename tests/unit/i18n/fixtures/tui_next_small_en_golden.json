@@ -1,0 +1,8 @@
+{
+  "tui.projects.detail.no_description": "no description yet",
+  "tui.projects.detail.no_text": "(no text in this entry)",
+  "tui.small.copy.code_count": "{shown} code",
+  "tui.small.copy.quote_count": "{shown} quote",
+  "tui.small.picker.of_separator": " of ",
+  "tui.small.picker.showing_prefix": "showing "
+}

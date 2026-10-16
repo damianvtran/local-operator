@@ -244,6 +244,15 @@ def _bridge_settings() -> Any:
     return TeamBridgeSettings.from_values(watcher.values)
 
 
+def _lapsed_choice(watcher: ConfigWatcher) -> str:
+    """The ``asks.lapsed_visible_for`` choice the reader resolves, by its window."""
+    from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
+    from local_operator.asks.visibility import lapsed_visible_ms
+
+    window_s = lapsed_visible_ms(watcher.config_dir) // 1000
+    return next(choice for choice, seconds in LAPSED_VISIBLE_FOR_S.items() if seconds == window_s)
+
+
 def _bash_shell(watcher: ConfigWatcher) -> str:
     """What `execute_bash` resolves per call (it reads through `paths.config_dir()`,
     which the probe points at the watcher's directory)."""
@@ -752,6 +761,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,
     ),
+    # -- asks: the lapsed-ask display window (decisions D8/D9) -----------------
+    # Observed through the ONE reader every surface calls per publish/request
+    # (``asks.visibility``), on the watcher's directory. That the RUNNING
+    # session's wire moves on the change (``_apply_config_change`` republishes)
+    # is proven end to end in ``tests/unit/asks/test_ask_wire.py``
+    # (``test_a_running_session_republishes_when_the_window_changes``).
+    "asks.lapsed_visible_for": ("1h", lambda s, w: _lapsed_choice(w)),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns
