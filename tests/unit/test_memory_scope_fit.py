@@ -1,7 +1,6 @@
 # Scope-fit guard tests (LOH-25 global-memory hygiene): a deterministic refusal on
 # GLOBAL writes whose content is work/lane/progress state, which belongs in session scope.
 """Global writes must refuse work-progress content; personal facts must still store."""
-import json
 
 import pytest
 
@@ -105,6 +104,15 @@ def test_ordinary_personal_fact_not_refused(tmp_path, text):
         "Ci Chen is my accountant",
         "My bank checks were reordered",
         "I build model ships in the garage",
+        # Code review round 1: honorific FP and ordinary-prose FPs.
+        "Mr Okafor lives at #12",
+        "Mrs Patel's flat #4 needs a key",
+        "Mr and Mrs Okafor live at #12",
+        "Mrs Tran is #1 priority",
+        "Merged households with Mr Patel in 2019",
+        "I bought a Tag Heuer watch, version 2",
+        "I commit 5000000 to savings each year",
+        "Check the green bin goes out Tuesday",
     ],
 )
 def test_personal_words_that_look_workish_store(tmp_path, text):
@@ -177,5 +185,4 @@ def test_guide_reworded_for_bounded_scope_fit():
     assert "memory://session" in body
     # The old absolute claim is gone; the bounded nature is stated.
     assert "not a content classifier" not in body
-    assert "narrow locator" in body
-    _ = json
+    assert "bounded locator filter" in body
