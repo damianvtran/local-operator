@@ -27066,16 +27066,21 @@ class OperatorApp(App[None]):
         should look like.
         """
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         counts: dict[str, int] = {}
         total = 0
-        for session_id, entry in store.read_index(config_dir()).items():
-            asks = entry.get("asks")
-            outstanding = len(store.outstanding_asks(asks if isinstance(asks, list) else []))
-            if outstanding:
-                counts[session_id] = outstanding
-                total += outstanding
+        # Through ``index_asks`` — the SAME reader, window and re-derivation the
+        # fleet list uses (``_load_fleet_asks``) — so a mark or ``asks: N`` never
+        # counts a row the list it opens will not show (``asks.lapsed_visible_for``,
+        # decision D8; review round 1, R1-1).
+        root = config_dir()
+        for row in store.index_asks(root, lapsed_visible_ms=lapsed_visible_ms(root)):
+            if store.is_outstanding(row.get("status")):
+                session_id = str(row.get("session_id") or "")
+                counts[session_id] = counts.get(session_id, 0) + 1
+                total += 1
         return counts, total
 
     def _expand_asks(self, ask_id: str | None = None, *, by_policy: bool = False) -> None:
@@ -27545,10 +27550,16 @@ class OperatorApp(App[None]):
     async def _load_fleet_asks(self) -> None:
         """Read the index off-thread, then mount the ONE list on it."""
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         try:
-            raw = await asyncio.to_thread(store.index_asks, config_dir())
+            # ``asks.lapsed_visible_for`` (decision D8) from the app's started
+            # watcher's snapshot (``_watch_config``), so another
+            # process's edit is already in it; only the int crosses the thread.
+            raw = await asyncio.to_thread(
+                store.index_asks, config_dir(), lapsed_visible_ms=lapsed_visible_ms(config_dir())
+            )
         except Exception:  # noqa: BLE001 — a broken index is not a crash
             logger.warning("could not read the fleet ask index", exc_info=True)
             raw = []
@@ -27568,10 +27579,13 @@ class OperatorApp(App[None]):
     async def _reload_fleet_rows(self) -> None:
         """Re-read the fleet rows after an answer, keeping the list on them."""
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         try:
-            raw = await asyncio.to_thread(store.index_asks, config_dir())
+            raw = await asyncio.to_thread(
+                store.index_asks, config_dir(), lapsed_visible_ms=lapsed_visible_ms(config_dir())
+            )
         except Exception:  # noqa: BLE001 — a broken index is not a crash
             logger.warning("could not read the fleet ask index", exc_info=True)
             return
