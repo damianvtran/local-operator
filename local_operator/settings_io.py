@@ -71,7 +71,11 @@ from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
-from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
+from local_operator.model.effort import (
+    EFFORT_ORDER,
+    FALLBACK_EFFORTS,
+    parse_tier_mapping,
+)
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -1404,6 +1408,28 @@ def _validate_advertise_hosts(value: object) -> object:
 #: syncs its title into this key, so a title the session layer accepted must
 #: never be refused by the config layer mid-sync.
 _AIDA_NAME_MAX_CHARS = 80
+
+
+def validate_tier_value(value: Any) -> None:
+    """A ``subagents.models.<tier>`` value: a selector string or a ``{model, effort}`` map.
+
+    The mapping form (#2428) gives a tier a reasoning effort; it mirrors a
+    fallback-chain hop and is parsed by the same leaf function the launch path
+    uses (``model.effort.parse_tier_mapping``), so a value this accepts is one
+    the launch resolves. A string stays the row's ordinary TEXT contract — this
+    validator only exists because ``validate``'s generic TEXT arm refuses every
+    non-string. A string that LOOKS like JSON is refused: stored verbatim it
+    would be read as a ``provider/model`` selector and fail at launch.
+    """
+    if isinstance(value, str):
+        if value.strip().startswith("{"):
+            raise ValueError('enter the mapping as JSON, e.g. {"model": "a/b", "effort": "high"}')
+        return
+    if parse_tier_mapping(value) is None:
+        raise ValueError(
+            "expected provider/model, or "
+            f'{{"model": "provider/model", "effort": "{"|".join(EFFORT_ORDER)}"}}'
+        )
 
 
 def _validate_delegated_max_age_hours(value: Any) -> None:
@@ -3120,6 +3146,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_lo_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     Setting(
         key="subagents.models.med",
@@ -3181,6 +3208,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_med_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     Setting(
         key="subagents.models.hi",
@@ -3242,6 +3270,7 @@ SETTINGS: tuple[Setting, ...] = (
         # signed off this trade.
         help=_t(_ws.subagents_models_hi_help()),
         empty_unsets=True,
+        validate_value=validate_tier_value,
     ),
     # -- resource classification --------------------------------------------
     #
@@ -5409,6 +5438,10 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
         # Hand-written YAML maps and the text editor share the same contract.
         # Python's dict repr uses single quotes and cannot round-trip as JSON.
         return json.dumps(raw, default=str)
+    if setting.validate_value is validate_tier_value and isinstance(raw, Mapping):
+        # Same contract as model_overrides above: a ``{model, effort}`` tier
+        # (#2428) is shown as JSON the TEXT editor can round-trip.
+        return json.dumps(raw, default=str)
     if setting.validate_value is _validate_openrouter_max_price and isinstance(raw, Mapping):
         # Same contract as model_overrides above: the TUI editor is text, so a
         # stored mapping (PATCH route, hand-written YAML) is shown as JSON the
@@ -5505,6 +5538,14 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.validate_value is validate_tier_value and text.startswith("{"):
+        # A ``{model, effort}`` tier typed on the page or via ``lop config
+        # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON
+        # text, which the tier reader would take for a selector.
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ValueError('expected JSON, e.g. {"model": "a/b", "effort": "high"}') from None
     return text
 
 
