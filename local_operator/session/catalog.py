@@ -918,10 +918,10 @@ class CatalogPage:
     page does not carry; the same concatenation :func:`load_catalog` returns, and
     the same shape the desktop route already splits on ``limit``. ``next_cursor``
     is minted from the page's LAST row and never from an appended extra: an extra
-    ranks below the page by construction, so a cursor taken from one would
-    re-serve the page. The extras themselves are a FIRST-PAGE promise, appended
-    only on an answer that carries no usable position -- see
-    :func:`catalogue_page`.
+    sits below every page row by construction, and in the page's own order, so a
+    cursor taken from one would re-serve the page. The extras themselves are a
+    FIRST-PAGE promise, appended only on an answer that carries no usable position
+    -- see :func:`catalogue_page`.
 
     THERE IS NO SEPARATE TRUNCATION FLAG, deliberately: ``next_cursor`` IS the
     answer to "did this scope hold more than the page" (non-null exactly when it
@@ -1997,8 +1997,8 @@ def load_catalog(
     by the ``limit`` slice below. A caller that renders a pinned section must
     have both, because a pin is a durable statement by the user and a recency
     window is a property of the listing. The extras come back APPENDED, after
-    the page and in the ranking's own order (every extra ranks below every page
-    row by construction, so the concatenation IS rank order).
+    the page and in the page's own order (every extra sits below every page row
+    by construction, so the concatenation is that order continued).
     """
     # A THIN SHELL OVER THE SHARED MIDDLE, and a refactor rather than a change of
     # promise: the scan-to-ranking half is ``_ranked_candidates`` and the
@@ -2174,7 +2174,8 @@ def catalogue_page(
     ``next_cursor``, ``counts`` and ``limit`` keep describing the PAGE and nothing
     else, exactly as they already did for the pins, so ``len(entries) > limit``
     says nothing about any of them and a caller that reads the extras must take
-    them from the tail (they are appended in rank order, below every page row).
+    them from the tail (they are appended in the page's own order, below every
+    page row).
 
     THE FILTER SITS AFTER RANKING AND BEFORE THE SLICE, and that is the only
     correct place for it: filtering the LISTING first would re-derive the ordering
@@ -2285,11 +2286,11 @@ def catalogue_page(
         # busy session at rank 51. The client cannot compensate for that: it
         # holds one page, and ``counts.active`` counts unread completions rather
         # than running rows (52 against 5 there), so it has no way to know a
-        # running row exists to fetch. Appended here instead, in rank order, so
-        # the guarantee holds for whatever order ``ranked`` is in force -- this
-        # rule reads the rows, never the sort key (see #2527, the complementary
-        # activity-sort change, which still cuts when the active set alone
-        # exceeds ``limit``).
+        # running row exists to fetch. Appended here instead, below the page and
+        # in the page's own order, so the guarantee holds for whatever order
+        # ``ranked`` is in force -- this rule reads the rows, never the sort key
+        # (see #2527, the complementary activity-sort change, which still cuts
+        # when the active set alone exceeds ``limit``).
         #
         # THE PINS ARE STILL THE HEAD ANSWER'S ALONE. A scoped answer cannot
         # speak for the pinned set -- the client gates its pin facts on the head

@@ -7273,7 +7273,7 @@ class DesktopSessions:
         ``is_user_session(path)``; this one must NOT, because the sidebar pins
         DELEGATED RUNS too — a delegated run is a HIDDEN session, and pins are
         kept resolvable across BOTH visibility axes (``pinned_hidden_ids`` for
-        the hidden one, ``off_page`` for a visible session outside a
+        the hidden one, ``pinned_off_page`` for a visible session outside a
         page) — and a desktop pin the user cannot remove is the worst shape of
         bug in this feature: the remedy for an unwanted pin is the thing such a
         check would refuse. A delegated run lives in `sessions/` like every other
