@@ -258,6 +258,8 @@ export type MessageParams = {
   "wire.exec.tools_unreachable": { "names": string; "count": string };
   "wire.exec.turn_did_not_complete": undefined;
   "wire.exec.waiting_on_you": undefined;
+  "wire.host_speed.retire_below_tps.help": undefined;
+  "wire.host_speed.retire_below_tps.label": undefined;
   "wire.memory.capture.help": undefined;
   "wire.memory.capture.label": undefined;
   "wire.memory.command": undefined;

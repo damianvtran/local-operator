@@ -8162,3 +8162,55 @@ def test_the_signature_matches_a_real_shells_real_output(tmp_path: Path) -> None
     # row it replaced.
     assert exercised, "no shell on this host was exercised"
     assert any("probe.sh" in item for item in exercised), "the long-path script form did not run"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_edit_checks_projected_utf8_bytes_before_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    """A hunk is not a payload size: enforce quota on the computed result.
+
+    The initial scratch guard excludes the replaced file, so an edit can pass
+    address/name checks while its final UTF-8 content would exceed the pad cap.
+    Refusal must precede mutation; accepting then reporting an error is too late.
+    This is not a reproduction of the separately unproven article-write refusal.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    target = pad / "quota.txt"
+    before = b"seed\n"
+    target.write_bytes(before)
+    # Derive a small boundary from the real filesystem rather than assuming
+    # files allocate their apparent byte length (APFS commonly allocates 4KiB).
+    # There are no other files: excluding this target leaves zero held bytes.
+    allocated = target.stat().st_blocks * 512
+    budget = max(4096, allocated)
+    replacement = "é" * (budget // 2 + 1) + "\n"
+    payload_bytes = len(replacement.encode("utf-8"))
+    single_write_cap = 4 * budget
+    assert len(before) < budget < payload_bytes < single_write_cap
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_WRITE_BYTES", single_write_cap)
+    # This is the actual shared initial guard, not a mocked permission result.
+    assert scratchpad_module.check_scratchpad_write(target, pad, "scratchpad://quota.txt") is None
+
+    result = await tools["edit"].execute(
+        "scratch-quota-red",
+        {
+            "path": "scratchpad://quota.txt",
+            "old_text": "seed\n",
+            "new_text": replacement,
+        },
+        None,
+        None,
+        context,
+    )
+    after = target.read_bytes()
+    assert result.is_error is True, (
+        f"edit accepted {payload_bytes} UTF-8 bytes against cap {budget}; "
+        f"actual file bytes={len(after)}, original unchanged={after == before}"
+    )
+    assert f"over the {budget:,}-byte ceiling" in result.text
+    assert after == before, "a refused quota-changing edit must not mutate the file"

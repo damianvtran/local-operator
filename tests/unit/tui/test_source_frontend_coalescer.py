@@ -16,7 +16,6 @@ pilot, so ``call_later`` is the real Textual scheduler rather than a stand-in.
 from __future__ import annotations
 
 import os
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,6 +25,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -45,13 +45,19 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(OperatorApp, "_start_herdr_reporter", lambda _self: None)
 
 
-def _recording(sink: list[object]):
-    """Stand in for ``run_worker``: record the coroutine and close it unwritten."""
+def _recording_releases(app: OperatorApp, sink: list[object]):
+    """Observe release handoffs on this App without consuming other workers."""
+    real_run_worker = app.run_worker
+    release_code = app._release_sidebar_source.__func__.__code__
 
-    def run(coro, **_kwargs):  # type: ignore[no-untyped-def]
-        sink.append(coro)
-        coro.close()
-        return None
+    def run(coro, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # Boot can still hand off a goal judge here. Counting/closing every
+        # coroutine mislabels that worker as a release and skips its finally.
+        if getattr(coro, "cr_code", None) is release_code:
+            sink.append(coro)
+            coro.close()  # Only the release body is excluded by this observer.
+            return None
+        return real_run_worker(coro, *args, **kwargs)
 
     return run
 
@@ -176,34 +182,59 @@ async def test_a_refused_schedule_does_not_latch_the_source_deaf() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_retired_source_still_clears_its_bit_and_acts_on_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Retirement is decided by the real callback, and the bit is not its casualty."""
+async def test_a_retired_source_still_clears_its_bit_and_acts_on_nothing(monkeypatch) -> None:
+    """Retirement is decided by the real callback, not by worker attribution."""
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     wired = _ViewerSource("child-0")
-    # Other app workers (including goal re-arm) can legitimately start here.
-    # Observe the release action itself, not every coroutine sent to run_worker;
-    # the latter mistakes unrelated startup work for releasing this source.
-    release = AsyncMock()
-    monkeypatch.setattr(app, "_release_sidebar_source", release)
+    releases: list[object] = []
+    adoptions: list[object] = []
+
+    def no_ancillary_producers(adopted):  # type: ignore[no-untyped-def]
+        # This callback test needs real adoption and scheduling, not unrelated
+        # viewer/mobile publication; keep the boundary on this App alone.
+        assert adopted is session
+        adoptions.append(adopted)
+
+    monkeypatch.setattr(app, "_mobile_adopted", no_ancillary_producers)
+    monkeypatch.setattr(app, "run_worker", _recording_releases(app, releases))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await await_session_boot(app)
+        assert app._session is session and adoptions
+        assert app._viewer_server is None
+        assert app._mobile_handle is None and app._mobile_registrant is None
         app._watch_source_frontend(wired.source)
         wired.source.retired = True
         app._sidebar_sources["child-0"] = wired.source
 
-        wired.deliver(3)
-        await pilot.pause()
+        # A genuine unrelated goal coroutine must run its finally, not be
+        # closed or counted as a release. An attached facade cannot judge here.
+        assert app._goal_judge_driver(wired.session, wired.source) is None
+        wired.source.goal.judge_in_flight = True
+        worker = app.run_worker(app._rearm_goal_judge_worker(wired.session, wired.source))
+        assert worker is not None, "the unrelated goal worker was consumed by the observer"
+        await worker.wait()
+        assert wired.source.goal.judge_in_flight is False
+        assert not releases
 
-        release.assert_not_called()
+        wired.deliver(3)
+        assert wired.source.frontend_change_scheduled is True
+        await pilot.pause()
+        assert not releases, "a retired source was handed to the release worker"
         assert wired.source.frontend_change_scheduled is False
 
         wired.deliver(1)
+        assert wired.source.frontend_change_scheduled is True
         await pilot.pause()
-        release.assert_not_called()
+        assert not releases
         assert wired.source.frontend_change_scheduled is False
+
+        # Sensitivity control: an actual retired-source release handoff is
+        # still caught before its body runs, even without a worker group name.
+        app.run_worker(app._release_sidebar_source(wired.source))
+        with pytest.raises(AssertionError, match="retired source"):
+            assert not releases, "a retired source was handed to the release worker"
+        assert len(releases) == 1
 
 
 @pytest.mark.asyncio

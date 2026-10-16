@@ -132,17 +132,22 @@ async def test_a_replaced_or_truncated_journal_is_never_described_by_an_old_reco
     assert anchor is not None
     assert write_anchor(tmp_path, anchor) is True
 
-    # A replaced file (the shape ``compact_file`` leaves): the record names the
-    # inode it scanned, and a forged record proves the check is what refuses it
-    # rather than the filesystem having handed out a different number.
+    # A replaced file (the shape ``compact_file`` leaves): the old record must
+    # stop describing the journal even when its replacement has identical bytes.
     path = tmp_path / "transcript.jsonl"
     replacement = tmp_path / "replacement.jsonl"
     replacement.write_bytes(path.read_bytes())
     os.replace(replacement, path)
+    assert validate_anchor(tmp_path, anchor) is None
+
+    # Forge against CURRENT identity: old_inode + 1 can legitimately equal the
+    # replacement's inode, making the supposedly invalid record fully valid.
+    wrong_inode = path.stat().st_ino + 1
+    assert wrong_inode != path.stat().st_ino
     assert (
         validate_anchor(
             tmp_path,
-            TailAnchor(inode=anchor.inode + 1, size=anchor.size, tail_digest=anchor.tail_digest),
+            TailAnchor(inode=wrong_inode, size=anchor.size, tail_digest=anchor.tail_digest),
         )
         is None
     )
@@ -150,6 +155,7 @@ async def test_a_replaced_or_truncated_journal_is_never_described_by_an_old_reco
     # A shrink: the record's size is above the file now.
     fresh = build_anchor(tmp_path)
     assert fresh is not None
+    assert validate_anchor(tmp_path, fresh) == fresh
     path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
     assert validate_anchor(tmp_path, fresh) is None
 

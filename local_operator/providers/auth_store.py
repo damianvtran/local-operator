@@ -64,13 +64,16 @@ import json
 import logging
 import os
 import sqlite3
+import stat
+import sys
 import threading
 import time
 import uuid
 import zlib
+from _thread import LockType
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -82,6 +85,7 @@ from local_operator.providers.registry import (
     get_provider_definition,
     provider_env_key,
 )
+from local_operator.wakes.lock import _try_lock, _unlock
 
 if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
     from local_operator.providers.usage import QuotaHealth
@@ -371,6 +375,216 @@ CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
 
 class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
+
+
+# Bootstrap exclusion is private to AuthStore, not a new general locking API.
+# SQLite serializes our BEGIN/ALTER, but WAL initialization happens BEFORE that
+# transaction and two direct constructors can conflict there (SQLITE_BUSY5).
+_AUTH_BOOTSTRAP_TIMEOUT_S = 5.0
+_bootstrap_clock = time.monotonic
+
+
+@dataclasses.dataclass
+class _BootstrapEntry:
+    mutex: LockType = dataclasses.field(default_factory=threading.Lock)
+    users: int = 0  # holders AND waiters; never remove a live waiter's identity
+    owner: int | None = None
+
+
+_BOOTSTRAP_REGISTRY_LOCK = threading.Lock()
+_BOOTSTRAP_ENTRIES: dict[str, _BootstrapEntry] = {}
+_BOOTSTRAP_FDS: set[int] = set()
+
+
+def _bootstrap_before_fork() -> None:
+    # Opening/registering and closing/removing descriptors share this lock, so
+    # a child cannot inherit an unregistered descriptor through a fork gap.
+    _BOOTSTRAP_REGISTRY_LOCK.acquire()
+
+
+def _bootstrap_parent_after_fork() -> None:
+    _BOOTSTRAP_REGISTRY_LOCK.release()
+
+
+def _bootstrap_child_after_fork() -> None:
+    global _BOOTSTRAP_REGISTRY_LOCK, _BOOTSTRAP_ENTRIES, _BOOTSTRAP_FDS
+    for fd in _BOOTSTRAP_FDS:
+        # NEVER LOCK_UN: inherited descriptors share the parent's open-file
+        # description. Closing only the child's copy leaves its exclusion live.
+        with suppress(OSError):
+            os.close(fd)
+    _BOOTSTRAP_REGISTRY_LOCK = threading.Lock()
+    _BOOTSTRAP_ENTRIES = {}
+    _BOOTSTRAP_FDS = set()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_bootstrap_before_fork,
+        after_in_parent=_bootstrap_parent_after_fork,
+        after_in_child=_bootstrap_child_after_fork,
+    )
+
+
+def _verify_bootstrap_file(
+    path: Path, fd: int, owner: int | None, *, require_mode: bool = True
+) -> None:
+    opened = os.fstat(fd)
+    named = path.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or opened.st_nlink != 1
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        raise AuthStoreError("AuthStore bootstrap lock is not the original regular file")
+    if os.name != "nt" and (
+        opened.st_uid != owner or (require_mode and stat.S_IMODE(opened.st_mode) != 0o600)
+    ):
+        raise AuthStoreError("AuthStore bootstrap lock must have the database owner and mode0600")
+
+
+def _open_bootstrap_file(path: Path, database: Path) -> int:
+    # Keep the capability guard explicit: the portability audit recognizes
+    # statement guards, and non-POSIX hosts must never call an absent API.
+    uid: int | None = None
+    if hasattr(os, "geteuid"):
+        uid = os.geteuid()
+    database_stat = database.stat() if database.exists() else None
+    owner = database_stat.st_uid if database_stat is not None and uid is not None else uid
+    if owner != uid and uid != 0:
+        raise AuthStoreError("AuthStore bootstrap requires the database owner")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    # No chmod/chown of pre-existing files. In particular, do not follow a
+    # sidecar symlink or 'repair' somebody else's lock into a credential lock.
+    with _BOOTSTRAP_REGISTRY_LOCK:
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            prior = path.lstat()
+            if not stat.S_ISREG(prior.st_mode):
+                raise AuthStoreError("AuthStore bootstrap lock must not be a symlink")
+            fd = os.open(path, flags)
+            created = False
+        _BOOTSTRAP_FDS.add(fd)
+    try:
+        if created:
+            _verify_bootstrap_file(path, fd, uid, require_mode=False)
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            if owner != uid:
+                # Root opening an EXISTING user-owned DB must not strand a
+                # root-owned sidecar. Only our fresh verified file may change
+                # owner; an existing foreign/misowned sidecar is never changed.
+                # A transfer still requires root and a real database owner;
+                # the optional-UID platform path must fail closed, not supply
+                # an invented owner merely to satisfy the integer-only API.
+                if owner is None or uid != 0 or database_stat is None or not hasattr(os, "fchown"):
+                    raise AuthStoreError("Cannot create a bootstrap lock for this database owner")
+                os.fchown(fd, owner, database_stat.st_gid)
+        _verify_bootstrap_file(path, fd, owner)
+        return fd
+    except BaseException:
+        with _BOOTSTRAP_REGISTRY_LOCK:
+            _BOOTSTRAP_FDS.discard(fd)
+            os.close(fd)
+        raise
+
+
+@contextmanager
+def _auth_bootstrap_guard(database: Path) -> Iterator[None]:
+    """Serialize the WHOLE writable bootstrap on one canonical filesystem DB.
+
+    A single5s deadline covers thread and nonblocking process-lock acquisition;
+    SQLite's own5s timeout is unchanged, and no SQL BUSY retry is introduced.
+    Persistent0600 sidecars are never unlinked (unlink splits lock identities).
+    This coordinates cooperating upgraded writers in the existing trusted
+    private-store directory, not hostile same-UID directory replacement or
+    hardlink aliases, which do not share a supported SQLite WAL filename.
+    """
+    if str(database) == ":memory:":
+        yield
+        return
+    database = database.resolve()
+    key = str(database)
+    pid = os.getpid()
+    ident = threading.get_ident()
+    deadline = _bootstrap_clock() + _AUTH_BOOTSTRAP_TIMEOUT_S
+    with _BOOTSTRAP_REGISTRY_LOCK:
+        entry = _BOOTSTRAP_ENTRIES.setdefault(key, _BootstrapEntry())
+        if entry.owner == ident:
+            raise AuthStoreError("Recursive AuthStore bootstrap on the same database")
+        entry.users += 1
+    held = False
+    locked = False
+    fd: int | None = None
+    try:
+        remaining = deadline - _bootstrap_clock()
+        if remaining <= 0 or not entry.mutex.acquire(timeout=remaining):
+            raise AuthStoreError("Timed out acquiring AuthStore bootstrap thread guard")
+        held = True
+        with _BOOTSTRAP_REGISTRY_LOCK:
+            entry.owner = ident
+        # The sidecar needs its parent first; mkdir is idempotent and no DB or
+        # credential byte is opened until both exclusion layers have succeeded.
+        database.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = database.with_name(database.name + ".bootstrap.lock")
+        fd = _open_bootstrap_file(lock_path, database)
+        while True:
+            if _bootstrap_clock() >= deadline:
+                raise AuthStoreError("Timed out acquiring AuthStore bootstrap process guard")
+            if _try_lock(fd):
+                locked = True
+                break
+            # Nonblocking OS lock only; this wait spends the SAME deadline.
+            threading.Event().wait(min(0.025, max(0.0, deadline - _bootstrap_clock())))
+        _verify_bootstrap_file(
+            lock_path,
+            fd,
+            (
+                database.stat().st_uid
+                if database.exists()
+                else (os.geteuid() if hasattr(os, "geteuid") else None)
+            ),
+        )
+        yield
+    finally:
+        # A child at fork already closed copied fds and reset the registry.
+        # Touching an old fd number there could unlock/close a NEW child's file.
+        if os.getpid() == pid:
+            original_error = sys.exc_info()[1]
+            cleanup_error: BaseException | None = None
+            try:
+                if fd is not None:
+                    try:
+                        if locked:
+                            _unlock(fd)
+                    except BaseException as error:
+                        cleanup_error = error
+                    finally:
+                        with _BOOTSTRAP_REGISTRY_LOCK:
+                            _BOOTSTRAP_FDS.discard(fd)
+                            try:
+                                os.close(fd)
+                            except BaseException as error:
+                                if cleanup_error is None:
+                                    cleanup_error = error
+            finally:
+                # Even an unlock/close failure must not strand thread waiters
+                # or keep a dead path entry alive in this process forever.
+                with _BOOTSTRAP_REGISTRY_LOCK:
+                    if held:
+                        entry.owner = None
+                        entry.mutex.release()
+                    entry.users -= 1
+                    if entry.users == 0:
+                        _BOOTSTRAP_ENTRIES.pop(key, None)
+            if cleanup_error is not None:
+                if original_error is not None:
+                    original_error.add_note(f"AuthStore guard cleanup: {cleanup_error!r}")
+                else:
+                    raise cleanup_error
 
 
 class CredentialInvalidError(AuthStoreError):
@@ -1297,59 +1511,87 @@ class AuthStore:
     # -- connection ----------------------------------------------------------
 
     def _connect(self) -> _SerializedConnection:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Create the file 0600 BEFORE sqlite opens it: the plain
-        # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
-        if not self._db_path.exists():
-            fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        # `check_same_thread=False` + an explicit mutex, rather than sqlite's
-        # default thread affinity. The store is built once on whatever thread
-        # first asks for it (for the desktop routes, the event loop) and is then
-        # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
-        # hop, a thread-pool executor, a background scheduler -- raised
-        # `ProgrammingError`. That is how a credential-free machine came to
-        # report every model as connected (D18): the raise was swallowed by a
-        # broad catch and reported as "the store is unreadable", which the model
-        # catalogue deliberately degrades to "show everything".
-        #
-        # Removing the one bad hop fixed that route; this fixes the CLASS, so
-        # the next caller to touch the store from another thread gets correct
-        # serialized access instead of a plausible-looking wrong answer. The
-        # lock is required because sqlite connection objects are not internally
-        # synchronised: `check_same_thread=False` alone would trade a loud error
-        # for silent interleaving.
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.executescript(_SCHEMA)
-        # Local metadata, never credential payload: old rows remain unknown until
-        # a real login write attests an incarnation. Refresh cannot create one.
-        # Concurrent process startup must serialize the check and ALTER, not
-        # swallow duplicate-column errors (which can conceal real corruption).
-        conn.execute("BEGIN IMMEDIATE")
+        memory = str(self._db_path) == ":memory:"
+        if not memory:
+            self._db_path = self._db_path.resolve()
+        # A return expression inside `with` is evaluated BEFORE guard exit.
+        # Keep raw ownership until exit succeeds: a release error must close
+        # the connection even when WAL/schema initialization already succeeded.
+        conn: sqlite3.Connection | None = None
         try:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")}
-            if "login_incarnation" not in columns:
-                conn.execute(
-                    "ALTER TABLE auth_credentials ADD COLUMN login_incarnation TEXT DEFAULT NULL"
-                )
-            conn.commit()
+            with _auth_bootstrap_guard(self._db_path):
+                if not memory:
+                    self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                # Create the file 0600 BEFORE sqlite opens it: the plain
+                # connect-then-chmod leaves a window where secrets sit 0644 (PR-11).
+                if not memory and not self._db_path.exists():
+                    fd = os.open(self._db_path, os.O_CREAT | os.O_WRONLY, 0o600)
+                    os.close(fd)
+                # `check_same_thread=False` + an explicit mutex, rather than sqlite's
+                # default thread affinity. The store is built once on whatever thread
+                # first asks for it (for the desktop routes, the event loop) and is then
+                # shared, so ANY caller reaching it from a worker -- an `asyncio.to_thread`
+                # hop, a thread-pool executor, a background scheduler -- raised
+                # `ProgrammingError`. That is how a credential-free machine came to
+                # report every model as connected (D18): the raise was swallowed by a
+                # broad catch and reported as "the store is unreadable", which the model
+                # catalogue deliberately degrades to "show everything".
+                #
+                # Removing the one bad hop fixed that route; this fixes the CLASS, so
+                # the next caller to touch the store from another thread gets correct
+                # serialized access instead of a plausible-looking wrong answer. The
+                # lock is required because sqlite connection objects are not internally
+                # synchronised: `check_same_thread=False` alone would trade a loud error
+                # for silent interleaving.
+                conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.executescript(_SCHEMA)
+                # Local metadata, never credential payload: old rows remain unknown until
+                # a real login write attests an incarnation. Refresh cannot create one.
+                # Concurrent process startup must serialize the check and ALTER, not
+                # swallow duplicate-column errors (which can conceal real corruption).
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    columns = {
+                        row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")
+                    }
+                    if "login_incarnation" not in columns:
+                        conn.execute(
+                            "ALTER TABLE auth_credentials ADD COLUMN "
+                            "login_incarnation TEXT DEFAULT NULL"
+                        )
+                    conn.commit()
+                except BaseException:
+                    with suppress(Exception):
+                        conn.rollback()
+                    raise
+                for path in (
+                    ()
+                    if memory
+                    else (
+                        self._db_path,
+                        self._db_path.with_suffix(self._db_path.suffix + "-wal"),
+                        self._db_path.with_suffix(self._db_path.suffix + "-shm"),
+                    )
+                ):
+                    # WAL sidecars hold the same plaintext; keep them 0600 too.
+                    try:
+                        os.chmod(path, 0o600)
+                    except OSError:
+                        pass
+            assert conn is not None, "bootstrap completed without a SQLite connection"
+            return _SerializedConnection(conn)
         except BaseException:
-            conn.rollback()
+            # A partially opened constructor has no AuthStore.close yet.
+            # Rollback/close must not obscure the genuine bootstrap error.
+            if conn is not None:
+                with suppress(Exception):
+                    conn.rollback()
+                with suppress(Exception):
+                    conn.close()
             raise
-        for path in (
-            self._db_path,
-            self._db_path.with_suffix(self._db_path.suffix + "-wal"),
-            self._db_path.with_suffix(self._db_path.suffix + "-shm"),
-        ):
-            # WAL sidecars hold the same plaintext; keep them 0600 too.
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        return _SerializedConnection(conn)
 
     def close(self) -> None:
         # The flag is set FIRST so a reader that races this close sees either a
@@ -1621,7 +1863,14 @@ class AuthStore:
         # reuses the stored account/org fields) would otherwise carry a dead
         # grant's tombstone, or another token's unconfirmed-send marker, onto
         # the credential the user just proved is alive.
-        payload.pop(GRANT_DEAD_AT_KEY, None)
+        # Native provider upserts are new logins; MCP also uses this entrypoint
+        # for continuation/marker writes. Its TokenStorage owns that distinction
+        # and explicitly clears the tombstone in set_tokens for a NEW grant.
+        # Clearing here would erase a just-written MCP tombstone, permitting a
+        # later process to replay a rejected token. MCP's send marker uses its
+        # own distinct key, so the provider send-marker reset stays unchanged.
+        if provider != "mcp-oauth":
+            payload.pop(GRANT_DEAD_AT_KEY, None)
         payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
         # Unlike updated_at this is a login event, not a refresh timestamp.
         # MCP refresh also uses upsert, so it cannot attest an incarnation yet.

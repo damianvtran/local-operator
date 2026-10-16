@@ -4069,6 +4069,19 @@ async def execute_bash(
         injections=injections,
     )
 
+    # Latch/filter shell policy FIRST: ConfigManager's budget read can quarantine
+    # malformed YAML, making a later policy probe see an absent file and silently
+    # inherit credentials. This preserves the existing fail-closed first read.
+    # Still resolve BEFORE spawn: a cooperative runner can immediately start a
+    # separate PG outside our group accounting. Reuse this Budget for both guards.
+    memory_budget = _configured_memory_budget(params.memory_mb)
+
+    # Resource metadata is reserved, not a credential grant: caller extras or
+    # shell policy exclusion must not silently drop/widen the resolved ceiling.
+    # A command can still deliberately use env -i; this is cooperative PG
+    # accounting, not arbitrary-descendant or adversarial containment.
+    env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(memory_budget.ceiling_mb)
+
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
     # time — and because this tool is NAMED bash, models write bash: 37 of 43
@@ -4195,7 +4208,6 @@ async def execute_bash(
     # host) is the pre-guard behaviour. The guard can only ever read and kill
     # THIS pgid: it never discovers a group of its own, so it cannot touch the
     # runtime or a sibling session (F5).
-    memory_budget = _configured_memory_budget(params.memory_mb)
     guard: memory_guard.Guard | None = None
     if spawned_pgid is not None and memory_budget.source != "disabled":
         guard = memory_guard.Guard(spawned_pgid, memory_budget)
@@ -8393,9 +8405,9 @@ def _scratchpad_target(
     file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
     silent write to the directory's own path.
 
-    ``size`` is the payload's length in bytes for the caller that has one
-    (``write``); it is optional because ``edit`` sees only its hunks and so is
-    judged on the name alone.
+    ``size`` is the payload's length in bytes when it is already known.
+    ``edit`` does its address/name preflight here, then checks the computed
+    payload under its file transaction before any mutation.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -9845,16 +9857,29 @@ async def execute_edit(
     # same load: file IO plus pure-Python matching and difflib over the whole
     # file. Keeping that work on the Textual loop merely moved the reported
     # freeze from the old one-hunk path into the new implementation.
-    outcome = await asyncio.to_thread(
-        _edit_file_result, path, hunks, params.anchor_line, params.path
-    )
+    is_scratchpad = _has_scratchpad_scheme(url)
+    try:
+        if is_scratchpad:
+            outcome = await asyncio.to_thread(
+                _edit_file_result,
+                path,
+                hunks,
+                params.anchor_line,
+                params.path,
+                scratch_root=_scratchpad_root(context),
+            )
+        else:
+            outcome = await asyncio.to_thread(
+                _edit_file_result, path, hunks, params.anchor_line, params.path
+            )
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, "edit", str(exc))
     if isinstance(outcome, str):
         return _error(tool_call_id, "edit", outcome)
     total_replacements, details = outcome
     # The URL is echoed for a scratchpad file so the result text reads as the
     # address the agent used, followed by where it landed
     # (see ``_scratchpad_address``).
-    is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
     text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
     introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
@@ -9874,10 +9899,14 @@ def _edit_file_result(
     hunks: list[EditHunk],
     anchor_line: int | None,
     caller_path: str = "",
+    *,
+    scratch_root: Path | None = None,
 ) -> tuple[int, dict[str, Any]] | str:
     """Serialize one file transaction across parent/child AgentLoops."""
     with _file_transaction(path):
-        return _edit_file_result_locked(path, hunks, anchor_line, caller_path)
+        return _edit_file_result_locked(
+            path, hunks, anchor_line, caller_path, scratch_root=scratch_root
+        )
 
 
 def _edit_file_result_locked(
@@ -9885,6 +9914,8 @@ def _edit_file_result_locked(
     hunks: list[EditHunk],
     anchor_line: int | None,
     caller_path: str = "",
+    *,
+    scratch_root: Path | None = None,
 ) -> tuple[int, dict[str, Any]] | str:
     """The current multi-hunk edit engine, synchronous for ``to_thread``.
 
@@ -10055,6 +10086,13 @@ def _edit_file_result_locked(
         )
 
     if current != original:
+        if scratch_root is not None:
+            # Hunks do not reveal the final payload size: the early URL/name
+            # check cannot bound growth. Judge the actual UTF-8 result while
+            # this file snapshot is still locked, before truncating anything.
+            # The shared guard already excludes the replaced file, preserving
+            # overwrite-to-fit recovery without counting its old bytes twice.
+            check_scratchpad_write(path, scratch_root, caller_path, len(current.encode("utf-8")))
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
     details = _diff_details(str(path), original, current)
@@ -18698,6 +18736,7 @@ BROWSER_ACTIONS = (
     "request_access",
     "await_access",
     "cancel_access",
+    "inspect_ownership",
     "recover",
     "retain",
     "release",
@@ -23133,6 +23172,16 @@ async def execute_browser(
     confinement = confinement_of(context)
     if confinement is not None:
         return _error(tool_call_id, "browser", confinement.network_refusal("browser"))
+    # A diagnostic must precede host selection, initialization, recovery, the
+    # approval gate and update-note bookkeeping: all can write owner state.
+    if str(args.get("action", "")).strip().lower() == "inspect_ownership":
+        resource = getattr(getattr(context, "browser", None), "resource", None)
+        result = (
+            await resource.inspect_ownership()
+            if resource is not None
+            else {"version": 1, "local_scope_missing": True}
+        )
+        return _text(tool_call_id, "browser", json.dumps(result, sort_keys=True), details=result)
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -23952,8 +24001,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # `local_operator/browser_files.py`, which runs unconditionally, plus this
         # describer naming what the call will do.
         approval_tier="write",
+        # Inspection is a true read: the harness must not ask for a write
+        # approval before it can reach the deliberately effect-free dispatcher.
         call_approval_tier=lambda args: (
-            "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+            "read"
+            if str(args.get("action") or "").strip().lower() == "inspect_ownership"
+            else "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
         ),
         concurrency="shared",
         interruptible=False,

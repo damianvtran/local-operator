@@ -249,7 +249,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # by this test's own printed table (the ``count_text_tokens`` ledger path)
     # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
     "bridge": 559,
-    "browser": 1308,
+    # Re-measured with this test's canonical isolated renderer: the read-only
+    # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
+    "browser": 1327,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

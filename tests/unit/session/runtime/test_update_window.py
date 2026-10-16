@@ -922,6 +922,55 @@ async def test_the_abandon_arm_runs_the_spool_on_a_pristine_session(tmp_path: Pa
     assert runtime.failures == [PAIR], "and it is published as a failure"
 
 
+@pytest.mark.asyncio
+async def test_the_WINDOW_arm_publishes_BEFORE_the_re_admission(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """THE ORDER THE ABANDON OWES, pinned by the one failure it has to survive.
+
+    ``_keep_loaded_build`` publishes the failure BEFORE the spooled work comes back in
+    (QA round 1, Q-2), because the re-admission can run real turns for 27-37 s while the
+    reaper may exit a tick after they land — published second, the record's account of
+    the failure could be missed entirely, and the runtime it was written for is gone by
+    the time anyone could ask.
+
+    THE DRAIN ARM CAN NO LONGER CARRY THIS PIN: it publishes nothing (operator ask,
+    2026-10-15), so on that arm a moved publish is invisible. That leaves the WINDOW arm
+    — now the ONLY publisher of ``types.UPDATE_FAILED_CAUSE`` — as the one place the
+    order is observable at all, and this cell is its pin.
+
+    SHAPED SO THE REVERTED ORDER CANNOT PASS IT: the re-admission RAISES, so on a tree
+    that puts the publish after the re-admission the raise is exactly what skips it and
+    ``failures`` stays empty. Both claims are required — the failure is published with
+    the pair, and the raise still reaches the caller (which is what makes the first
+    claim discriminating rather than incidental). The escape is not claimed to be
+    desirable: ``_drain_inbox_into`` swallows per-ROW failures and this is a step-level
+    one, and the cell records that shape so a later change which swallows it fails here
+    instead of quietly restoring the order that could lose the record's account.
+    """
+    entity = _DrainEntity(tmp_path)
+    append_inbox(
+        entity.directory,
+        InboxLine(text="run it here", sender={}, wake=True, source=SOURCE_USER, command_id="f" * 8),
+    )
+    runtime = _SpoolingRuntime()
+
+    async def _raise_on_readmission(_handle: object) -> int:
+        raise RuntimeError("the spooled work could not be brought back in")
+
+    monkeypatch.setattr(child_mod, "_drain_inbox_into", _raise_on_readmission)
+
+    with pytest.raises(RuntimeError):
+        await child_mod._abandon_update_window(entity, runtime, PAIR, 0.05)
+
+    assert runtime.failures == [PAIR], (
+        "the failure was not published before the re-admission: a re-admission that "
+        "raises took the record's account with it (QA round 1, Q-2). The WINDOW arm is "
+        "the only publisher left (operator ask, 2026-10-15), so this cell is where that "
+        "order is pinned."
+    )
+
+
 # -- the exit leg is bounded too (agent review round 1, MINOR 1) ---------------------
 
 

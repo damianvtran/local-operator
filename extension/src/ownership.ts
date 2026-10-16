@@ -4,7 +4,8 @@ import { getSurfaces, withSessionMutation } from "./state";
 
 /** A private proof is intentionally separate from ownerKey (tab-group copy).
  * Records live with surfaces in storage.session: worker churn preserves them;
- * a full browser restart clears both, so a reused numeric tab id is never proof.
+ * extension reload/update/disable or a full browser restart clears both, so a
+ * reused numeric tab id is never proof. Do not reload to inspect lost authority.
  */
 export interface Scope {
   session: string;
@@ -154,6 +155,37 @@ async function recoverRefusalDiagnostic(scope: Scope, sessionMatches: boolean, p
   };
 }
 
+/** Inspection is a snapshot, NEVER reconciliation. In particular it must not
+ * enter the owner queue (a stuck navigation may own it), materialize a scope,
+ * touch surfaces/approvals, or accept legacy capability-only dispatch. Storage
+ * returns a detached snapshot, so concurrent writers cannot change this read.
+ * Only this proof's row is selected; no foreign scope enumeration is permitted.
+ */
+export async function inspectOwnership(params: Params): Promise<Record<string, unknown>> {
+  const bounded = (v: unknown, max: number, empty = false): v is string =>
+    typeof v === "string" && v.length <= max && (empty || v.length > 0);
+  const ancestry = params.previous_generations ?? [];
+  if (!bounded(params.owner_proof, 128) || !/^[a-zA-Z0-9_-]{32,}$/.test(params.owner_proof)
+      || !bounded(params.requester, 256) || !params.requester.startsWith("session:")
+      || !bounded(params.owner_generation, 128)
+      || !bounded(params.previous_generation ?? "", 128, true)
+      || !Array.isArray(ancestry) || ancestry.length > 16
+      || !ancestry.every(value => bounded(value, 128))) {
+    throw new BridgeCommandError("owner_refused", "invalid ownership inspection identity", { refusal: "foreign" });
+  }
+  const all = await scopes();
+  const scope = Object.hasOwn(all, params.owner_proof) ? all[params.owner_proof] : undefined;
+  if (!scope) return { version: 1, scope_missing: true, session_match: false };
+  if (scope.session !== params.requester) return { version: 1, session_match: false };
+  return {
+    version: 1, scope_missing: false, session_match: true,
+    generation_current: scope.generation === params.owner_generation,
+    generation_previous: scope.generation === params.previous_generation,
+    generation_ancestry: ancestry.includes(scope.generation),
+    request_ancestry_count: ancestry.length,
+  };
+}
+
 /** Serialize owner commands per owner through the entire side effect, not just
  * the map write. A finish cannot overtake an in-flight allocation and then let
  * its late navigation resurrect the tab. The daemon's deadlines remain bounded;
@@ -170,6 +202,7 @@ export function withOwnership(
   method: string, params: Params, handler: () => Promise<Record<string, unknown>>,
   close: (params: Params) => Promise<Record<string, unknown>>,
 ): Promise<Record<string, unknown>> {
+  if (method === "owner_inspect") return inspectOwnership(params);
   const key = String(params.owner_proof ?? "legacy");
   const previous = queues.get(key) ?? Promise.resolve();
   const operate = async (): Promise<Record<string, unknown>> => {
