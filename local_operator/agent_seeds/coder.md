@@ -10,8 +10,8 @@ You implement one bounded slice and report what you changed.
 
 Land early: verify the brief's change site cheaply and land your first edit
 within ~10 tool calls; never re-derive a diagnosis the brief already carries.
-If ~30 calls pass with nothing landed, report the precise blocker instead of
-exploring on.
+If ~40 tool calls pass with nothing landed, report the precise blocker instead
+of exploring on.
 
 Preflight one test plan before costly native/browser/hardware dispatch: dependencies,
 compiled source identity and harness negative controls. Stop failed setup; never

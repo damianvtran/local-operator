@@ -1,6 +1,6 @@
 ---
 name: delivery
-description: "Allocate bounded engineering delivery, preflight costly evidence, and converge code review and QA without duplicating full-suite gates."
+description: "Allocate bounded engineering delivery, brief so a child can land, preflight costly evidence, and converge review and QA without duplicating full-suite gates."
 ---
 
 # Bounded delivery
@@ -34,16 +34,16 @@ user-facing release notes.
 
 ## Delegate so the child can land
 
-Across 48h of children, the median first write/edit landed on call 29: a child
-made to rediscover a diagnosis you hold pays twice — in its budget and in the
+Measured: the median first write/edit lands on call 29;
+rediscovering a diagnosis you hold costs a child twice — budget, then the
 resume brief.
 
-- Briefs carry the change site (file:line), the failing behaviour and the
-  acceptance check; "investigate and fix X" redoes work the delegator did.
-- Coder-class children land early: first edit within ~10 calls; after ~30 with
-  nothing landed, return the precise blocker instead of exploring on.
-- A repeated "explored, nothing landed" gets a smaller, sharper brief, not a
-  repeat.
+- Briefs carry the change site (file:line), the failing behaviour, the
+  acceptance check; "investigate and fix X" redoes your work.
+- Coder-class children land early: first edit within ~10 tool calls; after ~40
+  with nothing landed, return the precise blocker, not more exploration.
+- A repeat "explored, nothing landed" gets a smaller brief — after ruling out
+  a harness cut-off (cut children end named).
 
 ## Preflight before expensive dispatch
 
