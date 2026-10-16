@@ -130,19 +130,49 @@ describe("AskCard", () => {
 		expect(screen.getByText(/not shown in the transcript/)).toBeTruthy();
 	});
 
-	it("shows a timed-out ask as lapsed: the question, no answer controls, Dismiss kept", () => {
+	it("collapses a timed-out ask behind a Timed out badge until the user expands it", () => {
+		/* Decision D11 (Ben, 2026-10-15): a lapsed ask reads the way a declined one
+		   does on the desktop — one collapsed row with a status badge. Seeing it is
+		   an explicit tap; nothing about it is answerable, so the collapsed header
+		   offers no control but the disclosure itself. */
+		renderCard(ask({ status: "timed_out" }));
+		const header = screen.getByRole("button", { name: /Timed out/ });
+		expect(header.getAttribute("aria-expanded")).toBe("false");
+		expect(header.textContent).toContain("ship the fix?");
+		expect(screen.queryByText("Lapsed — the agent goes ahead without your answer")).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		/* Mounting it takes no focus: a lapsed ask never claims the user (D12). */
+		expect(document.activeElement).not.toBe(header);
+	});
+
+	it("expands a timed-out ask to the read-only card: the question, no answer controls, Dismiss kept", () => {
 		/* Ben's report (2026-10-15): the phone offered the options of an ask whose
 		   deadline had passed, as if the agent were still waiting on them. The
-		   agent has gone ahead without the answer, so the card reads that and
-		   offers only the one op the queue accepts on a timeout — dismiss. */
+		   agent has gone ahead without the answer, so the expanded card reads that
+		   and offers only the one op the queue accepts on a timeout — dismiss. */
 		renderCard(ask({ status: "timed_out" }));
-		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+		expect(
+			screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded"),
+		).toBe("true");
 		expect(screen.getByText("Lapsed — the agent goes ahead without your answer")).toBeTruthy();
-		expect(screen.getByText("ship the fix?")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
 		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+	});
+
+	it("dismisses a timed-out ask from inside its expanded body", async () => {
+		const settled = vi.fn();
+		renderCard(ask({ status: "timed_out" }), settled);
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
+		);
+		await waitFor(() => expect(settled).toHaveBeenCalled());
 	});
 
 	it("keeps an OPEN ask answerable when only the phone's clock says its deadline passed", () => {
