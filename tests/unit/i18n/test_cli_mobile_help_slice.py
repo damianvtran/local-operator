@@ -19,7 +19,7 @@ Rendering is "the pattern": `resolve_help_locale()` once, then
 
 Fidelity: every key renders to the byte its base call carried (table below,
 anchored to the base file's AST), and the REAL argparse output (`lop mobile
---help` plus each of its eleven subcommands, bare `mobile`, unknown
+--help` plus each of its ten subcommands, bare `mobile`, unknown
 subcommand) is byte-identical base vs branch.
 
 The ceiling assertions DERIVE the expected count from the scanner (equality =
