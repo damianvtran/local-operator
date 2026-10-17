@@ -98,5 +98,20 @@
   "tui.small.settings_view.read_only_label": "  read-only",
   "tui.small.settings_view.title": "settings",
   "tui.small.settings_view.bool_on": "on",
-  "tui.small.settings_view.bool_off": "off"
+  "tui.small.settings_view.bool_off": "off",
+  "tui.small.todo_panel.header": "Todos",
+  "tui.small.todo_panel.resolved": "{resolved}/{total} resolved",
+  "tui.small.todo_panel.dropped": "{count} dropped",
+  "tui.small.todo_panel.more_todos": "… {count} more todos",
+  "tui.small.todo_panel.stage": " · stage {stage}/{total}",
+  "tui.small.todo_panel.more_hidden": "+{count} more · ",
+  "tui.small.todo_panel.done_hidden": "+{count} done · ",
+  "tui.small.todo_panel.collapse": "ctrl+t to collapse",
+  "tui.small.todo_panel.expand": "ctrl+t to expand",
+  "tui.small.todo_panel.more_below": "↓ {count} more · ",
+  "tui.small.todo_panel.more_below_padded": "↓ {pad} more · ",
+  "tui.small.todo_panel.blocked": " — blocked",
+  "tui.small.todo_panel.dropped_row": " — dropped",
+  "tui.small.command_picker.projects": "{count, plural, one {{shown} project} other {{shown} projects}}",
+  "tui.small.command_picker.entries": "{count, plural, one {{shown} entry} other {{shown} entries}}"
 }

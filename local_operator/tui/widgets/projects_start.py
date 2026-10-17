@@ -38,6 +38,11 @@ from textual.containers import Container
 from textual.message import Message
 from textual.widgets import Input, Static
 
+from local_operator.i18n.keys import tui_projects as _x
+from local_operator.i18n.text import tr
+
+_t = tr("tui.projects")
+
 #: The row that keeps the feature usable on an empty registry (spec §7.6.1/D7).
 #: It is a ROW and not a footer because it is a real choice — the session it
 #: makes is the one a plain ``/new`` makes — and a card that could only offer
@@ -533,7 +538,7 @@ class StartPickerCard(Container):
         self._sync_window()
 
     def compose(self):
-        yield Static("start session", classes="projects-start-title projects-send-title")
+        yield Static(_t(_x.start_title()), classes="projects-start-title projects-send-title")
         # WHAT THIS IS ABOUT TO DO, AND FOR WHICH PROJECT (UX U2). The desktop
         # parity dialog says it in a sentence; this card said none of it, so `s`
         # then `enter` started a paid turn for a named project the reader was
@@ -549,11 +554,11 @@ class StartPickerCard(Container):
         # The one rule every surface here uses under its title (design D2's
         # "one rule or box", in this sheet's separator vocabulary).
         yield Static("", id="projects-start-rule", classes="projects-send-rule")
-        yield Input(placeholder="type to filter", id="projects-start-filter")
+        yield Input(placeholder=_t(_x.start_filter_placeholder()), id="projects-start-filter")
         yield Static("", id="projects-start-rows", classes="projects-send-rows")
         yield Static("", id="projects-start-note", classes="projects-send-note")
         yield Static(
-            "type to filter · ↑↓ move · ↵ select · esc close",
+            _t(_x.start_legend()),
             id="projects-start-legend",
             classes="projects-send-hints",
         )
@@ -974,7 +979,9 @@ class StartPickerCard(Container):
             # the fold while `enter` refuses in silence (UX review round 1, U6).
             return Text(NO_ROOM_NOTE, style=self._ink("muted"))
         hidden = len(self._rows) - self._visible
-        return Text(f"+{hidden} more" if hidden > 0 else "", style=self._ink("muted"))
+        return Text(
+            _t(_x.start_more(count=str(hidden))) if hidden > 0 else "", style=self._ink("muted")
+        )
 
     def _ink(self, key: str) -> Any:
         """A resolved style, or ``None`` when the host supplied no resolver."""

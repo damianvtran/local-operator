@@ -28,7 +28,7 @@ def _en(key: str, **params: object) -> str:
 
 def test_catalogue_matches_the_extraction_golden() -> None:
     assert catalogues.load_catalogue("en", "tui.projects") == GOLDEN
-    assert len(GOLDEN) == 91
+    assert len(GOLDEN) == 95
     context = json.loads(
         (catalogues.catalogue_root() / "en" / "tui.projects.context.json").read_text()
     )
