@@ -22,7 +22,13 @@ from typing import Any
 import pytest
 
 from local_operator.compaction.tokens import count_text_tokens
-from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, guard
+from local_operator.memory import (
+    MemoryError,
+    MemoryIdentity,
+    MemoryStore,
+    guard,
+    validate_fact,
+)
 from local_operator.memory_cli import render_human, run
 from local_operator.memory_inspect import PREVIEW_CHARS, SCHEMA, inspect_entries
 
@@ -47,11 +53,22 @@ def _seed_legacy_row(
     body: str,
     source: dict[str, Any] | None = None,
     status: str = "active",
+    created_at: float | None = None,
 ) -> str:
-    """Insert one row the way an older build/import could have left it.
+    """Insert one hand-built row with arbitrary bytes in the fact columns.
 
     Deliberately bypasses ``validate_fact``/``guard``: the guard-refused and
-    work-shaped rows under test are unrepresentable through today's write path.
+    work-shaped rows under test are unrepresentable through today's write path,
+    and this surface's premise is arbitrary stored state (an import, a restored
+    backup).
+
+    The wire shapes still match production: ``ops.data`` carries the OP
+    ENVELOPE (``_dump(op)``, the shape ``MemoryStore._ops`` decodes and
+    ``show`` reads ``scope``/``owner_key`` from) and ``current.fact`` carries
+    the fact. An earlier version of this helper put the FACT in ``ops.data``,
+    which is not a shape any build wrote; ``lop memory show`` then failed with
+    ``KeyError: 'scope'`` on rows minted here — a fixture defect, not a
+    reachable bug (see the PR thread).
     """
     entity = hashlib.sha256(f"{scope}-{title}-{time.time_ns()}".encode()).hexdigest()[:26]
     op_id = hashlib.sha256(f"op-{entity}".encode()).hexdigest()[:26]
@@ -66,7 +83,7 @@ def _seed_legacy_row(
         "expires_at": None,
         "pinned": False,
         "subject": "",
-        "created_at": time.time() - 90,
+        "created_at": time.time() - 90 if created_at is None else created_at,
         "source_time": None,
         "replaces": "",
     }
@@ -101,7 +118,7 @@ def _seed_legacy_row(
                 scope,
                 owner,
                 "put",
-                wire,
+                json.dumps(op, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
             ),
         )
         db.execute(
@@ -401,3 +418,257 @@ def test_bad_limit_is_refused(rig):
         inspect_entries(root, identity, limit=0)
     with pytest.raises(MemoryError):
         inspect_entries(root, identity, limit=51)
+
+
+# --- Round 1 remediation: the opaque write-path rule, provenance locators,
+# --- the live-writer read branch, corrupt rows, and the desktop registry.
+
+
+#: A secret-shaped title and base64 body: the plain guard accepts both, the
+#: write path's opaque pass refuses both. This is the rule MAJOR 1 was about.
+OPAQUE_TITLE = "Staging deploy key 9f2c7b1e4a5d6f8091a2b3c4d5e6f708192a3b4c7d5e"
+OPAQUE_BODY = "copied from the console: aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0fI3lO6rU9x"
+
+
+def test_opaque_rule_withholds_what_the_write_path_refuses(rig):
+    """title/body use the SAME guard pass as ``validate_fact``, not the plain one."""
+    root, identity, store = rig
+    for value in (OPAQUE_TITLE, OPAQUE_BODY):
+        guard(value)  # the plain pass genuinely accepts these ...
+        with pytest.raises(MemoryError):
+            guard(value, opaque=True)  # ... and the write path's pass refuses them
+    with pytest.raises(MemoryError):
+        validate_fact({"title": OPAQUE_TITLE, "body": "safe body"})
+    with pytest.raises(MemoryError):
+        validate_fact({"title": "safe title", "body": OPAQUE_BODY})
+
+    entity = _seed_legacy_row(store, "global", "global", title=OPAQUE_TITLE, body=OPAQUE_BODY)
+
+    report = inspect_entries(root, identity)
+    entry = next(item for item in report["entries"] if item["id"] == entity)
+    assert entry["redacted"] is True
+    assert entry["title"] is None and entry["title_exported"] is False
+    assert entry["body_preview"] is None and entry["body_exported"] is False
+    assert OPAQUE_TITLE not in json.dumps(report)
+    assert OPAQUE_BODY not in json.dumps(report)
+
+    raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
+    assert failed is False
+    human = render_human(raw, prefix="lop memory")
+    assert OPAQUE_TITLE not in human and OPAQUE_BODY not in human
+    assert "title withheld" in human and "Preview withheld" in human
+    # D4: a withheld row's proposal must not assert a judgement about content
+    # the page is refusing to show.
+    assert "No work/lane/progress marker" not in human
+    assert "Content withheld by the privacy guard" in human
+
+
+def test_sensitive_provenance_locator_is_withheld_and_disclosed(rig):
+    """``provenance_redacted`` is a sibling of the dict, and the human page says so."""
+    root, identity, store = rig
+    uri = "file:///Users/damian/.ssh/id_ed25519"
+    with pytest.raises(MemoryError):
+        guard(uri)
+    _seed_legacy_row(
+        store,
+        "global",
+        "global",
+        title="Config pointer",
+        body="Read it from the key file.",
+        source={"kind": "reported", "author": "main", "uri": uri},
+    )
+
+    report = inspect_entries(root, identity)
+    entry = report["entries"][0]
+    assert entry["provenance_redacted"] is True
+    assert "uri" not in entry["provenance"]
+    assert uri not in json.dumps(report)
+
+    raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
+    assert failed is False
+    human = render_human(raw, prefix="lop memory")
+    assert uri not in human
+    assert "locator withheld by the privacy guard" in human
+
+
+def test_live_writer_sidecars_take_the_non_immutable_read_path(rig):
+    """With ``-wal``/``-shm`` present the read MUST replay committed WAL frames.
+
+    ``immutable=1`` would miss them; this proves the mode=ro branch is what
+    runs, and that reading it changes no durable byte.
+    """
+    root, identity, store = rig
+    _seed_all_scopes(store, identity)
+    entity = hashlib.sha256(b"wal-only-row").hexdigest()[:26]
+    fact = json.dumps(
+        {
+            "title": "WAL-only fact",
+            "body": "Committed, not yet checkpointed.",
+            "tags": [],
+            "aliases": [],
+            "source": {"kind": "reported", "author": "main"},
+            "status": "active",
+            "verified_at": None,
+            "expires_at": None,
+            "pinned": False,
+            "subject": "",
+            "created_at": int(time.time()),
+            "source_time": None,
+            "replaces": "",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    writer = sqlite3.connect(store.path)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "INSERT INTO current VALUES (?,?,?,?,?,?)",
+            (entity, "global", "global", "wal-op-id", fact, count_text_tokens(fact)),
+        )
+        writer.commit()
+        assert Path(str(store.path) + "-wal").exists()
+        assert Path(str(store.path) + "-shm").exists()
+        before = _files(root)
+
+        report = inspect_entries(root, identity)
+
+        assert {entry["id"] for entry in report["entries"]} >= {entity}
+        after = _files(root)
+        assert set(after) == set(before)
+        for name in ("memory.db", "memory.db-wal"):
+            assert after[name] == before[name]
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_corrupt_stored_fact_fails_closed_without_touching_the_store(rig):
+    root, identity, store = rig
+    _seed_all_scopes(store, identity)
+    entity = hashlib.sha256(b"corrupt-row").hexdigest()[:26]
+    db = sqlite3.connect(store.path)
+    try:
+        db.execute(
+            "INSERT INTO current VALUES (?,?,?,?,?,?)",
+            (entity, "global", "global", "corrupt-op", "{not valid json", 4),
+        )
+        db.commit()
+    finally:
+        db.close()
+    before = _snapshot(store)
+
+    raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
+
+    assert failed is True
+    assert raw == "Memory request refused or store unavailable. No unsafe payload included."
+    assert _snapshot(store) == before
+
+
+def test_desktop_registry_admits_every_memory_operation():
+    """Pin the desktop vocabulary to the terminal one — nothing else does.
+
+    ``/memory inspect`` typed in the desktop composer is planned as prose (a
+    paid model turn) and 422s at the command route unless ``inspect`` is in the
+    registry's ``subcommands``; the TUI path reads ``memory_cli.OPERATIONS``
+    directly, which is why the gap was invisible to CI.
+    """
+    from local_operator import memory_cli
+    from local_operator.slash_commands import (
+        command_argument_refusal,
+        slash_command_for,
+        whole_draft_command,
+    )
+
+    spec = slash_command_for("/memory")
+    assert spec is not None
+    assert spec.subcommands == memory_cli.OPERATIONS
+    planned = whole_draft_command("/memory inspect")
+    assert planned is not None
+    assert planned[1] == "inspect"
+    assert command_argument_refusal(spec, "inspect") is None
+
+
+def test_page_is_newest_first_marks_suggestions_and_holds_eighty_columns(rig):
+    """D1/D2: the order is stated, the actionable rows are scannable, lines fit."""
+    root, identity, store = rig
+    now = time.time()
+    old = _seed_legacy_row(
+        store,
+        "global",
+        "global",
+        title="Old imported note",
+        body="From nine days ago.",
+        created_at=now - 9 * 86400,
+    )
+    store.put("global", {"title": "Fresh durable fact", "body": "Stated just now."})
+    work = _seed_legacy_row(
+        store,
+        "global",
+        "global",
+        title="PR #2463 is merged; CI green",
+        body="Next step: cut the release window.",
+        source={"kind": "reported", "author": "main", "session": "sess-inspect"},
+        created_at=now - 3600,
+    )
+
+    report = inspect_entries(root, identity)
+    stamps = [entry["created_at"] for entry in report["entries"]]
+    assert stamps == sorted(stamps, reverse=True)
+    assert report["entries"][-1]["id"] == old
+    assert report["counts"]["suggestions"] == 1
+    work_entry = next(entry for entry in report["entries"] if entry["id"] == work)
+    assert work_entry["disposition"]["proposal"] == "session-scoped"
+
+    raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
+    assert failed is False
+    human = render_human(raw, prefix="lop memory")
+    flat = " ".join(human.split())
+    assert "Order: newest first" in flat
+    assert "1 of 3 shown carries a move suggestion (→)" in flat
+    marked = [line for line in human.splitlines() if line.startswith("→ ")]
+    assert len(marked) == 1 and f"global/{work}" in marked[0]
+    # The bar covers prose and rows; a paste-ready command is exempt (it is
+    # copied, not read, and wrapping it would split a flag).
+    prose = [line for line in human.splitlines() if not line.startswith("More: ")]
+    over = [line for line in prose if len(line) > 80]
+    assert over == [], over
+
+
+def test_more_hint_repeats_every_flag_that_shaped_the_page(rig):
+    """D3: following the printed hint verbatim must not change the page."""
+    root, identity, store = rig
+    for n in range(4):
+        store.put("global", {"title": f"Fact {n}", "body": f"Body {n}."})
+
+    raw, failed = run(
+        "inspect --scope global --limit 2 --session sess-inspect",
+        config=root,
+        identity=identity,
+        prefix="lop memory",
+    )
+    assert failed is False
+    assert json.loads(raw)["has_more"] is True
+    human = render_human(raw, prefix="lop memory")
+    more = next(line for line in human.splitlines() if line.startswith("More: "))
+    assert "--cursor " in more
+    assert "--limit 2" in more
+    assert "--scope global" in more
+    assert "--session sess-inspect" in more
+
+    followed, failed = run(
+        more[len("More: lop memory ") :], config=root, identity=identity, prefix="lop memory"
+    )
+    assert failed is False
+    assert json.loads(followed)["counts"]["returned"] == 2
+
+
+def test_inspect_refuses_a_target_instead_of_silently_ignoring_it(rig):
+    """NIT 6: `inspect global/abc` must not read as an applied filter."""
+    root, identity, _ = rig
+    raw, failed = run("inspect global/abc", config=root, identity=identity, prefix="lop memory")
+    assert failed is True
+    assert "lists instead of reading one fact" in raw
+    assert "`lop memory show global/abc`" in raw
