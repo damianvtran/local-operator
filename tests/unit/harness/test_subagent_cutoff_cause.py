@@ -480,3 +480,87 @@ def test_a_settled_cut_off_child_keeps_its_cause_across_a_restore() -> None:
     # The negative arm still holds: a settled child with no recorded cause is
     # NOT relabelled as cut off.
     assert restored_job_row(job, dict(record, cut_off_cause="")).cut_off_cause == ""
+
+
+def test_the_relay_rejoins_an_answer_across_a_continuation() -> None:
+    """B-1: a continued answer must reach the parent WHOLE.
+
+    ``continue_truncated_answer`` splits one answer into two assistant messages
+    with the chrome prompt between them. The relay used to publish the LAST
+    message's text, so the parent's ``result_text`` was the tail alone — the
+    beginning of the deliverable gone, mid-word, with no marker. That is worse
+    than the cut-but-coherent beginning the continuation exists to repair, so
+    the join is pinned through the relay the production path uses.
+    """
+    from local_operator.harness.loop import CONTINUE_TRUNCATED_ANSWER_PROMPT
+
+    final: dict[str, Any] = {"text": "", "error": None}
+    relay = _relay(final)
+    asyncio.run(
+        relay(
+            AgentEndEvent(
+                messages=[
+                    Message.user("write the report"),
+                    Message.assistant("FINDING 1: the blocker. FINDING 2: the ma"),
+                    Message.user(CONTINUE_TRUNCATED_ANSWER_PROMPT),
+                    Message.assistant("jor. FINDING 3: nit."),
+                ],
+                aborted=False,
+            )
+        )
+    )
+
+    assert final["text"] == (
+        "FINDING 1: the blocker. FINDING 2: the major. FINDING 3: nit."
+    ), "the parent's result must be the whole deliverable, not the continuation tail"
+
+
+def test_the_relay_does_not_join_across_a_non_continuation_message() -> None:
+    """NEGATIVE CONTROL: the join walks back ONLY across the continuation prompt.
+
+    A run that narrated between assistant messages must keep the previous
+    behaviour — the last assistant message — or an unrelated turn would be
+    concatenated into the deliverable.
+    """
+    final: dict[str, Any] = {"text": "", "error": None}
+    relay = _relay(final)
+    asyncio.run(
+        relay(
+            AgentEndEvent(
+                messages=[
+                    Message.user("write the report"),
+                    Message.assistant("narration, not the answer"),
+                    Message.user("a different instruction"),
+                    Message.assistant("the final answer"),
+                ],
+                aborted=False,
+            )
+        )
+    )
+
+    assert final["text"] == "the final answer"
+
+
+def test_the_relay_keeps_an_empty_final_answer_empty() -> None:
+    """NEGATIVE CONTROL (review round 2, M-1): a wordless stop keeps its "".
+
+    Walking back past an EMPTY final assistant row would hand the parent stale
+    narration ("Let me check the files.") instead of the empty result it has
+    always received — a regression the rejoin must not introduce.
+    """
+    final: dict[str, Any] = {"text": "", "error": None}
+    relay = _relay(final)
+    asyncio.run(
+        relay(
+            AgentEndEvent(
+                messages=[
+                    Message.user("go"),
+                    Message.assistant("Let me check the files."),
+                    Message.assistant(""),
+                ],
+                aborted=False,
+            )
+        )
+    )
+
+    assert final["text"] == "", "an empty final answer must stay empty"
