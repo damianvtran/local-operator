@@ -16606,6 +16606,15 @@ class Session:
                 # is built -- for the same reason the contract is: every
                 # consumer of this session gets the one answer.
                 recover_wordless_stop=await self._silent_end_is_a_failure(),
+                # A delegated CHILD's deliverable is often its last message, and
+                # its only reader is a parent that can continue it only by paying
+                # for a resume. So a child continues an answer the output limit
+                # cut off (once) instead of ending cut and forcing that resume;
+                # an interactive session keeps the notice and lets the human
+                # decide. ``_parent_session_id`` is the one fact that separates
+                # the two, and it is read here -- at the one place a turn's
+                # config is built -- like the flag above.
+                continue_truncated_answer=bool(self._parent_session_id),
                 # This session's output contract (or None). Read here, at the one
                 # place a turn's config is built, so every consumer of this
                 # session — exec foreground, the detached worker, an SDK

@@ -3084,6 +3084,19 @@ class LoopConfig(BaseModel):
     #: those the bare stop stays its legitimate ending. Off by default: a
     #: direct embedder keeps today's ending exactly.
     recover_wordless_stop: bool = False
+    #: A truncation that produced VISIBLE text is, by contract, announced and
+    #: left there: the reader can ask for the rest. That is right for an
+    #: interactive session -- continuing prose the human did not ask for is its
+    #: own annoyance. A delegated CHILD's deliverable is often exactly that last
+    #: message (a review verdict, a QA report, a handoff), and its only reader is
+    #: a parent that can continue it solely by paying for a resume -- the cost
+    #: this flag exists to remove. With this on, ONE run-scoped continuation asks
+    #: the model to finish the answer in place; when that budget is spent the end
+    #: is stamped ``output-limit`` (``aborted=True``) so a cut PURE-PROSE report
+    #: is never read as a finished one -- a text+call turn is the call arm's and
+    #: keeps its own re-ask (``agent review round 1, M-1``). Off by default: every
+    #: direct embedder keeps today's ending exactly.
+    continue_truncated_answer: bool = False
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )
