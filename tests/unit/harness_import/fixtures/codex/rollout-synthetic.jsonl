@@ -1,0 +1,11 @@
+{"timestamp":"2026-01-01T00:00:01.000Z","type":"session_meta","payload":{"id":"codex-synthetic","cwd":"/tmp/synthetic-codex","timestamp":"2026-01-01T00:00:01.000Z","cli_version":"0.0.0"}}
+{"timestamp":"2026-01-01T00:00:02.000Z","type":"turn_context","payload":{"model":"gpt-synthetic"}}
+{"timestamp":"2026-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first codex question"}]}}
+{"timestamp":"2026-01-01T00:00:04.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first codex answer"}]}}
+{"timestamp":"2026-01-01T00:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"call-1"}}
+{"timestamp":"2026-01-01T00:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"synthetic.txt"}}
+{"timestamp":"2026-01-01T00:00:07.000Z","type":"event_msg","payload":{"type":"agent_message","message":"first codex answer"}}
+{"timestamp":"2026-01-01T00:00:08.000Z","type":"event_msg","payload":{"type":"thread_name_updated","thread_name":"Synthetic Codex"}}
+{"timestamp":"2026-01-01T00:00:09.000Z","type":"compacted","payload":{"message":"CODEX SUMMARY","window_id":7,"window_number":3,"previous_window_id":6,"replacement_history":[{"type":"compaction_summary","summary":"ignored"},{"type":"message","role":"user","content":[{"type":"input_text","text":"kept codex question"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"kept codex answer"}]}]}}
+{"timestamp":"2026-01-01T00:00:10.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"later codex question"}]}}
+{"timestamp":"2026-01-01T00:00:11.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"later codex answer"}]}}
