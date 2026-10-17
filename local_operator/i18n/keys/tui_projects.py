@@ -338,6 +338,22 @@ def send_wake_unconfirmed() -> Msg:
     return Msg("tui.projects.send.wake_unconfirmed", {})
 
 
+def start_filter_placeholder() -> Msg:
+    return Msg("tui.projects.start.filter_placeholder", {})
+
+
+def start_legend() -> Msg:
+    return Msg("tui.projects.start.legend", {})
+
+
+def start_more(*, count: str) -> Msg:
+    return Msg("tui.projects.start.more", {"count": count})
+
+
+def start_title() -> Msg:
+    return Msg("tui.projects.start.title", {})
+
+
 def this_session(*, count: str) -> Msg:
     return Msg("tui.projects.this_session", {"count": count})
 

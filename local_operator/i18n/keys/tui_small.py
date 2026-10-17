@@ -54,6 +54,14 @@ def ask_queue_waiting_clause(*, shown: str) -> Msg:
     return Msg("tui.small.ask_queue.waiting_clause", {"shown": shown})
 
 
+def command_picker_entries(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.command_picker.entries", {"count": count, "shown": shown})
+
+
+def command_picker_projects(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.command_picker.projects", {"count": count, "shown": shown})
+
+
 def copy_code_count(*, shown: str) -> Msg:
     return Msg("tui.small.copy.code_count", {"shown": shown})
 
@@ -368,6 +376,58 @@ def subagents_title() -> Msg:
 
 def timing_no_samples() -> Msg:
     return Msg("tui.small.timing.no_samples", {})
+
+
+def todo_panel_blocked() -> Msg:
+    return Msg("tui.small.todo_panel.blocked", {})
+
+
+def todo_panel_collapse() -> Msg:
+    return Msg("tui.small.todo_panel.collapse", {})
+
+
+def todo_panel_done_hidden(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.done_hidden", {"count": count})
+
+
+def todo_panel_dropped(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.dropped", {"count": count})
+
+
+def todo_panel_dropped_row() -> Msg:
+    return Msg("tui.small.todo_panel.dropped_row", {})
+
+
+def todo_panel_expand() -> Msg:
+    return Msg("tui.small.todo_panel.expand", {})
+
+
+def todo_panel_header() -> Msg:
+    return Msg("tui.small.todo_panel.header", {})
+
+
+def todo_panel_more_below(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_below", {"count": count})
+
+
+def todo_panel_more_below_padded(*, pad: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_below_padded", {"pad": pad})
+
+
+def todo_panel_more_hidden(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_hidden", {"count": count})
+
+
+def todo_panel_more_todos(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_todos", {"count": count})
+
+
+def todo_panel_resolved(*, resolved: str, total: str) -> Msg:
+    return Msg("tui.small.todo_panel.resolved", {"resolved": resolved, "total": total})
+
+
+def todo_panel_stage(*, stage: str, total: str) -> Msg:
+    return Msg("tui.small.todo_panel.stage", {"stage": stage, "total": total})
 
 
 def tool_card_http_blocked(*, status: str, reason: str, clause: str) -> Msg:

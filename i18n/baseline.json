@@ -68,7 +68,10 @@
     "local_operator/tui/widgets/settings_view.py",
     "local_operator/tui/widgets/usage_panel.py",
     "local_operator/tui/projects_render.py",
-    "local_operator/tui/app.py"
+    "local_operator/tui/app.py",
+    "local_operator/tui/widgets/todo_panel.py",
+    "local_operator/tui/widgets/command_picker.py",
+    "local_operator/tui/widgets/projects_start.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -228,11 +231,8 @@
     "local_operator/tui/images.py": 2,
     "local_operator/tui/session_move.py": 3,
     "local_operator/tui/widgets/analytics_panel.py": 0,
-    "local_operator/tui/widgets/command_picker.py": 2,
-    "local_operator/tui/widgets/projects_start.py": 4,
     "local_operator/tui/widgets/session_sidebar.py": 6,
     "local_operator/tui/widgets/status_line.py": 0,
-    "local_operator/tui/widgets/todo_panel.py": 14,
     "local_operator/tui/widgets/transcript.py": 0,
     "local_operator/tui/widgets/welcome.py": 1,
     "local_operator/tunnels/arguments.py": 10,

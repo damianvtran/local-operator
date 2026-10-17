@@ -453,5 +453,25 @@
     "role": "trailing row",
     "tone": "dim",
     "note": "Trailing row for the render cap; raw digit."
+  },
+  "tui.projects.start.title": {
+    "role": "heading",
+    "tone": "plain",
+    "note": "Card title for the start-session flow; lower-case house style like the send card's."
+  },
+  "tui.projects.start.filter_placeholder": {
+    "role": "placeholder",
+    "tone": "dim",
+    "note": "Placeholder in the filter input."
+  },
+  "tui.projects.start.legend": {
+    "role": "legend",
+    "tone": "dim",
+    "note": "The card's key legend; the arrows and the escape word are display vocabulary, the verbs translate."
+  },
+  "tui.projects.start.more": {
+    "role": "overflow",
+    "tone": "muted",
+    "note": "Row-count overflow when the card cannot show every row."
   }
 }
