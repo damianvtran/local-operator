@@ -1,0 +1,77 @@
+{
+  "cli.mobile_help.mobile": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the `mobile` command's one-liner; `lop` and session keep their names"
+  },
+  "cli.mobile_help.install": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'install' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.daemon_action": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "select over the start/stop/restart loop: the three words are branches so translators localize the verbs; the site passes the raw loop value"
+  },
+  "cli.mobile_help.logs": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logs' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.logs_lines": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logs_lines' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.logs_follow": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logs_follow' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.password": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'password' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.devices": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the device lifecycle command; 'push devices' is the product term"
+  },
+  "cli.mobile_help.devices_command": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "list/revoke/unrevoke are argparse choices and stay in situ"
+  },
+  "cli.mobile_help.devices_device_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the backticked command is in situ"
+  },
+  "cli.mobile_help.devices_port": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the default wording references the daemon's own default"
+  },
+  "cli.mobile_help.uninstall": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'uninstall' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.uninstall_purge": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the password reference is a product term"
+  },
+  "cli.mobile_help.serve": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'serve' argument; flag/command tokens stay in situ"
+  }
+}
