@@ -7108,7 +7108,22 @@ class FrontendStateStore:
         restore = getattr(session, "restored_usage", None)
         usage = restore() if callable(restore) else None
         if isinstance(usage, Usage):
-            state = state.model_copy(update=_replayed_context_change(state, usage.context_tokens))
+            # THE PAIR MOVES TOGETHER. ``refresh_restored_usage`` is the sibling
+            # seam and it republishes ``last_usage`` beside the occupancy, for
+            # the reason the guard below reads it: an advanced ``context_tokens``
+            # beside the checkpoint's older receipt would state one reading two
+            # ways, and the next replay compares those two fields against each
+            # other (agent review round 1, R1-1).
+            state = state.model_copy(
+                update={
+                    # Through the wire form and back, as every other writer of
+                    # this field does: ``model_copy`` does not validate, so the
+                    # receipt has to be a ``FrontendUsage`` rather than the dump
+                    # itself (``_seed_cold_usage``'s own comment).
+                    "last_usage": FrontendUsage.model_validate(_usage_with_decode_window(usage)),
+                    **_replayed_context_change(state, usage.context_tokens),
+                }
+            )
         return cls(state)
 
     @staticmethod

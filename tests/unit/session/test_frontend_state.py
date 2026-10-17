@@ -2185,6 +2185,10 @@ def test_a_checkpoint_cannot_pin_occupancy_below_the_journals_newest_receipt() -
 
     assert restored.context_tokens == 433_000
     assert restored.context_is_estimate is False
+    # The PAIR advances together: the strip and the cost chip read one receipt,
+    # and the next replay compares these two fields against each other.
+    assert restored.last_usage is not None
+    assert restored.last_usage.context_tokens == 433_000
 
 
 def test_an_equal_receipt_leaves_a_settled_compaction_estimate_standing() -> None:
@@ -2209,6 +2213,8 @@ def test_an_equal_receipt_leaves_a_settled_compaction_estimate_standing() -> Non
 
 
 def test_a_receipt_with_no_context_number_cannot_move_occupancy() -> None:
+    """A wire that reported only input/output says nothing about occupancy: it
+    may not blank or move the reading (the shared rule's second clause)."""
     checkpoint = _state(context_tokens=402_000)
     owner = SimpleNamespace(
         session_id="s1",
