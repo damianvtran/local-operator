@@ -38,11 +38,13 @@ import json
 import sqlite3
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from local_operator.memory import (
     FACT_STATUSES,
+    MAX_FACT_TIMESTAMP,
     MemoryError,
     MemoryIdentity,
     MemoryStore,
@@ -246,13 +248,218 @@ def _disposition(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _Row:
+    """One row's raw material, BEFORE any field gate has run.
+
+    A gate may read only fields declared here, and :func:`_project` is the ONLY
+    builder of an exported row. Together those two facts are the structural
+    guarantee: a stored value has no route to the human page or ``--json``
+    except through a gate in :data:`ENTRY_GATES`.
+    """
+
+    entity_id: Any
+    scope: Any
+    op_id: Any
+    revisions: Any
+    fact: dict[str, Any]
+    now: float
+    provenance: dict[str, Any]
+    provenance_redacted: bool
+    markers: list[str]
+    disposition: dict[str, Any]
+
+
+def _gate_segment(value: Any) -> str | None:
+    """A store identifier or scope: shape-checked, never content-guarded.
+
+    ``structural=True`` is the writer's own exemption for minted identifiers
+    (see ``memory.safe_segment``): a legitimate hex id can trip the guard's
+    card/IBAN shapes by chance, and guard-refusing it would blank every
+    install rather than withhold one suspicious row.
+    """
+    try:
+        return safe_segment(value, structural=True)
+    except MemoryError:
+        return None
+
+
+def _gate_timestamp(value: Any) -> float | None:
+    """A freshness timestamp, by the write path's own rule.
+
+    ``validate_fact`` accepts ``type(x) in (int, float)`` inside
+    ``0..MAX_FACT_TIMESTAMP`` (so a bool is refused) and nothing else; a value
+    it refuses is exactly a value this reader must not repeat.
+    """
+    if type(value) not in (int, float) or not 0 <= value <= MAX_FACT_TIMESTAMP:
+        return None
+    return value
+
+
+def _gate_id(raw: _Row) -> str | None:
+    return _gate_segment(raw.entity_id)
+
+
+def _gate_reference(raw: _Row) -> str | None:
+    scope = _gate_segment(raw.scope)
+    entity = _gate_segment(raw.entity_id)
+    return f"{scope}/{entity}" if scope and entity else None
+
+
+def _gate_scope(raw: _Row) -> str | None:
+    return _gate_segment(raw.scope)
+
+
+def _gate_status(raw: _Row) -> str:
+    """The closed vocabulary ``validate_fact`` enforces.
+
+    "unknown" is the existing fallback for a missing status and is the honest
+    answer for a value this reader refuses to repeat.
+    """
+    value = raw.fact.get("status")
+    return value if isinstance(value, str) and value in FACT_STATUSES else "unknown"
+
+
+def _gate_origin(raw: _Row) -> str:
+    # The store's own label over the GATED status, so an imported status cannot
+    # select a label the write path would never produce.
+    return origin_label({"status": _gate_status(raw)})
+
+
+def _gate_created_at(raw: _Row) -> float | None:
+    return _gate_timestamp(raw.fact.get("created_at"))
+
+
+def _gate_age(raw: _Row) -> float | None:
+    created = _gate_timestamp(raw.fact.get("created_at"))
+    return None if created is None else max(0.0, raw.now - float(created))
+
+
+def _gate_verified_at(raw: _Row) -> float | None:
+    return _gate_timestamp(raw.fact.get("verified_at"))
+
+
+def _gate_expires_at(raw: _Row) -> float | None:
+    return _gate_timestamp(raw.fact.get("expires_at"))
+
+
+def _gate_revision(raw: _Row) -> str | None:
+    return _gate_segment(raw.op_id)
+
+
+def _gate_revisions(raw: _Row) -> int:
+    try:
+        return max(0, int(raw.revisions))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _gate_provenance(raw: _Row) -> dict[str, Any]:
+    # Already gated field by field in ``_provenance``; copied so no caller can
+    # mutate the shared mapping.
+    return dict(raw.provenance)
+
+
+def _gate_provenance_redacted(raw: _Row) -> bool:
+    return bool(raw.provenance_redacted)
+
+
+def _gate_title(raw: _Row) -> Any:
+    title = raw.fact.get("title")
+    return title if _exportable(title) else None
+
+
+def _gate_title_exported(raw: _Row) -> bool:
+    return _exportable(raw.fact.get("title"))
+
+
+def _gate_body_preview(raw: _Row) -> str | None:
+    body = raw.fact.get("body")
+    return body[:PREVIEW_CHARS] if _exportable(body) and isinstance(body, str) else None
+
+
+def _gate_body_truncated(raw: _Row) -> bool:
+    body = raw.fact.get("body")
+    return bool(_exportable(body) and isinstance(body, str) and len(body) > PREVIEW_CHARS)
+
+
+def _gate_body_exported(raw: _Row) -> bool:
+    # Constant on purpose: the preview is the only body bytes this surface ever
+    # emits, and a caller must not read this field as permission to fetch more.
+    return False
+
+
+def _gate_redacted(raw: _Row) -> bool:
+    return not (_exportable(raw.fact.get("title")) and _exportable(raw.fact.get("body")))
+
+
+def _gate_scope_fit_candidate(raw: _Row) -> bool:
+    return _gate_segment(raw.scope) == "global" and bool(raw.markers)
+
+
+def _gate_work_markers(raw: _Row) -> list[str]:
+    # ``work_progress_markers`` returns only marker NAMES from a closed
+    # vocabulary, never the matched text; copying keeps the row independent.
+    return list(raw.markers)
+
+
+def _gate_disposition(raw: _Row) -> dict[str, Any]:
+    return dict(raw.disposition)
+
+
+#: **Every** key an exported entry row may carry, paired with the gate that
+#: decides what leaves the process. :func:`_project` builds the row by iterating
+#: THIS table, so a key cannot be added inline anywhere else.
+#:
+#: Why a table instead of a dict literal (three consecutive review rounds, each
+#: finding one more ungated field — ``author``/``status``, then
+#: ``verified_at``/``expires_at``): gating field by field is a fix that only
+#: covers the fields someone thought of. The leak returned because the output
+#: shape was written and the gates were added afterwards. Registering a field
+#: here is now the same act as gating it, and
+#: ``test_every_exported_field_is_gated_by_the_table`` fails on a table entry
+#: with no gate. Do NOT inline a key into a dict literal in this module: a value
+#: with no gate in front of it is exactly the defect this table exists to end.
+ENTRY_GATES: dict[str, Callable[[_Row], Any]] = {
+    "id": _gate_id,
+    "reference": _gate_reference,
+    "scope": _gate_scope,
+    "status": _gate_status,
+    "origin": _gate_origin,
+    "created_at": _gate_created_at,
+    "age_seconds": _gate_age,
+    "verified_at": _gate_verified_at,
+    "expires_at": _gate_expires_at,
+    "revision": _gate_revision,
+    "revisions": _gate_revisions,
+    "provenance": _gate_provenance,
+    "provenance_redacted": _gate_provenance_redacted,
+    "title": _gate_title,
+    "title_exported": _gate_title_exported,
+    "body_preview": _gate_body_preview,
+    "body_truncated": _gate_body_truncated,
+    "body_exported": _gate_body_exported,
+    "redacted": _gate_redacted,
+    "scope_fit_candidate": _gate_scope_fit_candidate,
+    "work_markers": _gate_work_markers,
+    "disposition": _gate_disposition,
+}
+
+
+def _project(raw: _Row) -> dict[str, Any]:
+    """Build the exported row by ITERATING :data:`ENTRY_GATES`.
+
+    Never list keys here. The dict comprehension is the whole point: there is no
+    statement in this function that can emit a value the table does not name.
+    """
+    return {name: gate(raw) for name, gate in ENTRY_GATES.items()}
+
+
 def _entry(row: sqlite3.Row, now: float, team_id: str) -> dict[str, Any]:
     fact = json.loads(row["fact"])
     scope = str(row["scope"])
     title = fact.get("title")
     body = fact.get("body")
-    title_ok = _exportable(title)
-    body_ok = _exportable(body)
     provenance, provenance_redacted = _provenance(fact)
     # Same field set as ``scope_fit`` on the write path: a row this listing
     # calls a candidate is exactly a row a new global write would refuse.
@@ -262,44 +469,21 @@ def _entry(row: sqlite3.Row, now: float, team_id: str) -> dict[str, Any]:
         if isinstance(value, list):
             haystack += "\n" + "\n".join(str(item) for item in value)
     markers = work_progress_markers(haystack)
-    created_at = fact.get("created_at")
-    # ``status`` is echoed raw into the row bracket (and ``origin`` is derived
-    # from it), so it is gated by the same closed vocabulary ``validate_fact``
-    # enforces rather than repeated as found: an imported row can carry any
-    # string here, and this listing shows exactly what a write would accept.
-    # "unknown" is the existing fallback for a missing status and states the
-    # truth for a value we refuse to repeat.
-    status = fact.get("status")
-    if not isinstance(status, str) or status not in FACT_STATUSES:
-        status = "unknown"
-    return {
-        "id": row["entity_id"],
-        "reference": f"{scope}/{row['entity_id']}",
-        "scope": scope,
-        "status": status,
-        "origin": origin_label(fact),
-        "created_at": created_at if isinstance(created_at, (int, float)) else None,
-        "age_seconds": (
-            max(0.0, now - float(created_at)) if isinstance(created_at, (int, float)) else None
-        ),
-        "verified_at": fact.get("verified_at"),
-        "expires_at": fact.get("expires_at"),
-        "revision": row["op_id"],
-        "revisions": int(row["revisions"]),
-        "provenance": provenance,
-        "provenance_redacted": provenance_redacted,
-        "title": title if title_ok else None,
-        "title_exported": title_ok,
-        "body_preview": (body[:PREVIEW_CHARS] if body_ok and isinstance(body, str) else None),
-        "body_truncated": bool(body_ok and isinstance(body, str) and len(body) > PREVIEW_CHARS),
-        "body_exported": False,
-        "redacted": not (title_ok and body_ok),
-        "scope_fit_candidate": scope == "global" and bool(markers),
-        "work_markers": markers,
-        "disposition": _disposition(
-            scope, markers, provenance, team_id, withheld=not (title_ok and body_ok)
-        ),
-    }
+    withheld = not (_exportable(title) and _exportable(body))
+    return _project(
+        _Row(
+            entity_id=row["entity_id"],
+            scope=scope,
+            op_id=row["op_id"],
+            revisions=row["revisions"],
+            fact=fact,
+            now=now,
+            provenance=provenance,
+            provenance_redacted=provenance_redacted,
+            markers=markers,
+            disposition=_disposition(scope, markers, provenance, team_id, withheld=withheld),
+        )
+    )
 
 
 def inspect_entries(
