@@ -83,14 +83,15 @@ class ImportJobRegistry:
             job.progress = state
 
         async def run() -> None:
-            job.result = await service.import_sessions(request, progress=on_progress)
-            if job.result.state == "done":
+            result = await service.import_sessions(request, progress=on_progress)
+            job.result = result
+            if result.state == "done":
                 job.progress.state = "done"
-            elif job.result.state == "cancelled":
+            elif result.state == "cancelled":
                 job.progress.state = "cancelled"
             else:
                 job.progress.state = "failed"
-                job.progress.error = job.result.error
+                job.progress.error = result.error
 
         job.task = asyncio.create_task(run())
         self._remember(job)

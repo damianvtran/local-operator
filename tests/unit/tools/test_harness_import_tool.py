@@ -57,6 +57,11 @@ def _text(result) -> str:
     return result.text
 
 
+def _details(result) -> dict[str, Any]:
+    assert result.details is not None
+    return result.details
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -79,11 +84,14 @@ def _assert_no_paths(value: Any, *, allow: set[str] | None = None) -> None:
 @pytest.mark.asyncio
 async def test_tool_registers_with_no_path_parameter():
     tool = TOOL_BUILDERS["harness_import"](_context())
+    assert tool is not None
     assert tool.name == "harness_import"
     assert "preview first" in tool.description
     assert "path" not in tool.parameters["properties"]
-    assert tool.call_approval_tier({"op": "sources"}) == "read"
-    assert tool.call_approval_tier({"op": "import"}) == "write"
+    tier = tool.call_approval_tier
+    assert tier is not None
+    assert tier({"op": "sources"}) == "read"
+    assert tier({"op": "import"}) == "write"
 
 
 @pytest.mark.asyncio
@@ -92,12 +100,12 @@ async def test_sources_and_sessions_write_nothing(import_home):
     before = sorted(path.relative_to(home) for path in home.rglob("*"))
     sources = await _call({"op": "sources"})
     assert not sources.is_error
-    assert any(row["source"] == SOURCE for row in sources.details["sources"])
+    assert any(row["source"] == SOURCE for row in _details(sources)["sources"])
     sessions = await _call({"op": "sessions", "source": SOURCE})
     assert not sessions.is_error
-    assert sessions.details["sessions"][0]["source_id"] == SESSION_ID
-    _assert_no_paths(sources.details)
-    _assert_no_paths(sessions.details)
+    assert _details(sessions)["sessions"][0]["source_id"] == SESSION_ID
+    _assert_no_paths(_details(sources))
+    _assert_no_paths(_details(sessions))
     after = sorted(path.relative_to(home) for path in home.rglob("*"))
     assert before == after
     assert not (config / "sessions").exists()
@@ -108,12 +116,12 @@ async def test_preview_writes_nothing_and_mints_a_token(import_home):
     home, config = import_home
     preview = await _call({"op": "preview", "source": SOURCE})
     assert not preview.is_error
-    assert preview.details["preview_token"].startswith("prev-")
-    assert preview.details["total_sessions"] == 1
-    assert preview.details["message_counts_estimated"] is True
-    assert preview.details["sessions"][0]["source_id"] == SESSION_ID
+    assert _details(preview)["preview_token"].startswith("prev-")
+    assert _details(preview)["total_sessions"] == 1
+    assert _details(preview)["message_counts_estimated"] is True
+    assert _details(preview)["sessions"][0]["source_id"] == SESSION_ID
     assert "Nothing has been imported" in _text(preview)
-    _assert_no_paths(preview.details)
+    _assert_no_paths(_details(preview))
     assert not (config / "sessions").exists()
     assert not (config / "imports").exists()
 
@@ -128,7 +136,7 @@ async def test_import_requires_confirm_selection_and_preview(import_home):
     assert confirm.is_error and "no default-all" in _text(confirm)
 
     preview = await _call({"op": "preview", "source": SOURCE})
-    token = preview.details["preview_token"]
+    token = _details(preview)["preview_token"]
     no_token = await _call({"op": "import", "source": SOURCE, "all": True, "confirm": True})
     assert no_token.is_error and "preview_token" in _text(no_token)
 
@@ -164,7 +172,7 @@ async def test_explicit_import_replay_and_source_immutability(import_home):
             "session_ids": {SOURCE: [SESSION_ID]},
         }
     )
-    token = preview.details["preview_token"]
+    token = _details(preview)["preview_token"]
     started = await _call(
         {
             "op": "import",
@@ -175,13 +183,13 @@ async def test_explicit_import_replay_and_source_immutability(import_home):
         }
     )
     assert not started.is_error
-    job_id = started.details["job_id"]
+    job_id = _details(started)["job_id"]
     job = JOBS.get(job_id)
     assert job is not None and job.task is not None
     await job.task
     status = await _call({"op": "status", "job_id": job_id})
     assert not status.is_error
-    result = status.details["result"]
+    result = _details(status)["result"]
     assert result["state"] == "done"
     target_id = result["sessions"][0]["target_session_id"]
     target = config / "sessions" / target_id
@@ -190,7 +198,7 @@ async def test_explicit_import_replay_and_source_immutability(import_home):
     assert len(history) == 5
     assert _sha(source) == before_hash
     assert not list(source.parent.glob("*.jsonl-shm"))
-    _assert_no_paths(status.details, allow={"instruction_review_path", "memory_review_path"})
+    _assert_no_paths(_details(status), allow={"instruction_review_path", "memory_review_path"})
 
     second_preview = await _call(
         {
@@ -205,14 +213,14 @@ async def test_explicit_import_replay_and_source_immutability(import_home):
             "source": SOURCE,
             "session_ids": {SOURCE: [SESSION_ID]},
             "confirm": True,
-            "preview_token": second_preview.details["preview_token"],
+            "preview_token": _details(second_preview)["preview_token"],
         }
     )
-    second_job = JOBS.get(second.details["job_id"])
+    second_job = JOBS.get(_details(second)["job_id"])
     assert second_job is not None and second_job.task is not None
     await second_job.task
-    second_status = await _call({"op": "status", "job_id": second.details["job_id"]})
-    assert second_status.details["result"]["sessions"][0]["outcome"] == "skipped_already_imported"
+    second_status = await _call({"op": "status", "job_id": _details(second)["job_id"]})
+    assert _details(second_status)["result"]["sessions"][0]["outcome"] == "skipped_already_imported"
     assert _sha(source) == before_hash
 
 
@@ -220,7 +228,7 @@ async def test_explicit_import_replay_and_source_immutability(import_home):
 async def test_status_and_cancel_are_shared_with_routes(import_home):
     home, config = import_home
     preview = await _call({"op": "preview", "source": SOURCE})
-    token = preview.details["preview_token"]
+    token = _details(preview)["preview_token"]
     started = await _call(
         {
             "op": "import",
@@ -230,14 +238,14 @@ async def test_status_and_cancel_are_shared_with_routes(import_home):
             "preview_token": token,
         }
     )
-    job_id = started.details["job_id"]
+    job_id = _details(started)["job_id"]
     cancelled = await _call({"op": "cancel", "job_id": job_id})
     assert not cancelled.is_error
     job = JOBS.get(job_id)
     assert job is not None and job.task is not None
     await job.task
     status = await _call({"op": "status", "job_id": job_id})
-    assert status.details["state"] in ("cancelled", "done")
+    assert _details(status)["state"] in ("cancelled", "done")
     assert JOBS.get(job_id) is job
 
 
@@ -262,14 +270,14 @@ async def test_import_reports_the_instruction_review_path(import_home):
             "source": "claude",
             "session_ids": {"claude": ["sess-claude"]},
             "confirm": True,
-            "preview_token": preview.details["preview_token"],
+            "preview_token": _details(preview)["preview_token"],
         }
     )
-    job = JOBS.get(started.details["job_id"])
+    job = JOBS.get(_details(started)["job_id"])
     assert job is not None and job.task is not None
     await job.task
-    status = await _call({"op": "status", "job_id": started.details["job_id"]})
-    review_path = status.details["result"]["instruction_review_path"]
+    status = await _call({"op": "status", "job_id": _details(started)["job_id"]})
+    review_path = _details(status)["result"]["instruction_review_path"]
     assert review_path.endswith("instructions/claude.md")
     assert Path(review_path).is_file()
     assert "Instructions saved for review at" in _text(status)
