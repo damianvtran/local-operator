@@ -49,7 +49,7 @@
     "tone": "terse, operator-facing, describes a flag or command",
     "note": "OAuth is a protocol name; HTTP stays"
   },
-  "cli.mcp_help.remove": {
+  "cli.mcp_help.remove_server": {
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a flag or command",
     "note": "help for the 'remove' argument; flag/command tokens stay in situ"

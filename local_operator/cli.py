@@ -2155,7 +2155,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     mcp_remove_parser = mcp_subparsers.add_parser(
         "remove",
-        help=_mh.remove().envelope(locale=help_locale)["text"],
+        help=_mh.remove_server().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     mcp_remove_parser.add_argument(

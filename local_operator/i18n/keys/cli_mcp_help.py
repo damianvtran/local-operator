@@ -74,13 +74,13 @@ def reauth_name() -> Msg:
     return Msg("cli.mcp_help.reauth_name", {})
 
 
-def remove() -> Msg:
-    return Msg("cli.mcp_help.remove", {})
-
-
 def remove_name() -> Msg:
     return Msg("cli.mcp_help.remove_name", {})
 
 
 def remove_scope() -> Msg:
     return Msg("cli.mcp_help.remove_scope", {})
+
+
+def remove_server() -> Msg:
+    return Msg("cli.mcp_help.remove_server", {})

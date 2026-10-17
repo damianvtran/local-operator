@@ -242,9 +242,9 @@ CASES = [
         "Enable OAuth for a remote HTTP server",
     ),  # add_oauth
     (
-        _mh.remove().envelope(locale="en")["text"],
+        _mh.remove_server().envelope(locale="en")["text"],
         "Remove an MCP server from a config scope",
-    ),  # remove
+    ),  # remove_server
     (
         _mh.remove_name().envelope(locale="en")["text"],
         "Server name to remove",

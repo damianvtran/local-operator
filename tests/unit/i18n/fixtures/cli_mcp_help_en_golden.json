@@ -9,7 +9,7 @@
   "cli.mcp_help.add_url": "HTTP/SSE server URL (alternative to --command)",
   "cli.mcp_help.add_scope": "Config scope to write (default: global ~/.local-operator/mcp.json)",
   "cli.mcp_help.add_oauth": "Enable OAuth for a remote HTTP server",
-  "cli.mcp_help.remove": "Remove an MCP server from a config scope",
+  "cli.mcp_help.remove_server": "Remove an MCP server from a config scope",
   "cli.mcp_help.remove_name": "Server name to remove",
   "cli.mcp_help.remove_scope": "Config scope to remove from (default: global)",
   "cli.mcp_help.login": "Authenticate one OAuth-enabled MCP server",
