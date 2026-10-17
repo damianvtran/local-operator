@@ -62,6 +62,7 @@ from local_operator.env import get_env_config
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
@@ -549,154 +550,166 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # Teams command
-    teams_parser = subparsers.add_parser("teams", help="Manage teams", parents=[parent_parser])
-    teams_subparsers = teams_parser.add_subparsers(dest="teams_command")
-    teams_subparsers.add_parser("list", help="List all teams", parents=[parent_parser])
-    teams_create = teams_subparsers.add_parser(
-        "create", help="Create a new team", parents=[parent_parser]
+    teams_parser = subparsers.add_parser(
+        "teams", help=_th.teams().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
-    teams_create.add_argument("name", type=str, help="Name of the team to create")
+    teams_subparsers = teams_parser.add_subparsers(dest="teams_command")
+    teams_subparsers.add_parser(
+        "list", help=_th.list().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
+    teams_create = teams_subparsers.add_parser(
+        "create", help=_th.create().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
+    teams_create.add_argument(
+        "name", type=str, help=_th.create_name().envelope(locale=help_locale)["text"]
+    )
     teams_create.add_argument(
         "--manager",
         type=str,
         default="manager",
-        help="Role or specialist who orchestrates (default: manager)",
+        help=_th.create_manager().envelope(locale=help_locale)["text"],
     )
     teams_create.add_argument(
         "--member",
         action="append",
         default=[],
         dest="members",
-        help="Roster slot as role or role:count (repeatable)",
+        help=_th.create_member().envelope(locale=help_locale)["text"],
     )
-    teams_create.add_argument("--description", type=str, default="", help="One-line description")
+    teams_create.add_argument(
+        "--description",
+        type=str,
+        default="",
+        help=_th.create_description().envelope(locale=help_locale)["text"],
+    )
     teams_create.add_argument(
         "--label",
         type=str,
         default=None,
-        help="Display label shown in listings, the chart and the status band "
-        "(free text; addressing still uses the name)",
+        help=_th.create_label().envelope(locale=help_locale)["text"],
     )
     teams_create.add_argument(
         "--alias",
         action="append",
         default=[],
         dest="aliases",
-        help="Extra addressing key for this team (repeatable; letters, digits, "
-        "dot, underscore, hyphen)",
+        help=_th.create_alias().envelope(locale=help_locale)["text"],
     )
     teams_show = teams_subparsers.add_parser(
-        "show", help="Show a team's roster and briefs", parents=[parent_parser]
+        "show", help=_th.show().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
-    teams_show.add_argument("name", type=str, help="Name of the team to show")
+    teams_show.add_argument(
+        "name", type=str, help=_th.show_name().envelope(locale=help_locale)["text"]
+    )
     teams_delete = teams_subparsers.add_parser(
-        "delete", help="Delete a team by name", parents=[parent_parser]
+        "delete", help=_th.delete().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     teams_delete.add_argument(
         "--name",
         type=str,
         required=True,
-        help="Name of the team to delete",
+        help=_th.delete_name().envelope(locale=help_locale)["text"],
     )
     teams_push = teams_subparsers.add_parser(
         "push",
-        help="Push a team to an organization or the public hub (Agent Hub); exit codes: "
-        "0 published, 1 error, 2 preview-only with changes pending, 3 declined, "
-        "130 cancelled",
+        help=_th.push().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    teams_push.add_argument("name", type=str, help="Name of the local team to push")
+    teams_push.add_argument(
+        "name", type=str, help=_th.push_name().envelope(locale=help_locale)["text"]
+    )
     teams_push_target = teams_push.add_mutually_exclusive_group()
     teams_push_target.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Organization tenant to publish into (`lop teams push --org <tenant_id> "
-        "<team>`; requires `lop login radient`)",
+        help=_th.push_org().envelope(locale=help_locale)["text"],
     )
     teams_push_target.add_argument(
         "--public",
         action="store_true",
-        help="Publish to the public Agent Hub instead of an organization",
+        help=_th.push_public().envelope(locale=help_locale)["text"],
     )
     teams_push.add_argument(
         "--id",
         type=str,
         dest="hub_id",
         default=None,
-        help="Hub team id to overwrite (republish; what `lop teams push` printed as "
-        '"Team ID"); needs --org or --public',
+        help=_th.push_id().envelope(locale=help_locale)["text"],
     )
     _add_hub_publish_flags(teams_push)
     teams_pull = teams_subparsers.add_parser(
         "pull",
-        help="Pull a team from the hub by id, or by name from the public hub " "(Agent Hub)",
+        help=_th.pull().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     teams_pull.add_argument(
         "team_id",
         type=str,
-        help="ID of the published team to pull, or a public team's name "
-        "(`lop teams pull a-team`; names resolve over the public listing)",
+        help=_th.pull_team_id().envelope(locale=help_locale)["text"],
     )
     teams_pull.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Organization tenant the team belongs to (`lop teams pull --org "
-        "<tenant_id> <team-id>`; requires `lop login radient`)",
+        help=_th.pull_org().envelope(locale=help_locale)["text"],
     )
 
     teams_sync = teams_subparsers.add_parser(
         "sync",
-        help="Check pulled teams against the hub and merge their updates",
+        help=_th.sync().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     teams_sync_group = teams_sync.add_mutually_exclusive_group()
-    teams_sync_group.add_argument("--name", type=str, help="Sync only the team with this name")
     teams_sync_group.add_argument(
-        "--all", action="store_true", help="Sync every linked team (default when --name is absent)"
+        "--name", type=str, help=_th.sync_name().envelope(locale=help_locale)["text"]
+    )
+    teams_sync_group.add_argument(
+        "--all", action="store_true", help=_th.sync_all().envelope(locale=help_locale)["text"]
     )
     _add_hub_sync_flags(teams_sync)
     teams_link = teams_subparsers.add_parser(
         "link",
-        help="Link a local team to a hub team so it can receive updates",
+        help=_th.link().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    teams_link.add_argument("name", type=str, help="Name of the local team")
-    teams_link.add_argument("hub_team_id", type=str, help="ID of the hub team to link it to")
     teams_link.add_argument(
-        "--org", type=str, default=None, help="Organization tenant that owns the hub team"
+        "name", type=str, help=_th.link_name().envelope(locale=help_locale)["text"]
+    )
+    teams_link.add_argument(
+        "hub_team_id", type=str, help=_th.link_hub_team_id().envelope(locale=help_locale)["text"]
+    )
+    teams_link.add_argument(
+        "--org", type=str, default=None, help=_th.link_org().envelope(locale=help_locale)["text"]
     )
     teams_link.add_argument(
         "--accept-unknown-baseline",
         action="store_true",
-        help="Link even though the local copy differs from the hub's (nothing is deleted)",
+        help=_th.link_accept_unknown_baseline().envelope(locale=help_locale)["text"],
     )
 
     teams_search = teams_subparsers.add_parser(
         "search",
-        help="Search the public Agent Hub for teams",
+        help=_th.search().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     teams_search.add_argument(
         "query",
         nargs="?",
         default=None,
-        help="Text to match against a public team's name or description "
-        "(omit to list the newest teams)",
+        help=_th.search_query().envelope(locale=help_locale)["text"],
     )
     teams_search.add_argument(
-        "--page", type=int, default=1, help="Page to list when no query is given (default: 1)"
+        "--page", type=int, default=1, help=_th.search_page().envelope(locale=help_locale)["text"]
     )
     teams_search.add_argument(
         "--perpage",
         type=int,
         default=20,
-        help="Teams per page for a listing (default: 20; the hub maxes at 100)",
+        help=_th.search_perpage().envelope(locale=help_locale)["text"],
     )
     teams_search.add_argument(
-        "--json", action="store_true", help="Print the raw listing or matches as JSON"
+        "--json", action="store_true", help=_th.search_json().envelope(locale=help_locale)["text"]
     )
 
     hub_parser = subparsers.add_parser(
