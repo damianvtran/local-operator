@@ -2213,15 +2213,28 @@ class EpisodeRunner:
         descriptor = self._descriptor
         if descriptor is None:
             return False
-        try:
-            # The rescue worker is a fresh process with nothing but the
-            # descriptor; it needs the credentials again to tear down. These
-            # are the values resolved at launch, so an in-process rescue never
-            # re-reads the store mid-failure.
-            aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
-        except BaseException:
-            return False
-        complete = bool(aggregate.complete)
+        complete = False
+        # BOUNDED RETRY, deliberately here rather than at the call sites: the
+        # measured leak (2026-10-17, ep-4386740c6af0) failed once, fast and
+        # silently, and left its instance running for hours while the
+        # descriptor sat in the rescue inbox. A replay of the same descriptor
+        # on the same build completed on the first attempt (launch, handshake,
+        # all three cleanup actions, close), so one immediate retry covers the
+        # transient class; the rescue sweep stays the unbounded net for
+        # everything else, and the descriptor is retired only on a complete
+        # aggregate either way.
+        for _ in range(2):
+            try:
+                # The rescue worker is a fresh process with nothing but the
+                # descriptor; it needs the credentials again to tear down.
+                # These are the values resolved at launch, so an in-process
+                # rescue never re-reads the store mid-failure.
+                aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
+            except BaseException:
+                continue
+            complete = bool(aggregate.complete)
+            if complete:
+                break
         if complete:
             self._retire_descriptor()
         return complete

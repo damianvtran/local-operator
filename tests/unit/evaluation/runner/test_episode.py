@@ -516,6 +516,69 @@ async def test_scorer_failure_can_only_abandon_as_ambiguous(
 
 
 @pytest.mark.asyncio
+async def test_failed_rescue_gets_one_immediate_retry(tmp_path: Path, episode_id: str) -> None:
+    """A single fast rescue failure must not strand the instance.
+
+    Measured leak (2026-10-17, ep-4386740c6af0): the rescue failed once, fast
+    and silently, its descriptor stayed in the inbox and its instance ran for
+    hours. The retry is bounded at one extra attempt so a genuinely broken
+    rescue cannot loop; the still-broken case keeps the descriptor for the
+    sweep, and the complete case retires it.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import load_pending_rescue
+
+    attempts: list[int] = []
+
+    async def _flaky(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        attempts.append(1)
+
+        class _Aggregate:
+            descriptor_id = descriptor.descriptor_id
+            complete = len(attempts) >= 2
+
+        return _Aggregate()
+
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": SupervisionError("scorer died")})
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+    runner._rescue = _flaky  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome = await runner.run()
+
+    assert outcome.status == "abandoned"
+    assert outcome.rescue_complete is True
+    assert len(attempts) == 2
+    # A complete aggregate retires the descriptor: the sweep has nothing left.
+    assert load_pending_rescue(build_config(tmp_path).rescue_root) is None
+
+    second = tmp_path / "still-broken"
+    second.mkdir()
+    broken_attempts: list[int] = []
+
+    async def _broken(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        broken_attempts.append(1)
+
+        class _Aggregate:
+            descriptor_id = descriptor.descriptor_id
+            complete = False
+
+        return _Aggregate()
+
+    adapter2 = FakeAdapter(second, f"{episode_id}-b", failures={"score": SupervisionError("x")})
+    runner2 = _runner(second, f"{episode_id}-b", adapter=adapter2, model=ScriptedModel())
+    runner2._rescue = _broken  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome2 = await runner2.run()
+
+    assert outcome2.rescue_complete is False
+    assert len(broken_attempts) == 2  # bounded: exactly one retry
+    # Still broken: the descriptor stays for the sweep to pick up.
+    assert load_pending_rescue(build_config(second).rescue_root) is not None
+
+
+@pytest.mark.asyncio
 async def test_incomplete_cleanup_labels_the_run_and_requires_rescue(
     tmp_path: Path, episode_id: str
 ) -> None:
