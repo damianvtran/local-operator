@@ -12,7 +12,12 @@ import json
 from collections.abc import Iterator, Sequence
 from typing import Any, Protocol
 
-from local_operator.harness_import.types import MemoryRecord, SourceEvent, SourceInfo, SourceSession
+from local_operator.harness_import.types import (
+    MemoryRecord,
+    SourceEvent,
+    SourceInfo,
+    SourceSession,
+)
 
 
 def parse_ts(value: object, *, fallback: float = 0.0) -> float:

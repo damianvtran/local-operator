@@ -19,6 +19,7 @@ because the obvious implementation is wrong:
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,8 +45,9 @@ from local_operator.session.transcript import (
 #: The shipped write-side preserved-turn cap for a 1M window. 100k is lop's
 #: legacy READ fallback and must not be written into a new imported row.
 IMPORT_PRESERVED_TURN_CAP = 150_000
-#: Inline image larger than this is skipped with a warning rather than
-#: externalised; the foreign store keeps the original.
+#: An inline image whose DECODED payload is larger than this is skipped with a
+#: warning rather than externalised; the foreign store keeps the original.
+#: Compare decoded bytes, never the base64 text length (~4/3 of the payload).
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 
 
@@ -60,6 +62,7 @@ class MappedSession:
             "tool_results": 0,
             "compactions": 0,
             "skipped": 0,
+            "duplicate_results": 0,
             "redactions": 0,
             "thinking": 0,
         }
@@ -68,6 +71,10 @@ class MappedSession:
     model_history: list[dict[str, Any]] = field(default_factory=list)
     compaction_anchors: dict[str, str] = field(default_factory=dict)
     active_leaf_source_id: str | None = None
+    #: Source event ids from the active leaf back to the root, so a resume can
+    #: distinguish a linear append (old leaf is an ancestor) from a branch
+    #: switch (it is not) without re-reading or guessing.
+    active_branch_source_ids: list[str] = field(default_factory=list)
     title: str | None = None
     title_user_set: bool = False
     first_user_text: str = ""
@@ -96,8 +103,13 @@ def _clean_images(images: list[ImageContent], warnings: list[str]) -> list[Image
     for image in images:
         if not image.data:
             continue
-        if len(image.data) > MAX_IMAGE_BYTES:
-            warnings.append("image skipped: inline payload exceeds the import cap")
+        try:
+            decoded_bytes = len(base64.b64decode(image.data, validate=False))
+        except (ValueError, TypeError):
+            warnings.append("image skipped: undecodable inline payload")
+            continue
+        if decoded_bytes > MAX_IMAGE_BYTES:
+            warnings.append("image skipped: decoded payload exceeds the import cap")
             continue
         kept.append(image)
     return kept
@@ -109,16 +121,17 @@ def build_mapped_session(
     source: str,
     source_session_id: str,
     default_created_ts: float = 0.0,
-    include_cleared_segments: bool = False,
 ) -> MappedSession:
     """Map one session's canonical events to deterministic transcript rows."""
-    del include_cleared_segments  # adapters already select the live segment
     mapped = MappedSession()
     stats = mapped.stats
     ordinal = 0
     last_ts = default_created_ts
     seen_tool_results: set[str] = set()
 
+    # Parent links come from EVERY event, including silent metadata rows the
+    # mapper does not emit: the branch walk must cross them.
+    all_parents = {event.source_event_id: event.parent_source_event_id for event in events}
     emissions: list[_Emission] = []
     for event in events:
         ts = float(event.ts or 0.0)
@@ -127,7 +140,12 @@ def build_mapped_session(
         last_ts = max(last_ts, ts)
         event.source_event_id = event.source_event_id or f"anon:{ordinal}:{event.kind}:{ts}"
         if event.kind == "unknown":
+            if event.raw_flags.get("silent"):
+                continue
             stats["skipped"] += 1
+            warning = event.raw_flags.get("warning")
+            if isinstance(warning, str) and warning.strip():
+                mapped.warnings.append(warning)
             continue
         if event.kind == "user":
             text = _clean_text_list(event.text, stats)
@@ -135,9 +153,7 @@ def build_mapped_session(
             if not text and not images:
                 stats["skipped"] += 1
                 continue
-            entry_id = stable_entry_id(
-                source, source_session_id, event.source_event_id, ordinal
-            )
+            entry_id = stable_entry_id(source, source_session_id, event.source_event_id, ordinal)
             ordinal += 1
             content: list[Content] = [TextContent(text=block) for block in text]
             content.extend(images)
@@ -172,9 +188,7 @@ def build_mapped_session(
             if not text and not tool_calls and not images:
                 stats["skipped"] += 1
                 continue
-            entry_id = stable_entry_id(
-                source, source_session_id, event.source_event_id, ordinal
-            )
+            entry_id = stable_entry_id(source, source_session_id, event.source_event_id, ordinal)
             ordinal += 1
             assistant_content: list[Content] = [TextContent(text=block) for block in text]
             assistant_content.extend(images)
@@ -199,6 +213,7 @@ def build_mapped_session(
                 continue
             if call_id in seen_tool_results:
                 stats["skipped"] += 1
+                stats["duplicate_results"] += 1
                 mapped.warnings.append(
                     f"duplicate tool result for call {call_id} skipped (source anomaly)"
                 )
@@ -209,9 +224,7 @@ def build_mapped_session(
                 clean, count = redact_text(str(block))
                 stats["redactions"] += count
                 tool_text.append(clean)
-            entry_id = stable_entry_id(
-                source, source_session_id, event.source_event_id, ordinal
-            )
+            entry_id = stable_entry_id(source, source_session_id, event.source_event_id, ordinal)
             ordinal += 1
             message = Message(
                 role="tool",
@@ -273,9 +286,7 @@ def build_mapped_session(
             details.update(
                 {key: value for key, value in event.raw_flags.items() if key != "user_set"}
             )
-            entry_id = stable_entry_id(
-                source, source_session_id, event.source_event_id, ordinal
-            )
+            entry_id = stable_entry_id(source, source_session_id, event.source_event_id, ordinal)
             ordinal += 1
             row = TranscriptEntry(
                 entry_id, ts, ENTRY_CUSTOM, {"custom_type": custom_type, "details": details}
@@ -294,6 +305,13 @@ def build_mapped_session(
             ),
             None,
         )
+    parents = all_parents
+    cursor = mapped.active_leaf_source_id
+    seen: set[str] = set()
+    while cursor and cursor not in seen:
+        seen.add(cursor)
+        mapped.active_branch_source_ids.append(cursor)
+        cursor = parents.get(cursor)
     _resolve_compactions(emissions, mapped, source=source, source_session_id=source_session_id)
     return mapped
 
@@ -307,9 +325,7 @@ def _resolve_compactions(
 ) -> None:
     del source_session_id
     row_index = {row.id: index for index, row in enumerate(mapped.rows)}
-    source_to_row = {
-        emission.event.source_event_id: emission.row.id for emission in emissions
-    }
+    source_to_row = {emission.event.source_event_id: emission.row.id for emission in emissions}
     message_indexes = [
         index
         for index, emission in enumerate(emissions)
@@ -327,7 +343,7 @@ def _resolve_compactions(
     ]
     latest_compaction: tuple[int, _Emission] | None = None
 
-    for position, (emit_index, emission) in enumerate(compaction_emissions):
+    for emit_index, emission in compaction_emissions:
         info = emission.event.compaction or CompactionInfo(summary="")
         anchor: str | None = None
         if info.first_kept_source_id:
@@ -339,9 +355,7 @@ def _resolve_compactions(
                     break
         if not anchor:
             anchor = emission.row.id
-            mapped.warnings.append(
-                "compaction has no retained message; replay is summary-only"
-            )
+            mapped.warnings.append("compaction has no retained message; replay is summary-only")
         anchor = _snap_anchor(anchor, mapped, row_index)
         payload = emission.row.payload
         if anchor is not None:
@@ -359,12 +373,9 @@ def _resolve_compactions(
         if snapshot:
             payload["preserve_data"] = {"source_snapshot": snapshot}
         payload["tokens_before"] = int(
-            info.tokens_before
-            or _estimate_before(emissions, emit_index)
+            info.tokens_before or _estimate_before(emissions, emit_index)
         )
-        mapped.compaction_anchors[emission.event.source_event_id] = payload[
-            "first_kept_entry_id"
-        ]
+        mapped.compaction_anchors[emission.event.source_event_id] = payload["first_kept_entry_id"]
         latest_compaction = (emit_index, emission)
 
     if latest_compaction is None:
@@ -374,7 +385,7 @@ def _resolve_compactions(
     turns: list[dict[str, str]] = []
     seen: set[str] = set()
     for index, emission in user_emissions:
-        if index >= _first_index_at_or_after_row(emissions, anchor_index):
+        if index >= anchor_index:
             break
         text = " ".join(
             _redact_again(block) for block in emission.event.text if block.strip()
@@ -402,13 +413,6 @@ def _resolve_compactions(
     payload["preserved_turns_cap"] = IMPORT_PRESERVED_TURN_CAP
 
 
-def _first_index_at_or_after_row(emissions: list[_Emission], row_index: int) -> int:
-    """Emission index of the row at ``row_index`` (or len)."""
-    if row_index >= len(emissions):
-        return len(emissions)
-    return row_index
-
-
 def _redact_again(text: str) -> str:
     return redact_text(text)[0]
 
@@ -423,9 +427,7 @@ def _estimate_before(emissions: list[_Emission], index: int) -> int:
     return total
 
 
-def _snap_anchor(
-    anchor: str, mapped: MappedSession, row_index: dict[str, int]
-) -> str | None:
+def _snap_anchor(anchor: str, mapped: MappedSession, row_index: dict[str, int]) -> str | None:
     """Never start a kept window on an orphan tool row or split a call group."""
     index = row_index.get(anchor)
     if index is None:

@@ -107,13 +107,20 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def iter_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+def iter_jsonl(
+    path: Path, *, stats: dict[str, int] | None = None
+) -> Iterator[tuple[int, dict[str, Any]]]:
     """Stream ``(line_number, object)`` from a JSONL file, bounded and tolerant.
 
     Malformed and oversized lines are skipped INDIVIDUALLY: a truncated tail
     (a live writer) must not discard the conversation before it. The one
     exception is a file over the total byte ceiling, which raises; importing
     half of a 2 GB body silently would be worse than telling the user.
+
+    ``stats`` is the observability half: when supplied it receives
+    ``skipped_lines``/``oversized_lines``/``malformed_lines`` so a caller can
+    report that the source was partial instead of importing it as complete.
+    Passing it is optional so the read-only listing paths stay allocation-free.
     """
     path = Path(path)
     try:
@@ -125,6 +132,9 @@ def iter_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for number, line in enumerate(handle, 1):
             if len(line) > MAX_LINE_BYTES:
+                if stats is not None:
+                    stats["skipped_lines"] = stats.get("skipped_lines", 0) + 1
+                    stats["oversized_lines"] = stats.get("oversized_lines", 0) + 1
                 continue
             line = line.strip()
             if not line:
@@ -132,6 +142,9 @@ def iter_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
             try:
                 value = json.loads(line)
             except (json.JSONDecodeError, ValueError):
+                if stats is not None:
+                    stats["skipped_lines"] = stats.get("skipped_lines", 0) + 1
+                    stats["malformed_lines"] = stats.get("malformed_lines", 0) + 1
                 continue
             if isinstance(value, dict):
                 yield number, value
@@ -147,12 +160,9 @@ def stable_session_id(source: str, source_id: str, *, suffix: str = "") -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
-def stable_entry_id(
-    source: str, source_id: str, source_event_id: str, ordinal: int
-) -> str:
+def stable_entry_id(source: str, source_id: str, source_event_id: str, ordinal: int) -> str:
     payload = (
-        f"lop-harness-import/v1/entry\0{source}\0{source_id}\0"
-        f"{source_event_id}\0{ordinal}"
+        f"lop-harness-import/v1/entry\0{source}\0{source_id}\0" f"{source_event_id}\0{ordinal}"
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -188,18 +198,20 @@ class SourceSnapshot:
 
 @contextlib.contextmanager
 def sqlite_snapshot(config: Path, database: Path) -> Iterator[SourceSnapshot]:
-    """Copy ``database`` (+ WAL/SHM) under the config root and open it immutable.
+    """Copy ``database`` (+ WAL/SHM) under the config root, then open the COPY.
 
     The copy is deleted on exit. A missing database raises ``FileNotFoundError``
     so the adapter can report "metadata unavailable" rather than an empty list.
+    ``connect_snapshot`` deliberately uses a normal read-only connection so the
+    copied WAL is replayed (see its docstring for the measured failure).
     """
     database = Path(database)
     if not database.exists():
         raise FileNotFoundError(database)
     stat = database.stat()
-    key = hashlib.sha256(
-        f"{database}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
-    ).hexdigest()[:16]
+    key = hashlib.sha256(f"{database}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()).hexdigest()[
+        :16
+    ]
     directory = imports_root(config) / "snapshots" / key
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = directory / database.name
@@ -215,7 +227,17 @@ def sqlite_snapshot(config: Path, database: Path) -> Iterator[SourceSnapshot]:
 
 
 def connect_snapshot(snapshot: SourceSnapshot) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{snapshot.path}?immutable=1", uri=True)
+    """Open the private COPY read-only, allowing SQLite to replay its WAL.
+
+    Deliberately NOT ``immutable=1``: that flag declares the database
+    unchanging, so SQLite skips the ``-wal`` we just copied and a live Codex
+    store (writer holding the WAL open) lists zero threads or fails with
+    "no such table". The copy is already private to us; a normal read-only
+    connection cannot reach the foreign original and still gets WAL replay.
+    (Documented deviation from design §7, whose ``immutable=1`` prescription
+    is what caused the invisible-thread failure.)
+    """
+    return sqlite3.connect(f"file:{snapshot.path}?mode=ro", uri=True, timeout=5)
 
 
 class ImportLock:
@@ -255,6 +277,11 @@ class ImportLock:
             return True
         if pid <= 0:
             return True
+        if os.name != "posix":
+            # On Windows ``os.kill(pid, 0)`` is TerminateProcess, not a
+            # liveness probe: it would KILL the process it is checking. The
+            # mtime rule above is the only safe cross-platform signal there.
+            return False
         try:
             os.kill(pid, 0)
         except ProcessLookupError:

@@ -2929,6 +2929,37 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
     ),
+    # -- harness_import: private import bookkeeping under <config>/imports ----
+    # These writers are called only with `<config>/imports/{snapshots,...}`,
+    # `<config>/imports/.lock`, and the target session's OWN sidecars
+    # (`harness-import.json`, `title.json`, `created_at.json`). None accepts a
+    # session ID or a caller-supplied path, so none can name a directory or
+    # transcript under `sessions/`.
+    (
+        "local_operator/harness_import/store.py::atomic_write_text",
+        "os.replace",
+        "Atomic temp->target replace for import manifests/index/instruction review only",
+    ),
+    (
+        "local_operator/harness_import/store.py::atomic_write_text",
+        "os.unlink",
+        "Cleans its own same-directory temp file after replace or on failure",
+    ),
+    (
+        "local_operator/harness_import/store.py::sqlite_snapshot",
+        "shutil.rmtree",
+        "Deletes only the private <config>/imports/snapshots/<hash>/ copy it created",
+    ),
+    (
+        "local_operator/harness_import/store.py::ImportLock.acquire",
+        "<path>.unlink",
+        "Removes the stale <config>/imports/.lock file before re-creating it",
+    ),
+    (
+        "local_operator/harness_import/store.py::ImportLock.release",
+        "<path>.unlink",
+        "Removes the same <config>/imports/.lock file this process created",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}

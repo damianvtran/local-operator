@@ -27,8 +27,8 @@ from local_operator.harness_import.types import (
     ImportRequest,
     ImportResult,
 )
-from local_operator.server.desktop import require_desktop
 from local_operator.server.dependencies import get_config_manager
+from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter(

@@ -109,4 +109,128 @@ async def test_user_edited_target_gets_a_fresh_copy(omp_store):
     row = second.sessions[0]
     assert row.outcome == "imported"
     assert row.target_session_id != first.sessions[0].target_session_id
-    assert read_manifest(config / "sessions" / row.target_session_id)["status"] == "complete"
+    written = read_manifest(config / "sessions" / row.target_session_id)
+    assert written is not None and written["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_rotated_source_creates_one_copy_then_skips(omp_store):
+    home, config = omp_store
+    path = home / ".omp" / "agent" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    service = HarnessImportService(config)
+    first = await service.import_sessions(_request())
+    original = first.sessions[0].target_session_id
+
+    path.write_text(
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": "omp-synthetic",
+                "timestamp": "2026-01-04T00:00:00.000Z",
+                "cwd": "/tmp/synthetic-omp",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "message",
+                "id": "rotated-1",
+                "parentId": None,
+                "timestamp": "2026-01-04T00:00:01.000Z",
+                "message": {
+                    "role": "user",
+                    "timestamp": "2026-01-04T00:00:01.000Z",
+                    "content": [{"type": "text", "text": "rotated source"}],
+                },
+            }
+        )
+        + "\n"
+    )
+    second = await service.import_sessions(_request())
+    assert second.sessions[0].outcome == "imported"
+    copy = second.sessions[0].target_session_id
+    assert copy == f"{original}-2"
+    third = await service.import_sessions(_request())
+    assert third.sessions[0].outcome == "skipped_already_imported"
+    assert third.sessions[0].target_session_id == copy
+    copied = read_manifest(config / "sessions" / copy)
+    assert copied is not None
+    assert copied["predecessor_target_session_id"] == original
+
+
+@pytest.mark.asyncio
+async def test_edited_target_creates_one_copy_then_skips(omp_store):
+    home, config = omp_store
+    service = HarnessImportService(config)
+    first = await service.import_sessions(_request())
+    original = first.sessions[0].target_session_id
+    with (config / "sessions" / original / "transcript.jsonl").open("a") as handle:
+        handle.write("\n")
+    second = await service.import_sessions(_request())
+    copy = second.sessions[0].target_session_id
+    assert copy == f"{original}-2"
+    third = await service.import_sessions(_request())
+    assert third.sessions[0].outcome == "skipped_already_imported"
+    assert third.sessions[0].target_session_id == copy
+    copied = read_manifest(config / "sessions" / copy)
+    assert copied is not None
+    assert copied["predecessor_target_session_id"] == original
+
+
+@pytest.mark.asyncio
+async def test_branch_change_gets_a_new_target_and_predecessor(omp_store):
+    home, config = omp_store
+    path = home / ".omp" / "agent" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    service = HarnessImportService(config)
+    first = await service.import_sessions(_request())
+    original = first.sessions[0].target_session_id
+
+    with path.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "message",
+                    "id": "branch-question",
+                    "parentId": "u1",
+                    "timestamp": "2026-01-03T00:00:20.000Z",
+                    "message": {
+                        "role": "user",
+                        "timestamp": "2026-01-03T00:00:20.000Z",
+                        "content": [{"type": "text", "text": "REWRITTEN BRANCH QUESTION"}],
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "message",
+                    "id": "branch-answer",
+                    "parentId": "branch-question",
+                    "timestamp": "2026-01-03T00:00:21.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "timestamp": "2026-01-03T00:00:21.000Z",
+                        "content": [{"type": "text", "text": "REWRITTEN BRANCH ANSWER"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    second = await service.import_sessions(_request())
+    copy = second.sessions[0].target_session_id
+    assert second.sessions[0].outcome == "imported"
+    assert copy == f"{original}-2"
+    assert (
+        "REWRITTEN BRANCH QUESTION" in (config / "sessions" / copy / "transcript.jsonl").read_text()
+    )
+    assert (
+        "REWRITTEN BRANCH QUESTION"
+        not in (config / "sessions" / original / "transcript.jsonl").read_text()
+    )
+    copied = read_manifest(config / "sessions" / copy)
+    assert copied is not None
+    assert copied["predecessor_target_session_id"] == original
+    third = await service.import_sessions(_request())
+    assert third.sessions[0].outcome == "skipped_already_imported"
+    assert third.sessions[0].target_session_id == copy

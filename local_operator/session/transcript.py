@@ -2116,9 +2116,7 @@ class Transcript:
         known = self._entry_ids | set(ids)
         existing = self._entry_ids.intersection(ids)
         if existing:
-            raise ValueError(
-                f"imported entry ids already committed: {sorted(existing)[:3]}"
-            )
+            raise ValueError(f"imported entry ids already committed: {sorted(existing)[:3]}")
         for entry in incoming:
             if entry.type not in (ENTRY_MESSAGE, ENTRY_COMPACTION, ENTRY_CUSTOM):
                 raise ValueError(f"unsupported imported entry type: {entry.type}")
@@ -2132,6 +2130,9 @@ class Transcript:
                     )
 
         supplied = messages or {}
+        for entry in incoming:
+            if entry.type == ENTRY_MESSAGE and entry.id not in supplied:
+                raise ValueError("every imported message entry must carry its Message")
         for entry_id, message in supplied.items():
             if entry_id not in set(ids):
                 raise ValueError("a supplied message does not match any imported entry")
@@ -2147,11 +2148,7 @@ class Transcript:
                 if message is None:
                     rows.append(entry)
                     continue
-                kind = (
-                    CUSTOM_KIND_MESSAGE
-                    if isinstance(message, Message)
-                    else CUSTOM_KIND_CUSTOM
-                )
+                kind = CUSTOM_KIND_MESSAGE if isinstance(message, Message) else CUSTOM_KIND_CUSTOM
                 payload = {
                     "kind": kind,
                     **encode_message_payload(message, self._attachments),

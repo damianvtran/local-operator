@@ -30,7 +30,9 @@ async def test_append_imported_preserves_source_time(tmp_path):
     row = json.loads(transcript.path.read_text().splitlines()[0])
     assert row["ts"] == 1700000000.25
     assert row["id"] == "entry-a"
-    assert transcript.build_llm_history()[0].content[0].text == "hello"
+    history = transcript.build_llm_history()
+    assert isinstance(history[0], Message)
+    assert history[0].text == "hello"
 
 
 @pytest.mark.asyncio
@@ -49,12 +51,11 @@ async def test_anchor_later_in_same_batch_is_valid(tmp_path):
         ),
         TranscriptEntry("entry-b", 101.0, ENTRY_MESSAGE, {"kind": "message"}),
     ]
-    await transcript.append_imported(
-        rows, messages={"entry-b": _user("entry-b", "kept", 101.0)}
-    )
+    await transcript.append_imported(rows, messages={"entry-b": _user("entry-b", "kept", 101.0)})
     history = transcript.build_llm_history()
     assert len(history) == 2
-    assert history[1].content[0].text == "kept"
+    assert isinstance(history[1], Message)
+    assert history[1].text == "kept"
 
 
 @pytest.mark.asyncio
@@ -63,6 +64,10 @@ async def test_missing_or_duplicate_ids_are_refused(tmp_path):
     with pytest.raises(ValueError):
         await transcript.append_imported(
             [TranscriptEntry("entry-a", 1.0, ENTRY_MESSAGE, {"kind": "message"})] * 2
+        )
+    with pytest.raises(ValueError):
+        await transcript.append_imported(
+            [TranscriptEntry("bogus", 1.0, ENTRY_MESSAGE, {"kind": "message"})]
         )
     with pytest.raises(ValueError):
         await transcript.append_imported(
@@ -126,5 +131,7 @@ async def test_tool_pair_stays_orderable(tmp_path):
         messages={"a": assistant, "r": result},
     )
     history = transcript.build_llm_history()
+    assert isinstance(history[0], Message)
+    assert isinstance(history[1], Message)
     assert history[0].tool_calls[0].id == "call-1"
     assert history[1].tool_call_id == "call-1"
