@@ -43,6 +43,7 @@ from local_operator.evaluation.runner.episode import (
 )
 from local_operator.evaluation.runner.model import EpisodeModelClient
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
+from local_operator.evaluation.runner.secrets import StaticSecretResolver
 from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
@@ -99,9 +100,6 @@ def _runner(
         redactions=redactions,
         secrets=secrets,
     )
-
-
-from local_operator.evaluation.runner.secrets import StaticSecretResolver
 
 
 def _kinds(root: Path) -> list[str]:

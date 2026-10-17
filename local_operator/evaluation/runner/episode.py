@@ -546,7 +546,9 @@ def _canary_values_outside_own_roots(
     """
 
     own = tuple(str(root) for root in roots)
-    return tuple(value for value in values if not any(value in root or root in value for root in own))
+    return tuple(
+        value for value in values if not any(value in root or root in value for root in own)
+    )
 
 
 class EpisodeRunner:
