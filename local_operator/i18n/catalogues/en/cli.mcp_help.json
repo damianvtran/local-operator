@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "Manage MCP servers",
+  "cli.mcp_help.list": "List configured MCP servers (all sources merged)",
+  "cli.mcp_help.add": "Add an MCP server (stdio command or http/sse URL)",
+  "cli.mcp_help.add_name": "Server name",
+  "cli.mcp_help.add_command": "Stdio command to launch the server",
+  "cli.mcp_help.add_arg": "Stdio command argument (repeatable)",
+  "cli.mcp_help.add_env": "Environment variable KEY=VALUE for the stdio server (repeatable)",
+  "cli.mcp_help.add_url": "HTTP/SSE server URL (alternative to --command)",
+  "cli.mcp_help.add_scope": "Config scope to write (default: global ~/.local-operator/mcp.json)",
+  "cli.mcp_help.add_oauth": "Enable OAuth for a remote HTTP server",
+  "cli.mcp_help.remove": "Remove an MCP server from a config scope",
+  "cli.mcp_help.remove_name": "Server name to remove",
+  "cli.mcp_help.remove_scope": "Config scope to remove from (default: global)",
+  "cli.mcp_help.login": "Authenticate one OAuth-enabled MCP server",
+  "cli.mcp_help.login_name": "Server name to authenticate",
+  "cli.mcp_help.logout": "Remove the stored OAuth credential for one MCP server",
+  "cli.mcp_help.logout_name": "Server name to log out",
+  "cli.mcp_help.reauth": "Log out of one OAuth MCP server and run a fresh authorization",
+  "cli.mcp_help.reauth_name": "Server name to re-authenticate"
+}

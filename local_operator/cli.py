@@ -61,8 +61,10 @@ from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_mcp_help as _mh
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_teams_help as _th
+from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
@@ -1541,7 +1543,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # which is a question about this machine rather than about one session.
     wake_parser = subparsers.add_parser(
         "wake",
-        help="Inspect scheduled wakes and the supervisor that fires them",
+        help=_wh.wake().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # DEFAULTS ON THE PARENT, so every route into `wake_command` carries the
@@ -1555,19 +1557,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     wake_sub = wake_parser.add_subparsers(dest="wake_command")
     wake_status = wake_sub.add_parser(
         "status",
-        help="whether a supervisor is installed, and what it would fire next",
+        help=_wh.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    wake_status.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_status.add_argument(
+        "--json", action="store_true", help=_wh.json().envelope(locale=help_locale)["text"]
+    )
     wake_status.add_argument(
         "--install",
         action="store_true",
-        help="install the supervisor now rather than waiting for the next schedule",
+        help=_wh.status_install().envelope(locale=help_locale)["text"],
     )
     wake_status.add_argument(
         "--uninstall",
         action="store_true",
-        help="remove the supervisor; scheduled wakes then fire only when a session is open",
+        help=_wh.status_uninstall().envelope(locale=help_locale)["text"],
     )
     # THE ROLLOUT PATH, and the reason this is a subcommand rather than only a
     # flag on `status`. Repair-on-demand lives in the install hook, which runs
@@ -1578,28 +1582,32 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # persist. This command makes the repair reachable directly.
     wake_sub.add_parser(
         "install",
-        help="install or repair the supervisor now (restarts a stale or stopped one)",
+        help=_wh.install().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     wake_list = wake_sub.add_parser(
         "list",
-        help="every scheduled wake on this machine, soonest first",
+        help=_wh.list().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    wake_list.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_list.add_argument(
+        "--json", action="store_true", help=_wh.json().envelope(locale=help_locale)["text"]
+    )
     # `create` completes the surface: `status` says whether wakes fire,
     # `list` says what is scheduled, and this is how a wake gets scheduled
     # from outside a session — which is also what makes install-on-demand
     # testable without driving a TUI.
     wake_create = wake_sub.add_parser(
         "create",
-        help="schedule a wake for a session (installs the supervisor on demand)",
+        help=_wh.create().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    wake_create.add_argument("session", help="session id to wake")
+    wake_create.add_argument(
+        "session", help=_wh.create_session().envelope(locale=help_locale)["text"]
+    )
     wake_create.add_argument(
         "when",
-        help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
+        help=_wh.create_when().envelope(locale=help_locale)["text"],
     )
     # From ``harness.wake_types``, NOT ``harness.wake``. The help names the SHARED
     # cap rather than a second number that could drift from it — but the parser is
@@ -1618,8 +1626,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # directly so it had no cap at all. Said here rather than leaving the
         # limit to be discovered by being refused (review round 1, R5).
         help=(
-            "the self-prompt delivered when it fires "
-            f"(at most {MAX_WAKE_MESSAGE_CHARS} characters)"
+            _wh.create_message(max=str(MAX_WAKE_MESSAGE_CHARS)).envelope(locale=help_locale)["text"]
         ),
     )
     wake_create.add_argument(
@@ -1633,7 +1640,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # tool path uses, so `40s` / `8h30m` mean the same thing from either
         # entry point — including its deliberate rejection of a bare number
         # and of a zero interval, both of which are runaway loops.
-        help='repeat every DURATION after the first fire ("5m", "1h", "8h30m")',
+        help=_wh.create_every().envelope(locale=help_locale)["text"],
     )
     wake_create.add_argument(
         "--until",
@@ -1643,33 +1650,32 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # `advance_wake_schedule`'s `retired: until` have always honoured it;
         # only the CLI could not express it, so a scheduled automation could
         # only ever be unbounded (round 4, R4).
-        help='stop repeating after this time ("in 7d", "at 09:30")',
+        help=_wh.create_until().envelope(locale=help_locale)["text"],
     )
     wake_create.add_argument(
         "--limit",
         type=int,
         default=None,
         metavar="N",
-        help="stop repeating after N fires",
+        help=_wh.create_limit().envelope(locale=help_locale)["text"],
     )
     wake_create.add_argument(
         "--notify",
         action="store_true",
-        help=(
-            "notify on completion of the wake's turn (default quiet: scripted "
-            "arms match the contract; errored turns notify regardless)"
-        ),
+        help=(_wh.create_notify().envelope(locale=help_locale)["text"]),
     )
-    wake_create.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_create.add_argument(
+        "--json", action="store_true", help=_wh.json().envelope(locale=help_locale)["text"]
+    )
     wake_serve = wake_sub.add_parser(
         "serve",
-        help="run the supervisor in the foreground (what the LaunchAgent runs)",
+        help=_wh.serve().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     wake_serve.add_argument(
         "--once",
         action="store_true",
-        help="fire whatever is due right now, then exit",
+        help=_wh.serve_once().envelope(locale=help_locale)["text"],
     )
 
     # Standing monitors — the wake family's read-only sibling. Top-level beside
@@ -2092,85 +2098,100 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # --- Additive MCP subcommands (rewrite) --------------------------------
-    mcp_parser = subparsers.add_parser("mcp", help="Manage MCP servers", parents=[parent_parser])
+    mcp_parser = subparsers.add_parser(
+        "mcp", help=_mh.mcp().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
     mcp_subparsers.add_parser(
         "list",
-        help="List configured MCP servers (all sources merged)",
+        help=_mh.list().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     mcp_add_parser = mcp_subparsers.add_parser(
         "add",
-        help="Add an MCP server (stdio command or http/sse URL)",
+        help=_mh.add().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_add_parser.add_argument("name", type=str, help="Server name")
     mcp_add_parser.add_argument(
-        "--command", type=str, default=None, help="Stdio command to launch the server"
+        "name", type=str, help=_mh.add_name().envelope(locale=help_locale)["text"]
+    )
+    mcp_add_parser.add_argument(
+        "--command",
+        type=str,
+        default=None,
+        help=_mh.add_command().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--arg",
         action="append",
         default=None,
         dest="server_args",
-        help="Stdio command argument (repeatable)",
+        help=_mh.add_arg().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--env",
         action="append",
         default=None,
         dest="server_env",
-        help="Environment variable KEY=VALUE for the stdio server (repeatable)",
+        help=_mh.add_env().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--url",
         type=str,
         default=None,
-        help="HTTP/SSE server URL (alternative to --command)",
+        help=_mh.add_url().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--scope",
         type=str,
         choices=["global", "project"],
         default="global",
-        help="Config scope to write (default: global ~/.local-operator/mcp.json)",
+        help=_mh.add_scope().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--oauth",
         action="store_true",
-        help="Enable OAuth for a remote HTTP server",
+        help=_mh.add_oauth().envelope(locale=help_locale)["text"],
     )
     mcp_remove_parser = mcp_subparsers.add_parser(
         "remove",
-        help="Remove an MCP server from a config scope",
+        help=_mh.remove().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_remove_parser.add_argument("name", type=str, help="Server name to remove")
+    mcp_remove_parser.add_argument(
+        "name", type=str, help=_mh.remove_name().envelope(locale=help_locale)["text"]
+    )
     mcp_remove_parser.add_argument(
         "--scope",
         type=str,
         choices=["global", "project"],
         default="global",
-        help="Config scope to remove from (default: global)",
+        help=_mh.remove_scope().envelope(locale=help_locale)["text"],
     )
     mcp_login_parser = mcp_subparsers.add_parser(
         "login",
-        help="Authenticate one OAuth-enabled MCP server",
+        help=_mh.login().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_login_parser.add_argument("name", type=str, help="Server name to authenticate")
+    mcp_login_parser.add_argument(
+        "name", type=str, help=_mh.login_name().envelope(locale=help_locale)["text"]
+    )
     mcp_logout_parser = mcp_subparsers.add_parser(
         "logout",
-        help="Remove the stored OAuth credential for one MCP server",
+        help=_mh.logout().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_logout_parser.add_argument("name", type=str, help="Server name to log out")
+    mcp_logout_parser.add_argument(
+        "name", type=str, help=_mh.logout_name().envelope(locale=help_locale)["text"]
+    )
     mcp_reauth_parser = mcp_subparsers.add_parser(
         "reauth",
-        help="Log out of one OAuth MCP server and run a fresh authorization",
+        help=_mh.reauth().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_reauth_parser.add_argument("name", type=str, help="Server name to re-authenticate")
+    mcp_reauth_parser.add_argument(
+        "name", type=str, help=_mh.reauth_name().envelope(locale=help_locale)["text"]
+    )
 
     # Built separately so provider transports stay off the CLI import path.
     from local_operator.web_fetch.cli import add_fetch_subparser

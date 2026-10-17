@@ -1,0 +1,97 @@
+{
+  "cli.mcp_help.mcp": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the `mcp` command's one-liner; MCP is a protocol name, do not translate"
+  },
+  "cli.mcp_help.list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.add": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "http/sse and stdio are protocol words in situ"
+  },
+  "cli.mcp_help.add_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'add_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.add_command": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'add_command' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.add_arg": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'add_arg' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.add_env": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "KEY=VALUE is a format token; keep in situ"
+  },
+  "cli.mcp_help.add_url": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "flag names in situ"
+  },
+  "cli.mcp_help.add_scope": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the default path is a value token and stays"
+  },
+  "cli.mcp_help.add_oauth": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "OAuth is a protocol name; HTTP stays"
+  },
+  "cli.mcp_help.remove": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'remove' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.remove_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'remove_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.remove_scope": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "scope values global/project are argparse choices and stay in situ"
+  },
+  "cli.mcp_help.login": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'login' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.login_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'login_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.logout": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logout' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.logout_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logout_name' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.reauth": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'reauth' argument; flag/command tokens stay in situ"
+  },
+  "cli.mcp_help.reauth_name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'reauth_name' argument; flag/command tokens stay in situ"
+  }
+}
