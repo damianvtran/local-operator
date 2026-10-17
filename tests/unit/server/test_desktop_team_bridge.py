@@ -72,11 +72,42 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 #
 # IT IS A TEST GUARD, NOT AN OS BOUNDARY, and the difference is stated rather
 # than implied: in-process pytest cannot prove that no syscall egresses. It
-# catches the CONSTRUCTORS this slice could reach — the real client, an httpx
-# transport, a socket, a subprocess — and nothing beyond them. Wire-HTTP
-# evidence needs a launched daemon and an OS-level boundary; that evidence is
-# held (programme launch hold) rather than claimed from here.
+# catches the CONSTRUCTORS and entry points this slice could reach — the real
+# client, an httpx transport, a socket, a subprocess — and nothing beyond them.
+# Wire-HTTP evidence needs a launched daemon and an OS-level boundary; that
+# evidence is held (programme launch hold) rather than claimed from here.
+#
+# TWO LAYERS PER ARM (R-2, Q-R2-1, Q-R2-2). Every arm of ``_wire_arm_cases``
+# below is installed TWICE, in this order:
+#   1. the OUTER no-I/O layer (``_retain_outer_noio_layer``, installed FIRST so
+#      every bomb shadows it): a recording fake that cannot perform I/O, appends
+#      the attempt to ``_OUTER_ATTEMPTS`` and refuses with
+#      ``OuterNoIOLayerRefused`` — deliberately NOT an ``AssertionError``;
+#   2. the INNER bomb (``_arm_tripwire``): the guard under test.
+# The per-arm controls (``test_the_tripwire_fires_on_every_named_arm`` here, and
+# the same audited arms in ``tests/unit/team_bridge/test_read_context.py``)
+# assert each inner bomb fires. A scratch replay that removes ONE inner arm
+# leaves its operation on the OUTER layer, which refuses it AT THE ENTRY POINT
+# — so the removed arm's control fails loudly while no dial, resolution, child
+# launch or real transport can run. No mutation ever removes the outer layer,
+# and it is not itself under test.
 _TRIPWIRE: dict[str, list[str]] = {"trips": [], "expected": []}
+
+#: Every attempt the OUTER no-I/O layer intercepted: the record a removal
+#: replay leaves when an inner arm is missing, so nothing real was performed.
+_OUTER_ATTEMPTS: list[str] = []
+
+
+class OuterNoIOLayerRefused(RuntimeError):
+    """The retained outer layer refused, in place of a real operation.
+
+    Deliberately NOT an ``AssertionError``: the per-arm controls assert the
+    INNER bomb's ``AssertionError``, so a replay that removes one inner arm
+    must fail its control by receiving THIS type, loudly — never by passing on
+    a trip that came from somewhere else. The ordinary suite never raises it:
+    the bombs sit on top of the layer and trip first.
+    """
+
 
 #: The real constructors, captured BEFORE any fixture patches a module
 #: attribute, so the two named allowances can hand the real one back.
@@ -95,27 +126,157 @@ def _expect_trip() -> None:
     _TRIPWIRE["expected"].append("control")
 
 
-def _arm_tripwire(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bomb every constructor a read path could use to reach a wire."""
+def _bomb(name: str) -> Any:
+    """A tripwire bomb: fails the cell before the real object can run."""
+
+    def _fail(*args: Any, **kwargs: Any) -> NoReturn:
+        _trip(name)
+
+    return _fail
+
+
+def _wire_arm_cases() -> tuple[tuple[str, Any, str, str, Any], ...]:
+    """The eight named arms: (case id, patch target, attribute, trip label, operation).
+
+    ONE row per arm, read by all three consumers — the inner bombs, the outer
+    no-I/O layer, and the per-arm controls in BOTH test modules — so a trip
+    label cannot drift from the operation that must trip it (a drift fails that
+    arm's control immediately). Each operation reaches for the REAL object the
+    arm replaced; the loopback addresses are placeholders that are never
+    reached, because the bomb — or, in a removal replay, the retained outer
+    fake — refuses before any wire object exists.
+    """
 
     import socket as socket_mod
 
     import httpx
 
-    def _bomb(name: str) -> Any:
-        def _fail(*args: Any, **kwargs: Any) -> NoReturn:
-            _trip(name)
+    executable = sys.executable
+    return (
+        (
+            "client-init",
+            tb_client.TeamBridgeClient,
+            "__init__",
+            "a real TeamBridgeClient",
+            lambda root: tb_client.TeamBridgeClient(root),
+        ),
+        (
+            "httpx-sync-transport",
+            httpx.HTTPTransport,
+            "__init__",
+            "httpx.HTTPTransport",
+            lambda root: httpx.HTTPTransport(),
+        ),
+        (
+            "httpx-async-transport",
+            httpx.AsyncHTTPTransport,
+            "__init__",
+            "httpx.AsyncHTTPTransport",
+            lambda root: httpx.AsyncHTTPTransport(),
+        ),
+        (
+            "getaddrinfo",
+            socket_mod,
+            "getaddrinfo",
+            "socket.getaddrinfo",
+            lambda root: socket_mod.getaddrinfo("localhost", 9),
+        ),
+        (
+            "create-connection",
+            socket_mod,
+            "create_connection",
+            "socket.create_connection",
+            lambda root: socket_mod.create_connection(("127.0.0.1", 9), timeout=0.1),
+        ),
+        (
+            "connect",
+            socket_mod.socket,
+            "connect",
+            "socket.connect",
+            lambda root: socket_mod.socket().connect(("127.0.0.1", 9)),
+        ),
+        (
+            "connect-ex",
+            socket_mod.socket,
+            "connect_ex",
+            "socket.connect_ex",
+            lambda root: socket_mod.socket().connect_ex(("127.0.0.1", 9)),
+        ),
+        (
+            "subprocess-popen",
+            subprocess.Popen,
+            "__init__",
+            "subprocess.Popen",
+            lambda root: subprocess.Popen([executable, "-c", "pass"]),
+        ),
+    )
 
-        return _fail
 
-    monkeypatch.setattr(tb_client.TeamBridgeClient, "__init__", _bomb("a real TeamBridgeClient"))
-    monkeypatch.setattr(httpx.HTTPTransport, "__init__", _bomb("httpx.HTTPTransport"))
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "__init__", _bomb("httpx.AsyncHTTPTransport"))
-    monkeypatch.setattr(socket_mod, "getaddrinfo", _bomb("socket.getaddrinfo"))
-    monkeypatch.setattr(socket_mod, "create_connection", _bomb("socket.create_connection"))
-    monkeypatch.setattr(socket_mod.socket, "connect", _bomb("socket.connect"))
-    monkeypatch.setattr(socket_mod.socket, "connect_ex", _bomb("socket.connect_ex"))
-    monkeypatch.setattr(subprocess.Popen, "__init__", _bomb("subprocess.Popen"))
+def _outer_refuse(label: str) -> Any:
+    """The outer layer's callable: record the attempt, then refuse it.
+
+    By construction there is no I/O reachable from this function at all: it
+    only appends to the record and raises.
+    """
+
+    def _refuse(*args: Any, **kwargs: Any) -> NoReturn:
+        _OUTER_ATTEMPTS.append(label)
+        raise OuterNoIOLayerRefused(
+            f"outer no-I/O layer refused {label}: the inner arm is not installed, "
+            "and this layer performs no real operation"
+        )
+
+    return _refuse
+
+
+def _retain_outer_noio_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install a recording fake BENEATH every bomb — one per arm (R-2).
+
+    Installed FIRST so each bomb shadows its fake: the ordinary suite still
+    trips the bomb, and only a replay that removes a bomb exposes the layer
+    underneath it. No arm mutation ever removes this layer — that is what makes
+    a single-arm removal replay safe by construction.
+    """
+
+    for _arm_id, target, attr, label, _operate in _wire_arm_cases():
+        monkeypatch.setattr(target, attr, _outer_refuse(label))
+
+
+def _arm_tripwire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bomb every entry point a read path could use to reach a wire.
+
+    ONE bomb per row of ``_wire_arm_cases`` — the same rows the outer layer and
+    the per-arm controls read, so a label cannot drift from its operation. A
+    scratch replay removes ONE arm by skipping its row HERE (never in the outer
+    layer); the operation then lands on the retained recording fake.
+    """
+
+    for _arm_id, target, attr, label, _operate in _wire_arm_cases():
+        monkeypatch.setattr(target, attr, _bomb(label))
+
+
+def _install_wire_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset the ledger, retain the outer layer, then arm the inner bombs.
+
+    The shared entry point: BOTH test modules' autouse fixtures call THIS, so
+    the guard a cell gets does not depend on which file it lives in (R-2 /
+    Q-R2-1).
+    """
+
+    _TRIPWIRE["trips"].clear()
+    _TRIPWIRE["expected"].clear()
+    _OUTER_ATTEMPTS.clear()
+    _retain_outer_noio_layer(monkeypatch)
+    _arm_tripwire(monkeypatch)
+
+
+def _audit_wire_guard() -> None:
+    """The teardown audit: a trip nobody declared fails the cell, too."""
+
+    assert len(_TRIPWIRE["trips"]) == len(_TRIPWIRE["expected"]), (
+        "a real wire object was constructed in a cell that did not declare it: "
+        f"{_TRIPWIRE['trips']}"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -124,28 +285,30 @@ def _no_real_wire_object(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     A cell that trips it without declaring so (``_expect_trip``) fails HERE as
     well as at the construction site: the declaration is what keeps a
-    negative-control cell honest about the one thing it means to do.
+    negative-control cell honest about the one thing it means to do. The second
+    module (``tests/unit/team_bridge/test_read_context.py``) calls the same
+    shared installers from its own autouse fixture — a fixture defined here is
+    not autouse for cells over there (R-2 / Q-R2-1).
     """
 
-    _TRIPWIRE["trips"].clear()
-    _TRIPWIRE["expected"].clear()
-    _arm_tripwire(monkeypatch)
+    _install_wire_guard(monkeypatch)
     yield
-    assert len(_TRIPWIRE["trips"]) == len(_TRIPWIRE["expected"]), (
-        "a real wire object was constructed in a cell that did not declare it: "
-        f"{_TRIPWIRE['trips']}"
-    )
+    _audit_wire_guard()
 
 
 @contextlib.contextmanager
 def _spawn_allowed() -> Iterator[None]:
     """The ONE hole in the subprocess bomb, asked for by name.
 
-    Two cells need a REAL fresh interpreter: the lazy-import cell proves the
-    router's boot path leaves httpx unimported, and the retained-manager
-    regression needs an EXTERNAL writer whose writes this process has never
-    made. Both run this repo's own literal script with no socket and no
-    credential, and the rest of the tripwire stays armed around them.
+    This is a REAL escape, not a label: during the window a genuine child
+    process is launched, and monkeypatches do not follow it into the fresh
+    interpreter — so this allowance is not no-subprocess or no-egress proof
+    for what the child does. Two cells need exactly that real interpreter: the
+    lazy-import cell proves the router's boot path leaves httpx unimported, and
+    the retained-manager regression needs an EXTERNAL writer whose writes this
+    process has never made. Both run this repo's own literal script with no
+    socket and no credential, and the rest of the tripwire stays armed around
+    them.
     """
 
     saved = subprocess.Popen.__init__
@@ -928,7 +1091,11 @@ def _plant_proof(
     # schema says INTEGER (a legal SQLite store), and categories text that is not
     # the array it claims to be. Both are written straight to the row after the
     # product's own API has committed it, exactly as ``categories_text`` does.
+    # Epoch and creator_generation get SEPARATE text knobs (Q-R2-4): the two
+    # answer to different terms — policy currency vs enrollment currency — and
+    # each needs its own write-side regression cell.
     receipt_epoch_text: str | None = overrides.pop("receipt_epoch_text", None)
+    receipt_generation_text: str | None = overrides.pop("receipt_generation_text", None)
     assert not overrides, overrides
 
     store = Store(root)
@@ -968,12 +1135,18 @@ def _plant_proof(
                     1_700_000_000.0,
                 ),
             )
-        if receipt_epoch_text is not None:
+        for column, raw in (
+            ("policy_epoch", receipt_epoch_text),
+            ("creator_generation", receipt_generation_text),
+        ):
+            if raw is None:
+                continue
             with sqlite3.connect(state_db_path(root)) as conn:
+                # The column name is this file's own constant, never caller text.
                 conn.execute(
-                    "UPDATE screening_receipts SET policy_epoch = ? "
+                    f"UPDATE screening_receipts SET {column} = ? "
                     "WHERE owner_key = ? AND message_id = ?",
-                    (receipt_epoch_text, _owner_key(owner), str(item["message"]["id"])),
+                    (raw, _owner_key(owner), str(item["message"]["id"])),
                 )
     if hold is not None:
         with sqlite3.connect(state_db_path(root)) as conn:
@@ -1841,45 +2014,37 @@ async def test_the_detail_read_refuses_a_machine_with_no_retained_namespace(api)
 
 
 # ---------------------------------------------------------------------------
-# The programme guard (R-2), the header the APP's middleware supplies (R-6) and
-# the damage code a text integer must map to (R-3): the three things the cells
-# above structurally cannot show.
+# The per-arm guard controls (R-2, Q-R2-2), the header the APP's middleware
+# supplies (R-6) and the damage code a text integer must map to (R-3): the
+# things the cells above structurally cannot show.
 # ---------------------------------------------------------------------------
 
 
-def test_the_tripwire_fires_on_a_real_client_construction(tmp_path: Path) -> None:
-    """The negative control for the client arm: the REAL class cannot be built.
+@pytest.mark.parametrize(
+    ("arm_id", "trip", "operate"),
+    [(arm_id, label, operate) for arm_id, _target, _attr, label, operate in _wire_arm_cases()],
+    ids=[arm_id for arm_id, _target, _attr, _label, _operate in _wire_arm_cases()],
+)
+def test_the_tripwire_fires_on_every_named_arm(
+    tmp_path: Path, arm_id: str, trip: str, operate: Any
+) -> None:
+    """One control per named arm — the guard is not decoration (R-2, Q-R2-2).
 
-    Without this cell, deleting the bomb would leave the file green — nothing
-    else here constructs the real client — and the guard would be decoration.
+    Without a control per arm, deleting a bomb leaves the file green wherever
+    nothing else constructs that object, and the guard is decoration. Each
+    operation reaches for the REAL object its arm replaced (no shims), and the
+    outer no-I/O layer stays retained beneath every bomb: a scratch replay that
+    removes THIS ONE arm makes THIS item fail — the operation lands on the
+    outer recording fake (``OuterNoIOLayerRefused``, never an
+    ``AssertionError``), which refuses it at the entry point — while no dial,
+    resolution, child launch or real transport can run. Neither
+    ``_spawn_allowed`` nor ``_real_client_allowed`` is asked for here: no
+    operation in these rows needs a real object.
     """
 
     _expect_trip()
-    with pytest.raises(AssertionError, match="GUARD TRIPPED: a real TeamBridgeClient"):
-        tb_client.TeamBridgeClient(tmp_path)
-
-
-def test_the_tripwire_fires_on_a_socket_a_subprocess_and_a_transport() -> None:
-    """The other three arms, each measured rather than assumed.
-
-    A socket dial, a child process and a default httpx transport are the three
-    remaining ways a cell could leave this process's memory; each must fail the
-    cell that makes it, before any call it was made for.
-    """
-
-    import socket as socket_mod
-
-    import httpx
-
-    _expect_trip()
-    with pytest.raises(AssertionError, match="GUARD TRIPPED: socket.create_connection"):
-        socket_mod.create_connection(("127.0.0.1", 9), timeout=0.1)
-    _expect_trip()
-    with pytest.raises(AssertionError, match="GUARD TRIPPED: subprocess.Popen"):
-        subprocess.run([sys.executable, "-c", "pass"], capture_output=True, timeout=10)
-    _expect_trip()
-    with pytest.raises(AssertionError, match="GUARD TRIPPED: httpx.AsyncHTTPTransport"):
-        httpx.AsyncHTTPTransport()
+    with pytest.raises(AssertionError, match=f"GUARD TRIPPED: {trip}"):
+        operate(tmp_path)
 
 
 async def test_the_desktop_boundary_marks_the_read_no_store(tmp_path, monkeypatch):

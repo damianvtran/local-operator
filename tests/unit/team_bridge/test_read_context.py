@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -51,14 +51,19 @@ from local_operator.team_bridge.store import (
     OwnerReceipt,
     OwnerSnapshot,
     Store,
+    StoreRefused,
     _decode_intent_categories,
     _owner_key,
     state_db_path,
 )
 from tests.unit.server.test_desktop_team_bridge import (
     _access,
+    _audit_wire_guard,
+    _expect_trip,
+    _install_wire_guard,
     _owner,
     _plant_proof,
+    _wire_arm_cases,
     _wire_item,
 )
 
@@ -80,6 +85,27 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeClient.instances = []
     FakeClient.behavior["access"] = _access()
     monkeypatch.setattr(tb_client, "TeamBridgeClient", FakeClient)
+
+
+# --- the wire tripwire, armed in THIS module too (R-2 / QA Q-R2-1) -----------
+#
+# The route module's autouse fixture covers ITS cells only — a fixture is
+# visible where it is defined, and importing helpers registers nothing — so
+# before this, a cell here that lost its ``_patch_client`` patch could
+# construct the REAL client (or reach for a socket) inside a test that reads as
+# hermetic. This fixture calls the SAME shared installers the route module
+# calls (outer no-I/O layer first, inner bombs second), and the per-arm cell at
+# the bottom proves every named arm fires here too. Shared via imports rather
+# than a conftest on purpose: the only conftest covering BOTH modules is
+# ``tests/unit/conftest.py``, which would arm the guard for every unrelated
+# suite under ``tests/unit``.
+@pytest.fixture(autouse=True)
+def _no_real_wire_object(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Arm the wire tripwire for every cell in this module, and audit it."""
+
+    _install_wire_guard(monkeypatch)
+    yield
+    _audit_wire_guard()
 
 
 @pytest.mark.asyncio
@@ -644,6 +670,81 @@ def test_the_write_side_consumption_refuses_a_receipt_from_another_generation(
     assert consumed is None
 
 
+@pytest.mark.parametrize(
+    ("case", "overrides", "expected_note"),
+    [
+        # Q-R2-3: the restored write-side diagnostics are load-bearing, and
+        # nothing pinned them — removing the note from ``consume_screening_receipt``
+        # survived every cell in this package and the route module.
+        (
+            "categories-not-json",
+            {"categories_text": "not-json", "intent": None},
+            "categories decode failed",
+        ),
+        (
+            "categories-not-a-closed-category",
+            {
+                "verdict": "reject",
+                "categories_text": '["not_a_closed_category"]',
+                "intent": None,
+            },
+            "categories failed validation",
+        ),
+        ("unknown-verdict", {"verdict": "maybe", "intent": None}, "unknown verdict"),
+        (
+            "allow-with-categories",
+            {"categories": ("spam",), "intent": None},
+            "allow verdict with categories",
+        ),
+        # Q-R2-4: TEXT where the schema says INTEGER is now typed on the WRITE
+        # side too — intentional hardening, pinned below (StoreRefused, not the
+        # raw ValueError ``int()`` used to raise).
+        (
+            "epoch-is-text",
+            {"receipt_epoch_text": "not-a-number", "intent": None},
+            "epoch or creator generation is not a number",
+        ),
+        (
+            "generation-is-text",
+            {"receipt_generation_text": "not-a-number", "intent": None},
+            "epoch or creator generation is not a number",
+        ),
+    ],
+)
+def test_the_write_side_consumption_names_each_damaged_field(
+    tmp_path: Path, case: str, overrides: dict[str, Any], expected_note: str
+) -> None:
+    """The refusal SAYS what is damaged, on the write side too (Q-R2-3, Q-R2-4).
+
+    Consuming a damaged receipt must refuse rather than let a caller re-screen
+    behind it, and the sentence it refuses WITH is a triaging operator's whole
+    picture of the damage. These cells assert that exact sentence beside the
+    closed code; the two TEXT cases also pin that the refusal is the typed
+    ``StoreRefused`` and not the raw ``ValueError`` a bare ``int()`` raised on
+    the base — deliberate hardening of the write side, stated rather than left
+    as a surprise.
+    """
+
+    owner = _enroll(tmp_path, enabled=True)
+    item = _wire_item()
+    envelope, code = validate_envelope(owner, item)
+    assert code is None and envelope is not None
+    _plant_proof(tmp_path, owner, item, **overrides)
+
+    with pytest.raises(StoreRefused) as refusal:
+        Store(tmp_path).consume_screening_receipt(
+            owner,
+            body_sha256=envelope.body_sha256,
+            template_sha256="ab" * 32,
+            model="m-1",
+            admission_revision="r-1",
+            envelope_digest=envelope.envelope_digest,
+        )
+
+    assert refusal.value.code == "proof_corrupt", case
+    assert str(refusal.value) == expected_note, case
+
+
 def test_the_intent_category_decoder_answers_none_for_unreadable_text() -> None:
     """Unreadable intent categories are proof that cannot admit (R-1).
 
@@ -673,3 +774,33 @@ def test_the_screening_vocabulary_stays_closed_and_receipt_free() -> None:
     """
 
     assert SCREENING_STATES == ("unreviewed", "held", "blocked")
+
+
+# ---------------------------------------------------------------------------
+# The wire tripwire, audited per arm in THIS module (R-2 / QA Q-R2-1): the
+# fixture above arms it; this cell proves every named arm actually fires here.
+# That was the missing half — importing the route module's helpers registered
+# no fixture, and all 47 cells ran with the real constructors within reach.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("arm_id", "trip", "operate"),
+    [(arm_id, label, operate) for arm_id, _target, _attr, label, operate in _wire_arm_cases()],
+    ids=[arm_id for arm_id, _target, _attr, _label, _operate in _wire_arm_cases()],
+)
+def test_the_wire_tripwire_is_armed_here_on_every_named_arm(
+    tmp_path: Path, arm_id: str, trip: str, operate: Any
+) -> None:
+    """Every named arm fires under THIS module's fixture (R-2 / Q-R2-1).
+
+    Same arms, same operations, same retained outer no-I/O layer as the route
+    module's control cell — the one thing that differs is whose fixture
+    installed them, and that is exactly the thing this cell audits. A scratch
+    replay that removes ONE inner arm must fail the matching item here the same
+    way it fails in the route module.
+    """
+
+    _expect_trip()
+    with pytest.raises(AssertionError, match=f"GUARD TRIPPED: {trip}"):
+        operate(tmp_path)
