@@ -54,5 +54,13 @@
   "cli.browser.drive_no_single": "no single connected extension matches ''{target}''.",
   "cli.browser.install_failed": "install failed",
   "cli.browser.status_yes": "yes",
-  "cli.browser.status_no": "no"
+  "cli.browser.status_no": "no",
+  "cli.browser.no_tabs_known": "No browser tabs and no ownership records.",
+  "cli.browser.no_tabs_unknown": "No ownership records. The bridge did not answer, so open tabs are unknown — run 'lop browser status' to check the daemon.",
+  "cli.browser.could_not_pin_driver": "could not pin the driver",
+  "cli.browser.cleanup_closed": "Browser cleanup: closed. The tab was closed and its record settled.",
+  "cli.browser.cleanup_retained": "Browser cleanup: retained — {detail}.",
+  "cli.browser.cleanup_tab_held_open": "the tab is held open",
+  "cli.browser.cleanup_pending": "Browser cleanup: pending — nothing was closed ({detail}). Retry the same command once the bridge answers; the generation you copied is still current.",
+  "cli.browser.cleanup_no_action": "Browser cleanup: no action taken — {detail}."
 }

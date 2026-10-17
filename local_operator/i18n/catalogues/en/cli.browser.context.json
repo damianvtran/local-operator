@@ -278,5 +278,45 @@
     "role": "lop browser CLI output",
     "tone": "terse, factual, operator-facing",
     "note": "the word 'no' on an aligned status row"
+  },
+  "cli.browser.no_tabs_known": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "empty-state line when the live-tabs list was read and is genuinely empty"
+  },
+  "cli.browser.no_tabs_unknown": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "empty-state line when the bridge did not answer; command token in situ. Wrapped with textwrap.fill(width=78) AFTER rendering, so line breaking stays a layout concern of the caller"
+  },
+  "cli.browser.could_not_pin_driver": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "fallback shown when the pin result carries no error text"
+  },
+  "cli.browser.cleanup_closed": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "cleanup outcome; wrapped with textwrap.fill by the caller, so widths stay layout"
+  },
+  "cli.browser.cleanup_retained": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "cleanup outcome; detail is the retention reason (free text, can quote an approval)"
+  },
+  "cli.browser.cleanup_tab_held_open": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "fallback retention reason when the bridge gave none"
+  },
+  "cli.browser.cleanup_pending": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "cleanup outcome; detail is the bridge's refusal; the generation sentence is advice the user acts on"
+  },
+  "cli.browser.cleanup_no_action": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "cleanup outcome; detail is why nothing was closed"
   }
 }

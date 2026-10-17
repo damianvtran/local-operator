@@ -38,8 +38,32 @@ def cleanup_blocked(*, detail: str) -> Msg:
     return Msg("cli.browser.cleanup_blocked", {"detail": detail})
 
 
+def cleanup_closed() -> Msg:
+    return Msg("cli.browser.cleanup_closed", {})
+
+
+def cleanup_no_action(*, detail: str) -> Msg:
+    return Msg("cli.browser.cleanup_no_action", {"detail": detail})
+
+
+def cleanup_pending(*, detail: str) -> Msg:
+    return Msg("cli.browser.cleanup_pending", {"detail": detail})
+
+
+def cleanup_retained(*, detail: str) -> Msg:
+    return Msg("cli.browser.cleanup_retained", {"detail": detail})
+
+
+def cleanup_tab_held_open() -> Msg:
+    return Msg("cli.browser.cleanup_tab_held_open", {})
+
+
 def config_root_line(*, path: str) -> Msg:
     return Msg("cli.browser.config_root_line", {"path": path})
+
+
+def could_not_pin_driver() -> Msg:
+    return Msg("cli.browser.could_not_pin_driver", {})
 
 
 def daemon_healthy(*, value: str) -> Msg:
@@ -152,6 +176,14 @@ def no_changes() -> Msg:
 
 def no_extension_waiting() -> Msg:
     return Msg("cli.browser.no_extension_waiting", {})
+
+
+def no_tabs_known() -> Msg:
+    return Msg("cli.browser.no_tabs_known", {})
+
+
+def no_tabs_unknown() -> Msg:
+    return Msg("cli.browser.no_tabs_unknown", {})
 
 
 def note_prefix(*, warning: str) -> Msg:

@@ -3353,19 +3353,19 @@ def browser_command(args: argparse.Namespace) -> int:
                 print(_bt(_b.cleanup_blocked(detail=detail)))
                 return 1
             if result.state == "closed":
-                message = "Browser cleanup: closed. The tab was closed and its record settled."
+                message = _bt(_b.cleanup_closed())
             elif result.state == "retained":
-                message = f"Browser cleanup: retained — {result.detail or 'the tab is held open'}."
+                message = _bt(
+                    _b.cleanup_retained(
+                        detail=str(result.detail or _bt(_b.cleanup_tab_held_open()))
+                    )
+                )
             elif result.state == "pending":
                 # The generation is deliberately NOT rotated by a failed attempt
                 # any more, so the value they already copied stays correct.
-                message = (
-                    f"Browser cleanup: pending — nothing was closed ({result.detail}). "
-                    "Retry the same command once the bridge answers; "
-                    "the generation you copied is still current."
-                )
+                message = _bt(_b.cleanup_pending(detail=str(result.detail)))
             else:
-                message = f"Browser cleanup: no action taken — {result.detail}."
+                message = _bt(_b.cleanup_no_action(detail=str(result.detail)))
             print(textwrap.fill(message, width=78, subsequent_indent="  "))
             return 0 if result.state in ("closed", "retained") else 1
         rows = read_inventory(sessions)
@@ -3421,14 +3421,9 @@ def browser_command(args: argparse.Namespace) -> int:
             return 0
         if not rows and not live_tabs:
             print(
-                "No browser tabs and no ownership records."
+                _bt(_b.no_tabs_known())
                 if live_known
-                else textwrap.fill(
-                    "No ownership records. The bridge did not answer, so open "
-                    "tabs are unknown — run 'lop browser status' to check the "
-                    "daemon.",
-                    width=78,
-                )
+                else textwrap.fill(_bt(_b.no_tabs_unknown()), width=78)
             )
             return 0
         if rows:
@@ -3539,7 +3534,7 @@ def browser_command(args: argparse.Namespace) -> int:
         if not result.get("ok"):
             print(
                 f"\n\033[1;31m{result.get('error', _bt(_b.install_failed()))}\033[0m"
-            )  # i18n: ignore ANSI-styled wrapper; fallback extracted (install_failed)
+            )  # i18n: ignore ANSI-styled wrapper; install-layer error text; fallback extracted
             return 1
         print(_bt(_b.bridge_installed()))
         print(_bt(_b.load_extension()))
@@ -3552,7 +3547,7 @@ def browser_command(args: argparse.Namespace) -> int:
             if not repair["ok"]:
                 print(
                     f"\n\033[1;31m{repair['error']}\033[0m"
-                )  # i18n: ignore ANSI-styled passthrough; text is wire-supplied (repair)
+                )  # i18n: ignore ANSI-styled passthrough; bridge/install text; escapes formatting
                 return 1
             print(_bt(_b.bridge_reconciled()))
             return 0
@@ -3843,7 +3838,7 @@ def browser_command(args: argparse.Namespace) -> int:
             # "matches" and two unrelated installs under it. `matches` is absent
             # on a daemon predating this field, and the old sentence stands.
             matches = result.get("matches")
-            message = str(result.get("error", "could not pin the driver"))
+            message = str(result.get("error", _bt(_b.could_not_pin_driver())))
             if isinstance(matches, int):
                 # Echo the target AS TYPED, not the normalised form (review round 5,
                 # NIT 5): `drive 'ohcmfhja…'` used to answer "…matches 'ohcmfhja'.",
@@ -3884,7 +3879,7 @@ def browser_command(args: argparse.Namespace) -> int:
         if not result["ok"]:
             print(
                 f"\033[1;31m{result['error']}\033[0m"
-            )  # i18n: ignore ANSI-styled passthrough; text is wire-supplied (service)
+            )  # i18n: ignore ANSI-styled passthrough of service-layer text; escapes formatting
             return 1
         print(_bt(_b.service_ok(command=command)))
         return 0
@@ -3927,7 +3922,7 @@ def browser_command(args: argparse.Namespace) -> int:
         if not result.get("ok") and error:
             print(
                 f"\033[1;31m{error}\033[0m"
-            )  # i18n: ignore ANSI-styled passthrough; text is wire-supplied (uninstall)
+            )  # i18n: ignore ANSI-styled passthrough of uninstall-layer text; escapes formatting
         # What was found and deliberately left behind, so "uninstalled" never
         # silently means "and something of yours is still registered".
         warning = result.get("warning")

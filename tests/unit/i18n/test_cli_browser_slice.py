@@ -8,10 +8,10 @@ never by scanner heuristics. This is it.
 
 | class | sites | treatment |
 |---|---|---|
-| (a) human status/progress copy | 54 | **extracted** -> `cli.browser.*` |
+| (a) human status/progress copy | 55 | **extracted** -> `cli.browser.*` |
 | (b) token line (contract) | 1 | **ignored per site**: `  generation={...}` — the token |
 | | | names the `--generation` flag |
-| (c) ANSI-styled passthrough | 4 | **ignored per site**: the text is localized at |
+| (c) ANSI-styled passthrough | 5 | **ignored per site**: the text is localized at |
 | | | its own layer; the escapes are formatting |
 | (d) command hints | in (a) | whole line is copy; command tokens stay in |
 | | | situ (the `--help` ruling) |
@@ -53,7 +53,7 @@ REPO = Path(__file__).resolve().parents[3]
 _bw = tr("cli.browser")
 
 CLI = "local_operator/cli.py"
-CEILING = 747
+CEILING = 746
 
 
 def test_every_key_renders_the_bytes_the_base_expressions_produced() -> None:
@@ -72,7 +72,7 @@ def test_the_catalogue_is_the_golden_fixture() -> None:
         (REPO / "tests/unit/i18n/fixtures/cli_browser_en_golden.json").read_text(encoding="utf-8")
     )
     assert live == golden, "the shipped catalogue and the fixture golden drifted"
-    assert len(golden) == 56, len(golden)
+    assert len(golden) == 64, len(golden)
     sidecar = catalogues.context("en", "cli.browser")
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
@@ -93,6 +93,9 @@ def test_the_ignores_do_not_mask_live_english() -> None:
     assert "result.get('error', _bt(_b.install_failed()))" in source
     assert "_bt(_b.drive_no_connected(target=args.target))" in source
     assert "_bt(_b.drive_no_single(target=args.target))" in source
+    assert "_bt(_b.could_not_pin_driver())" in source
+    assert "_bt(_b.cleanup_closed())" in source
+    assert "_bt(_b.cleanup_pending(detail=str(result.detail)))" in source
     assert _bw(_b.install_failed()) == "install failed"
     assert _bw(_b.drive_no_connected(target="tok")) == "no connected extension matches 'tok'."
     assert _bw(_b.drive_no_single(target="tok")) == "no single connected extension matches 'tok'."
@@ -314,4 +317,34 @@ CASES = [
     (_bw(_b.install_failed()), "install failed"),  # install_failed
     (_bw(_b.status_yes()), "yes"),  # status_yes
     (_bw(_b.status_no()), "no"),  # status_no
+    (_bw(_b.no_tabs_known()), "No browser tabs and no ownership records."),  # no_tabs_known
+    (
+        _bw(_b.no_tabs_unknown()),
+        (
+            "No ownership records. The bridge did not answer, so open tabs are unknown"
+            " \u2014 run 'lop browser status' to check the daemon."
+        ),
+    ),  # no_tabs_unknown
+    (_bw(_b.could_not_pin_driver()), "could not pin the driver"),  # could_not_pin_driver
+    (
+        _bw(_b.cleanup_closed()),
+        "Browser cleanup: closed. The tab was closed and its record settled.",
+    ),  # cleanup_closed
+    (
+        _bw(_b.cleanup_retained(detail="why")),
+        "Browser cleanup: retained \u2014 why.",
+    ),  # cleanup_retained
+    (_bw(_b.cleanup_tab_held_open()), "the tab is held open"),  # cleanup_tab_held_open
+    (
+        _bw(_b.cleanup_pending(detail="the bridge refused")),
+        (
+            "Browser cleanup: pending \u2014 nothing was closed (the bridge refused). "
+            "Retry the same command once the bridge answers; the generation you "
+            "copied is still current."
+        ),
+    ),  # cleanup_pending
+    (
+        _bw(_b.cleanup_no_action(detail="because")),
+        "Browser cleanup: no action taken \u2014 because.",
+    ),  # cleanup_no_action
 ]

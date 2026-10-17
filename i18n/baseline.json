@@ -87,7 +87,7 @@
     "local_operator/browser_files.py": 5,
     "local_operator/capacity_recovery.py": 2,
     "local_operator/classification/recommend.py": 1,
-    "local_operator/cli.py": 747,
+    "local_operator/cli.py": 746,
     "local_operator/clients/google_client.py": 18,
     "local_operator/code_requests/tool.py": 20,
     "local_operator/compaction/api.py": 3,
