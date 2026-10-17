@@ -267,6 +267,47 @@ async def test_digest_empty_texts_are_not_spent_on(tmp_path: Path) -> None:
     assert cn.build_turn_digest(index, 1) is None
 
 
+async def test_digest_reads_a_skill_turn_as_the_line_that_was_typed(tmp_path: Path) -> None:
+    """D8 on the rail: a checkpoint of a ``$skill`` turn was named after the
+    payload's header, spending ``_USER_TEXT_BUDGET`` before the request.
+
+    The STORED doc is what the hover card shows and stays untouched — only the
+    digest's rendering of it changes, so the hash keeps meaning the same thing.
+    """
+    cfg = tmp_path / "cfg"
+    _seed(cfg, "s1", [(_skill_payload("$research the widget market"), "Read done.", "complete")])
+    index = ti.read_index(cfg, "s1")
+    assert index is not None
+
+    digest = cn.build_turn_digest(index, 1)
+
+    assert digest is not None
+    assert "User: $research the widget market" in digest
+    assert "The user invoked" not in digest
+    assert "SKILL_BODY_MARKER" not in digest
+    # Still a pure function of the stored strings, hash included.
+    assert cn.build_turn_digest(index, 1) == digest
+    stored = next(c for c in index.checkpoints if c.kind == ti.KIND_USER and c.turn == 1)
+    assert "SKILL_BODY_MARKER" in stored.text
+
+
+def _skill_payload(typed: str) -> str:
+    """A ``$skill`` invocation in its PERSISTED form — the real renderer's output."""
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import parse_invocation, render_invocation
+
+    skill = Skill(
+        name="research",
+        description="research things",
+        file_path=Path("/skills/research/SKILL.md"),
+        base_dir=Path("/skills/research"),
+        source="user",
+    )
+    invocation = parse_invocation(typed, {"research": skill})
+    assert invocation is not None
+    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+
+
 # ---------------------------------------------------------------------------
 # the state derive (the manifest's single source of truth)
 # ---------------------------------------------------------------------------

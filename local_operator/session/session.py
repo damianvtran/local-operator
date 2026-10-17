@@ -89,6 +89,7 @@ from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
     AsyncJobManager,
+    effort_fallback_clause,
     is_model_fallback,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
@@ -137,12 +138,10 @@ from local_operator.harness.render import (
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
-    SubagentModelUnavailable,
     is_inherit_tier_sentinel,
-    malformed_tier_reason,
-    read_effort_tier_targets,
     resolve_launch_target,
     run_subagent,
+    team_slot_name,
 )
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
@@ -165,6 +164,7 @@ from local_operator.harness.types import (
     Content,
     CustomMessage,
     EventHandler,
+    HistoryDeltaEvent,
     ImageContent,
     LoopConfig,
     Message,
@@ -990,6 +990,21 @@ class _PendingCompaction:
     reason: str
     #: Ids of ``plan.llm_history[: plan.cut]`` — the span the summary replaces.
     summarized_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingAdoption:
+    """An aside exchange the user added while a turn owned the message list.
+
+    The second variant of ``Session._pending_shell_records`` beside the bare
+    ``(command, result)`` shell receipt (decision D1): ONE FIFO, so a bang
+    receipt and an adopted aside land in the order the user produced them, at
+    the same safe boundaries, through the same pop-after-write discipline.
+    Kept in memory only (D2) — journalling it at queue time would put
+    user/assistant rows inside a durable tool batch — and dispose flushes it.
+    """
+
+    messages: tuple[Message, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2734,6 +2749,24 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             blocks[index] = str(value)
 
 
+def _member_reasoning_effort(spec: ModelSpec, requested: str | None) -> str | None:
+    """A member override's effort word as a level THIS spec can be asked for.
+
+    ``auto`` is not a ladder rung and must not be clamped like one: it is the
+    member's explicit "use whatever this model does by default", which is why a
+    team can take tier ``hi`` without inheriting that tier's ``xhigh``. Mapping
+    it to the spec's own documented default says that once, here, instead of
+    leaning on ``resolve_effort_in``'s unrankable-word fallback -- which lands on
+    the default only for a model that documents one, and for a different reason.
+
+    ``None`` and a model with no ladder both pass through: the first means no
+    override, and the second is returned untouched by :func:`_with_tier_effort`.
+    """
+    if requested == "auto":
+        return spec.reasoning_default_effort
+    return requested
+
+
 def _with_tier_effort(spec: ModelSpec, effort: str | None) -> ModelSpec:
     """``spec`` running at a tier's configured reasoning ``effort`` (#2428).
 
@@ -4151,7 +4184,13 @@ class Session:
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
         #: resume. The runtime flushes this FIFO before releasing `_turn_lock`.
-        self._pending_shell_records: list[tuple[str, ToolResult]] = []
+        #: An aside the user adopted mid-turn rides the same queue as a
+        #: :class:`_PendingAdoption`, for the same reason; a held one is skipped
+        #: rather than blocking receipts behind it (D7).
+        self._pending_shell_records: list[tuple[str, ToolResult] | _PendingAdoption] = []
+        #: Tail ids of held adoptions already warned about, so a hold is logged
+        #: once rather than at every boundary that re-tries it.
+        self._held_adoption_warned: set[str] = set()
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
         # automatic pass runs inside a turn and is covered by ``_is_streaming``;
@@ -8667,7 +8706,13 @@ class Session:
                 carried_prompt=True,
             )
         finally:
-            self._turn_lock.release()
+            # D8: anything queued after the pipeline's own flush (or on an
+            # early exit before it) lands before the lock goes free.
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def seed_history(self, messages: list[Message]) -> None:
         """Prime the conversation from a host-supplied history.
@@ -15823,7 +15868,11 @@ class Session:
         # during the wait therefore bumps the epoch past this sample, which is
         # exactly how the honoured-vs-stale test below can tell the two apart.
         arrived_at_epoch = self._abort_epoch
-        async with self._turn_lock:
+        # acquire/try/finally rather than ``async with``, so every exit — the
+        # pipeline and both early returns below — passes D8's flush-before-
+        # release rule.
+        await self._turn_lock.acquire()
+        try:
             if self._leaving_deliveries:
                 # THE LATCH, RE-CHECKED AT ADMISSION (session 664a234ec561,
                 # 2026-09-28). The spawn-time check (``_deliver_job_results``)
@@ -15925,6 +15974,12 @@ class Session:
                 carried_prompt=carried_prompt,
                 drain_steering_on_open=drain_steering_on_open,
             )
+        finally:
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _run_turn_pipeline(
         self,
@@ -17720,13 +17775,29 @@ class Session:
 
             if not model_may_choose_tier():
                 raise ValueError("specific task models require subagents.model_choice=model")
-        model_spec = self._resolve_subagent_model(target.role, effort, strict=True, model=model)
+        model_spec, selection_source = self._resolve_subagent_selection(
+            target.role,
+            effort,
+            strict=True,
+            model=model,
+            roster=target.roster,
+            slot_kind="team" if target.is_team_launch else "agent",
+            # For a ``team:pod`` launch the resolved ROLE is pod's manager while
+            # the override sits on the ``team:pod`` SLOT, so the slot's own name
+            # is what the roster lookup needs (``team_slot_name`` returns
+            # ``None`` for an agent slot, whose role IS its slot name).
+            slot_role=team_slot_name(agent, target.is_team_launch),
+        )
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
             model_spec=model_spec,
+            # Which LAYER chose that model, for the ``selection:`` label the
+            # delegating model reads back. Derived here, where the roster is in
+            # hand, because ``run_subagent`` cannot see one from the arguments.
+            selection_source=selection_source,
             target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
@@ -17776,6 +17847,9 @@ class Session:
         strict: bool = False,
         model: str | None = None,
         apply_tier_effort: bool = True,
+        roster: Any = None,
+        slot_kind: str = "agent",
+        slot_role: str | None = None,
     ) -> ModelSpec | None:
         """Effort tier -> ModelSpec via config; None keeps the parent's model.
 
@@ -17823,7 +17897,77 @@ class Session:
         a delegated role: the supplement renderer reads ``hi`` only to pick a
         model, and its per-turn token cap counts reasoning, so inheriting the
         tier's ``max`` would spend the cap on thinking.
+
+        ``roster`` is the team whose ``team.yml`` NAMES this slot -- the
+        PARENT's active team (``LaunchTarget.roster``) -- and NOT the team the
+        child carries: a ``team:pod`` launch runs as pod's manager while the
+        ``TeamMember`` override that moved it lives on the ``team:pod`` slot of
+        the parent's roster. ``slot_kind`` picks that slot's kind, and
+        ``slot_role`` names it when it differs from ``agent`` (see
+        ``harness.subagent.team_slot_name``); the lookup casefolds and takes
+        the first match. All three default to "no roster", which is every
+        caller that has no launch behind it (session naming, the supplement
+        renderer) and keeps their behaviour byte-identical.
         """
+        spec, _source = self._resolve_subagent_selection(
+            agent,
+            effort,
+            strict=strict,
+            model=model,
+            apply_tier_effort=apply_tier_effort,
+            roster=roster,
+            slot_kind=slot_kind,
+            slot_role=slot_role,
+        )
+        return spec
+
+    def _resolve_subagent_selection(
+        self,
+        agent: str,
+        effort: str | None,
+        *,
+        strict: bool = False,
+        model: str | None = None,
+        apply_tier_effort: bool = True,
+        roster: Any = None,
+        slot_kind: str = "agent",
+        slot_role: str | None = None,
+    ) -> tuple[ModelSpec | None, str]:
+        """``(spec, model_selection_source)`` for one delegated role.
+
+        The SPEC half is what :meth:`_resolve_subagent_model` hands its naming and
+        resume callers. The SOURCE half names WHICH layer decided it, and is the
+        reason this exists: ``run_subagent`` derives a source from the launch
+        ARGUMENTS alone, which cannot see a roster, so the launch path passes the
+        value this computed instead.
+
+        Sources: ``explicit_inherit`` and ``explicit_model`` for a per-run
+        ``model``, ``team`` when a ``TeamMember`` ``tier``/``effort`` decided
+        either field, ``effort`` for the caller's own tier argument, ``role`` for
+        the row's ``effort:`` tag, ``parent`` for no pin at all.
+
+        The resolution itself is
+        :func:`~local_operator.harness.subagent.resolve_member_model` -- the SAME
+        function the desktop ``/effective`` route reads -- so the model a surface
+        ADVERTISES and the model a child RUNS are one answer. Two resolvers is
+        exactly how this codebase got schema-vs-launch drift (see
+        ``_launch_subagent``).
+        """
+        from local_operator.harness.subagent import (
+            SubagentModelUnavailable,
+            resolve_member_model,
+        )
+
+        def _resolved(registry: Any) -> Any:
+            return resolve_member_model(
+                agent,
+                roster=roster,
+                slot_kind=slot_kind,
+                slot_role=slot_role,
+                launch_tier=effort,
+                agent_registry=registry,
+            )
+
         if model is not None:
             # Explicit run choices override the role, but never rewrite it.
             # Retain the inherit sentinel separately from omission so restart
@@ -17831,52 +17975,54 @@ class Session:
             if effort is not None:
                 raise ValueError("pass either model or effort, not both")
             if model == "inherit":
-                return None
+                return None, "explicit_inherit"
             from local_operator.mobile.peer_model import validate_subagent_selection
 
             provider, separator, model_id = model.partition("/")
             if not separator or not provider or not model_id or any(c.isspace() for c in model):
                 raise ValueError("model must be 'inherit' or <provider>/<model-id>")
-            return validate_subagent_selection(provider, model_id)
-        wanted = effort
-        if wanted is None and agent and agent != "task":
-            from local_operator.agent_profiles import resolve_profile
-
-            registry = self.agent_registry
-            try:
-                # FRESH at spawn/resume: the registry's cached view is up to
-                # ``AgentRegistry._refresh_interval`` stale, and a role PIN
-                # written after this session started must reach the NEXT
-                # spawn — the resolution requirement this read exists to
-                # honour.
-                refresh = getattr(registry, "refresh_now", None)
-                if callable(refresh):
-                    refresh()
-                profile = resolve_profile(agent, registry=registry, strict_registry=True)
-            except Exception as exc:  # noqa: BLE001
-                # An unreadable registry is NOT "no role of that name": the
-                # old swallow sent this down the seed path (a packaged seed
-                # carries no operator pin) and then inherited the session
-                # model with no trace — precisely the silent substitution the
-                # strict tier path refuses one layer up. Surface it instead.
-                if strict:
-                    raise SubagentModelUnavailable(
-                        agent,
-                        f"the agent registry could not be read ({exc}); refusing to "
-                        "inherit the session model for a role whose pin cannot be "
-                        "resolved",
-                    ) from exc
-                logger.warning(
-                    "agent registry could not be read while resolving role %r (%s); "
-                    "using the session model",
+            chosen = validate_subagent_selection(provider, model_id)
+            # The MODEL and the DEPTH are independent fields, so a member's own
+            # ``effort`` still applies to an explicitly chosen model. Only that
+            # field does: an explicit ``model=`` IS a statement about the model,
+            # so a member TIER loses to it (including the effort a ``{model,
+            # effort}`` tier mapping carries -- that effort belongs to the tier's
+            # model, which is not the one being run).
+            member = _resolved(None)
+            if apply_tier_effort and member.effort_source == "team":
+                chosen = _with_tier_effort(chosen, _member_reasoning_effort(chosen, member.effort))
+            return chosen, "explicit_model"
+        try:
+            resolution = _resolved(self.agent_registry)
+        except Exception as exc:  # noqa: BLE001
+            # An unreadable registry is NOT "no role of that name": the old
+            # swallow sent this down the seed path (a packaged seed carries no
+            # operator pin) and then inherited the session model with no trace --
+            # precisely the silent substitution the strict tier path refuses one
+            # layer up. Surface it instead.
+            if strict:
+                raise SubagentModelUnavailable(
                     agent,
-                    exc,
-                )
-                profile = None
-            if profile is not None:
-                wanted = profile.effort
-        if wanted is None:
-            return None
+                    f"the agent registry could not be read ({exc}); refusing to "
+                    "inherit the session model for a role whose pin cannot be "
+                    "resolved",
+                ) from exc
+            logger.warning(
+                "agent registry could not be read while resolving role %r (%s); "
+                "using the session model",
+                agent,
+                exc,
+            )
+            # Re-resolve with no registry at all: the ROW pin is what could not
+            # be read, and a roster override does not need it, so a member tier
+            # still wins on the lenient path.
+            resolution = _resolved(None)
+        wanted = resolution.tier
+        source = (
+            "team"
+            if resolution.decided_by_team
+            else "effort" if effort else "role" if resolution.selector is not None else "parent"
+        )
 
         def _unavailable(reason: str, *, quiet: bool = False) -> ModelSpec | None:
             # One exit for every "asked for a tier, cannot honour it" branch so
@@ -17892,74 +18038,57 @@ class Session:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None
 
-        try:
-            # The same read the tool schemas use (``configured_effort_tiers``),
-            # so a tier the schema advertises is one this path resolves and
-            # vice versa. Unstripped-but-not on purpose: the shared reader
-            # strips selectors once, so the tier it advertises cannot pass
-            # this check and then die on a whitespace-padded provider name at
-            # the first provider call. Malformed selectors are still kept by
-            # the read: they must reach the named refusal below, not vanish
-            # into "not configured".
-            #
-            # The TARGETS read rather than the bare selectors, for the
-            # reasoning effort a ``{model, effort}`` tier carries (#2428): the
-            # selector half is exactly what ``read_effort_tier_selectors``
-            # returns, so the checks below are unchanged for both forms.
-            selector, tier_effort = read_effort_tier_targets().get(wanted, (None, None))
-        except Exception as exc:  # noqa: BLE001 — a config read error is a reason, not a crash
-            return _unavailable(f"config could not be read ({exc})")
-        # Type before falsiness, and the ``is not None`` is what makes the two
-        # surfaces agree (review R2-F7). A FALSY non-string (``lo: 0``,
-        # ``lo: []``) is a key the operator DID write, so it must draw the same
-        # "lacks provider/model" refusal that ``effort_tier_rejection`` gives
-        # it — under the old order it fell into the quiet "not configured"
-        # branch and the tool-argument path called the same key malformed,
-        # which is the schema-vs-launch drift this change exists to close,
-        # merely moved into the message text. Only a genuinely absent key
-        # (``None``) or an empty/whitespace-only string (the shared reader
-        # strips) stays quiet: a session with no ``subagents.models`` at all
-        # names itself on the parent model by design and must not warn.
-        if selector is not None and not isinstance(selector, str):
-            return _unavailable(malformed_tier_reason(wanted, selector))
-        if not selector:
-            return _unavailable(f"no model configured at subagents.models.{wanted}", quiet=True)
+        if resolution.unavailable:
+            _unavailable(resolution.unavailable, quiet=resolution.unavailable_quiet)
+            return None, source
+        selector = resolution.selector
+        # ``apply_tier_effort=False`` returns the model at ITS OWN default: the
+        # one caller is the supplement renderer, which borrows a tier's model
+        # without being a delegated role and whose per-turn token cap counts
+        # reasoning.
+        requested = resolution.effort if apply_tier_effort else None
+        if selector is None:
+            # No tier anywhere. An effort override on its own is still a PIN --
+            # on the SESSION's model, the same shape the ``default`` sentinel
+            # returns below -- because an operator who asked for a depth asked
+            # for this child specifically. With no effort either there is nothing
+            # to resolve and the child inherits, as every unpinned child does.
+            if requested is None:
+                return None, source
+            return (
+                _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                source,
+            )
         if is_inherit_tier_sentinel(selector):
             # The explicit opt-in, resolved at LAUNCH and not at write time:
-            # ``self.model`` is the accessor the rest of the session uses to
-            # name the model every provider call is built from, and the SAME
-            # one ``run_subagent`` reaches for when a child owns no model
-            # (``model=model_spec if model_spec is not None else
-            # parent_session.model``). Reading it here rather than recording
-            # the model into the config is what makes a later default move
-            # every pin on this tier — the requirement the sentinel exists to
-            # satisfy, and the pinned test in
-            # ``tests/unit/session/test_pinned_subagent_model.py`` holds it.
+            # ``self.model`` is the accessor the rest of the session uses to name
+            # the model every provider call is built from, and the SAME one
+            # ``run_subagent`` reaches for when a child owns no model. Reading it
+            # here rather than recording the model into the config is what makes
+            # a later default move every pin on this tier.
             #
             # Because this returns a SPEC and not ``None``, ``owns_model`` is
             # stamped True and the child's routing is pinned to it: an
-            # operator-configured tier is a deliberate pin even when it points
-            # at the session's own model, and the disclosure code already
-            # anticipates exactly that (a pin whose label equals the parent's
-            # is why ``owns_model`` is a separate field).
-            return _with_tier_effort(self.model, tier_effort if apply_tier_effort else None)
-        provider, _, model_id = selector.partition("/")
-        # BOTH halves, to the same standard ``configured_effort_tiers`` applies
-        # (review R3-F11). Checking only the model let a leading-slash selector
-        # (``hi: "/kimi"``) through here while the schema surface refused it —
-        # the same schema-vs-launch drift this change exists to close, and the
-        # worse direction of it: the launch built ``ModelSpec(provider='',
-        # model_id='kimi')`` and the child died at its first provider call
-        # instead of at launch, where the tier is still named.
-        if not provider or not model_id:
-            return _unavailable(f"subagents.models.{wanted}={selector!r} lacks provider/model")
+            # operator-configured tier is a deliberate pin even when it points at
+            # the session's own model, and the disclosure code already
+            # anticipates exactly that (a pin whose label equals the parent's is
+            # why ``owns_model`` is a separate field).
+            return (
+                _with_tier_effort(self.model, _member_reasoning_effort(self.model, requested)),
+                source,
+            )
+        # BOTH halves were already checked, to the same standard
+        # ``configured_effort_tiers`` applies, by ``resolve_member_model`` -- one
+        # place, so a selector that reaches here has a provider and a model.
+        provider, _, model_id = str(selector).partition("/")
         try:
             from local_operator.model.configure import build_model_spec
 
             spec = build_model_spec(provider, model_id)
-            return _with_tier_effort(spec, tier_effort if apply_tier_effort else None)
         except Exception as exc:  # noqa: BLE001 — an unbuildable selector is a reason, not a crash
-            return _unavailable(f"{selector!r} could not be resolved ({exc})")
+            _unavailable(f"{selector!r} could not be resolved ({exc})")
+            return None, source
+        return _with_tier_effort(spec, _member_reasoning_effort(spec, requested)), source
 
     def _append_or_park_journal(self, message: CustomMessage) -> None:
         """Put a journal notice on the live context, or park it for a boundary.
@@ -19508,13 +19637,38 @@ class Session:
         # the RUNTIME-only reason rides along when the live row still carries
         # one — after a restart it is gone and the labels still answer (see
         # ``AsyncJob.model_fallback_reason``).
+        #
+        # THE EFFORT CLAUSE (design §6), the same disclosure one field deeper:
+        # a substituted model is not the whole loss — a hop keeps the requested
+        # reasoning level only where the target's ladder accepts it, so a child
+        # pinned at ``xhigh`` can come back thinking at its substitute's default
+        # with the pin clause alone still reading as an ordinary substitution.
+        # Rides INSIDE the pin clause, between the model pair and the cause,
+        # because it is a property of the same move and reads in the same order
+        # as the live notice (one renderer builds the phrase:
+        # ``jobs.effort_fallback_clause``). Gated on the runtime
+        # ``model_fallback`` flag rather than on the labels, and that asymmetry
+        # with the clause above is deliberate: the labels can also diverge for
+        # reasons this row should NOT blame on a fallback (an operator's own
+        # ``/model`` switch leaves the flag False), while ``None`` as a level is
+        # a real answer — the substitute's own default — that a comparison
+        # cannot tell from "no fallback recorded". Both facts are runtime-only,
+        # so a restored row states neither, exactly like the reason above.
         requested = str(getattr(job, "requested_model_label", "") or "").strip()
         effective = str(getattr(job, "model_label", "") or "").strip()
         pin_clause = ""
         if is_model_fallback(requested, effective):
             reason = str(getattr(job, "model_fallback_reason", "") or "").strip()
             cause = f" — {reason}" if reason else ""
-            pin_clause = f" (pinned {requested}, ran on {effective}{cause})"
+            effort = (
+                effort_fallback_clause(
+                    getattr(job, "requested_effort", None),
+                    getattr(job, "model_fallback_effort", None),
+                )
+                if getattr(job, "model_fallback", False)
+                else ""
+            )
+            pin_clause = f" (pinned {requested}, ran on {effective}{effort}{cause})"
         delivery = (
             f"background job '{label}' {status}{pin_clause}:\n{summary}"
             if summary
@@ -20775,8 +20929,11 @@ class Session:
             # `record_shell` queues while manual compaction owns the message
             # list. Fold those receipts into the newly compacted context before
             # another prompt can acquire the lock and build its request.
-            await self._flush_shell_records()
-            self._turn_lock.release()
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     @staticmethod
     async def _offloaded(compaction_api: Any, name: str, *args: Any) -> Any:
@@ -23501,7 +23658,7 @@ class Session:
             )
         return snapshot
 
-    async def adopt_aside(self, messages: Sequence[Message]) -> None:
+    async def adopt_aside(self, messages: Sequence[Message]) -> Literal["queued", "applied"]:
         """Promote an off-the-record aside exchange into the conversation.
 
         The one door out of :meth:`complete_aside`'s no-trace contract, and it
@@ -23509,20 +23666,106 @@ class Session:
         appended as ordinary user/assistant turns, to the live context and the
         transcript both, so the next real turn sees it and a resume replays it.
 
-        Refused while a turn is running, and not as caution. The loop owns
-        ``_context.messages`` for the duration and pairs every tool call with
-        its result; splicing a user message between an assistant tool-call
-        message and the results it is waiting for produces a message list no
-        provider will accept.
+        NOTHING IS EVER SPLICED INTO A LIVE TOOL BATCH. The loop owns
+        ``_context.messages`` while a turn runs and pairs every tool call with
+        its result; a user message between an assistant tool-call message and
+        the results it is waiting for is a list no provider will accept. So an
+        adopt that arrives mid-turn is QUEUED (returns ``"queued"``) on the
+        shell-receipt FIFO and lands at the turn's next safe boundary — the
+        ``_flush_shell_records`` sites, every one of which holds ``_turn_lock``
+        with no open batch (decision D1) — announced by a ``HistoryDeltaEvent``
+        carrying the pair. It never goes through the steering queue: anything
+        drained there continues the turn it lands in.
 
         The turn LOCK is consulted as well as the streaming flag, for the
         reason :meth:`prompt` spells out: ``_is_streaming`` covers only
         ``_run_turn`` itself, while the lock is held across the whole pipeline
-        including a post-compaction auto-continuation. A fork landing in that
-        gap would be swept into a continuation the user never saw.
+        including a post-compaction auto-continuation. The pipeline's own
+        ``finally`` flush runs after that continuation, so the pair lands once
+        the whole pipeline is done rather than being swept into it.
+
+        Two states refuse LOUDLY with :class:`AsideAdoptRefused` instead,
+        because deferring there would be a lie: a closed session (no boundary
+        will ever flush the queue), and an idle write that finds the live list
+        still ending in unanswered calls — the backstop for the invariant
+        above, should any path reach here with a batch open (decision D3).
         """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        if self._disposed:
+            raise AsideAdoptRefused(reason="session_closed")
+        fresh = self._unadopted_messages(messages)
+        if not fresh:
+            # A retried adopt (a client that lost the ack) must not land twice:
+            # every message is already queued or already durable.
+            durable = all(self._transcript.has_entry(m.id) for m in messages)
+            return "applied" if durable else "queued"
         if self._is_streaming or self._turn_lock.locked():
-            raise RuntimeError("cannot adopt an aside while a turn is running")
+            self._pending_shell_records.append(_PendingAdoption(tuple(fresh)))
+            return "queued"
+        # Serialized like the idle ``record_shell`` write, for its reason: a
+        # prompt acquiring the lock while the transcript write below awaits
+        # would start a turn, and the extend after it would then land inside
+        # that turn's live list — the splice this method exists to prevent.
+        await self._turn_lock.acquire()
+        try:
+            # Re-filtered under the lock: the holder we waited for may have
+            # landed some of these messages from the queue on its way out.
+            fresh = self._unadopted_messages(messages)
+            if fresh and unanswered_tail_call_ids(self._context.messages):
+                raise AsideAdoptRefused(reason="open_tool_batch")
+            if fresh:
+                await self._apply_adoption(fresh)
+        finally:
+            # D8: a record queued while this write awaited lands before release.
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+        return "applied"
+
+    def _unadopted_messages(self, messages: Sequence[Message]) -> list[Message]:
+        """The messages of ``messages`` not yet queued or durable, in order.
+
+        Dedupe is PER MESSAGE ID, across the queue and the transcript (review
+        R2-2, superseding D2's tail-id rule). An aside continuation re-sends the
+        whole exchange with a new tail — ``[Q1, A1, Q2, A2]`` after ``[Q1, A1]``
+        was adopted — so a tail-only check let ``Q1``/``A1`` land twice.
+
+        PAIR-SAFE, or refused: the exchange is user/assistant pairs, and a
+        filter that keeps half of one would land an answer with no question
+        (or the reverse). Each pair must be entirely known or entirely new, and
+        the result must be an even run starting with a user row; anything else
+        raises :class:`AsideAdoptRefused` (bare reason, the generic sentence)
+        instead of landing a half pair.
+        """
+        from local_operator.session.errors import AsideAdoptRefused
+
+        known = {
+            message.id
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption)
+            for message in queued.messages
+        }
+        fresh: list[Message] = []
+        for index in range(0, len(messages), 2):
+            pair = list(messages[index : index + 2])
+            seen = [m.id in known or self._transcript.has_entry(m.id) for m in pair]
+            if all(seen):
+                continue
+            if any(seen) or len(pair) != 2:
+                raise AsideAdoptRefused()
+            fresh.extend(pair)
+        if any(
+            message.role != ("user" if offset % 2 == 0 else "assistant")
+            for offset, message in enumerate(fresh)
+        ):
+            raise AsideAdoptRefused()
+        return fresh
+
+    async def _apply_adoption(self, messages: Sequence[Message]) -> None:
+        """Write one adopted exchange to the transcript, then the live context."""
         # Persist first, then adopt — the order ``seed_history`` uses, and for
         # the same reason: a failed transcript write must not leave the live
         # context carrying messages a resume will not replay.
@@ -23550,7 +23793,9 @@ class Session:
         its safe boundary before another prompt can start.
         """
         if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
-            queued.tool_call_id == result.tool_call_id for _, queued in self._pending_shell_records
+            not isinstance(queued, _PendingAdoption)
+            and queued[1].tool_call_id == result.tool_call_id
+            for queued in self._pending_shell_records
         ):
             return
         if self._is_streaming or self._turn_lock.locked():
@@ -23560,12 +23805,21 @@ class Session:
         # while transcript.append_message is awaiting and build its request from
         # a half-written synthetic exchange. Re-check the FIFO after acquisition
         # to flush anything that raced us while we waited.
-        async with self._turn_lock:
+        await self._turn_lock.acquire()
+        try:
             # Queue-then-flush rather than a direct write: the FIFO pops only
             # after a successful transcript write, so a failure here leaves the
             # receipt for the next boundary instead of losing it.
             self._pending_shell_records.append((command, result))
             await self._flush_shell_records()
+        finally:
+            # D8's rule for every release; a no-op unless something queued
+            # during the write above (or the write failed, when it logs).
+            # Release in its own ``finally`` (R2-1): see the helper.
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
 
     async def _persist_shell_record(self, command: str, result: ToolResult) -> None:
         """Append one synthetic bash exchange to transcript and live context."""
@@ -23592,10 +23846,187 @@ class Session:
         successful write so a transcript failure leaves the unpersisted tail
         available to the next boundary or dispose.
         """
-        while self._pending_shell_records:
-            command, result = self._pending_shell_records[0]
-            await self._persist_shell_record(command, result)
-            self._pending_shell_records.pop(0)
+        # Walk by INDEX and re-read the list each pass: a record queued during
+        # one of this loop's awaits is picked up by the same flush (D8).
+        #
+        # A held adoption is SKIPPED, not a barrier (D7): bang receipts behind it
+        # persist exactly as they did before adoptions shared this queue —
+        # unconditionally, even onto an open tail — because blocking them
+        # behind a pair that may never land lost receipts that used to be
+        # durable. Adoption-vs-later-receipt order is therefore guaranteed only
+        # while the tail is closed, which is every boundary but a cancelled turn.
+        index = 0
+        # Adoptions keep their order AMONG THEMSELVES even though receipts may
+        # pass them: a continuation's pair (Q2/A2) is queued already filtered of
+        # the first pair (R2-2), so landing it while Q1/A1 is still held — say
+        # a receipt closed the tail mid-pass — would put the follow-up before
+        # the question it follows. Once one adoption is held this pass, every
+        # later adoption waits with it.
+        adoption_held = False
+        while index < len(self._pending_shell_records):
+            queued = self._pending_shell_records[index]
+            if isinstance(queued, _PendingAdoption):
+                if adoption_held or not await self._land_deferred_adoption(queued):
+                    adoption_held = True
+                    index += 1
+                    continue
+            else:
+                command, result = queued
+                await self._persist_shell_record(command, result)
+            # Pop by IDENTITY, not by the index read before the await: the list
+            # may have grown during it, though nothing else removes from it.
+            # (``list.remove`` would match by equality instead, and it is the
+            # filesystem-deletion guard's ``.remove`` shape.)
+            position = next(
+                i for i, item in enumerate(self._pending_shell_records) if item is queued
+            )
+            del self._pending_shell_records[position]
+
+    async def _flush_queued_before_release(self) -> None:
+        """The last flush before ``_turn_lock`` is released.
+
+        THE RULE (D8): every ``_turn_lock.release()`` is immediately preceded by
+        this, with no await in between, in the shape::
+
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+
+        The inner ``finally`` is not optional (review R2-1): a cancel delivered
+        while this awaits a write is a ``BaseException`` the ``except`` below
+        does not catch, and a release skipped then holds the lock for good —
+        every later prompt is refused as "already streaming". ``release()`` is
+        synchronous, so the no-await rule still holds. The one exemption is
+        ``serving.py``'s ``_await_turn_lock_free`` (``async with lock: pass``):
+        nothing awaits inside that hold, so nothing can be queued during it.
+
+        Without this, a record queued while the lock is held is stranded until
+        some later turn: the pipeline's own flush is followed by further awaits
+        (shape incidents, the after-turn duty, the patience flush), and an adopt
+        arriving in that window saw the lock held, queued, and then nothing
+        flushed when the lock went free.
+
+        It LOGS rather than raises. It runs in ``finally`` blocks, where an
+        exception would replace the one already propagating (the turn's own
+        outcome); a failed write leaves its record queued for the next boundary
+        or for the dispose report, so nothing is lost by not raising here.
+        """
+        try:
+            await self._flush_shell_records()
+        except Exception:  # noqa: BLE001 — must not mask the in-flight exception
+            logger.error(
+                "could not persist %d queued record(s) before releasing the turn lock; "
+                "they stay queued for the next boundary",
+                len(self._pending_shell_records),
+                exc_info=True,
+            )
+
+    async def _report_unlanded_records(self) -> None:
+        """Say LOUDLY that a queued record will never land (D7).
+
+        Dispose is the last boundary, so whatever is still queued after its
+        flush never will be: an adoption held back by an open tool batch, or a
+        bang receipt whose transcript write failed. Nothing leaves the queue
+        without a write or this report. Each record is an ERROR line naming it,
+        and the batch is ONE user-visible ``NoticeEvent(kind="error")`` — the
+        path the session's other runtime warnings use — counting both kinds.
+        """
+        adoptions = [
+            queued
+            for queued in self._pending_shell_records
+            if isinstance(queued, _PendingAdoption) and queued.messages
+        ]
+        receipts = [
+            queued
+            for queued in self._pending_shell_records
+            if not isinstance(queued, _PendingAdoption)
+        ]
+        if not adoptions and not receipts:
+            return
+        for adoption in adoptions:
+            logger.error(
+                "aside adopt %s never landed: the conversation closed with an open tool "
+                "batch, so the exchange was not added",
+                adoption.messages[-1].id,
+            )
+        for _command, result in receipts:
+            logger.error(
+                "shell receipt %s never landed: its transcript write failed and the "
+                "conversation closed",
+                result.tool_call_id,
+            )
+        lost: list[str] = []
+        if adoptions:
+            lost.append(f"{len(adoptions)} aside(s) you added to the conversation")
+        if receipts:
+            lost.append(f"{len(receipts)} shell command record(s)")
+        await self._emit(
+            NoticeEvent(
+                text=f"{' and '.join(lost)} could not be saved before the conversation closed",
+                kind="error",
+            )
+        )
+        # DURABLE as well (review R6): the notice reaches only a frontend still
+        # connected during teardown. The row is written straight to the
+        # transcript, as ``_journal_held_delivery_failure`` does once disposed —
+        # ``journal_incident`` returns early then, and the transcript still
+        # accepts appends until the end of ``dispose``.
+        from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+        from local_operator.incidents import format_unlanded_records_message
+
+        rendered = format_unlanded_records_message(
+            [adoption.messages[-1].id for adoption in adoptions],
+            [result.tool_call_id for _command, result in receipts],
+        )
+        try:
+            await self._transcript.append_message(
+                CustomMessage(
+                    custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+                    attribution="system",
+                    details={"text": rendered, "raw": rendered[:1000]},
+                ),
+                preserve_mtime=True,
+            )
+        except Exception:  # noqa: BLE001 — the ERROR lines above still stand
+            logger.error("could not journal the unlanded-records incident", exc_info=True)
+
+    async def _land_deferred_adoption(self, queued: _PendingAdoption) -> bool:
+        """Apply an adopt that waited for this boundary, and tell every frontend.
+
+        Returns False, writing nothing, when the live list still ends in
+        unanswered calls. A turn CANCELLED without an abort (its prompt task
+        dropped with the control socket) leaves the tail open at every later
+        boundary, and a future boundary placed inside a loop would too; either
+        way the pair would otherwise splice into a batch. It does not RAISE:
+        the adopt can still land once a new turn closes the tail, and an
+        exception out of a ``finally`` would mask the turn's own outcome. The
+        flush skips it (D7) and dispose reports it if it never lands.
+
+        The event is a HISTORY delta, not live message events: these rows were
+        never streamed, so a frontend must project them through the settled
+        renderer — the contract :class:`HistoryDeltaEvent` already states.
+        """
+        messages = [m for m in queued.messages if not self._transcript.has_entry(m.id)]
+        if not messages:
+            return True
+        if unanswered_tail_call_ids(self._context.messages):
+            # Named by the exchange's tail id, the identity the dedupe keys on.
+            # ONCE per held adoption, not per boundary: every boundary after a
+            # cancelled turn re-tries it, and a line per retry is noise that
+            # buries the dispose report that actually matters.
+            if messages[-1].id not in self._held_adoption_warned:
+                self._held_adoption_warned.add(messages[-1].id)
+                logger.warning(
+                    "aside adopt %s held back: the conversation still ends in an open "
+                    "tool batch at a flush boundary; it lands at the next safe one",
+                    messages[-1].id,
+                )
+            return False
+        await self._apply_adoption(messages)
+        self._held_adoption_warned.discard(messages[-1].id)
+        await self._emit(HistoryDeltaEvent(messages=list(messages)))
+        return True
 
     # -- wakes -------------------------------------------------------------------
 
@@ -27834,7 +28265,10 @@ class Session:
             # last-resort pass keeps disposal durable if teardown reached here
             # through a host path without a turn task.
             if self._pending_shell_records:
-                await self._flush_shell_records()
+                # The logging flush, not the raising one: a failed write must
+                # stay queued for the report below rather than abort teardown.
+                await self._flush_queued_before_release()
+                await self._report_unlanded_records()
             # C3: THE CLOSING CHECKPOINT. Written once per runtime that ended a
             # turn, UI or not — see :meth:`_write_closing_checkpoint` for why
             # this is what keeps the next cold open bounded rather than O(file).

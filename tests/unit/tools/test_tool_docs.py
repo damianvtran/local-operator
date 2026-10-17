@@ -254,7 +254,11 @@ MEASURED_TOKENS: dict[str, int] = {
     "bridge": 559,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
-    "browser": 1327,
+    # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
+    # the field's own description to the doc — the deliberate cost of the value
+    # never appearing in the transcript (incident: a literal password in `type`
+    # reached a subagent's transcript, where no shape pass could see it).
+    "browser": 1424,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -338,7 +342,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
     "task": 616,
-    "team": 485,
+    # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
+    # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
+    # prose — the same arm renders the doc back at 485 when that property and its
+    # ``$defs.TeamOverride`` entry are stripped, i.e. the cost is the nested
+    # list-of-objects shape and its three field descriptions, not added
+    # sentences. It is the ONLY entry that moved. Re-measured deliberately
+    # through this test's own printed table; the tier arm below is unmoved
+    # because this doc does not read config.
+    "team": 779,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe

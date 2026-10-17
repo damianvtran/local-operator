@@ -1896,10 +1896,18 @@ class TestQuietGroupFold:
 
     @pytest.mark.asyncio
     async def test_a_member_re_read_as_a_splitter_dissolves_the_bar(self, monkeypatch) -> None:
-        """Belt-for-belt: if a member ever RE-READS as a splitter (the mount
-        order and the empty-assistant boundary should make this unreachable),
-        the restate unfolds rather than keep hiding — the safe direction every
-        refusal in this file takes."""
+        """A member that re-reads as a splitter gives up only THAT row.
+
+        This used to unfold the whole bar (every member shown, the bar removed).
+        That is the reported flicker: on a live turn a member re-reads as a
+        splitter whenever its own row becomes attention-bearing — a tool that
+        FAILED, an interruption, a `never sent`, an ask — so a fold that had
+        just swallowed a batch handed all of its rows back a frame later and the
+        next append folded them again. The fold now releases the splitter and the
+        rows behind it (the rows a reader must see) and keeps standing over the
+        rows it already condensed, which is the latch the other clients hold
+        (`docs/design/quiet-turns.md` §5, native: "once condensed stays
+        condensed")."""
         import local_operator.tui.widgets.transcript as transcript_mod
 
         session = FakeSession()
@@ -1913,6 +1921,7 @@ class TestQuietGroupFold:
             await _deliver(pilot, app, session, "two", "p2")
             await _settle_for_quiet_bars(pilot, app)
             (bar,) = _quiet_bars(app)
+            held = list(bar._members)
 
             real = transcript_mod.quiet_group_record_of
             flip = {"on": False}
@@ -1931,6 +1940,18 @@ class TestQuietGroupFold:
             await pilot.pause()
 
             blocks = app.query_one(TranscriptView).blocks()
-            assert bar not in blocks, "the refused bar is removed"
+            assert bar in blocks, "the fold keeps standing over the rows it condensed"
             assert card.display, "the row it would have hidden is visible again"
-            assert all(p.display for p in _peer_blocks(app))
+            held_ids = {id(member) for member in bar._members}
+            assert all(
+                peer.display for peer in _peer_blocks(app) if id(peer) not in held_ids
+            ), "every row the fold released shows in place"
+            assert held[0] in bar._members, "the rows before the splitter stay folded"
+            assert not held[0].display, "and stay hidden, which is the point of the fold"
+            # A latched bar re-derives its FACTS from the rows it still holds:
+            # the released splitter was a work row, and a bar that went on
+            # counting it would claim work it no longer hides.
+            assert len(bar._members) == 1
+            assert bar.group.count == 1, "one receipt, stated as one"
+            assert bar.group.actions == 0, "the released work row is not claimed"
+            assert len(bar.group.row_ids) == 1

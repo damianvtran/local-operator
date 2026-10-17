@@ -15,6 +15,7 @@ Exercise the web surface with the harness `browser` tool: reconnaissance, then a
 
 ## Act, then capture the state
 
+- Credentials go through `secret_ref` on `browser type` — never a literal password in `text`; the ref resolves session-first (the `ask` answer), then the encrypted store. If the store lacks it, ask the operator to sign in by hand; do not type the value yourself.
 - After every action capture BOTH: the action performed and the resulting state (URL, the target element's text or attributes, visible feedback). "Clicked button" and "order confirmed, ref #1234 shown" are different evidence.
 - Verify the intended effect, not just the absence of an error: row created, redirect happened, message shown, count changed.
 - Re-read the page after anything that navigates or re-renders; stale element refs are the top cause of flaky interaction.

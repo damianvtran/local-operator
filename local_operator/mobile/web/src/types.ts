@@ -784,8 +784,10 @@ export type CommandOp =
 	   uses — so the phone is not a second answering implementation. */
 	| { op: "ask_respond"; ask_id: string; answers: Record<string, string[]> }
 	| { op: "ask_decline"; ask_id: string }
-	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and
-	   injects nothing — no turn is bought. */
+	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and asks
+	   the model nothing — no turn is bought HERE. The one thing it can still owe is
+	   the deadline notice that ask never got (design `ask-nonblocking.md` §14),
+	   delivered on the conversation's next run. */
 	| { op: "ask_dismiss"; ask_id: string }
 	| { op: "snapshot" }
 	/* THE TURN-SUPPLEMENT FAMILY (memo §2.7). Additive ops the runtime's dispatch

@@ -168,3 +168,17 @@ async def test_the_provider_catalogue_and_mcp_verb_keys_are_advertised(test_app_
     features = _features(response.json())
     assert features.get("provider_catalogue", 0) >= 1
     assert features.get("mcp_catalog", 0) >= 2
+
+
+@pytest.mark.asyncio
+async def test_the_queued_aside_adopt_key_is_advertised_unconditionally(test_app_client):
+    """The desktop gates its mid-turn "Add to conversation" on this key (D4/D5).
+
+    Absent, the renderer keeps today's disabled control, which is right for an
+    older backend that answers a mid-turn adopt with a 503; present, it enables
+    the control and reads ``status: "queued"``. No switch withholds it.
+    """
+    response = await test_app_client.get("/v1/capabilities")
+
+    assert response.status_code == 200
+    assert _features(response.json()).get("aside_adopt_queue", 0) >= 1

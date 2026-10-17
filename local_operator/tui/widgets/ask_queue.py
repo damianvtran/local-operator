@@ -254,11 +254,13 @@ STATUS_MARKS: dict[str, str] = {
 #: something to answer, but it is the reason the pending count is honest.
 DELIVERING_MARK = "▸"
 
-#: The glyph a row wears while an answer for it is IN FLIGHT through the engage
-#: seam (fleet scope only — the current session's ops are synchronous). Sized
-#: for the phone's own window (engage 30 s + ack 15 s), it is not a spinner:
-#: nothing repaints on a clock here, and a row that looked busy would be the
-#: animated affordance §5.0 forbids. It exists so the row cannot be fired twice.
+#: The glyph a row wears while an op for it is IN FLIGHT through the fleet
+#: worker (fleet scope only — the current session's ops are synchronous). Sized
+#: for the DIAL's own window (engage 30 s + ack 15 s), which a dismissal no longer
+#: takes (it is one append against the log, fork A §14) — the mark is about the row
+#: being spoken for, not about a clock. It is not a spinner: nothing repaints on a
+#: clock here, and a row that looked busy would be the animated affordance §5.0
+#: forbids. It exists so the row cannot be fired twice.
 IN_FLIGHT_MARK = "…"
 
 
@@ -1074,10 +1076,12 @@ class AskQueueList(Widget):
     def set_in_flight(self, ask_id: str, active: bool) -> None:
         """Paint ``ask_id`` as being sent (or stop painting it).
 
-        Called by the app around a fleet answer: the engage-and-dial window is
-        the phone's 30 s + 15 s, and the row must both SAY it is in flight and
-        REFUSE a second gesture for that window — the mark and the guard are the
-        same state, deliberately, so they cannot disagree.
+        Called by the app around a fleet op: for an answer or a decline the window
+        is the DIAL's (the phone's 30 s + 15 s), and for a dismissal it is the
+        append that settles it against the log with nothing dialled (fork A §14) —
+        the row must both SAY it is spoken for and REFUSE a second gesture for that
+        window, whichever op set it. The mark and the guard are the same state,
+        deliberately, so they cannot disagree.
         """
         if active:
             self._in_flight.add(ask_id)

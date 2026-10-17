@@ -10,6 +10,30 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def exhausted(*, value: str) -> Msg:
+    return Msg("tui.usage.exhausted", {"value": value})
+
+
+def fetching() -> Msg:
+    return Msg("tui.usage.fetching", {})
+
+
+def near_limit(*, value: str) -> Msg:
+    return Msg("tui.usage.near_limit", {"value": value})
+
+
+def no_windows() -> Msg:
+    return Msg("tui.usage.no_windows", {})
+
+
+def not_reported(*, value: str) -> Msg:
+    return Msg("tui.usage.not_reported", {"value": value})
+
+
+def of_separator() -> Msg:
+    return Msg("tui.usage.of_separator", {})
+
+
 def paid_blocked() -> Msg:
     return Msg("tui.usage.paid.blocked", {})
 
@@ -28,3 +52,43 @@ def paid_family_caps() -> Msg:
 
 def paid_unlimited() -> Msg:
     return Msg("tui.usage.paid.unlimited", {})
+
+
+def refresh_failed() -> Msg:
+    return Msg("tui.usage.refresh_failed", {})
+
+
+def refreshing() -> Msg:
+    return Msg("tui.usage.refreshing", {})
+
+
+def reported_balance(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.usage.reported_balance", {"count": count, "shown": shown})
+
+
+def resets_in(*, value: str) -> Msg:
+    return Msg("tui.usage.resets_in", {"value": value})
+
+
+def showing_prefix() -> Msg:
+    return Msg("tui.usage.showing_prefix", {})
+
+
+def sign_in_expired(*, value: str) -> Msg:
+    return Msg("tui.usage.sign_in_expired", {"value": value})
+
+
+def stale(*, value: str) -> Msg:
+    return Msg("tui.usage.stale", {"value": value})
+
+
+def title() -> Msg:
+    return Msg("tui.usage.title", {})
+
+
+def unavailable() -> Msg:
+    return Msg("tui.usage.unavailable", {})
+
+
+def windows_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.usage.windows_count", {"count": count, "shown": shown})

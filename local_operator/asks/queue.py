@@ -1009,16 +1009,19 @@ class AskQueue:
         return {"ok": True}
 
     def dismiss(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
-        """View-only removal of a timed-out ask. Injects nothing, ever."""
+        """View-only removal of a timed-out ask — the LIVE arm.
+
+        The dismissal injects nothing and asks the model nothing; what it can still
+        OWE is the deadline notice the ask had not delivered (fork A, §14), and the
+        reconcile :meth:`_settled` schedules delivers that like any other row. The
+        refusal comes from :func:`asks.render.dismiss_refusal`, shared with the cold
+        door (``asks/dismiss.py``), so a surface cannot tell which one answered it.
+        """
         now = self._now()
         record = self._find(ask_id, now)
-        if record is None:
-            return {"ok": False, "error": render.refusal_copy(None)}
-        if record["status"] != store.STATUS_TIMED_OUT:
-            return {
-                "ok": False,
-                "error": "only a timed-out ask can be dismissed; it is still open.",
-            }
+        refusal = render.dismiss_refusal(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
         payload = {
             "v": store.EVENT_SCHEMA,
             "kind": store.EVENT_DISMISSED,
@@ -1260,7 +1263,12 @@ class AskQueue:
         responses: list[tuple[int, CustomMessage]] = []
         for record in records:
             status = record["status"]
-            if status not in store.INJECTING_STATUSES:
+            # A DISMISSED ask whose notice was never delivered is an owed row like
+            # any other (fork A, §14): the dismissal put the ask away, and nothing
+            # ever told the model it had no answer. Its row is the same
+            # ``ask-timeout-<id>`` the deadline would have written.
+            owed_dismissed = status == store.STATUS_DISMISSED and bool(record.get("notice_owed"))
+            if status not in store.INJECTING_STATUSES and not owed_dismissed:
                 continue
             response_id = store.response_row_id(record["ask_id"])
             timeout_id = store.timeout_row_id(record["ask_id"])
@@ -1269,7 +1277,7 @@ class AskQueue:
                 store.STATUS_DECLINED,
                 store.STATUS_LATE,
             )
-            want_timeout = status in (store.STATUS_TIMED_OUT, store.STATUS_LATE)
+            want_timeout = status in (store.STATUS_TIMED_OUT, store.STATUS_LATE) or (owed_dismissed)
             response_missing = want_response and response_id not in planned
             # N8, AND IT IS PERMANENT RATHER THAN A ONE-BATCH DEFERRAL (review
             # round 1, MAJOR 2). A response row for this ask — present, or being
@@ -1295,6 +1303,7 @@ class AskQueue:
                             lapsed_while_stopped=_lapsed_while_stopped(
                                 record, marker, self._session_id
                             ),
+                            dismissed=owed_dismissed,
                         ),
                     )
                 )
@@ -1737,28 +1746,46 @@ class AskQueue:
         now_ms: int,
         *,
         lapsed_while_stopped: bool = False,
+        dismissed: bool = False,
     ) -> CustomMessage:
-        text = render.timeout_text(record, now_ms=now_ms, lapsed_while_stopped=lapsed_while_stopped)
+        """The ``ask_timeout`` row: the deadline notice, and the fork-A variant.
+
+        ``dismissed`` says the user put the ask away before this row existed, so the
+        TEXT gains the one sentence that says so (``render.timeout_text``) and the
+        details gain an additive flag. The row's id and status are UNCHANGED —
+        ``ask-timeout-<id>`` with ``status: "timed_out"`` is the delivery marker the
+        fold, the transcript card and every reader already know (fork A is an
+        amendment to WHEN this row is written, not a new row).
+        """
+        text = render.timeout_text(
+            record,
+            now_ms=now_ms,
+            lapsed_while_stopped=lapsed_while_stopped,
+            dismissed=dismissed,
+        )
         waited_s = max(0, now_ms - int(record.get("created_at") or now_ms)) // 1000
+        details: dict[str, Any] = {
+            "ask_id": record["ask_id"],
+            "status": store.STATUS_TIMED_OUT,
+            "waited_s": waited_s,
+            "urgent": bool(record.get("urgent")),
+            "lapsed_while_stopped": lapsed_while_stopped,
+            # The questions ride the row so a transcript CARD can expand onto
+            # what went unanswered (design §5.1: "collapsed one-liner,
+            # expandable Q&A"). They are the same dicts the response row and
+            # the wire carry, so a card cannot disagree with the picker about
+            # what was asked; additive, and a reader that ignores it (the
+            # phone's notice fold does) is unaffected.
+            "questions": [dict(q) for q in (record.get("questions") or ())],
+            "text": text,
+        }
+        if dismissed:
+            details["dismissed"] = True
         return CustomMessage(
             custom_type=ASK_TIMEOUT_MESSAGE_TYPE,
             attribution="system",
             id=store.timeout_row_id(str(record["ask_id"])),
-            details={
-                "ask_id": record["ask_id"],
-                "status": store.STATUS_TIMED_OUT,
-                "waited_s": waited_s,
-                "urgent": bool(record.get("urgent")),
-                "lapsed_while_stopped": lapsed_while_stopped,
-                # The questions ride the row so a transcript CARD can expand onto
-                # what went unanswered (design §5.1: "collapsed one-liner,
-                # expandable Q&A"). They are the same dicts the response row and
-                # the wire carry, so a card cannot disagree with the picker about
-                # what was asked; additive, and a reader that ignores it (the
-                # phone's notice fold does) is unaffected.
-                "questions": [dict(q) for q in (record.get("questions") or ())],
-                "text": text,
-            },
+            details=details,
         )
 
     # -- the wire view and the derived index -------------------------------

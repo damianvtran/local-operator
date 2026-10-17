@@ -900,5 +900,13 @@ def feature_flags() -> dict[str, Any]:
         # definitive (show nothing, do not retry), because a backend that
         # answers this key yet 404s the route is broken, not slow.
         "quota_notice": 1,
+        # THE QUEUED ASIDE ADOPT (decision D4): `POST .../asides/{id}/adopt` made
+        # while the conversation is mid-turn answers `status: "queued"` and the
+        # pair lands at the turn's safe boundary as a `history_delta`, instead of
+        # the plain-RuntimeError 503 an older backend gives; a state that cannot
+        # defer is a typed 409 `aside_adopt_refused`. The renderer enables its
+        # mid-turn adopt control only when this key is present, so an older
+        # backend keeps today's disabled state.
+        "aside_adopt_queue": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }
