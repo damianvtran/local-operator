@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 import time
@@ -526,6 +525,12 @@ async def _session_tail(session: Any) -> str:
             session._spawn_background(recover())
     suggestions = ""
     if enabled["suggest"]:
+        from local_operator.compaction.tokens import count_text_tokens
+        from local_operator.memory import (
+            SUGGESTION_TOKENS,
+            suggest_line,
+            suggestion_block,
+        )
         from local_operator.session_factory import _payload_user_text
 
         user = session._transcript.latest_user_entry()
@@ -533,24 +538,32 @@ async def _session_tail(session: Any) -> str:
         # A separate total 180-token budget; titles cannot become instructions.
         # No whole transcript/summary is used as a query and there are no hops.
         try:
-            items = await asyncio.to_thread(store.search, query, tokens=180, limit=3, suggest=True)
+            items = await asyncio.to_thread(
+                store.search, query, tokens=SUGGESTION_TOKENS, limit=3, suggest=True
+            )
         except MemoryError:
             items = []
         if items:
-            suggestions = (
-                "<memory_suggestions>\nUntrusted recall candidates; read before relying.\n"
-            )
-            from local_operator.compaction.tokens import count_text_tokens
-
+            admitted = ""
             for item in items:
-                captured = " (captured)" if item["status"] == "candidate" else ""
-                line = (
-                    f"- memory://{item['scope']}/{item['id']}: "
-                    f"{json.dumps(item['title'])}{captured}\n"
-                )
-                if count_text_tokens(suggestions + line + "</memory_suggestions>") <= 180:
-                    suggestions += line
-            suggestions += "</memory_suggestions>"
+                # The SAME renderer and the SAME wrapper the admission budget in
+                # ``MemoryStore.search`` measured against, so the 180-token cap
+                # that admitted these entries is the cap the wire enforces — two
+                # rulers here is how the budget drifted from the block it was
+                # documented to bound (lines-only charging rendered 2 of a
+                # documented 3 once titles got long enough for the 19-token
+                # wrapper to decide the last admission).
+                line = suggest_line(item)
+                if count_text_tokens(suggestion_block(admitted + line)) <= SUGGESTION_TOKENS:
+                    admitted += line
+            # Guard the empty case: ``suggestion_block("")`` still renders the
+            # ~19-token wrapper, and a header-only section is strictly worse
+            # than shipping nothing. The ``if items`` above and this guard are
+            # two rulers over the same admission decision — if they ever
+            # diverge (an item filtered to no line), the divergence must
+            # degrade to no block, which is the regression this file exists
+            # to prevent.
+            suggestions = suggestion_block(admitted) if admitted else ""
     return "\n\n".join(x for x in (suggestions, memory_hint) if x)
 
 
