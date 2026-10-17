@@ -5711,6 +5711,52 @@ async def test_a_prompt_turn_recovers_a_wordless_stop_once(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_child_session_continues_a_truncated_answer(tmp_path):
+    """A delegated child's cut ANSWER is continued in place (the flag wiring).
+
+    ``continue_truncated_answer`` is on only for a child session, and this is
+    the real path that proves it: the same turn that ends cut for a person
+    (notice only) spends one more request here, because the child's deliverable
+    is that message and its only reader is a parent that would otherwise pay a
+    resume for the rest.
+    """
+    from local_operator.harness.loop import CONTINUE_TRUNCATED_ANSWER_PROMPT
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="half"), StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta=" rest"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, parent_session_id="parent-1")
+    await session.prompt("write the report")
+
+    assert len(stream.requests) == 2, "the child spends the one continuation"
+    # ensure_ascii=False so the prompt's em dash is compared as the character the
+    # wire carries, not as a \u2014 escape.
+    second = json.dumps(stream.requests[1].model_dump(mode="json"), ensure_ascii=False)
+    assert CONTINUE_TRUNCATED_ANSWER_PROMPT in second, "the continuation reached the wire"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_session_does_not_continue_a_truncated_answer(tmp_path):
+    """NEGATIVE CONTROL for the wiring: with no parent, the same turn keeps one
+    request — an interactive session's reader can ask for the rest."""
+    from local_operator.harness.loop import CONTINUE_TRUNCATED_ANSWER_PROMPT
+
+    stream = ScriptedStream([[StreamTextDelta(delta="half"), StreamEndEvent(stop_reason="length")]])
+    session = make_session(tmp_path, stream)
+    await session.prompt("write the report")
+
+    assert len(stream.requests) == 1, "no continuation without a parent"
+    assert CONTINUE_TRUNCATED_ANSWER_PROMPT not in json.dumps(
+        stream.requests[0].model_dump(mode="json"), ensure_ascii=False
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_abort_stops_work_already_queued_behind_the_turn(tmp_path):
     """One Esc stops the running turn AND the arrivals queued behind it.
 

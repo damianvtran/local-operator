@@ -611,6 +611,30 @@ LENGTH_STOP_RECOVERY_PROMPT = (
 #: the same diagnosis.
 MAX_LENGTH_SILENT_RECOVERIES = 1
 
+#: How many times ONE run continues an answer that the output limit cut off
+#: mid-prose. A prose truncation is the one length end the loop deliberately did
+#: NOT continue -- the reader was expected to ask -- and for an interactive
+#: session that is right. For a delegated CHILD it is the exact failure the
+#: operator reported: the deliverable IS that message (a review verdict, a QA
+#: report, a handoff), it arrives cut, and the only actor left is a parent that
+#: pays a resume to get the rest. ONE continuation finishes the answer in place;
+#: a second truncation ends the run NAMED (``incidents.OUTPUT_LIMIT_CAUSE``)
+#: rather than bare, so a cut report can never be read as a finished one. Gated
+#: by ``LoopConfig.continue_truncated_answer`` (children only): an interactive
+#: session keeps today's notice-and-end behaviour.
+MAX_TRUNCATED_ANSWER_CONTINUATIONS = 1
+
+#: What the loop tells the model after the output limit cut its answer off
+#: mid-prose. Second person, like its recovery siblings, and it names the one
+#: instruction that matters: continue from the cut, do not restart. Persisted as
+#: harness chrome (see ``harness.rows.harness_chrome_prompts``) so replay shows
+#: the notice rather than attributing the harness's words to the user.
+CONTINUE_TRUNCATED_ANSWER_PROMPT = (
+    "Harness recovery notice: your last message was cut off mid-answer by your "
+    "output limit — the rest of it was never sent. Continue from exactly where "
+    "it stopped, without repeating what you already wrote, and finish the answer."
+)
+
 #: How many times ONE run will continue a turn that the network cut short —
 #: the laptop closed at home and opened at work, which is minutes of no route
 #: to anywhere.
@@ -2047,12 +2071,22 @@ class AgentLoop:
         # ``MAX_LENGTH_SILENT_RECOVERIES``. Run-scoped and topped up by nothing,
         # like every sibling recovery budget.
         length_silent_recoveries = 0
+        # Turns this run has continued after the output limit cut an answer
+        # mid-prose -- see ``MAX_TRUNCATED_ANSWER_CONTINUATIONS``. Run-scoped and
+        # topped up by nothing, like every sibling recovery budget.
+        truncated_answer_continuations = 0
         # Whether the model call that LAST ended this run was a silent length
         # cut-off whose recovery budget was spent. Reset per model call (below)
         # rather than only set once: a run that recovers through a late injection
         # and then answers has NOT ended cut off, and stamping a cause on its end
         # would tell the parent a completed run was truncated.
         length_silent_cut_off = False
+        # Whether the LAST model call ended on a prose truncation the run could
+        # not continue (the budget was spent, or the flag is off). Reset per
+        # call beside its silent sibling for the same reason: the terminal end
+        # describes the last call only, and a run that later answers cleanly must
+        # not inherit an earlier call's brand.
+        length_answer_cut_off = False
         # Turns this run has re-asked after arriving with no text and no tool
         # calls on a clean stop -- see ``MAX_WORDLESS_STOP_RECOVERIES``.
         # Run-scoped and topped up by nothing, like the truncation budget
@@ -2165,6 +2199,7 @@ class AgentLoop:
                     # Per model call: the flag describes how THIS call ended, and
                     # the terminal end event reads it for the last call only.
                     length_silent_cut_off = False
+                    length_answer_cut_off = False
                     turn_connectivity_loss = False
                     turn_retryable_interruption = False
                     turn_attempted_selector: "ModelSpec | None" = None
@@ -3134,13 +3169,54 @@ class AgentLoop:
                             # prevent, on a turn where there genuinely IS an answer
                             # to cut off (design round 2, D7).
                             #
-                            # The remedy clause is not decoration: with no call in
-                            # flight this is the one truncation the loop does NOT
-                            # auto-continue (above), so the reader is the only actor
-                            # left and every sibling row in the family names a move
-                            # (design round 1, D4). A cut call IS re-asked, but only
-                            # the call: the answer's remainder was never sent, and
-                            # only the reader can ask for it.
+                            # The remedy clause is not decoration: for a session
+                            # with no reader who can ask — a delegated CHILD,
+                            # whose parent can continue it only by paying for a
+                            # resume — the loop continues the answer ITSELF, once,
+                            # when ``continue_truncated_answer`` is on, and the
+                            # notice says so. Every other session keeps the
+                            # move it can actually make. A cut call IS re-asked,
+                            # but only the call: the answer's remainder was never
+                            # sent.
+                            if (
+                                config.continue_truncated_answer
+                                and not assistant.tool_calls
+                                and not _graceful_cancel_requested(config)
+                                and truncated_answer_continuations
+                                < MAX_TRUNCATED_ANSWER_CONTINUATIONS
+                            ):
+                                truncated_answer_continuations += 1
+                                # Persisted for the same reason every recovery
+                                # prompt is: a resumed session must be able to
+                                # see why the conversation continues. Harness
+                                # chrome -- see
+                                # ``harness.rows.harness_chrome_prompts``.
+                                recovery = Message.user(CONTINUE_TRUNCATED_ANSWER_PROMPT)
+                                context.messages.append(recovery)
+                                new_messages.append(recovery)
+                                yield NoticeEvent(
+                                    text=(
+                                        "the model hit the output limit — continuing "
+                                        "the answer where it stopped"
+                                    ),
+                                    kind="warning",
+                                )
+                                # No TurnEndEvent: the turn is still live, and the
+                                # row settles when the continued answer arrives.
+                                has_more_tool_calls = True
+                                continue
+                            if (
+                                config.continue_truncated_answer
+                                and not assistant.tool_calls
+                                and not _graceful_cancel_requested(config)
+                            ):
+                                # The one continuation is spent and the answer is
+                                # STILL cut: the end must be NAMED, or a parent
+                                # reads a truncated report as a finished one —
+                                # the same misread the silent arm's brand
+                                # removes. A text+call turn is left alone here:
+                                # the call arm owns its re-ask.
+                                length_answer_cut_off = True
                             yield NoticeEvent(
                                 text=(
                                     "the model hit the output limit — this answer "
@@ -3577,8 +3653,10 @@ class AgentLoop:
             # (``Session._classify_cut_off``, ``tests/unit/session/test_cut_off_turns.py``).
             yield AgentEndEvent(
                 messages=new_messages,
-                aborted=length_silent_cut_off,
-                cut_off_cause=OUTPUT_LIMIT_CAUSE if length_silent_cut_off else "",
+                aborted=length_silent_cut_off or length_answer_cut_off,
+                cut_off_cause=(
+                    OUTPUT_LIMIT_CAUSE if (length_silent_cut_off or length_answer_cut_off) else ""
+                ),
                 generation=generation,
             )
         finally:

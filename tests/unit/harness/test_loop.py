@@ -17,6 +17,7 @@ import pytest
 import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
+    CONTINUE_TRUNCATED_ANSWER_PROMPT,
     LENGTH_ENDED_CALL_RESULT_TEXT,
     LENGTH_STOP_RECOVERY_PROMPT,
     MAX_CONNECTIVITY_CONTINUATIONS,
@@ -3804,8 +3805,9 @@ async def test_text_only_length_truncation_is_announced_but_not_retried():
     assert "output limit" in notices[0].text
     assert notices[0].kind == "warning"
     # The copy is pinned here because it is the one row of the family the user
-    # can be left holding with no other move: a text truncation is NOT
-    # auto-continued below, and its sibling rows all name one, so this one must
+    # can be left holding with no other move: for an INTERACTIVE session a text
+    # truncation is not auto-continued (a delegated child continues it once --
+    # see the tests below), and its sibling rows all name one, so this one must
     # name a remedy too (design round 1, D4). It also uses the family's em dash,
     # not the `--` it shipped with on the first pass (D2).
     assert notices[0].text == (
@@ -3817,6 +3819,87 @@ async def test_text_only_length_truncation_is_announced_but_not_retried():
     assert "partial" in "".join(
         getattr(m, "text", "") or "" for m in context.messages if isinstance(m, Message)
     )
+    # NEGATIVE CONTROL for the child continuation: with the flag off (the
+    # default, every interactive session) the prose truncation keeps its bare
+    # end -- only the notice changed, not the ending.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.aborted and end.cut_off_cause == ""
+
+
+@pytest.mark.asyncio
+async def test_a_child_continues_a_prose_truncation_once():
+    """A cut ANSWER is continued IN PLACE for a delegated child.
+
+    The prose arm deliberately does not auto-continue an interactive session:
+    the human can ask for the rest. A child has no such reader -- its parent can
+    continue it only by paying for a resume -- and its deliverable is often that
+    very message (a verdict, a report, a handoff). One continuation spends one
+    request to finish it; the notice says so, and the end is NOT branded because
+    the run completed its answer.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first half"), StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta=" second half"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")],
+            context,
+            make_config(stream, continue_truncated_answer=True),
+            None,
+        )
+    ]
+
+    assert len(stream.requests) == 2, "the continuation is one extra request"
+    assert any(
+        m.role == "user" and m.text == CONTINUE_TRUNCATED_ANSWER_PROMPT
+        for m in context.messages
+        if isinstance(m, Message)
+    ), "the continuation must be persisted as harness chrome"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("continuing the answer where it stopped" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert (
+        not end.aborted and end.cut_off_cause == ""
+    ), "a run that finished its answer through the continuation is not cut off"
+
+
+@pytest.mark.asyncio
+async def test_a_second_prose_truncation_ends_the_run_NAMED():
+    """The prose continuation budget is ONE; a second cut ends the run as a
+    NAMED ``output-limit`` cut-off.
+
+    A bare end reads as a completed answer on every surface -- the exact misread
+    the silent arm's brand removes, and just as wrong for a truncated report.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first half"), StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta="second half"), StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")],
+            context,
+            make_config(stream, continue_truncated_answer=True),
+            None,
+        )
+    ]
+
+    assert len(stream.requests) == 2, "initial + exactly one continuation"
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    assert end.cut_off_cause == "output-limit", end.cut_off_cause
 
 
 @pytest.mark.asyncio
