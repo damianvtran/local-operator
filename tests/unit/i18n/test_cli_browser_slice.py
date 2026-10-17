@@ -53,7 +53,17 @@ REPO = Path(__file__).resolve().parents[3]
 _bw = tr("cli.browser")
 
 CLI = "local_operator/cli.py"
-CEILING = 746
+CEILING = 702  # the count after CLI tranche 1; may only fall
+
+
+def _live_cli_count(i18n_check) -> int:
+    """The ceiling must have NO SLACK: it equals what the scanner actually
+    counts for cli.py right now. Derived rather than hard-coded, because every
+    later extraction tranche moves it -- a hard pin turns each tranche into a
+    stale-pin break (help tranche 1 had to fix exactly that chain)."""
+    entries = i18n_check.load_allowlist(i18n_check.ALLOWLIST)
+    scanned = i18n_check.scan_tree(i18n_check.REPO)
+    return i18n_check._counts(scanned, entries).get(CLI, 0)
 
 
 def test_every_key_renders_the_bytes_the_base_expressions_produced() -> None:
@@ -113,9 +123,12 @@ def test_the_usage_line_renders_its_literal_braces() -> None:
     )
 
 
-def test_the_ceiling_shrank_by_exactly_this_slice() -> None:
+def test_the_ceiling_has_no_slack_and_never_rises(i18n_check) -> None:
     baseline = json.loads((REPO / "i18n" / "baseline.json").read_text(encoding="utf-8"))
-    assert baseline["files"].get(CLI) == CEILING, baseline["files"].get(CLI)
+    live = _live_cli_count(i18n_check)
+    assert baseline["files"].get(CLI) == live, (baseline["files"].get(CLI), live)
+    # The count may only fall from here; this bound records "after CLI tranche 1".
+    assert live <= CEILING, live
     assert CLI not in baseline["enforced"], "cli.py is activated without the file being clean"
 
 
@@ -128,7 +141,13 @@ def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check) 
     baseline_dir.mkdir()
     baseline = baseline_dir / "baseline.json"
     baseline.write_text(
-        json.dumps({"note": "slice fixture", "enforced": [CLI], "files": {CLI: CEILING}})
+        json.dumps(
+            {
+                "note": "slice fixture",
+                "enforced": [CLI],
+                "files": {CLI: _live_cli_count(i18n_check)},
+            }
+        )
     )
     allowlist = baseline_dir / "allowlist.toml"
     allowlist.write_text("entries = []\n")

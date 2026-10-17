@@ -37,7 +37,7 @@ from local_operator.i18n.keys import cli_sessions_help as _sh
 
 REPO = Path(__file__).resolve().parents[3]
 CLI = "local_operator/cli.py"
-CEILING = 702
+CEILING = 702  # the count after help tranche 1; may only fall
 BLOCK = (
     "sessions_parser",
     "cleanup_parser",
@@ -46,6 +46,16 @@ BLOCK = (
     "move_parser",
     "sync_parser",
 )
+
+
+def _live_cli_count(i18n_check) -> int:
+    """Derived, not hard-pinned: every later extraction tranche moves cli.py's
+    ceiling, and a hard pin turns each tranche into a stale-pin break (round 1
+    of this very PR was that failure, twice over). Equality keeps "no slack";
+    the bound keeps "may only fall"."""
+    entries = i18n_check.load_allowlist(i18n_check.ALLOWLIST)
+    scanned = i18n_check.scan_tree(i18n_check.REPO)
+    return i18n_check._counts(scanned, entries).get(CLI, 0)
 
 
 def test_every_key_renders_the_byte_its_base_call_carried() -> None:
@@ -85,9 +95,11 @@ def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
     assert "_sh." in block
 
 
-def test_the_ceiling_shrank_by_exactly_this_tranche_and_stays_unactivated() -> None:
+def test_the_ceiling_has_no_slack_and_stays_unactivated(i18n_check) -> None:
     baseline = json.loads((REPO / "i18n" / "baseline.json").read_text(encoding="utf-8"))
-    assert baseline["files"].get(CLI) == CEILING, baseline["files"].get(CLI)
+    live = _live_cli_count(i18n_check)
+    assert baseline["files"].get(CLI) == live, (baseline["files"].get(CLI), live)
+    assert live <= CEILING, live
     assert CLI not in baseline["enforced"], "cli.py is activated without the file being clean"
 
 
@@ -100,7 +112,13 @@ def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check) 
     baseline_dir.mkdir()
     baseline = baseline_dir / "baseline.json"
     baseline.write_text(
-        json.dumps({"note": "slice fixture", "enforced": [CLI], "files": {CLI: CEILING}})
+        json.dumps(
+            {
+                "note": "slice fixture",
+                "enforced": [CLI],
+                "files": {CLI: _live_cli_count(i18n_check)},
+            }
+        )
     )
     allowlist = baseline_dir / "allowlist.toml"
     allowlist.write_text("entries = []\n")
