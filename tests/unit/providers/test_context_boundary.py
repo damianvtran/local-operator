@@ -1,6 +1,7 @@
 """Regression guards for stale admission hints, without live model requests."""
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -144,6 +145,12 @@ def test_a_failed_tokenizer_warm_does_not_change_the_measured_pair():
     state a transient first-use failure leaves a live process in: the retry
     must recover the exact ruler, otherwise one failed fetch silently affects
     every compaction budget for the life of the process.
+
+    The retry is DISPATCHED rather than run inline (a caller must never wait
+    on a fetch — round-1 fix 3), so the recovery is joined here: the call that
+    notices the elapsed deadline counts with the fallback, and the next one
+    has the real encoder back. The measurement below runs after that
+    publication, which is the state every later request sees.
     """
     pytest.importorskip("tiktoken")
     from local_operator.compaction import tokens as tokens_mod
@@ -158,6 +165,16 @@ def test_a_failed_tokenizer_warm_does_not_change_the_measured_pair():
         tokens_mod._ENCODING_FAILED = True
         tokens_mod._ENCODING_FAILURES = 1
         tokens_mod._ENCODING_RETRY_AT = 0.0
+
+        # The retry is dispatched, so the table-cached load may publish before
+        # this call returns; either way the latch must clear without a fetch
+        # ever running on this thread.
+        tokens_mod._get_encoding()
+        deadline = time.monotonic() + 60.0
+        while tokens_mod._ENCODING is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert tokens_mod._ENCODING is not None, "the dispatched retry never recovered"
+        assert tokens_mod._ENCODING_FAILED is False
 
         req = request().model_copy(
             update={

@@ -1,5 +1,6 @@
 """Token estimation: tiktoken path, fallback, memoization, invalidation."""
 
+import threading
 import time
 
 import pytest
@@ -411,8 +412,10 @@ class TestThreadSafetyForOffloadedEstimation:
         loads: list[int] = []
         real_import = tokens_mod._get_encoding
 
-        tokens_mod._ENCODING = None
-        tokens_mod._ENCODING_FAILED = False
+        # The supported reset: it also clears the epoch-keyed load claim, so a
+        # stale claim from another test cannot make these workers observe the
+        # fallback instead of the singleton.
+        tokens_mod.reset_tokenizer_state()
 
         class _Sentinel:
             def encode(self, text, **_kwargs):
@@ -439,8 +442,7 @@ class TestThreadSafetyForOffloadedEstimation:
                 sys.modules["tiktoken"] = original
             else:
                 sys.modules.pop("tiktoken", None)
-            tokens_mod._ENCODING = None
-            tokens_mod._ENCODING_FAILED = False
+            tokens_mod.reset_tokenizer_state()
 
     def test_an_invalidation_during_a_computation_is_not_lost(self):
         """A mutation that lands mid-encode must not leave a stale count.
@@ -663,6 +665,21 @@ def _require_real_encoding() -> None:
         pytest.skip("cl100k_base unavailable — the recovery cannot be observed")
 
 
+def _wait_until(predicate, timeout: float = 30.0) -> bool:
+    """Poll ``predicate`` until it holds; ``False`` on timeout.
+
+    Used for the states that are now reached on the loader thread — the retry
+    is deliberately not run inline, so a test cannot observe its outcome by
+    return value.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return bool(predicate())
+
+
 def test_a_failed_load_is_retried_once_its_backoff_elapses():
     """The latch is a cooldown, not a verdict for the life of the process.
 
@@ -671,6 +688,14 @@ def test_a_failed_load_is_retried_once_its_backoff_elapses():
     calibration-margin test's pair from (97502, 90002) into (106876, 97501)
     and made a 100k window refuse a request it could serve. A latch whose
     deadline has passed must recover the real encoder.
+
+    The recovery is observed on the loader thread, because the retry is
+    dispatched rather than run inline: the call that notices the elapsed
+    deadline may degrade for that one estimate (the fast, table-cached load can
+    publish before it returns), and the encoder is back for the next. Running
+    it inline is the round-1 defect (a caller blocked on the fetch for its
+    whole timeout); the non-blocking half is pinned separately by
+    ``test_a_due_retry_does_not_block_an_unrelated_estimate``.
     """
     _require_real_encoding()
     try:
@@ -678,11 +703,117 @@ def test_a_failed_load_is_retried_once_its_backoff_elapses():
         tokens_mod._ENCODING_FAILED = True
         tokens_mod._ENCODING_FAILURES = 1
         tokens_mod._ENCODING_RETRY_AT = 0.0  # the backoff has elapsed
-        assert tokens_mod._get_encoding() is not None
+        tokens_mod._get_encoding()  # dispatches the retry
+        assert _wait_until(lambda: tokens_mod._ENCODING is not None)
         assert tokens_mod._ENCODING_FAILED is False
         assert tokens_mod._ENCODING_FAILURES == 0
     finally:
         tokens_mod.reset_tokenizer_state()
+
+
+def test_a_due_retry_does_not_block_an_unrelated_estimate():
+    """A retry runs on its own thread; no caller waits on its fetch.
+
+    Round-1 defect: the elapsed-backoff retry ran inline holding the shared
+    lock, so an unrelated thread's ``estimate_tokens`` blocked for the whole
+    fetch — reproduced at 2.01 s with a 2 s fake, and 75.7 s offline, every
+    backoff interval, forever. The retry must be dispatched and the estimate
+    must answer immediately from the fallback.
+    """
+    import sys
+    import types
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_load(_name: str):
+        entered.set()
+        release.wait(20)
+        return object()
+
+    fake_tiktoken = types.ModuleType("tiktoken")
+    fake_tiktoken.get_encoding = slow_load  # type: ignore[attr-defined]
+    original = sys.modules.get("tiktoken")
+
+    tokens_mod.reset_tokenizer_state()
+    try:
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_FAILURES = 1
+        tokens_mod._ENCODING_RETRY_AT = 0.0
+        sys.modules["tiktoken"] = fake_tiktoken
+
+        assert tokens_mod._get_encoding() is None  # dispatches, does not load
+        assert entered.wait(5), "the retry never reached its fetch"
+
+        started = time.monotonic()
+        assert estimate_tokens(Message.user("x" * 400)) == 100
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.5, f"an unrelated estimate waited {elapsed:.2f}s on the retry"
+    finally:
+        release.set()
+        _wait_until(lambda: tokens_mod._LOAD_EPOCH is None)
+        if original is not None:
+            sys.modules["tiktoken"] = original
+        else:
+            sys.modules.pop("tiktoken", None)
+        tokens_mod.reset_tokenizer_state()
+
+
+def test_a_retry_failing_after_a_reset_cannot_rearm_the_latch():
+    """QA's interleaving: a reset landing while a retry is in flight.
+
+    Reproduced before this round as ``failed=True, retry_in=30s`` on the next
+    count — the loader compared the epoch, the reset landed, and the loader
+    published its failure into the fresh state. The compare and the store are
+    now ONE critical section, and the reset takes the same lock, so the reset
+    is either entirely before the publication (discarded) or entirely after it
+    (the reset clears what was published).
+    """
+    import sys
+    import types
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_failure(_name: str):
+        entered.set()
+        release.wait(20)
+        raise RuntimeError("cold BPE fetch failed")
+
+    fake_tiktoken = types.ModuleType("tiktoken")
+    fake_tiktoken.get_encoding = slow_failure  # type: ignore[attr-defined]
+    original = sys.modules.get("tiktoken")
+
+    tokens_mod.reset_tokenizer_state()
+    try:
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_FAILURES = 1
+        tokens_mod._ENCODING_RETRY_AT = 0.0
+        sys.modules["tiktoken"] = fake_tiktoken
+
+        text = "word " * 100
+        assert count_text_tokens(text) == len(text) // 4  # the retry is now in flight
+        assert entered.wait(5), "the retry never reached its fetch"
+
+        tokens_mod.reset_tokenizer_state()  # lands inside the publication window
+        release.set()
+        assert _wait_until(lambda: tokens_mod._LOAD_EPOCH is None)
+
+        assert tokens_mod._ENCODING_FAILED is False, "the late retry re-armed the latch"
+        assert tokens_mod._ENCODING_FAILURES == 0
+        assert tokens_mod._ENCODING_RETRY_AT == 0.0
+        assert tokens_mod._ENCODING is None
+    finally:
+        release.set()
+        if original is not None:
+            sys.modules["tiktoken"] = original
+        else:
+            sys.modules.pop("tiktoken", None)
+        tokens_mod.reset_tokenizer_state()
+
+    # The fresh state still loads: no cooldown was smuggled into it.
+    _require_real_encoding()
+    tokens_mod.reset_tokenizer_state()
 
 
 def test_a_failed_load_is_not_retried_inside_its_backoff():
@@ -696,24 +827,126 @@ def test_a_failed_load_is_not_retried_inside_its_backoff():
         tokens_mod._ENCODING_FAILED = True
         tokens_mod._ENCODING_RETRY_AT = time.monotonic() + 60.0
         assert tokens_mod._get_encoding() is None
+        assert tokens_mod._LOAD_EPOCH is None, "a gated attempt was dispatched anyway"
     finally:
         tokens_mod.reset_tokenizer_state()
 
 
+def test_a_cooldown_does_not_poison_the_per_model_cache():
+    """A transient cooldown must not be cached as "tiktoken is gone" for a model.
+
+    ``count_text_tokens(text, model=...)`` is the HTTP chat response's
+    ``stats.total_tokens`` path. When the model resolution has to fall back to
+    the shared singleton and that singleton is inside a retry cooldown, the
+    answer for THIS call is legitimately the chars/4 fallback — but caching
+    that ``None`` under the model name would re-create the round-1 defect one
+    layer down: a 30-300 s transient published as a permanent property of the
+    model. Both directions are pinned: no poisoning during the cooldown, and
+    the model's real encoder used (and cached) once the tokenizer recovers.
+    """
+    import sys
+    import types
+
+    def unavailable(_name: str):
+        raise RuntimeError("no BPE table while offline")
+
+    fake_tiktoken = types.ModuleType("tiktoken")
+    fake_tiktoken.encoding_for_model = unavailable  # type: ignore[attr-defined]
+    fake_tiktoken.get_encoding = unavailable  # type: ignore[attr-defined]
+    original = sys.modules.get("tiktoken")
+
+    tokens_mod.reset_tokenizer_state()
+    try:
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_FAILURES = 1
+        tokens_mod._ENCODING_RETRY_AT = time.monotonic() + 300.0
+        sys.modules["tiktoken"] = fake_tiktoken
+
+        text = "hello world, this is a token count"
+        assert count_text_tokens(text, model="gpt-4o") == len(text) // 4
+        assert (
+            "gpt-4o" not in tokens_mod._MODEL_ENCODINGS
+        ), "a cooldown result was cached as the model's encoder"
+    finally:
+        if original is not None:
+            sys.modules["tiktoken"] = original
+        else:
+            sys.modules.pop("tiktoken", None)
+        tokens_mod.reset_tokenizer_state()
+
+    # Recovery direction: the model's own encoder must be resolvable again.
+    pytest.importorskip("tiktoken")
+    cjk = "大语言模型会显著改变分词计数方式" * 4
+    try:
+        tokens_mod.reset_tokenizer_state()
+        real = count_text_tokens(cjk, model="gpt-4o")
+        assert real != len(cjk) // 4, "the recovered model encoder was not used"
+        assert "gpt-4o" in tokens_mod._MODEL_ENCODINGS
+        assert count_text_tokens(cjk, model="gpt-4o") == real  # served from cache
+    finally:
+        tokens_mod.reset_tokenizer_state()
+
+
+def test_the_retry_backoff_doubles_and_caps():
+    """30 s, then doubling per failure, pinned at the 5-minute cap.
+
+    Pinned because the schedule is the whole reason a permanently offline
+    process is bounded: a wrong base or a missing cap is either a retry storm
+    (a 75.7 s fetch on nearly every estimate) or a never-retried process.
+    """
+    import sys
+    import types
+
+    def always_fails(_name: str):
+        raise RuntimeError("no BPE table")
+
+    fake_tiktoken = types.ModuleType("tiktoken")
+    fake_tiktoken.get_encoding = always_fails  # type: ignore[attr-defined]
+    original = sys.modules.get("tiktoken")
+
+    tokens_mod.reset_tokenizer_state()
+    try:
+        sys.modules["tiktoken"] = fake_tiktoken
+        epoch = tokens_mod._ENCODING_EPOCH
+        delays: list[float] = []
+        for _ in range(6):
+            with tokens_mod._STATE_LOCK:
+                tokens_mod._LOAD_EPOCH = epoch  # claim, as _get_encoding would
+            started = time.monotonic()
+            assert tokens_mod._load_encoding(epoch) is None
+            delays.append(tokens_mod._ENCODING_RETRY_AT - started)
+
+        assert delays == pytest.approx([30.0, 60.0, 120.0, 240.0, 300.0, 300.0], abs=1.0)
+        assert tokens_mod._ENCODING_FAILURES == 6
+    finally:
+        if original is not None:
+            sys.modules["tiktoken"] = original
+        else:
+            sys.modules.pop("tiktoken", None)
+        tokens_mod.reset_tokenizer_state()
+
+
 def test_reset_tokenizer_state_clears_the_latch_and_reloads():
-    """The test-visible reset returns a poisoned process to a cold state."""
+    """The test-visible reset returns a poisoned process to a cold state.
+
+    Including the per-model cache: an encoder resolved from the pre-reset
+    tiktoken state must not outlive the reset (that cache is what
+    ``count_text_tokens(model=...)`` answers from).
+    """
     _require_real_encoding()
     try:
         tokens_mod._ENCODING = None
         tokens_mod._ENCODING_FAILED = True
         tokens_mod._ENCODING_FAILURES = 3
         tokens_mod._ENCODING_RETRY_AT = time.monotonic() + 300.0
+        tokens_mod._MODEL_ENCODINGS["gpt-4o"] = object()
 
         tokens_mod.reset_tokenizer_state()
 
         assert tokens_mod._ENCODING_FAILED is False
         assert tokens_mod._ENCODING_FAILURES == 0
         assert tokens_mod._ENCODING_RETRY_AT == 0.0
+        assert tokens_mod._MODEL_ENCODINGS == {}
         assert tokens_mod._get_encoding() is not None
     finally:
         tokens_mod.reset_tokenizer_state()
