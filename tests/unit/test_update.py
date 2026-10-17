@@ -114,6 +114,25 @@ def _may_touch_the_plists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update_mod, "_repair_refusal", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _never_probes_the_live_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this module asks launchd about the operator's real job.
+
+    The mobile child's D3 gate reads the supervised pid only after a ``current``
+    plist outcome, and ``mobile_install._supervised_pid`` is a live
+    ``launchctl print`` against the label this machine actually runs — the same
+    hazard QA round 2's Q-1 closed for the sandbox path. A pytest process here
+    runs under the operator's HOME, so without this every test that drives the
+    child to a ``current`` repair would inspect their daemon (a read, but their
+    job all the same). ``None`` is also the honest default: no supervisor was
+    consulted, so the child bounces, exactly as before the gate existed.
+
+    Tests that pin the gate override this in their own body — a test's own
+    ``monkeypatch`` runs after this fixture, so it wins.
+    """
+    monkeypatch.setattr(install_mod, "_supervised_pid", lambda: None)
+
+
 def _pypi_payload(version: str, files: list[dict[str, object]]) -> dict[str, object]:
     return {"info": {"version": version}, "urls": files, "releases": {version: files}}
 
@@ -1238,6 +1257,119 @@ def test_update_no_services_still_repairs_the_supervised_daemons(
     assert ran == ["daemons"]
 
 
+def test_services_stage_on_a_generation_install_moves_the_supervised_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1: ONE owner for the sequence, and the generation path is not exempt.
+
+    The generation branch called `reload_serve_daemons(rolling=True)` alone, so a
+    default `lop update` on this host's own layout never refreshed the supervised
+    LaunchAgents: the mobile relay, browser bridge, tunnel and wakes units stayed
+    on 0.71.5 through seven releases (0.73.1-0.73.10), and the phone kept serving
+    the asks sheet of that build. The order asserted here is the contract
+    `restart_services` owns: supervised units (from a child of the NEW build)
+    first, the serve reloads after.
+    """
+    from local_operator import services, update
+
+    order: list[str] = []
+    calls: list[dict[str, object]] = []
+
+    def daemons() -> list[update.DaemonRefresh]:
+        order.append("daemons")
+        return [
+            update.DaemonRefresh(
+                "service daemons",
+                statuses=(update.DaemonStatus("mobile", "refreshed"),),
+            )
+        ]
+
+    def serve(**kwargs: object) -> list[object]:
+        order.append("serve")
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(update, "_is_generation_install", lambda _root=None: True)
+    monkeypatch.setattr(update, "_live_serve_records", lambda: {})
+    monkeypatch.setattr(update, "refresh_daemons_after_upgrade", daemons)
+    monkeypatch.setattr(services, "reload_serve_daemons", serve)
+
+    report = update._services_stage()
+
+    assert order == ["daemons", "serve"], "the supervised units must move on this path"
+    assert calls == [{"wait_s": services.RELOAD_WAIT_S, "rolling": True}]
+    assert report.daemons == (update.DaemonStatus("mobile", "refreshed"),)
+
+
+def test_services_stage_on_a_mutable_install_keeps_the_non_rolling_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mutable twin: same sequence, and the rolling contract stays OFF.
+
+    A pip/uv mutable install has no generations to roll through; passing
+    ``rolling=True`` there would advertise a contract the layout cannot honour.
+    """
+    from local_operator import services, update
+
+    order: list[str] = []
+    calls: list[dict[str, object]] = []
+    statuses = (update.DaemonStatus("tunnel", "already"),)
+
+    monkeypatch.setattr(update, "_is_generation_install", lambda _root=None: False)
+    monkeypatch.setattr(update, "_live_serve_records", lambda: {})
+    monkeypatch.setattr(
+        update,
+        "refresh_daemons_after_upgrade",
+        lambda: order.append("daemons")
+        or [update.DaemonRefresh("service daemons", statuses=statuses)],
+    )
+    monkeypatch.setattr(
+        services,
+        "reload_serve_daemons",
+        lambda **kwargs: order.append("serve") or calls.append(kwargs) or [],
+    )
+
+    report = update._services_stage()
+
+    assert order == ["daemons", "serve"]
+    assert calls == [{"wait_s": services.RELOAD_WAIT_S, "rolling": False}]
+    assert report.daemons == statuses
+
+
+def test_rolling_receipt_lists_every_supervised_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: a receipt row per supervised unit, not just the pending ones.
+
+    The receipt said nothing at all about a generation install's supervised
+    units — its `services` list held only serving rows and pending ones — so the
+    seven-release staleness was not visible in the operation record either.
+    ``central_services_complete`` stays False: a refreshed pid proves a bounce,
+    not that the unit is on the current build.
+    """
+    from local_operator import update
+
+    stage = update.StageReport(
+        daemons=(
+            update.DaemonStatus("browser bridge", "refreshed"),
+            update.DaemonStatus("mobile", "already"),
+            update.DaemonStatus("tunnel", "failed"),
+        )
+    )
+    monkeypatch.setattr(update, "_config_roots", lambda: [])
+    monkeypatch.setattr(update, "current_generation", lambda: None)
+
+    rolling = update._rolling_receipt(None, stage)
+
+    rows = {row["name"]: row for row in rolling["services"]}
+    assert rows == {
+        "browser bridge": {"name": "browser bridge", "state": "refreshed", "reason": ""},
+        "mobile": {"name": "mobile", "state": "already", "reason": ""},
+        "tunnel": {"name": "tunnel", "state": "failed", "reason": ""},
+    }
+    assert rolling["central_services_complete"] is False
+
+
 def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -1646,6 +1778,34 @@ def test_refresh_failed_when_executable_gone() -> None:
     assert result.kind == "failed"
     assert "interpreter vanished" in result.error
     run.assert_not_called()
+
+
+def test_refresh_reports_an_already_current_daemon_as_already() -> None:
+    """D3: the child's skipped bounce reaches the parent as its own kind.
+
+    The child prints ``daemon_report:{"name":"mobile","status":"already"}``
+    when the running daemon's argv already names the generation ``current``
+    points at. The parent must not read that rc-0 child as ``restarted``: that
+    would claim a bounce nobody made, and it would add the "refresh the phone
+    UI" line for a phone that never lost its connection.
+    """
+    completed = subprocess.CompletedProcess(
+        [],
+        0,
+        stdout=update_mod._daemon_report_line("mobile", "already") + "\n",
+        stderr="",
+    )
+    with (
+        patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+        patch("subprocess.run", return_value=completed),
+    ):
+        result = refresh_mobile_after_upgrade()
+    assert result.kind == "already"
+    # The machine line is not a human line: the summary must not echo it.
+    assert result.lines == ()
+    refresh = update_mod._mobile_daemon_refresh(result)
+    assert refresh.statuses == (update_mod.DaemonStatus("mobile", "already"),)
+    assert refresh.lines == (), "a skipped bounce must not claim the phone UI refresh"
 
 
 class TestServiceDaemonRefresh:
@@ -2356,6 +2516,98 @@ class TestServiceDaemonRefresh:
         )
         assert update_mod.mobile_refresh_command() == 0
         assert order == ["plist", "bounce:restart"]
+
+    def test_the_mobile_unit_skips_the_bounce_when_its_build_is_current(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """D3: a daemon provably on the current generation is not bounced.
+
+        Once `lop update` refreshes the supervised units on every run (D1), every
+        no-op update check reaches this child — an unconditional bounce would drop
+        the phone's connection on each one. ``False`` from
+        ``generation_staleness_of_process`` means both halves were READ and match.
+        """
+        from local_operator import launchd
+        from local_operator.mobile import install as mobile_install
+
+        monkeypatch.setattr(
+            mobile_install,
+            "refresh_plist_if_stale",
+            lambda: launchd.PlistRefresh(name="mobile", kind="current"),
+        )
+        monkeypatch.setattr(mobile_install, "_supervised_pid", lambda: 4242)
+        monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
+        monkeypatch.setattr(
+            mobile_install, "service_action", lambda action: pytest.fail("must not bounce")
+        )
+
+        assert update_mod.mobile_refresh_command() == 0
+        assert update_mod._daemon_report_line("mobile", "already") in capsys.readouterr().out
+
+    @pytest.mark.parametrize("staleness", [True, None])
+    def test_the_mobile_unit_bounces_when_the_build_is_not_proven_current(
+        self, staleness: bool | None, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """The mutable path is byte-for-byte unchanged.
+
+        ``True`` is a proven move; ``None`` is the unanswered question (no
+        generation in argv, an unreadable pointer) and must bounce too — the bug
+        being fixed is a daemon left on an old build, so an unproven build is
+        bounced, never skipped.
+        """
+        from local_operator import launchd
+        from local_operator.mobile import install as mobile_install
+
+        bounced: list[str] = []
+        monkeypatch.setattr(
+            mobile_install,
+            "refresh_plist_if_stale",
+            lambda: launchd.PlistRefresh(name="mobile", kind="current"),
+        )
+        monkeypatch.setattr(mobile_install, "_supervised_pid", lambda: 4242)
+        monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: staleness)
+        monkeypatch.setattr(
+            mobile_install,
+            "service_action",
+            lambda action: bounced.append(action) or {"ok": True, "error": ""},
+        )
+
+        assert update_mod.mobile_refresh_command() == 0
+        assert bounced == ["restart"]
+        assert update_mod._daemon_report_line("mobile", "already") not in capsys.readouterr().out
+
+    def test_the_mobile_unit_bounces_when_no_supervised_pid_is_readable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No pid proves nothing, so it must not be read as current.
+
+        ``_supervised_pid`` answers ``None`` on a host with no launchd layout, a
+        pip/pipx install, or a job launchd does not report a pid for. The
+        staleness question is not even asked there.
+        """
+        from local_operator import launchd
+        from local_operator.mobile import install as mobile_install
+
+        bounced: list[str] = []
+        monkeypatch.setattr(
+            mobile_install,
+            "refresh_plist_if_stale",
+            lambda: launchd.PlistRefresh(name="mobile", kind="current"),
+        )
+        monkeypatch.setattr(mobile_install, "_supervised_pid", lambda: None)
+        monkeypatch.setattr(
+            update_mod,
+            "generation_staleness_of_process",
+            lambda pid: pytest.fail("no pid to compare"),
+        )
+        monkeypatch.setattr(
+            mobile_install,
+            "service_action",
+            lambda action: bounced.append(action) or {"ok": True, "error": ""},
+        )
+
+        assert update_mod.mobile_refresh_command() == 0
+        assert bounced == ["restart"]
 
     def test_the_mobile_unit_retries_the_bounce_once(self, monkeypatch) -> None:
         """ONE bounded retry, for the 2026-09-30 failure mode.

@@ -755,7 +755,28 @@ def test_restart_services_carries_the_daemon_statuses_through(monkeypatch) -> No
         "refresh_daemons_after_upgrade",
         lambda: [update_mod.DaemonRefresh("service daemons", statuses=statuses)],
     )
-    monkeypatch.setattr(services, "reload_serve_daemons", lambda *, wait_s: [])
+    monkeypatch.setattr(services, "reload_serve_daemons", lambda *, wait_s, rolling: [])
     refreshes = services.restart_services()
     assert refreshes[0].statuses == statuses
     assert refreshes[0].name == "service daemons"
+
+
+def test_restart_services_passes_the_rolling_contract_through(monkeypatch) -> None:
+    """D1: the reload's rolling contract is this function's argument to carry.
+
+    ``update._services_stage`` asks for ``rolling`` only on a generation install;
+    a mutable one keeps the non-rolling reload. ``lop services restart`` calls
+    this with no argument, so the default has to stay ``rolling=False``.
+    """
+    from local_operator import update as update_mod
+
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(update_mod, "refresh_daemons_after_upgrade", lambda: [])
+    monkeypatch.setattr(
+        services, "reload_serve_daemons", lambda **kwargs: seen.append(kwargs) or []
+    )
+
+    services.restart_services(rolling=True)
+    services.restart_services()
+
+    assert [call["rolling"] for call in seen] == [True, False]
