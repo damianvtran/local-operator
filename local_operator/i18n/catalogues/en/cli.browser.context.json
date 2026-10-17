@@ -1,0 +1,282 @@
+{
+  "cli.browser.no_changes": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "approval-required notice for `cleanup --yes`"
+  },
+  "cli.browser.invalid_session": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "rejected session id argument"
+  },
+  "cli.browser.cleanup_blocked": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "detail is the daemon's refusal reason"
+  },
+  "cli.browser.live_tabs": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "count is the number of unowned live tabs"
+  },
+  "cli.browser.handles_redacted": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "provenance note under the live-tabs list"
+  },
+  "cli.browser.read_only": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "the read-only policy line"
+  },
+  "cli.browser.exact_cleanup": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "command hint; command tokens stay in situ"
+  },
+  "cli.browser.bridge_installed": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "install success line"
+  },
+  "cli.browser.load_extension": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "follow-up step; command token in situ"
+  },
+  "cli.browser.bridge_reconciled": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "repair success line"
+  },
+  "cli.browser.installed_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; value is a yes/no word"
+  },
+  "cli.browser.daemon_healthy": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; value is a yes/no word"
+  },
+  "cli.browser.bridge_predates": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; command token in situ"
+  },
+  "cli.browser.extension_connected": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; value is a yes/no word"
+  },
+  "cli.browser.extension_update_note": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "note names the newer version"
+  },
+  "cli.browser.paired_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; value is a yes/no word"
+  },
+  "cli.browser.driving_tabs": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "label counts the driven tabs"
+  },
+  "cli.browser.driving_none": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; no tabs driven"
+  },
+  "cli.browser.driving_url": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "url is the page the bridge reports"
+  },
+  "cli.browser.heartbeat_stale": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "age is seconds; keep the ANSI codes exactly"
+  },
+  "cli.browser.heartbeat_fallback": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "consequence line under a stale heartbeat"
+  },
+  "cli.browser.heartbeat_repair": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "command hint; command token in situ"
+  },
+  "cli.browser.port_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; port is a number"
+  },
+  "cli.browser.log_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; log is a path"
+  },
+  "cli.browser.downloads_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; downloads root path"
+  },
+  "cli.browser.downloads_detail": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "size is bytes; audit is the audit filename"
+  },
+  "cli.browser.supervisor_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; supervisor name"
+  },
+  "cli.browser.config_root_line": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; config root path"
+  },
+  "cli.browser.legacy_install": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; legacy registration path"
+  },
+  "cli.browser.legacy_note": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "wrapped continuation; merged with 3708 so one sentence is one key"
+  },
+  "cli.browser.unclaimed_registration": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "keep the ANSI codes exactly"
+  },
+  "cli.browser.pair_no_extension": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "no extension paired; command token in situ"
+  },
+  "cli.browser.waiting_header": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "aligned label; pending claimants follow"
+  },
+  "cli.browser.revoke_no_match": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "target echoes the user's typed token; keep ANSI codes"
+  },
+  "cli.browser.nothing_paired": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "indented empty-list note"
+  },
+  "cli.browser.revoked": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "label identifies the revoked extension"
+  },
+  "cli.browser.revoked_browser": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "reset confirmation"
+  },
+  "cli.browser.pairing_code": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "same key as L3787"
+  },
+  "cli.browser.enter_code": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "same key as L3788"
+  },
+  "cli.browser.open_popup": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "instruction"
+  },
+  "cli.browser.pairing_code_labeled": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "code plus the waiting install's label"
+  },
+  "cli.browser.enter_each_code": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "instruction"
+  },
+  "cli.browser.already_paired": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "explains the already-paired state; tokens in situ"
+  },
+  "cli.browser.no_extension_waiting": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "instruction"
+  },
+  "cli.browser.authorised_installs": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "list header"
+  },
+  "cli.browser.now_driving": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "id is a short extension id"
+  },
+  "cli.browser.service_ok": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "command is start/stop/restart"
+  },
+  "cli.browser.logs_missing": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "path is the daemon log path; command tokens in situ"
+  },
+  "cli.browser.cannot_run": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "command is a binary name; location is the log path; keep ANSI codes"
+  },
+  "cli.browser.note_prefix": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "note: prefix; warning is the uninstall warning; keep ANSI codes"
+  },
+  "cli.browser.usage": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "usage line; the brace group is literal (escaped)"
+  },
+  "cli.browser.drive_no_connected": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "target echoes the user's typed token"
+  },
+  "cli.browser.drive_no_single": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "target echoes the user's typed token"
+  },
+  "cli.browser.install_failed": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "fallback when the install result carries no error"
+  },
+  "cli.browser.status_yes": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "the word 'yes' on an aligned status row"
+  },
+  "cli.browser.status_no": {
+    "role": "lop browser CLI output",
+    "tone": "terse, factual, operator-facing",
+    "note": "the word 'no' on an aligned status row"
+  }
+}
