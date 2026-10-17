@@ -239,6 +239,26 @@ class EnvironmentProvider(Protocol):
         """
         ...
 
+    async def probe_control_server(self, timeout: float) -> bool:
+        """Is the guest's control server answering REQUESTS, right now?
+
+        READ-ONLY and state-free by contract: no statement runs, no
+        observation is built, nothing advances. The one caller is the
+        adapter's ``probe`` RPC, sent by the harness exactly once after an
+        ``execute`` the adapter classified as an ambiguous delivery
+        (``guest_loss``), to decide whether the session may stay usable and
+        the model may be told the batch's effect is UNKNOWN rather than losing
+        the episode.
+
+        MUST NOT RAISE for unreachability: every way the server can fail to
+        answer -- refused, timed out within ``timeout``, a non-200 status --
+        is ``False``. The implementation reuses the SAME bounded GET the
+        allocation loop's readiness check already trusts (``_READY_PATH``,
+        upstream's own ``ensure_ready`` probe), so "reachable" means here
+        exactly what it meant when the guest was first admitted.
+        """
+        ...
+
     async def evaluate(self) -> Any:
         """Run OSWorld's evaluator; return its raw result (float or dict)."""
         ...
