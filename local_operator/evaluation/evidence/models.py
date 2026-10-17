@@ -948,6 +948,13 @@ VerificationIssueCode = Literal[
     "artifact_missing",
     "artifact_unreferenced",
     "finalization_invalid",
+    # A terminal last step (truncated by the step budget, or ended by the
+    # environment) requires a terminal lifecycle snapshot to explain the
+    # stop. An episode that died mid-finalization never wrote one; the code
+    # is separate from ``finalization_invalid`` so an ambiguity abandonment
+    # can lawfully tolerate exactly this unmet requirement (see
+    # ``EvidenceWriter.abandon``) while every other consumer keeps blocking.
+    "terminal_output_unresolved",
     "receipt_binding_invalid",
     "score_invalid",
     "counter_mismatch",

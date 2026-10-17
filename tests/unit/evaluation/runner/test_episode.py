@@ -9,7 +9,9 @@ will take is indistinguishable from one that writes none.
 
 from __future__ import annotations
 
+import asyncio
 import errno
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +19,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
+from local_operator.evaluation.adapters.api import (
+    Requirement,
+    ScopedInfraValue,
+    SecretRef,
+)
 from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
@@ -26,6 +32,7 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     EnvironmentStepPayload,
     ErrorPayload,
+    EvidenceArtifactRef,
     ModelResponsePayload,
     ObservationPayload,
     ReconciliationPayload,
@@ -40,9 +47,11 @@ from local_operator.evaluation.runner.episode import (
     MAX_STDERR_TAIL_CHARS,
     EpisodeConfig,
     EpisodeRunner,
+    _canary_values_outside_own_roots,
 )
 from local_operator.evaluation.runner.model import EpisodeModelClient
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
+from local_operator.evaluation.runner.secrets import StaticSecretResolver
 from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
@@ -86,6 +95,7 @@ def _runner(
     redactions: RedactionSet | None = None,
     spec: Any = None,
     config: Any = None,
+    secrets: Any = None,
 ) -> EpisodeRunner:
     return EpisodeRunner(
         spec or build_spec(episode_id),
@@ -96,6 +106,7 @@ def _runner(
         launch=lambda _: adapter,
         rescue=_rescue_ok,
         redactions=redactions,
+        secrets=secrets,
     )
 
 
@@ -508,6 +519,75 @@ async def test_scorer_failure_can_only_abandon_as_ambiguous(
     assert report.abandonment.reason == "ambiguous_finalization"
     # Rescue runs before abandonment: cloud safety must not wait on a writer.
     assert outcome.rescue_complete is True
+
+
+@pytest.mark.asyncio
+async def test_failed_rescue_gets_one_immediate_retry(tmp_path: Path, episode_id: str) -> None:
+    """A single fast rescue failure must not strand the instance.
+
+    Measured leak (2026-10-17, ep-4386740c6af0): the rescue failed once, fast
+    and silently, its descriptor stayed in the inbox and its instance ran for
+    hours. The retry is bounded at one extra attempt so a genuinely broken
+    rescue cannot loop; the still-broken case keeps the descriptor for the
+    sweep, and the complete case retires it.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import load_pending_rescue
+
+    attempts: list[int] = []
+
+    async def _flaky(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        attempts.append(1)
+
+        class _Aggregate:
+            descriptor_id = descriptor.descriptor_id
+            complete = len(attempts) >= 2
+
+        return _Aggregate()
+
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": SupervisionError("scorer died")})
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+    runner._rescue = _flaky  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome = await runner.run()
+
+    assert outcome.status == "abandoned"
+    assert outcome.rescue_complete is True
+    assert len(attempts) == 2
+    # A complete aggregate retires the descriptor: the sweep has nothing left.
+    assert load_pending_rescue(build_config(tmp_path).rescue_root) is None
+
+    second = tmp_path / "still-broken"
+    second.mkdir()
+    broken_attempts: list[int] = []
+
+    async def _broken(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        broken_attempts.append(1)
+
+        class _Aggregate:
+            descriptor_id = descriptor.descriptor_id
+            complete = False
+
+        return _Aggregate()
+
+    adapter2 = FakeAdapter(second, f"{episode_id}-b", failures={"score": SupervisionError("x")})
+    runner2 = _runner(second, f"{episode_id}-b", adapter=adapter2, model=ScriptedModel())
+    runner2._rescue = _broken  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome2 = await runner2.run()
+
+    assert outcome2.rescue_complete is False
+    assert len(broken_attempts) == 2  # bounded: exactly one retry
+    # Still broken: the descriptor stays for the sweep to pick up.
+    assert load_pending_rescue(build_config(second).rescue_root) is not None
+
+    # Episode-level budget: the bound is per episode, not per call site
+    # (both the close-out and evidence-failure paths can ask), so a third
+    # launch is refused outright and the sweep is left the descriptor.
+    assert await runner2._attempt_rescue() is False
+    assert len(broken_attempts) == 2
 
 
 @pytest.mark.asyncio
@@ -2889,6 +2969,225 @@ async def test_a_secret_in_the_stderr_tail_withholds_the_tail_whole(
     assert "upstream said" not in text
     assert _TAIL_HEADER in text and WITHHELD in text
     assert text.startswith("SupervisionError: worker died mid-observe")
+
+
+@pytest.mark.asyncio
+async def test_the_episodes_own_path_is_not_a_canary(tmp_path: Path, episode_id: str) -> None:
+    """A resolved value the episode's own roots contain cannot prove a leak.
+
+    Measured failure this closes (2026-10-17): the OSWorld rig's sealed infra
+    refs widen the redaction set, so the benchmark's own INPUTS ROOT -- a path
+    prefix of the run's cache directories -- became a canary; the scoring
+    details capture carries the evaluator's log lines, which name those cache
+    paths; the scoring receipt's scan then refused the artifact wholesale and
+    every episode that reached scoring died with ``evidencefailure``. A
+    location cannot distinguish leakage from ordinary operation, so values in
+    that relationship with the episode's own roots are dropped from the
+    canary set; a real secret still widens it, and still withholds the text
+    that carries it.
+    """
+
+    own_path = str(tmp_path)
+    secret = "S3CRET-CANARY-6c1f"
+    spec = replace(
+        build_spec(episode_id),
+        secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+    )
+    resolver = StaticSecretResolver({"OWN_PATH_ROW": own_path, "AWS_ACCESS_KEY_ID": secret})
+
+    # (a) Text naming the episode's own tree SURFACES: the path value was
+    # resolved but is not a canary (it is a substring of the roots themselves).
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(f"fetching {own_path}/cache/file.ics\n".encode())
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "step", "finish"]),
+        spec=spec,
+        secrets=resolver,
+    ).run()
+    assert outcome.status == "failed", outcome.diagnostic
+    assert outcome.bundle_root is not None
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert f"fetching {own_path}/cache/file.ics" in text
+
+    # (b) The resolved SECRET still withholds a tail that carries it: the
+    # drop is scoped to values the episode's own roots contain, not a
+    # weakening of the canary set.
+    second = tmp_path / "secret-case"
+    second.mkdir()
+    adapter2 = _fatal_adapter(second, f"{episode_id}-secret")
+    adapter2.stderr_tail = _StubTail(f"carrying {secret}\n".encode())
+    outcome2 = await _runner(
+        second,
+        f"{episode_id}-secret",
+        adapter=adapter2,
+        model=ScriptedModel(["step", "step", "finish"]),
+        spec=replace(
+            build_spec(f"{episode_id}-secret"),
+            secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+        ),
+        secrets=resolver,
+    ).run()
+    assert outcome2.status == "failed", outcome2.diagnostic
+    assert outcome2.bundle_root is not None
+    text2 = _fatal_detail_text(outcome2.bundle_root)
+    assert secret not in text2 and "carrying" not in text2
+    assert WITHHELD in text2
+
+
+def test_canary_drop_requires_path_shape(tmp_path: Path) -> None:
+    """The drop is scoped to path-shaped locations, not bare containment.
+
+    Round-1 hardening, made DISCRIMINATING in round 2: the roots live under a
+    directory literally named ``[redacted]`` and the secret value is that same
+    bare identifier, so the PRE-remediation predicate (bare containment)
+    drops it and this test fails -- which is exactly the collision the
+    narrowing exists to keep as a canary (a details artifact carrying
+    "credential [redacted] accepted" must still be refused).
+    """
+
+    base = tmp_path / "[redacted]"
+    roots = (base / "a", base / "b")
+    values = (
+        str(tmp_path),
+        str(base / "a"),
+        str(base / "a" / "x"),
+        "[redacted]",
+        "not-a-path-but-text",
+    )
+    kept = _canary_values_outside_own_roots(values, roots)
+    # The three path-shaped locations are dropped (ancestor, equal, inside);
+    # the identifier that is merely a path COMPONENT of every root, and the
+    # non-path text, are kept -- in order.
+    assert kept == ("[redacted]", "not-a-path-but-text")
+
+
+@pytest.mark.asyncio
+async def test_scoring_details_publish_own_path_but_refuse_real_secret(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The exit criterion at the ACTUAL failing path, from both directions.
+
+    DISCRIMINATING since round 2: the episode's roots live under a directory
+    literally named ``[redacted]`` and the secret value is that same bare
+    identifier, so under the PRE-remediation predicate every root contains it,
+    the capture carrying it publishes, and the refusal assertion below fails.
+    With the path-shape rule the identifier stays a canary and the refusal is
+    real. (a) own-path-only details bytes publish and the run seals scored;
+    (b) the same capture plus the identifier-shaped secret [redacted]
+    refused at the receipt and the bundle takes the ambiguity path.
+    """
+
+    base = tmp_path / "[redacted]"
+    base.mkdir()
+    identifier = "[redacted]"
+    own_path = str(base)
+
+    async def _run_with_details(text: str, suffix: str, secrets: dict[str, str]) -> Any:
+        # The supervision layer's reference check enforces the declared media
+        # type, so the capture is canonical JSON with the payload text inside
+        # -- the same envelope the real evaluator diagnostics use.
+        payload = json.dumps(
+            {"evaluator_diagnostics": {"stderr": {"text": text}}},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        sha = hashlib.sha256(payload).hexdigest()
+        artifacts = base / "artifacts"
+        artifacts.mkdir(exist_ok=True)
+        (artifacts / sha).write_bytes(payload)
+        details = EvidenceArtifactRef(
+            sha256=sha, media_type="application/json", byte_count=len(payload)
+        )
+        case_id = f"{episode_id}-{suffix}"
+        adapter = FakeAdapter(
+            base, case_id, score=ScoreArtifact(status="scored", binary=0, details=details)
+        )
+        return await _runner(
+            base,
+            case_id,
+            adapter=adapter,
+            model=ScriptedModel(["step", "finish"]),
+            spec=replace(
+                build_spec(case_id),
+                secret_refs=tuple(SecretRef(name=name) for name in secrets),
+            ),
+            secrets=StaticSecretResolver(secrets),
+        ).run()
+
+    # (a) The measured case: own-path text publishes, episode seals scored.
+    sealed = await _run_with_details(
+        f"fetching {own_path}/cache/file.ics", "own", {"OWN_PATH_ROW": own_path}
+    )
+    assert sealed.status == "completed", sealed.diagnostic
+    assert sealed.score is not None and sealed.score.status == "scored"
+    assert sealed.bundle_root is not None and verify_bundle(sealed.bundle_root).valid
+    published = sealed.bundle_root / "artifacts"
+    assert any(
+        f"fetching {own_path}/cache/file.ics".encode() in path.read_bytes()
+        for path in published.iterdir()
+        if path.is_file()
+    )
+
+    # (b) The collision: the identifier-shaped secret stays a canary, so the
+    # capture carrying it is refused and the bundle takes the ambiguity path.
+    refused = await _run_with_details(
+        f"carrying {own_path} under {identifier}",
+        "secret",
+        {"OWN_PATH_ROW": own_path, "IDENT_ROW": identifier},
+    )
+    assert refused.status == "abandoned", refused.diagnostic
+    assert refused.score is None
+    assert refused.bundle_root is not None
+    report = verify_bundle(refused.bundle_root)
+    assert report.abandonment is not None
+    # The recorded terminal says the run died on evidence, which is this
+    # case's whole point: the identifier-shaped secret made the receipt
+    # unpublishable.
+    assert report.abandonment.diagnostic_code == "evidencefailure"
+    assert report.abandonment.reason == "ambiguous_finalization"
+    assert not any(
+        identifier.encode() in path.read_bytes()
+        for path in (refused.bundle_root / "artifacts").iterdir()
+        if path.is_file()
+    )
+
+
+@pytest.mark.asyncio
+async def test_rescue_cancellation_propagates_without_retry(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A CancelledError during rescue must not launch a second worker.
+
+    Round-1 hardening: the broad retry handler used to swallow cancellation
+    and start another rescue after the run was told to stop; the fix raises
+    before it, so exactly one launch happened and the cancellation reaches the
+    caller.
+    """
+
+    launches: list[int] = []
+
+    async def _cancelling(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        launches.append(1)
+        raise asyncio.CancelledError()
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+
+    class _StubDescriptor:
+        descriptor_id = "d" * 64
+
+    runner._descriptor = _StubDescriptor()  # pyright: ignore[reportAttributeAccessIssue]
+    runner._rescue = _cancelling  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._attempt_rescue()
+
+    assert len(launches) == 1
+    assert runner._rescue_launches == 1
 
 
 @pytest.mark.asyncio
