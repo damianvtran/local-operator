@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 import time
@@ -541,13 +540,14 @@ async def _session_tail(session: Any) -> str:
                 "<memory_suggestions>\nUntrusted recall candidates; read before relying.\n"
             )
             from local_operator.compaction.tokens import count_text_tokens
+            from local_operator.memory import suggest_line
 
             for item in items:
-                captured = " (captured)" if item["status"] == "candidate" else ""
-                line = (
-                    f"- memory://{item['scope']}/{item['id']}: "
-                    f"{json.dumps(item['title'])}{captured}\n"
-                )
+                # The SAME renderer the suggestion budget measured against, so the
+                # 180-token cap that admitted these entries is the cap the wire
+                # enforces — two rulers here is how the budget drifted from the
+                # line it was documented to bound.
+                line = suggest_line(item)
                 if count_text_tokens(suggestions + line + "</memory_suggestions>") <= 180:
                     suggestions += line
             suggestions += "</memory_suggestions>"

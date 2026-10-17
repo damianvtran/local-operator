@@ -467,6 +467,67 @@ def test_suggestion_guard_suppresses_generic_one_word_and_filters_scope(store):
     assert not foreign.search("Mercury deployment", suggest=True)
 
 
+def test_suggestion_slot_is_one_per_fact_and_budget_is_the_rendered_line(store):
+    """Two rows carrying one body cost one slot, and 180 tokens means the WIRE.
+
+    Both halves were measured defects: capture writes the same body under
+    several titles ("... corrected", "... again"), so a literal per-row cap
+    spent two of three slots on one fact and crowded out a distinct matching
+    fact. And the budget counted ``_dump(item)`` (~87-90 tokens per candidate)
+    while the rendered line costs 32-35, so ``tokens=180, limit=3`` was really a
+    two-entry cap in every fixture. Both are pinned here so a future ruler
+    change cannot silently restore either.
+    """
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.memory import _dump, suggest_line
+
+    for suffix in ("", " corrected", " again"):
+        store.put(
+            "session",
+            {
+                "title": f"Mercury deployment{suffix}",
+                "body": "Mercury deployment proof docs/proof.md",
+                "tags": ["mercury", "deployment", "proof"],
+            },
+        )
+    store.put(
+        "session",
+        {
+            "title": "Mercury rollout owner",
+            "body": "Mercury deployment owner is the platform team",
+            "tags": ["mercury", "deployment"],
+        },
+    )
+    for n in range(4):  # distinct facts that all match the same two terms
+        store.put(
+            "session",
+            {
+                "title": f"Mercury release note {n}",
+                "body": f"Mercury deployment detail number {n} docs/note{n}.md",
+                "tags": ["mercury", "deployment", f"note{n}"],
+            },
+        )
+
+    items = store.search("Mercury deployment proof", tokens=180, limit=3, suggest=True)
+    titles = [str(item["title"]) for item in items]
+    assert len(items) == 3, titles
+    # The three duplicate-body rows occupy ONE slot...
+    assert sum(1 for title in titles if title.startswith("Mercury deployment")) == 1, titles
+    # ...which is what lets two DISTINCT facts through, the ones the per-row
+    # budget/cap could not reach (whichever two the ranking puts next).
+    assert sum(1 for title in titles if not title.startswith("Mercury deployment")) == 2, titles
+    rendered = sum(count_text_tokens(suggest_line(item)) for item in items)
+    assert rendered <= 180
+    # The old ruler would have refused three entries on its own: ~87-90
+    # tokens per dumped record against a 180 budget.
+    assert sum(count_text_tokens(_dump(item)) for item in items) > 180
+
+    # Explicit search still returns every revision: collapsing is a suggestion
+    # convenience, not a fact-visibility rule.
+    explicit = store.search("Mercury deployment proof", tokens=2000, limit=20)
+    assert len([i for i in explicit if i["body"] == "Mercury deployment proof docs/proof.md"]) == 3
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "strategy,images",

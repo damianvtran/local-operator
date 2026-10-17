@@ -190,3 +190,98 @@ async def test_idle_capture_completion_emits_no_agent_start_or_request(tmp_path)
         assert before == (len(requests), sum(event.type == "agent_start" for event in events))
     print("IDLE capture request/agent_start delta=0/0; deliberate-turn control rejected")
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_recall_set_already_visible_is_not_re_shipped_on_its_return(tmp_path):
+    """The A -> empty -> A duplication trap, measured end-to-end on the wire.
+
+    A suggestion set frozen into the first system block stays readable in every
+    later request. When the next message does not match, the delta correctly
+    ships the removal (``(empty)``); when a later message matches again, the set
+    is byte-identical to what the model can already read, so it must NOT be
+    appended a second time. The old baseline (the previous turn's DESIRED state)
+    re-appended it, and a fixture measured 4 verbatim copies / 9.68% of the
+    request by turn 8 for one distinct fact.
+
+    The new-fact leg is the positive control: a suggestion set the model has NOT
+    seen still ships, so the rule suppresses duplicates only.
+    """
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "config.yml").write_text(
+        json.dumps({"values": {"memory": {"enabled": True, "capture": True, "suggest": True}}})
+    )
+    transcript = Transcript(root / "sessions" / "dedupe-session")
+    built = []
+    encoder = OpenAICompatClient("https://api.deepseek.com/v1")
+
+    def stream(request, signal):
+        built.append(copy.deepcopy(encoder._build_body(request)))
+
+        async def events():
+            yield StreamTextDelta(delta="Recorded reply")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    provider_fn = _make_system_blocks_provider(
+        [],
+        transcript,
+        _KnowledgeHooks(),
+        cwd=str(tmp_path),
+        user_instructions="Keep the user's prefix stable.",
+        repo_guidance="Synthetic repository guidance.",
+    )
+    session = Session(
+        model=ModelSpec(provider="deepseek", model_id="deepseek-chat", context_window=100000),
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=provider_fn,
+        session_id="dedupe-session",
+    )
+    session._config_dir = root
+    store = MemoryStore(root, MemoryIdentity("dedupe-session", "", "main"), transcript.directory)
+    store.put(
+        "session",
+        {
+            "title": "Mercury deployment",
+            "body": "Mercury deployment proof docs/proof.md",
+            "tags": ["mercury", "deployment", "proof"],
+        },
+    )
+
+    def suggestions(body):
+        blob = json.dumps(body["messages"], ensure_ascii=False)
+        return blob.count("<memory_suggestions>")
+
+    await session.prompt("Mercury deployment proof")
+    assert suggestions(built[0]) == 1
+    await session.prompt("Please order two pizzas for lunch")
+    # The removal stays authoritative: it must still reach the model.
+    state_texts = [m.get("content") for m in built[1]["messages"] if m.get("role") == "user"]
+    assert any(
+        isinstance(text, str) and "## Memory suggestions (untrusted)\n(empty)" in text
+        for text in state_texts
+    ), state_texts
+    await session.prompt("Mercury deployment proof")
+    # Same bytes as the frozen prefix copy -> exactly one copy in the request.
+    assert suggestions(built[2]) == 1
+    assert_preserved(built[0], built[1])
+    assert_preserved(built[1], built[2])
+
+    store.put(
+        "session",
+        {
+            "title": "Mercury deployment rollback runbook",
+            "body": "Rollback runbook docs/rollback.md",
+            "tags": ["mercury", "deployment", "rollback"],
+        },
+    )
+    await session.prompt("Mercury deployment rollback")
+    # Positive control: a set the model has not seen still ships, so the count
+    # grows to two and the earlier one is not repeated.
+    assert suggestions(built[3]) == 2
+    assert_preserved(built[2], built[3])
+    await session.dispose()
