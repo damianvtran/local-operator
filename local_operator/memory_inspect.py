@@ -21,12 +21,15 @@ migration to a command whose whole contract is that a human can look without
 changing anything; do that as a separate, explicitly reviewed surface.
 
 Bodies and titles are withheld when ``local_operator.memory.guard`` refuses
-them. Such a row is already in the store (an import or an older build can put
-it there), but re-exporting it through a listing would defeat the rule the
-guard exists to enforce. What remains is the safe header: ID, scope, status,
-age, provenance and the preview disposition. ``lop memory show`` is the
-deliberate per-ID read a human uses after this preview; it is not a bulk
-export either.
+them, using the SAME rule the write path applies — including the stricter
+``opaque=True`` pass ``validate_fact`` runs on title/body. Without that pass
+this surface would print a value the write path refused, which is the one
+thing a listing must never do. Such a row is already in the store (an
+arbitrary import can put it there), but re-exporting it through a listing
+would defeat the rule the guard exists to enforce. What remains is the safe
+header: ID, scope, status, age, provenance and the preview disposition.
+``lop memory show`` is the deliberate per-ID read a human uses after this
+preview; it is not a bulk export either.
 """
 
 from __future__ import annotations
@@ -60,6 +63,15 @@ PREVIEW_CHARS = 160
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 50
+
+#: The page's ordering key: the fact's own timestamp, read from its JSON.
+#: ``json_valid`` guards the expression so ONE corrupt imported row sorts last
+#: instead of failing the whole listing with a SQLite "malformed JSON" error
+#: (the row parser then refuses that row on its own terms).
+_CREATED_AT = (
+    "CASE WHEN json_valid(fact) THEN "
+    "COALESCE(CAST(json_extract(fact,'$.created_at') AS REAL),0) ELSE 0 END"
+)
 
 HELP = (
     "Read-only preview. Nothing listed here is moved, edited or forgotten. A proposal "
@@ -96,17 +108,25 @@ def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
         db.close()
 
 
-def _exportable(text: Any) -> bool:
+def _exportable(text: Any, *, opaque: bool = True) -> bool:
     """Whether the existing privacy guard would let this value out.
 
     Uses the store's own rule rather than a second opinion: a value the write
-    path refuses is exactly a value a listing must not print (the proposal
-    recorded ``body_exported``/``title_exported`` as false for these).
+    path refuses is exactly a value a listing must not print.
+
+    ``opaque`` MUST match the pass the write path runs on the same field.
+    ``validate_fact`` applies ``guard(value, opaque=True)`` to title, body,
+    subject, tags and aliases — that pass is what enables the long-hex/base64
+    rule, because an unnamed 40-hex string is how a leaked API key would be
+    kept. Defaulting to it here is what makes this listing no stronger a
+    reader than the write path is a writer. Only source locators are written
+    through the plain ``guard(dict)`` pass, so only they pass ``opaque=False``
+    (see :func:`_provenance`).
     """
     if not isinstance(text, str):
         return False
     try:
-        guard(text)
+        guard(text, opaque=opaque)
     except MemoryError:
         return False
     return True
@@ -127,7 +147,12 @@ def _provenance(fact: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         value = source.get(key)
         if not isinstance(value, str) or not value:
             continue
-        if key in ("kind", "author", "session") or _exportable(value):
+        # ``opaque=False`` matches the write path exactly: ``validate_fact``
+        # runs its opaque title/body pass over free-text fields only, and
+        # guards ``source`` through the plain recursive ``guard(dict)``. A
+        # stricter test here would withhold locators the store accepted, which
+        # is a different (and wrong) answer than "what would the write refuse?".
+        if key in ("kind", "author", "session") or _exportable(value, opaque=False):
             kept[key] = value
         else:
             redacted = True
@@ -139,6 +164,8 @@ def _disposition(
     markers: list[str],
     provenance: dict[str, Any],
     team_id: str,
+    *,
+    withheld: bool = False,
 ) -> dict[str, Any]:
     """The PREVIEW proposal for one entry. Descriptive only — nothing consumes it.
 
@@ -156,10 +183,19 @@ def _disposition(
             "applied": False,
         }
     if not markers:
+        # A withheld row must not have its proposal read as a judgement about
+        # content the page refuses to show; say the marker scan is all that was
+        # consulted, so the detail lines up with the redaction promise.
+        reason = (
+            "Content withheld by the privacy guard; no work/lane/progress marker in the "
+            "stored text."
+            if withheld
+            else "No work/lane/progress marker; a durable global fact is plausible."
+        )
         return {
             "proposal": "keep",
             "destination": "global",
-            "reason": "No work/lane/progress marker; a durable global fact is plausible.",
+            "reason": reason,
             "applied": False,
         }
     marker_text = ", ".join(markers)
@@ -237,7 +273,9 @@ def _entry(row: sqlite3.Row, now: float, team_id: str) -> dict[str, Any]:
         "redacted": not (title_ok and body_ok),
         "scope_fit_candidate": scope == "global" and bool(markers),
         "work_markers": markers,
-        "disposition": _disposition(scope, markers, provenance, team_id),
+        "disposition": _disposition(
+            scope, markers, provenance, team_id, withheld=not (title_ok and body_ok)
+        ),
     }
 
 
@@ -252,9 +290,14 @@ def inspect_entries(
 ) -> dict[str, Any]:
     """List authorized entries and their preview dispositions; change nothing.
 
-    Paging mirrors ``MemoryStore.inventory`` (newest/ID-descending, cursor is the
-    last ID shown) so a person who already pages ``lop memory list`` does not
-    have to learn a second scheme.
+    The page is ordered newest-first by the fact's OWN ``created_at`` (entry ID
+    breaks ties), not by entity ID. Entity IDs are time-ordered only for rows
+    this build wrote; an imported/legacy row carries a hash-shaped ID and would
+    otherwise sort to the top regardless of age — measured on a 25-entry store
+    where three 3h/1d/9d-old rows sat above twenty rows dated minutes ago. The
+    cursor remains the entry ID a person was given, so the printed ``More:``
+    command is unchanged; its ordering key is looked up under the same
+    authorization predicate as the page itself.
     """
     if not 1 <= limit <= MAX_LIMIT:
         raise MemoryError(f"Inspection limit must be 1–{MAX_LIMIT}.")
@@ -285,8 +328,6 @@ def inspect_entries(
     # Reused rather than restated: two surfaces answering "who may read this?"
     # differently is the defect this shares the rule to avoid.
     where, values = store._where(scope)
-    page_where = where + (" AND entity_id<?" if cursor else "")
-    page_values: list[Any] = [*values, cursor] if cursor else list(values)
     try:
         with _read_only_connection(store.path) as db:
             has_current = db.execute(
@@ -294,11 +335,25 @@ def inspect_entries(
             ).fetchone()
             if not has_current:
                 return report
+            page_where = where
+            page_values: list[Any] = list(values)
+            if cursor:
+                # The cursor's ordering key is read under the same predicate as
+                # the page: a cursor naming another owner's row yields an empty
+                # page rather than an ordering hint about a scope we cannot read.
+                anchor = db.execute(
+                    f"SELECT {_CREATED_AT} FROM current WHERE {where} AND entity_id=?",
+                    [*values, cursor],
+                ).fetchone()
+                if anchor is None:
+                    return report
+                page_where = f"{where} AND ({_CREATED_AT},entity_id)<(?,?)"
+                page_values = [*values, float(anchor[0]), cursor]
             rows = db.execute(
                 "SELECT entity_id,scope,op_id,fact,"
                 "(SELECT count(*) FROM ops o WHERE o.entity_id=current.entity_id) "
                 f"AS revisions FROM current WHERE {page_where} "
-                "ORDER BY entity_id DESC LIMIT ?",
+                f"ORDER BY {_CREATED_AT} DESC,entity_id DESC LIMIT ?",
                 # One extra row answers "is there more?" truthfully instead of
                 # treating a full page as proof of a next one.
                 [*page_values, limit + 1],
@@ -319,7 +374,15 @@ def inspect_entries(
     report["counts"]["total"] = sum(by_scope.values())
     report["entries"] = [_entry(row, current, identity.team_id) for row in page]
     report["counts"]["returned"] = len(report["entries"])
+    # Counted on THIS page on purpose: the header's job is "which of the rows in
+    # front of me need a decision?". A store-wide total would be a number the
+    # reader cannot act on without paging to it.
+    report["counts"]["suggestions"] = sum(
+        1 for entry in report["entries"] if entry["disposition"]["proposal"] != "keep"
+    )
     if has_more:
         report["has_more"] = True
+        # Display order IS the paging order, so the last row shown is the key
+        # the next page continues strictly after.
         report["next_cursor"] = page[-1]["entity_id"]
     return report

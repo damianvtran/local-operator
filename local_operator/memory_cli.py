@@ -14,6 +14,7 @@ import argparse
 import json
 import shlex
 import sqlite3
+import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -220,6 +221,14 @@ def execute(
         # A silently ignored flag reads as a filter that was applied.
         raise MemoryError("--limit applies to `inspect` only.")
     if args.operation == "inspect":
+        # Inspect lists; it never targets a row. A silently ignored target reads
+        # as a filter that was applied (same argument as the --limit refusal
+        # above), so point at the verb that does read one fact.
+        if args.target:
+            raise MemoryError(
+                f"`{prefix} inspect` lists instead of reading one fact; use "
+                f"`{prefix} show {args.target[0]}` for that row."
+            )
         # Deliberately BEFORE import_session(): that call writes a session's
         # portable log into the store. Inspection must not change a row, so it
         # never reaches any mutable store method.
@@ -485,6 +494,32 @@ _PROPOSALS = {
     "review-work-scope": "review as work scope",
 }
 
+#: The repo's own list-row bar (see ``_row``: "an 80-column terminal never
+#: clips the ID or splits a status"). Every line of this page is shaped to it.
+SHAPED_WIDTH = 80
+
+
+def _shaped(line: str, width: int = SHAPED_WIDTH) -> list[str]:
+    """Wrap one rendered line to the 80-column bar on word boundaries.
+
+    ``break_long_words=False``/``break_on_hyphens=False``: an identifier, a
+    timestamp or a path longer than the bar overflows on one line rather than
+    being split into unreadable halves (measured before this: 44% of lines
+    exceeded 80 columns and tokens were cut mid-word). Continuation lines hang
+    under the line's own indent so a wrapped block still reads as one block.
+    """
+    if not line.strip():
+        return [line]
+    indent = line[: len(line) - len(line.lstrip())]
+    return textwrap.wrap(
+        line.strip(),
+        width=width,
+        initial_indent=indent,
+        subsequent_indent=indent + "  ",
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [indent]
+
 
 def _inspect_text(value: dict[str, Any], prefix: str) -> str:
     """Render the read-only preview.
@@ -492,6 +527,11 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
     The word "proposal" and the trailing "NOT applied" are load-bearing: a person
     must never read this page as a record of a change. Withheld content says WHY
     it is withheld, in the same voice the write guard refuses it.
+
+    Ordering is stated and visible: rows arrive newest-first by the fact's own
+    date (see ``memory_inspect.inspect_entries``), and a row whose proposal is
+    not "keep" carries a gutter arrow. At 20+ rows the three rows that need a
+    decision must be findable without reading every block of prose.
     """
     entries = value["entries"]
     counts = value["counts"]
@@ -501,13 +541,23 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
         lines.append("Agent memory is OFF (memory.enabled=false): agents cannot use these.")
     by_scope = counts.get("by_scope") or {}
     summary = " · ".join(f"{name} {count}" for name, count in sorted(by_scope.items()))
-    lines.append(
+    lines += _shaped(
         f"{counts['total']} entr{'y' if counts['total'] == 1 else 'ies'} in the authorized "
         f"scopes ({summary or 'none'}) · {counts['returned']} shown"
     )
     if not entries:
         lines.append("Nothing retained in these scopes.")
         return "\n".join(lines)
+    suggested = counts.get("suggestions")
+    if suggested is None:
+        suggested = sum(1 for entry in entries if entry["disposition"]["proposal"] != "keep")
+    decision = (
+        f"{suggested} of {counts['returned']} shown "
+        f"carr{'ies' if suggested == 1 else 'y'} a move suggestion (→)."
+        if suggested
+        else "No row on this page carries a move suggestion."
+    )
+    lines += _shaped(f"Order: newest first by each fact's own date. {decision}")
     for entry in entries:
         proposed = entry["disposition"]
         state = (
@@ -516,10 +566,13 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
             else f"{entry['origin']} · {entry['status']}"
         )
         age = _date(entry["created_at"], "age unknown", now=now)
+        # The arrow is the scan column D1 asked for: two cells of gutter, so the
+        # references still line up while suggestion rows stand out.
+        marker = "→ " if proposed["proposal"] != "keep" else "  "
         lines.append("")
-        lines.append(f"{entry['reference']}  [{state} · {age}]")
+        lines += _shaped(f"{marker}{entry['reference']}  [{state} · {age}]")
         if entry["title_exported"]:
-            lines.append(f"  {entry['title']}")
+            lines += _shaped(f"  {entry['title']}")
         else:
             lines.append("  [title withheld — the privacy guard would refuse it]")
         provenance = entry["provenance"]
@@ -528,29 +581,47 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
         meta = [f"by {author} ({kind})"]
         if provenance.get("session"):
             meta.append(f"session {provenance['session']}")
-        if provenance.get("redacted"):
+        # The flag is emitted by _entry as a SIBLING of the provenance dict, not
+        # inside it; reading it from the dict silently dropped the disclosure.
+        if entry["provenance_redacted"]:
             meta.append("locator withheld by the privacy guard")
-        lines.append(
+        lines += _shaped(
             "  Source: " + " · ".join(meta) + f" · revision {entry['revision']}"
             f" · {entry['revisions']} revision(s)"
         )
         if entry["body_preview"] is not None:
             suffix = "…" if entry["body_truncated"] else ""
-            lines.append(f"  Preview: {entry['body_preview']}{suffix}")
+            lines += _shaped(f"  Preview: {entry['body_preview']}{suffix}")
         else:
             lines.append("  Preview withheld — the privacy guard would refuse this body.")
         markers = ", ".join(entry["work_markers"]) or "none"
-        lines.append(
+        lines += _shaped(
             f"  Proposal: {_PROPOSALS.get(proposed['proposal'], proposed['proposal'])}"
             f" → {proposed['destination']} — {proposed['reason']} (markers: {markers}; "
             "NOT applied)"
         )
     if value.get("next_cursor"):
         lines.append("")
-        lines.append(f"More: {prefix} inspect --cursor {value['next_cursor']}{value['context']}")
-    lines.append(
-        "No change was made. A proposal is for a human to carry out with memory:// or "
-        f"{prefix} edit/forget after reading one fact with {prefix} show SCOPE/ID."
+        # Every flag that shaped this page, so the pasted command shows the same
+        # rows at the same size (a hint that dropped --limit changed 5 to 20).
+        more = f"{prefix} inspect --cursor {value['next_cursor']}"
+        if value.get("limit"):
+            more += f" --limit {value['limit']}"
+        if value.get("scope"):
+            more += f" --scope {value['scope']}"
+        more += value.get("context") or ""
+        # ONE line, like every other paste-ready hint this runner prints
+        # (`More:`/`Next:` in the list view): a command is copied, not read, and
+        # an 80-column wrap would split it mid-flag. The 80-column bar applies
+        # to the prose and row blocks, not to a command token stream.
+        lines.append(f"More: {more}")
+    # The recipe, not just the implication: a move is a write in the destination
+    # scope followed by a forget of the original, and forget needs the revision
+    # the read just printed.
+    lines += _shaped(
+        "No change was made. To carry out a proposal, read one fact with "
+        f"`{prefix} show SCOPE/ID`, state it again in the destination scope "
+        f"(memory:// for an agent), then `{prefix} forget SCOPE/ID --revision REV --yes`."
     )
     return "\n".join(lines)
 

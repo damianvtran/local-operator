@@ -2062,7 +2062,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         _tr(wire_memory.command()),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.SUBCOMMAND,
-        subcommands=("list", "show", "search", "edit", "forget", "status"),
+        # This vocabulary is what the desktop planner and the command route
+        # admit, and it must equal ``memory_cli.OPERATIONS``: the terminal path
+        # parses with that tuple, so a verb missing here is a verb the desktop
+        # spends as a model message (or 422s) while the TUI runs it.
+        # tests/unit/test_memory_inspect.py pins the two lists together.
+        subcommands=("list", "show", "search", "edit", "forget", "status", "inspect"),
     ),
     SlashCommand(
         "project",
