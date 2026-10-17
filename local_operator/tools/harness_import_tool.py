@@ -194,6 +194,14 @@ def _request_from_params(params: HarnessImportParams) -> ImportRequest:
     )
 
 
+def _unknown_source(service: HarnessImportService, params: HarnessImportParams) -> str | None:
+    names = {params.source} if params.source else set((params.session_ids or {}).keys())
+    unknown = sorted(name for name in names if name and name not in service.adapters)
+    if unknown:
+        return f"unknown source {unknown[0]!r}; choose claude, codex or omp."
+    return None
+
+
 def _selection_error(params: HarnessImportParams) -> str | None:
     session_ids = params.session_ids or {}
     has_sessions = any(values for values in session_ids.values())
@@ -262,6 +270,9 @@ async def execute_harness_import(
     if params.op == "preview":
         if not params.source and not params.session_ids:
             return _error(tool_call_id, TOOL_NAME, "preview needs a source or session_ids.")
+        unknown = _unknown_source(service, params)
+        if unknown:
+            return _error(tool_call_id, TOOL_NAME, unknown)
         request = _request_from_params(params)
         if not request.session_ids and not request.all:
             # A source-only preview means "show me everything listed for this
@@ -293,6 +304,9 @@ async def execute_harness_import(
                 TOOL_NAME,
                 "import refused: pass confirm=true after previewing the exact selection.",
             )
+        unknown = _unknown_source(service, params)
+        if unknown:
+            return _error(tool_call_id, TOOL_NAME, "import refused: " + unknown)
         error = _selection_error(params)
         if error:
             return _error(tool_call_id, TOOL_NAME, "import refused: " + error)
