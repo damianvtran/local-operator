@@ -1453,7 +1453,9 @@ def _await_relocations(
     return out
 
 
-def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
+def restart_services(
+    *, wait_s: float = RELOAD_WAIT_S, rolling: bool = False
+) -> list[ServiceRefresh]:
     """Bring EVERY non-runtime service onto the current build.
 
     THE ONE OWNER of that sentence, so ``lop update`` and ``lop services
@@ -1464,6 +1466,12 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
     reasons); the ``serve`` reloads follow. A run that moved nothing is a
     success with nothing to say — the list comes back with skips in it rather
     than with an error.
+
+    ``rolling`` is the READER's contract with the serve fleet
+    (:func:`reload_serve_daemons`), not a choice this function makes: only a
+    generation install has generations to roll a busy daemon through, and
+    ``update._services_stage`` is the caller that knows. ``lop services restart``
+    keeps the default, which is the non-rolling reload it always ran.
     """
     from local_operator import update
 
@@ -1489,7 +1497,7 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
                 ),
             )
         )
-    refreshes.extend(reload_serve_daemons(wait_s=wait_s))
+    refreshes.extend(reload_serve_daemons(wait_s=wait_s, rolling=rolling))
     return refreshes
 
 
