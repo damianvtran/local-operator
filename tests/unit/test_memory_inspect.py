@@ -410,6 +410,10 @@ def test_cli_json_is_parseable_and_human_view_states_nothing_changed(tmp_path, m
     assert "No change was made" in human
     assert "NOT applied" in human
     assert '"entries"' not in human
+    # D6: the footer is a separate block, not glued to the last row or More:.
+    lines = human.splitlines()
+    footer = next(i for i, line in enumerate(lines) if line.startswith("No change was made"))
+    assert lines[footer - 1] == ""
 
 
 def test_bad_limit_is_refused(rig):
@@ -489,6 +493,92 @@ def test_sensitive_provenance_locator_is_withheld_and_disclosed(rig):
     human = render_human(raw, prefix="lop memory")
     assert uri not in human
     assert "locator withheld by the privacy guard" in human
+
+
+def test_sensitive_author_and_out_of_vocabulary_status_are_not_echoed(rig):
+    """Every provenance string is gated, and ``status`` by the write vocabulary.
+
+    ``author`` is free text and ``status`` is a closed vocabulary at write; an
+    imported row can hold anything in either, and both reach the screen. The
+    PAN here is a value ``guard()`` AND ``validate_fact()`` both refuse, so a
+    row carrying it is exactly the import this reader exists for.
+    """
+    root, identity, store = rig
+    pan = "4111 1111 1111 1111"
+    with pytest.raises(MemoryError):
+        guard(pan)
+    with pytest.raises(MemoryError):
+        validate_fact({"title": "safe", "body": "safe body", "source": {"author": pan}})
+    with pytest.raises(MemoryError):
+        validate_fact({"title": "safe", "body": "safe body", "status": pan})
+
+    entity = _seed_legacy_row(
+        store,
+        "global",
+        "global",
+        title="Imported card holder",
+        body="Nothing sensitive in this body.",
+        source={"kind": "reported", "author": pan, "session": "sess-inspect"},
+        status=pan,
+    )
+
+    report = inspect_entries(root, identity)
+    entry = next(item for item in report["entries"] if item["id"] == entity)
+    assert entry["provenance_redacted"] is True
+    assert "author" not in entry["provenance"]
+    assert entry["status"] == "unknown"
+    assert pan not in json.dumps(report)
+
+    raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
+    assert failed is False
+    human = render_human(raw, prefix="lop memory")
+    assert pan not in human
+    assert "by unknown (reported)" in human
+    # Legit values are NOT collateral damage: the write path accepts these, so
+    # the reader keeps them.
+    assert entry["provenance"]["kind"] == "reported"
+    assert entry["provenance"]["session"] == "sess-inspect"
+    assert "session sess-inspect" in human
+
+
+def test_stale_cursor_reports_real_totals_and_says_start_from_the_top(rig):
+    """A cursor that no longer names a row must not deny the store's contents."""
+    root, identity, store = rig
+    for n in range(3):
+        store.put("global", {"title": f"Fact {n}", "body": f"Body {n}."})
+
+    first = inspect_entries(root, identity, limit=1)
+    cursor = first["next_cursor"]
+    assert cursor and first["counts"]["total"] == 3
+    entry = first["entries"][0]
+    store.put(
+        "global",
+        {},
+        entity=entry["id"],
+        expected_version=entry["revision"],
+        forget=True,
+    )
+
+    stale = inspect_entries(root, identity, limit=1, cursor=cursor)
+
+    assert stale["cursor_stale"] is True
+    assert stale["entries"] == []
+    # Cursor-independent: the store still holds two entries, and the page says so.
+    assert stale["counts"]["total"] == 2
+    assert stale["counts"]["by_scope"] == {"global": 2}
+
+    raw, failed = run(
+        f"inspect --limit 1 --cursor {cursor}",
+        config=root,
+        identity=identity,
+        prefix="lop memory",
+    )
+    assert failed is False
+    human = render_human(raw, prefix="lop memory")
+    flat = " ".join(human.split())
+    assert "2 entries in the authorized scopes" in flat
+    assert "Cursor no longer available" in flat
+    assert "Nothing retained" not in human
 
 
 def test_live_writer_sidecars_take_the_non_immutable_read_path(rig):
@@ -657,6 +747,10 @@ def test_more_hint_repeats_every_flag_that_shaped_the_page(rig):
     assert "--limit 2" in more
     assert "--scope global" in more
     assert "--session sess-inspect" in more
+    # D6 on a paged view too: the footer must not touch the More: command.
+    lines = human.splitlines()
+    footer = next(i for i, line in enumerate(lines) if line.startswith("No change was made"))
+    assert lines[footer - 1] == "" and lines[footer - 2].startswith("More: ")
 
     followed, failed = run(
         more[len("More: lop memory ") :], config=root, identity=identity, prefix="lop memory"

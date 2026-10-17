@@ -546,7 +546,16 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
         f"scopes ({summary or 'none'}) · {counts['returned']} shown"
     )
     if not entries:
-        lines.append("Nothing retained in these scopes.")
+        # A stale cursor spends its emptiness on the CURSOR, not the store: the
+        # counts above are real, so "nothing retained" would be a false claim
+        # about data this page simply stopped listing at.
+        if value.get("cursor_stale"):
+            lines += _shaped(
+                "Cursor no longer available — start from the top (the entry it named is "
+                "gone or no longer in an authorized scope)."
+            )
+        else:
+            lines.append("Nothing retained in these scopes.")
         return "\n".join(lines)
     suggested = counts.get("suggestions")
     if suggested is None:
@@ -618,6 +627,7 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
     # The recipe, not just the implication: a move is a write in the destination
     # scope followed by a forget of the original, and forget needs the revision
     # the read just printed.
+    lines.append("")
     lines += _shaped(
         "No change was made. To carry out a proposal, read one fact with "
         f"`{prefix} show SCOPE/ID`, state it again in the destination scope "
