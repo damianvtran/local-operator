@@ -7092,6 +7092,45 @@ class FrontendStateStore:
         )
         if payload is not None:
             state = state.model_copy(update={"spend_channels": payload})
+        # OCCUPANCY IS RECONCILED HERE FOR THE SAME REASON THE MONEY ABOVE IS.
+        # The checkpoint is written at a turn end, and a headless host between
+        # turns is exactly the case it lags: the runtime keeps serving (and the
+        # pane keeps painting) receipts that the journal has not yet taken, so
+        # restoring the row's ``context_tokens`` verbatim starts the runtime on a
+        # reading the conversation has already passed. The desktop host's adopt
+        # edge re-materializes the pair before it serves a frame
+        # (``runtime/serving.py``), but every other headless host constructs the
+        # store HERE, and the first frame it publishes must not disagree with
+        # the journal's own newest receipt. ``_replayed_context_change`` is the
+        # one rule both replay sites already share: an equal or absent receipt
+        # moves nothing (a settled post-compaction estimate stands), a different
+        # one is a newer call and wins.
+        restore = getattr(session, "restored_usage", None)
+        usage = restore() if callable(restore) else None
+        if isinstance(usage, Usage):
+            # THE PAIR MOVES TOGETHER, AND ONLY WHEN THE RECEIPT CARRIES A
+            # READING. ``refresh_restored_usage`` is the sibling seam and it
+            # republishes ``last_usage`` beside the occupancy: an advanced
+            # ``context_tokens`` beside the checkpoint's older receipt would
+            # state one reading two ways, and the next replay compares those two
+            # fields against each other (review round 1, R1-1).
+            #
+            # The receipt is replaced ONLY in that case. A wire that reported
+            # input/output and no context number says nothing about occupancy,
+            # so the shared rule's answer is ``{}`` — and installing its receipt
+            # anyway would blank the pair AND disarm the equal-receipt guard: the
+            # next replay would see a different receipt and revert a settled
+            # post-compaction estimate (review round 2, R2-1).
+            changes = _replayed_context_change(state, usage.context_tokens)
+            if changes:
+                # Through the wire form and back, as every other writer of this
+                # field does: ``model_copy`` does not validate, so the receipt
+                # has to be a ``FrontendUsage`` rather than the dump itself
+                # (``_seed_cold_usage``'s own comment).
+                changes["last_usage"] = FrontendUsage.model_validate(
+                    _usage_with_decode_window(usage)
+                )
+            state = state.model_copy(update=changes)
         return cls(state)
 
     @staticmethod
