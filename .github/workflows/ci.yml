@@ -835,7 +835,9 @@ jobs:
         with:
           name: junit-timings-${{ matrix.python-version }}-${{ matrix.shard }}
           path: junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
-          retention-days: 1
+          # 7 days, not 1: post-hoc flake/review evidence reads must survive past
+          # the next day (PR #2470: XML expired at ~24.5 h, forced a re-run).
+          retention-days: 7
           if-no-files-found: ignore
 
       - name: Print the shard stall report
@@ -1293,7 +1295,9 @@ jobs:
         with:
           name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
           path: junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
-          retention-days: 1
+          # 7 days, not 1: same post-hoc evidence rationale as the unit-shard
+          # junit artifact (PR #2470: expired XML forced a full re-run).
+          retention-days: 7
           if-no-files-found: ignore
       - name: Report a hang's thread dump
         # The dump this step prints is the DIAGNOSTIC half. A process still
