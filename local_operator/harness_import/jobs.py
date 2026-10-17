@@ -98,6 +98,9 @@ class ImportJobRegistry:
         )
         job = ImportJob(progress.job_id, progress, session_key=session_key)
         job.service = service
+        # A cancel can arrive between accepting the job and the event loop
+        # running its first step; clear only here, before ``create_task``.
+        service.clear_cancel()
 
         def on_progress(state: ImportProgress) -> None:
             job.progress = state

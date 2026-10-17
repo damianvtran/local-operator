@@ -134,7 +134,10 @@ def _public(value: Any, *, key: str = "") -> Any:
 
 
 def _public_title(value: Any) -> str:
-    return normalise_title(str(value)) if value else ""
+    # Titles are a public result field like any other: strip absolute source
+    # paths after the shared redaction/glyph pass. A path-shaped title is not
+    # a title a caller can act on, and source roots must not leak.
+    return _strip_paths(normalise_title(str(value))) if value else ""
 
 
 def _public_source(info: Any) -> dict[str, Any]:
