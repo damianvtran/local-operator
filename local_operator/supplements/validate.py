@@ -300,6 +300,23 @@ def _numeric(value: Any) -> float | None:
     return None
 
 
+#: Markdown emphasis glyphs around or inside a table cell: ``**bold**``, ``*italic*``,
+#: ``__alt__``. Lone underscores in identifiers (``snake_case``) are content, not emphasis.
+_EMPHASIS_RE: Final = re.compile(r"\*+|(?<![A-Za-z0-9_])_{2,}|_{2,}(?![A-Za-z0-9_])")
+
+
+def _strip_emphasis(text: str) -> str:
+    """``**42.3**`` -> ``42.3``: emphasis is formatting, not the datum (memo §2.10).
+
+    A markdown table that bolds its winners yields extracted cells like ``**77.0**``; the
+    value it holds is 77.0, and the model's faithful emission of 77.0 must be admitted. The
+    2026-10-17 investigation (session 8197f86e639d) found the opposite: every bolded cell
+    failed provenance as "not in the evidence", and a bolded LABEL as "an invented label is
+    a fabrication" against glyphs that were sitting in the evidence itself.
+    """
+    return _EMPHASIS_RE.sub("", text).strip()
+
+
 class _EvidenceIndex:
     """The evidence's own values, canonicalised once per output (memo §2.10).
 
@@ -318,8 +335,13 @@ class _EvidenceIndex:
                     text = str(cell).strip()
                     if not text:
                         continue
+                    # The cell's CONTENT, with markdown emphasis canonicalised away: the
+                    # verbatim spelling stays admissible too (a component may copy the cell
+                    # exactly as it reads), and the plain form is what the value checks use.
+                    plain = _strip_emphasis(text) or text
                     self.strings.add(text)
-                    number = _numeric(text)
+                    self.strings.add(plain)
+                    number = _numeric(plain)
                     if number is not None:
                         self.numbers.add(number)
                     else:
@@ -328,7 +350,7 @@ class _EvidenceIndex:
                             _number,
                         )
 
-                        parsed = _number(text)
+                        parsed = _number(plain)
                         if parsed is not None:
                             self.numbers.add(parsed)
             for column in dataset.columns:

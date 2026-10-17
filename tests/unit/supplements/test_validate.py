@@ -133,6 +133,86 @@ def test_a_fabricated_series_is_refused() -> None:
     assert any("evidence" in error for error in result.rejected[0].errors)
 
 
+def test_emphasis_marked_cells_admit_their_content_not_their_glyphs() -> None:
+    """The 2026-10-17 investigation (session 8197f86e639d): a markdown table bolds its
+    winners, so extracted cells read ``**77.0**`` / ``**Terminal-Bench 4.0**``. The model's
+    faithful emission -- the plain value, the plain label -- must be admitted; keeping the
+    glyphs made every bolded cell fail provenance ("not in the evidence", and "an invented
+    label is a fabrication" against a label printed in bold in the evidence itself).
+
+    A lone ``_`` in an identifier is content and survives the canonicalisation.
+    """
+    marked = (
+        Dataset(
+            title="Vendor table",
+            source="answer",
+            columns=("Benchmark", "score"),
+            rows=(
+                ("**DeepSWE v1.1**", "**77.0**"),
+                ("**Terminal-Bench 4.0**", "**+11.1**"),
+                ("snake_case", "**2.8**"),
+            ),
+            n_rows=3,
+            numeric_columns=("score",),
+        ),
+    )
+    emitted = component(
+        json.dumps(
+            {
+                "tab": {
+                    "title": "Vendor table",
+                    "columns": ["Benchmark", "score"],
+                    "rows": [
+                        ["DeepSWE v1.1", 77.0],
+                        ["Terminal-Bench 4.0", 11.1],
+                        ["snake_case", 2.8],
+                    ],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.bar(document.getElementById("c"),"tab",'
+        '{x:"Benchmark",y:"score"})</script>',
+        title="Vendor table",
+        source="answer",
+    )
+    result = validate_output(emitted, marked)
+    assert result.components, [error for block in result.rejected for error in block.errors]
+
+
+def test_the_emphasis_canonicalisation_never_admits_a_fabrication() -> None:
+    """MUTATION twin: stripping glyphs must not loosen provenance -- values the evidence
+    never holds (77.1) and labels it never prints (``Invented v9``) stay refused."""
+    marked = (
+        Dataset(
+            title="Vendor table",
+            source="answer",
+            columns=("Benchmark", "score"),
+            rows=(("**DeepSWE v1.1**", "**77.0**"),),
+            n_rows=1,
+            numeric_columns=("score",),
+        ),
+    )
+    lying = component(
+        json.dumps(
+            {
+                "tab": {
+                    "title": "Vendor table",
+                    "columns": ["Benchmark", "score"],
+                    "rows": [["Invented v9", 77.1]],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.bar(document.getElementById("c"),"tab",'
+        '{x:"Benchmark",y:"score"})</script>',
+        title="Vendor table",
+        source="answer",
+    )
+    result = validate_output(lying, marked)
+    assert not result.components
+    joined = " ".join(error for block in result.rejected for error in block.errors)
+    assert "'Invented v9'" in joined and "77.1" in joined
+
+
 def test_an_extrapolated_trend_is_refused() -> None:
     """MUTATION: a forecast point. The evidence measured four regions, not a fifth quarter."""
     extrapolated = component(
