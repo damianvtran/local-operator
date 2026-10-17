@@ -409,6 +409,64 @@ def test_the_sweep_finds_files_written_through_a_variable_path_and_only_those(
     assert _bash(tmp_path, command).candidates == ()
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -c \"p=pick(); open(p,'w').write('x')\"",
+        "python3 - <<'PY'\np = pick()\nopen(p, 'w').write('x')\nPY",
+    ],
+)
+def test_a_no_cd_variable_write_sweeps_the_session_cwd(command: str, tmp_path: Path) -> None:
+    """The no-``cd`` shape is the common one, and it must root the sweep at the session cwd.
+
+    The producer used to append the working directory only when it was truthy, so a
+    command that never ``cd``'d (``cwd == ""``) contributed no sweep root at all and the
+    consumer's ``if directory else cwd`` fallback was dead code: a python step writing
+    through a variable without changing directory produced no candidate. Over-match is
+    what keeps the session-cwd root as safe as a ``cd``'d one: one level only, deliverable
+    kinds only, and only files modified since the logical turn's start — a pre-existing
+    file cannot enter — while ``since == 0`` still disables the sweep entirely (the twin
+    assertion below and ``test_a_no_cd_command_with_only_named_outputs_does_not_arm_the_sweep``).
+    """
+    import time
+
+    old = _write(tmp_path / "old.json")
+    os.utime(old, (1.0, 1.0))
+    _write(tmp_path / "fresh.json")
+    _write(tmp_path / ".hidden.json")
+    _write(tmp_path / "run.log")
+    _write(tmp_path / "notes.py")
+    _write(tmp_path / "sub" / "deep.json")
+    out = _bash(tmp_path, command, since=time.time() - 60)
+    assert [c.path for c in out.candidates] == ["fresh.json"]
+    # No turn start recorded -> the sweep is OFF (listing "everything" would over-match).
+    assert _bash(tmp_path, command).candidates == ()
+
+
+def test_a_no_cd_command_with_only_named_outputs_does_not_arm_the_sweep(tmp_path: Path) -> None:
+    import time
+
+    _write(tmp_path / "named.md")
+    _write(tmp_path / "bystander.md")
+    out = _bash(tmp_path, "python3 -c \"open('named.md','w').write('x')\"", since=time.time() - 60)
+    assert [c.path for c in out.candidates] == ["named.md"]
+
+
+def test_the_sweep_roots_are_the_cd_directory_the_session_cwd_or_nothing() -> None:
+    """The producer's three ``cwd`` states, pinned at the ``bash_effects`` seam.
+
+    A known ``cd`` directory sweeps there; no ``cd`` at all contributes the EMPTY string,
+    which the consumer resolves to the session cwd; an unknowable ``cd`` target
+    contributes nothing, because its relative names were dropped rather than guessed
+    against the cwd (``_in_dir``'s rule, pinned by
+    ``test_an_unknowable_cd_drops_relative_names_instead_of_guessing``).
+    """
+    variable = "python3 -c \"p=pick(); open(p,'w').write('x')\""
+    assert cand.bash_effects(f"cd sub && {variable}").sweep_dirs == ("sub",)
+    assert cand.bash_effects(variable).sweep_dirs == ("",)
+    assert cand.bash_effects(f'cd "$WORK"; {variable}').sweep_dirs == ()
+
+
 def test_a_command_with_only_named_outputs_does_not_arm_the_sweep(tmp_path: Path) -> None:
     import time
 
