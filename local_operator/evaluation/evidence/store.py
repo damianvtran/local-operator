@@ -1098,6 +1098,11 @@ class EvidenceWriter:
             data,
             media_type=media_type,
             allowed_states=("open", "finalizing"),
+            # The fail-open boundary: a diagnostic is not durable evidence. An
+            # ENOSPC/EDQUOT/EMFILE here must cost the diagnosis, never the
+            # writer -- poison would make ``abandon()`` refuse the bundle and
+            # lose a run that could still record a terminal.
+            best_effort=True,
         )
 
     def record_failure_diagnostic(
@@ -1203,6 +1208,7 @@ class EvidenceWriter:
         expected_byte_count: int | None = None,
         scoring_details: bool = False,
         allowed_states: tuple[str, ...] | None = None,
+        best_effort: bool = False,
     ) -> EvidenceArtifactRef:
         with self._thread_lock:
             self._ensure_open()
@@ -1234,6 +1240,10 @@ class EvidenceWriter:
             primary: BaseException | None = None
             ref: EvidenceArtifactRef | None = None
             link_attempted = False
+            # Whether THIS call created ``ref.sha256`` (as opposed to finding
+            # identical bytes already there). Only a file this call created may
+            # be removed again by the best-effort cleanup below.
+            created = False
             try:
                 fd = os.open(
                     temp,
@@ -1285,32 +1295,69 @@ class EvidenceWriter:
                         raise EvidenceBundleInvalid("existing artifact conflicts with digest")
                     if media_type != "application/octet-stream":
                         _project_artifact(existing, media_type)
+                else:
+                    created = True
             except BaseException as error:
                 primary = error
-                if link_attempted or (
-                    isinstance(error, (OSError, EvidenceError))
-                    and not isinstance(error, EvidenceBundleInvalid)
+                # ``best_effort`` (the failure diagnostic) never poisons: its
+                # bytes are disposable, and poisoning here would convert a
+                # survivable failure into a bundle that cannot record a
+                # terminal at all. Measured by independent review: an ENOSPC on
+                # the ~3 KB diagnostic, landing after the few hundred journal
+                # bytes, turned ``abandoned`` into ``abandonment_failed``; the
+                # same-code control (diagnostic disabled) abandoned cleanly.
+                if not best_effort and (
+                    link_attempted
+                    or (
+                        isinstance(error, (OSError, EvidenceError))
+                        and not isinstance(error, EvidenceBundleInvalid)
+                    )
                 ):
                     self._poison()
             cleanup_error = self._cleanup_artifact_temp(fd, temp)
             fd = -1
-            if cleanup_error is not None:
+            if cleanup_error is not None and not best_effort:
                 # Ambiguous temp ownership is itself a durable-boundary failure,
                 # even when the primary content rejection was deterministic.
                 self._poison()
             if primary is not None:
+                if best_effort:
+                    self._discard_created_artifact(created, ref)
                 if cleanup_error is not None:
                     raise primary from cleanup_error
                 raise primary
             if cleanup_error is not None:
+                if best_effort:
+                    self._discard_created_artifact(created, ref)
                 raise EvidenceRecoveryOnly("artifact cleanup failed") from cleanup_error
             assert ref is not None
             try:
                 self._calls.fsync(self._artifacts_fd)
             except OSError:
+                if best_effort:
+                    self._discard_created_artifact(created, ref)
+                    raise
                 self._poison()
                 raise
             return ref
+
+    def _discard_created_artifact(self, created: bool, ref: EvidenceArtifactRef | None) -> None:
+        """Remove an artifact THIS call linked, when the publish then failed.
+
+        Best-effort by construction: it runs on a path that is already
+        reporting a failure, and a file it cannot remove is the caller's
+        problem to detect via verification, never a second error to raise.
+        Only a digest this call itself created is removed (``created``), so
+        identical bytes that an earlier record already references are never
+        touched.
+        """
+
+        if not created or ref is None:
+            return
+        try:
+            self._calls.unlink(ref.sha256, dir_fd=self._artifacts_fd)
+        except BaseException:
+            return
 
     def begin_finalization(
         self,

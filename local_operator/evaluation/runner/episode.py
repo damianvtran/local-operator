@@ -2396,7 +2396,7 @@ class EpisodeRunner:
         writer = self._require_writer()
         try:
             writer.append(kind, payload)
-        except EvidenceError as error:
+        except (EvidenceError, OSError) as error:
             raise _EvidenceFailure(_diagnostic(error, None), operation=f"append:{kind}") from error
 
     def _append_receipt(
@@ -2410,7 +2410,7 @@ class EpisodeRunner:
                 writer.record_cleanup(payload)
             else:
                 writer.record_scoring_result(payload, details_source=details_source)
-        except EvidenceError as error:
+        except (EvidenceError, OSError) as error:
             raise _EvidenceFailure(_diagnostic(error, None), operation=f"receipt:{kind}") from error
 
     def _publish(self, data: bytes, *, media_type: str, expected_sha256: str | None = None) -> Any:
@@ -2419,14 +2419,14 @@ class EpisodeRunner:
             return writer.publish_artifact(
                 data, media_type=media_type, expected_sha256=expected_sha256
             )
-        except EvidenceError as error:
+        except (EvidenceError, OSError) as error:
             raise _EvidenceFailure(_diagnostic(error, None), operation="publish") from error
 
     def _begin_finalization(self, intent: FinalizationIntent, operation: str | None) -> None:
         writer = self._require_writer()
         try:
             writer.begin_finalization(self._finalization_id, operation, intent)
-        except EvidenceError as error:
+        except (EvidenceError, OSError) as error:
             raise _EvidenceFailure(
                 _diagnostic(error, None), operation="begin_finalization"
             ) from error
@@ -2484,7 +2484,7 @@ class EpisodeRunner:
         )
         try:
             writer.record_final_lifecycle(payload)
-        except EvidenceError as error:
+        except (EvidenceError, OSError) as error:
             raise _EvidenceFailure(_diagnostic(error, None), operation="lifecycle") from error
 
     def _seal(
@@ -2512,7 +2512,7 @@ class EpisodeRunner:
         )
         try:
             return writer.seal(draft)
-        except EvidenceError as error:
+        except (EvidenceError, OSError) as error:
             raise _EvidenceFailure(_diagnostic(error, None), operation="seal") from error
 
     def _publish_failure_diagnostic(
@@ -2544,14 +2544,25 @@ class EpisodeRunner:
         failure, so an unpublished artifact, a writer that is already poisoned
         or a journal that refuses the event leaves the bundle byte-for-byte as
         it would have been without this call, and the caller records the same
-        status and diagnostic string it records today. The artifact is
-        published BEFORE the event that references it, and on this path the
-        only way that event can fail without poisoning the writer is a
-        deterministic content refusal of a payload made of identifiers and a
-        digest; an I/O failure poisons the writer, where today's ``abandon()``
-        already fails closed as ``abandonment_failed``. So the orphan case the
-        verifier would reject cannot arise on any path where today's
-        abandonment succeeds.
+        status and diagnostic string it records today.
+
+        Two measured corrections to an earlier claim here, both now pinned by
+        same-code control tests (diagnostic monkeypatched to a no-op, compared
+        on status and string):
+
+        * A failed diagnostic publish used to POISON the writer, because
+          ``_publish_artifact`` poisons on any ``OSError``. Review measured an
+          ENOSPC on this ~3 KB artifact turning a control ``abandoned`` into
+          ``abandonment_failed``: the diagnostic was losing the bundle it was
+          meant to explain. ``publish_failure_diagnostic`` therefore runs with
+          ``best_effort``, which cleans its temp and never poisons -- the bytes
+          are disposable, unlike durable evidence.
+        * The artifact is published BEFORE the event that references it, so a
+          refused event would orphan it and ``abandon()`` rejects that. Every
+          abandonment path now runs ``_discard_orphaned_artifacts`` before its
+          terminal, which removes bytes no journal record names. That is what
+          keeps the orphan case from arising where today's abandonment
+          succeeds.
 
         Both writes go through the writer's existing scanned, bounded,
         fsynced artifact machinery (``publish_failure_diagnostic`` /
@@ -2605,13 +2616,22 @@ class EpisodeRunner:
         await self._emergency_teardown()
         # Diagnosis BEFORE the terminal: the abandonment is the last durable
         # write a scored intent can make, so anything recorded after it is lost.
+        # An ``_EvidenceFailure`` raised by a receipt already names the write
+        # that broke; only a genuine scoring failure falls back to the scoring
+        # operation id.
         self._publish_failure_diagnostic(
             error,
             layer=_failure_layer(error),
             phase="scoring",
-            operation=self._scoring_operation_id,
+            operation=getattr(error, "operation", None) or self._scoring_operation_id,
             category="scorer",
         )
+        # The diagnostic's own event can be refused (a redaction canary can
+        # match its identifier payload) without poisoning the writer, which
+        # leaves the artifact unreferenced and makes ``abandon()`` refuse the
+        # whole bundle. Every other abandonment path sweeps; this one has to as
+        # well, or a diagnostic that was meant to preserve a terminal loses it.
+        self._discard_orphaned_artifacts(writer)
         status: EpisodeStatus = "abandoned"
         detail = _diagnostic_code(error)
         try:
@@ -2741,8 +2761,11 @@ class EpisodeRunner:
             )
         rescue_complete: bool | None = None
         if cancelled:
-            # No awaits: they would re-raise the cancellation.
-            self._emergency_teardown_sync()
+            # No awaits on a cancelled task: each one re-raises immediately.
+            # The writer's diagnostic and abandon calls are synchronous, which
+            # is what makes a terminal possible here at all; teardown is left to
+            # the rescue sweep, whose descriptor is already durable.
+            pass
         else:
             rescue_complete = await self._attempt_rescue()
             await self._emergency_teardown()
@@ -2761,6 +2784,11 @@ class EpisodeRunner:
             detail = (
                 f"{detail}; abandonment refused: {_diagnostic(abandonment_error, self._redactions)}"
             )
+        if cancelled:
+            # Record, then re-raise: the terminal is durable and the caller
+            # still sees the cancellation it caused. Swallowing it here would
+            # report a completed outcome for stopped work.
+            raise error
         return EpisodeOutcome(
             status=status,
             episode_id=self._spec.episode_id,
@@ -2786,25 +2814,6 @@ class EpisodeRunner:
             writer.discard_unreferenced_artifacts()
         except BaseException:
             return
-
-    def _emergency_teardown_sync(self) -> None:
-        """Best-effort synchronous reap for a cancelled task.
-
-        ``_emergency_teardown`` is the normal path; this one exists only so a
-        cancellation can still record its terminal without awaiting. A
-        supervisor whose ``terminate`` is a coroutine is left to the rescue
-        sweep -- the descriptor is already durable -- rather than being driven
-        from a cancelled context.
-        """
-
-        supervisor = self._supervisor
-        terminate = getattr(supervisor, "terminate", None)
-        if terminate is None or asyncio.iscoroutinefunction(terminate):
-            return
-        try:
-            terminate()
-        except BaseException:
-            pass
 
     async def _close_session(self) -> None:
         session = self._session
@@ -3239,6 +3248,30 @@ def _header_value(value: str) -> str:
     return value.encode("unicode_escape").decode("ascii")
 
 
+def _render_error(error: BaseException) -> str:
+    """Render an exception without pydantic's embedded input values.
+
+    A ``ValidationError``'s ``str()`` embeds ``input_value=<head>...<tail>`` for
+    every failing field, and the one model on this boundary that carries secret
+    bytes is ``ResolvedSecret`` -- so quoting it into evidence is a leak the
+    resolvers cannot prevent, because the value arrived as an INPUT. Only the
+    model title, the field location and the error type are kept.
+
+    Shared by ``_diagnostic`` and the failure diagnostic, deliberately: the
+    failure diagnostic publishes to a durable artifact, and a second rendering
+    written beside this one is the way the ``include_input=False`` guarantee
+    gets lost. Every string that reaches either path goes through here.
+    """
+
+    if isinstance(error, ValidationError):
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
+            for item in error.errors(include_input=False, include_url=False)
+        )
+        return f"ValidationError: {error.title} ({details})"
+    return f"{type(error).__name__}: {error}"
+
+
 def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:
     """Render an error for ``EpisodeOutcome.diagnostic`` without its inputs.
 
@@ -3272,14 +3305,7 @@ def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:
     ``1``, ``value``), not the secret's name or bytes.
     """
 
-    if isinstance(error, ValidationError):
-        details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
-            for item in error.errors(include_input=False, include_url=False)
-        )
-        rendered = f"ValidationError: {error.title} ({details})"
-    else:
-        rendered = f"{type(error).__name__}: {error}"
+    rendered = _render_error(error)
     if redactions is not None:
         try:
             # The FULL rendering, before the bound is applied.
@@ -3378,10 +3404,26 @@ def _failure_layer(error: BaseException) -> Literal["evidence", "adapter", "inte
       calling it an adapter failure would point the reader at the wrong code.
     """
 
-    if isinstance(error, (_EvidenceFailure, EvidenceError, OSError)):
+    # Evidence first: an ``_EvidenceFailure`` is the harness's own write
+    # failing, and ``EvidenceError``/OSError are its causes. The adapter branch
+    # must still come BEFORE the bare ``OSError`` test, because
+    # ``TimeoutError`` and ``ConnectionError`` are OSError subclasses -- a
+    # judge deadline judged in that order was filed as ``evidence``.
+    if isinstance(error, (_EvidenceFailure, EvidenceError)):
         return "evidence"
-    if isinstance(error, (RpcRemoteError, SupervisionError, TimeoutError, asyncio.TimeoutError)):
+    if isinstance(
+        error,
+        (
+            RpcRemoteError,
+            SupervisionError,
+            TimeoutError,
+            asyncio.TimeoutError,
+            ConnectionError,
+        ),
+    ):
         return "adapter"
+    if isinstance(error, OSError):
+        return "evidence"
     return "internal"
 
 
@@ -3460,19 +3502,28 @@ def _failure_diagnostic_text(
     everything else here is what turns a bare code into a diagnosis.
     """
 
+    # ``_render_error``, never ``str(error)``: a pydantic ValidationError's
+    # default rendering embeds ``input_value=``, which can quote the secret
+    # that failed validation. This artifact is durable evidence.
+    message = _diagnostic_value(
+        _render_error(error), redactions, limit=MAX_FAILURE_DIAGNOSTIC_CHARS
+    )
     lines = [
         f"layer: {_diagnostic_value(layer, redactions, limit=32)}",
         f"phase: {_diagnostic_value(phase, redactions, limit=64)}",
         f"operation: {_diagnostic_value(operation or 'unknown', redactions, limit=128)}",
         f"exception: {_diagnostic_value(type(error).__name__, redactions, limit=128)}",
-        f"message: {_diagnostic_value(str(error), redactions, limit=MAX_FAILURE_DIAGNOSTIC_CHARS)}",
+        f"message: {message}",
     ]
     cause = _first_os_error(error)
     if cause is not None:
         symbol = errno.errorcode.get(cause.errno) if cause.errno is not None else None
         lines.append(f"errno: {_diagnostic_value(symbol or 'unknown', redactions, limit=32)}")
         lines.append(
-            f"strerror: {_diagnostic_value(cause.strerror or str(cause), redactions, limit=256)}"
+            # ``or ""``, never ``str(cause)``: ``OSError(EIO, None, "<path>")``
+            # renders the full path, re-leaking what ``path:`` reduced to a
+            # basename one line above.
+            f"strerror: {_diagnostic_value(cause.strerror or '', redactions, limit=256)}"
         )
         if cause.filename is not None:
             element = os.path.basename(str(cause.filename)) or "?"
