@@ -354,3 +354,51 @@ def test_compatible_page_union_preserves_old_proof_and_refuses_collisions():
     assert refused is not None
     assert first["id"] in refused["unavailable"]
     assert all(r["id"] != first["id"] for r in refused["records"])
+
+
+@pytest.mark.asyncio
+async def test_discovery_accepts_the_journal_directory_instead_of_a_transcript(tmp_path):
+    """The desktop hot path has a directory and must not replay the journal.
+
+    ``discover_records`` reads only ``Transcript.directory``, so a request path
+    that already knows the directory must be able to reach discovery WITHOUT
+    constructing ``Transcript`` -- whose constructor JSON-decodes every journal
+    line (a measured 6.6-8.9 s on a 485 MB journal). Both accepted forms must
+    produce the same envelope; one ``_directory_of`` helper reads them.
+    """
+    transcript = Transcript(tmp_path / "sessions" / "sess")
+    _, history, record = make_cycle(0)
+    await transcript.append_messages(history[:-1])
+    assert await persist_record(transcript, record)
+    await transcript.append_message(history[-1])
+    through_transcript = discover_records(transcript, history, "sess")
+    through_path = discover_records(transcript.directory, history, "sess")
+    assert through_path is not None
+    assert through_path == through_transcript
+    assert through_path["records"] == [record]
+
+
+@pytest.mark.asyncio
+async def test_discovery_uses_a_supplied_index_without_refreshing(tmp_path, monkeypatch):
+    """A caller on a read path hands the CURRENT resident index in.
+
+    Re-acquiring it -- ``refresh_index`` re-reads and re-parses the whole index
+    JSON, 1.5-2.5 s on the operator's store -- is the regression the desktop
+    bridge stopped paying. The supplied index must be used as-is.
+    """
+    from local_operator.session import transcript_index
+
+    transcript = Transcript(tmp_path / "sessions" / "sess")
+    _, history, record = make_cycle(0)
+    await transcript.append_messages(history[:-1])
+    assert await persist_record(transcript, record)
+    await transcript.append_message(history[-1])
+    index = transcript_index.refresh_index(tmp_path, "sess")
+    assert index is not None
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("discover_records refreshed an index it was handed")
+
+    monkeypatch.setattr(transcript_index, "refresh_index", forbidden)
+    response = discover_records(transcript.directory, history, "sess", index=index)
+    assert response is not None and response["records"] == [record]
