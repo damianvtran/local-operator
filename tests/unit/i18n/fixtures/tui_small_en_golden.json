@@ -113,5 +113,11 @@
   "tui.small.todo_panel.blocked": " — blocked",
   "tui.small.todo_panel.dropped_row": " — dropped",
   "tui.small.command_picker.projects": "{count, plural, one {{shown} project} other {{shown} projects}}",
-  "tui.small.command_picker.entries": "{count, plural, one {{shown} entry} other {{shown} entries}}"
+  "tui.small.command_picker.entries": "{count, plural, one {{shown} entry} other {{shown} entries}}",
+  "tui.small.session_sidebar.opened_by": "opened by {role}",
+  "tui.small.session_sidebar.lead_return": "esc return",
+  "tui.small.session_sidebar.lead_focus": "f9 focus",
+  "tui.small.session_sidebar.pin_suffix": " · ctrl+k pin",
+  "tui.small.session_sidebar.asks_suffix": " · ctrl+f asks",
+  "tui.small.session_sidebar.hide_suffix": " · ctrl+b hide"
 }
