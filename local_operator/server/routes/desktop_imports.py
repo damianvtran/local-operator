@@ -13,20 +13,14 @@ than interleaving two writers.
 
 from __future__ import annotations
 
-import asyncio
-import time
-from collections import OrderedDict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from local_operator.harness_import.jobs import JOBS, ImportJob, ImportJobBusy
 from local_operator.harness_import.service import HarnessImportService
-from local_operator.harness_import.types import (
-    ImportProgress,
-    ImportRequest,
-    ImportResult,
-)
+from local_operator.harness_import.types import ImportRequest
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -37,7 +31,8 @@ router = APIRouter(
     dependencies=[Depends(require_desktop)],
 )
 
-MAX_JOBS = 20
+#: Kept as a module alias because tests and older callers clear the map.
+_JOBS = JOBS.jobs
 
 
 class ImportBody(BaseModel):
@@ -68,17 +63,15 @@ class ImportBody(BaseModel):
         )
 
 
-class _Job:
-    __slots__ = ("progress", "result", "task")
-
-    def __init__(self, progress: ImportProgress):
-        self.progress = progress
-        self.result: ImportResult | None = None
-        self.task: asyncio.Task[Any] | None = None
+def _job_or_404(job_id: str) -> ImportJob:
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="import job not found")
+    return job
 
 
-#: Bounded newest-first registry. Process-local by design.
-_JOBS: "OrderedDict[str, _Job]" = OrderedDict()
+def _job_payload(job: ImportJob) -> dict[str, Any]:
+    return JOBS.payload(job)
 
 
 def service_for(request: Request) -> HarnessImportService:
@@ -89,32 +82,6 @@ def service_for(request: Request) -> HarnessImportService:
     service = HarnessImportService(manager.config_dir)
     request.app.state.harness_import_service = service
     return service
-
-
-def _job_or_404(job_id: str) -> _Job:
-    job = _JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="import job not found")
-    return job
-
-
-def _job_payload(job: _Job) -> dict[str, Any]:
-    payload = job.progress.to_dict()
-    # The route's registry key is the job's public identity. The service mints
-    # its own result id internally; reporting that here would make a client that
-    # polls by the id it was given see a different id in the payload.
-    payload["job_id"] = next(
-        (key for key, value in _JOBS.items() if value is job), payload["job_id"]
-    )
-    if job.result is not None:
-        payload["result"] = job.result.to_dict()
-    return payload
-
-
-def _remember(job_id: str, job: _Job) -> None:
-    _JOBS[job_id] = job
-    while len(_JOBS) > MAX_JOBS:
-        _JOBS.popitem(last=False)
 
 
 @router.get("/sources")
@@ -155,38 +122,14 @@ async def import_preview(body: ImportBody, request: Request) -> CRUDResponse[Any
 @router.post("/jobs")
 async def import_start(body: ImportBody, request: Request) -> CRUDResponse[Any]:
     service = service_for(request)
-    # Refuse early rather than queueing a job the lock will reject later.
-    for existing in _JOBS.values():
-        if existing.task is not None and not existing.task.done():
-            raise HTTPException(status_code=409, detail="an import job is already running")
-    progress = ImportProgress(
-        job_id=f"imp-{int(time.time() * 1000):x}",
-        state="queued",
-        phase="queued",
-        started_at=time.time(),
-        updated_at=time.time(),
-    )
-    job = _Job(progress)
-
-    def on_progress(state: ImportProgress) -> None:
-        job.progress = state
-
-    async def run() -> None:
-        job.result = await service.import_sessions(body.request(), progress=on_progress)
-        if job.result.state == "done":
-            job.progress.state = "done"
-        elif job.result.state == "cancelled":
-            job.progress.state = "cancelled"
-        else:
-            job.progress.state = "failed"
-            job.progress.error = job.result.error
-
-    job.task = asyncio.create_task(run())
-    _remember(progress.job_id, job)
+    try:
+        job = JOBS.start(service, body.request())
+    except ImportJobBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return CRUDResponse(
         status=200,
         message="Import job accepted.",
-        result={"job_id": progress.job_id},
+        result={"job_id": job.job_id},
     )
 
 
@@ -197,14 +140,16 @@ async def import_status(job_id: str) -> CRUDResponse[Any]:
 
 @router.delete("/jobs/{job_id}")
 async def import_cancel(job_id: str, request: Request) -> CRUDResponse[Any]:
-    job = _job_or_404(job_id)
-    if job.task is None or job.task.done():
+    _job_or_404(job_id)
+    cancelled = JOBS.cancel(job_id)
+    if cancelled.get("settled"):
         return CRUDResponse(
-            status=200, message="Import job already settled.", result=_job_payload(job)
+            status=200,
+            message="Import job already settled.",
+            result=_job_payload(_job_or_404(job_id)),
         )
-    cancelled = service_for(request).cancel()
     return CRUDResponse(
         status=200,
         message="Import cancellation requested.",
-        result={"job_id": job_id, "cancelled": cancelled, "state": job.progress.state},
+        result={**cancelled, "state": _job_or_404(job_id).progress.state},
     )

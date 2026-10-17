@@ -61,7 +61,7 @@ class _ImportCancelled(RuntimeError):
     """Raised between write batches when the operator cancelled the job."""
 
 
-def _normalise_title(text: str | None) -> str:
+def normalise_title(text: str | None) -> str:
     if not text:
         return ""
     # Drop control/format/private-use/surrogate characters: omp titles can
@@ -147,6 +147,10 @@ class HarnessImportService:
         preview.warnings.extend(self._option_warnings(request, selected))
         for adapter, session in selected:
             row = session.to_dict()
+            # Titles are a result surface too: credential-shaped text must not
+            # reach the agent from preview while `sessions` redacts it, and
+            # private-use glyphs render as tofu in lop's pickers.
+            row["title"] = normalise_title(session.title)
             row["target_session_id"] = target_session_id(adapter.source, session.source_id)
             manifests = self._existing_manifests(session, adapter.source)
             row["already_imported"] = any(
@@ -225,7 +229,6 @@ class HarnessImportService:
         request: ImportRequest,
         progress: Callable[[ImportProgress], None] | None = None,
     ) -> ImportResult:
-        self._cancel.clear()
         result = ImportResult(job_id=uuid.uuid4().hex[:12])
         state = ImportProgress(
             job_id=result.job_id,
@@ -330,6 +333,15 @@ class HarnessImportService:
             return result
         finally:
             self._lock.release()
+
+    def clear_cancel(self) -> None:
+        """Clear a previous/cancel-in-queue request before a NEW job starts.
+
+        This lives on the service but is called by ``JOBS.start`` before the
+        task is scheduled: clearing inside ``import_sessions`` would discard a
+        cancel that arrived while the job was still queued.
+        """
+        self._cancel.clear()
 
     def cancel(self) -> bool:
         self._cancel.set()
@@ -681,9 +693,9 @@ class HarnessImportService:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_session_created_at(directory, session.created_ts or 0.0)
         title = (
-            _normalise_title(mapped.title)
-            or _normalise_title(session.title)
-            or _normalise_title(mapped.first_user_text)
+            normalise_title(mapped.title)
+            or normalise_title(session.title)
+            or normalise_title(mapped.first_user_text)
             or f"{source} {session.source_id}"[:TITLE_MAX]
         )
         from local_operator.resume import write_session_title
