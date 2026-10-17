@@ -221,6 +221,16 @@
         "effort": null,
         "delegate": true,
         "class": "proactive"
+      },
+      {
+        "sha": "f43e3b1a2ab9fe5966a941ef85e90be09151d95e",
+        "version": "1.5.4",
+        "instructions_sha256": "b6ce565edd14a5f9d823b8cc82f21d370a63178fa0dd6905c300fd5cfe70ad69",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
       }
     ],
     "architect": [
