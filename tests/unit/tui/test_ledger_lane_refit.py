@@ -183,16 +183,34 @@ async def _scroll_frame(app: OperatorApp, pilot) -> None:
     ``_refresh_layout`` is called directly rather than waiting for the update
     timer, because the pass is the frame under test and a test cannot depend on
     which of two queued messages the loop runs first.
+
+    The branch is asserted WHERE IT IS TAKEN — synchronously, between the call
+    and the next await — and on the fact the call itself reads: with no layout
+    request waiting (``_layout_widgets`` empty) the visible-only pass is what
+    ``_refresh_layout(scroll=True)`` takes, by construction. Read after the
+    following pause it is a moving target: the seeded rows' ``Layout`` messages
+    and the boot's own cascade arrive asynchronously, and a straggler landing
+    in that pause makes the pause's update take the FULL branch, whose
+    ``reflow`` clears ``_visible_map`` — so the read reported a closed window
+    the direct call had, in fact, exercised (CI job 116803306374: ``assert
+    None is not None`` at this file's :192, one shard-load ordering of the
+    seed's cascade; reproduced with an injected-lateness rig holding the seed
+    rows' layout requests until the frame's first visible pass delivered
+    them).
     """
     view = app.query_one(TranscriptView)
     view.scroll_relative(y=-6, animate=False)
     await pilot.pause()
+    assert app.screen._layout_widgets == {}, (
+        "a layout request was already processed, so the pass below would take the "
+        "full branch and this test is not exercising the frame it was written for"
+    )
     app.screen._refresh_layout(scroll=True)
-    await pilot.pause()
     assert app.screen._compositor._visible_map is not None, (
         "the scroll pass did not take the visible-only branch, so this test is not "
         "exercising the frame it was written for"
     )
+    await pilot.pause()
 
 
 async def _toggle_sidebar_behind_a_scroll(app: OperatorApp, pilot) -> None:
