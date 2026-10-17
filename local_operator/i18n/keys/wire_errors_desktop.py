@@ -275,6 +275,10 @@ def skill_not_found() -> Msg:
     return Msg("wire.errors.desktop.skill_not_found", {})
 
 
+def sort_unknown(*, sorts: str) -> Msg:
+    return Msg("wire.errors.desktop.sort_unknown", {"sorts": sorts})
+
+
 def start_after_end() -> Msg:
     return Msg("wire.errors.desktop.start_after_end", {})
 

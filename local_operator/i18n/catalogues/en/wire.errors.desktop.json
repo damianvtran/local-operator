@@ -63,6 +63,7 @@
   "wire.errors.desktop.session_is_remote_write": "The {noun} for {session_id} lives on {label}, and this desktop cannot write it there yet; nothing was changed here.",
   "wire.errors.desktop.session_not_found": "no conversation with id {session_id}",
   "wire.errors.desktop.skill_not_found": "Skill not found",
+  "wire.errors.desktop.sort_unknown": "sort must be one of {sorts}.",
   "wire.errors.desktop.start_after_end": "The start must precede the end",
   "wire.errors.desktop.unknown_command": "Unknown command",
   "wire.errors.desktop.unknown_provider": "Unknown provider"

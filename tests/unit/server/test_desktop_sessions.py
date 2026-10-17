@@ -8466,6 +8466,11 @@ async def test_an_unknown_scope_name_is_an_empty_page_not_a_404(draft_api) -> No
         ("scope_name=lopdev", "scope_kind_required"),
         ("scope_kind=pod&scope_name=lopdev", "scope_kind_unknown"),
         (f"scope_kind=team&scope_name={'n' * 65}", "scope_name_too_long"),
+        # An unknown ORDER is refused by name too: the framework ignores a
+        # query parameter the handler does not know how to answer, so a
+        # silently-served rank order would be an ordering the client did not
+        # ask for and could not detect.
+        ("sort=sideways", "sort_unknown"),
     ],
 )
 async def test_a_bad_scope_is_refused_by_name(draft_api, query: str, code: str) -> None:
@@ -8489,6 +8494,52 @@ async def test_a_bad_scope_is_refused_by_name(draft_api, query: str, code: str) 
     # Nothing about the store leaked into the refusal, and no scope can be
     # applied to a name the route would not accept.
     assert "sessions" not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_the_activity_sort_carries_the_just_used_conversation(draft_api) -> None:
+    """The regression this parameter exists for, at the route that serves it.
+
+    A store whose cold population is a wake band: without ``sort`` the
+    conversation the reader just used sorts past the page (the rank order puts
+    every wake-bearing row first), and with ``sort=activity`` it leads the
+    head -- which is what keeps it inside the sidebar's first fetch on the
+    operator's own store. The default answer is asserted UNCHANGED in the same
+    test, because the compatibility promise is the other half of the fix.
+    """
+    from local_operator.wakes import store as wakes_store
+
+    client, root = draft_api
+    for index in range(10):
+        row = _bound_session(root, f"sched{index:08d}", created=500.0 + index)
+        # The activity clock is the TRANSCRIPT's mtime, and ``_bound_session``
+        # leaves it at "now" -- which would model a freshly-touched scheduled
+        # conversation, not an old one. Backdate it to the row's own creation,
+        # exactly as the bin-promptness scenes backdate their subjects.
+        os.utime(row / "transcript.jsonl", (500.0 + index, 500.0 + index))
+        wakes_store.write_entry(
+            root,
+            row.name,
+            cwd=str(root),
+            schedules=[
+                {
+                    "kind": "wake",
+                    "id": f"wake-{row.name}",
+                    "next_due_at": 4_000_000_000_000,
+                    "prompt": "Resume.",
+                }
+            ],
+        )
+    subject = _bound_session(root, "subject00001", created=900.0)
+    os.utime(subject / "transcript.jsonl", (1_500.0, 1_500.0))
+
+    rank_answer = await client.get("/v1/desktop/sessions?limit=10")
+    activity_answer = await client.get("/v1/desktop/sessions?limit=10&sort=activity")
+
+    assert rank_answer.status_code == 200, rank_answer.text
+    assert activity_answer.status_code == 200, activity_answer.text
+    assert "subject00001" not in _ids(rank_answer)
+    assert _ids(activity_answer)[0] == "subject00001"
 
 
 @pytest.mark.asyncio
