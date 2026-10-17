@@ -30,7 +30,7 @@ from local_operator.memory import (
     validate_fact,
 )
 from local_operator.memory_cli import render_human, run
-from local_operator.memory_inspect import PREVIEW_CHARS, SCHEMA, inspect_entries
+from local_operator.memory_inspect import ENTRY_GATES, PREVIEW_CHARS, SCHEMA, inspect_entries
 
 SENSITIVE_TITLE = "Card number 4111 1111 1111 1111"
 SENSITIVE_BODY = "Backup credentials: SSN 123-45-6789"
@@ -54,6 +54,7 @@ def _seed_legacy_row(
     source: dict[str, Any] | None = None,
     status: str = "active",
     created_at: float | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> str:
     """Insert one hand-built row with arbitrary bytes in the fact columns.
 
@@ -87,6 +88,9 @@ def _seed_legacy_row(
         "source_time": None,
         "replaces": "",
     }
+    # Applied last so a caller can poison raw fields the write path would refuse
+    # (timestamps, status, ...) — the imported-row state this reader exists for.
+    fact.update(overrides or {})
     wire = json.dumps(fact, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     op = {
         "v": 1,
@@ -496,12 +500,16 @@ def test_sensitive_provenance_locator_is_withheld_and_disclosed(rig):
 
 
 def test_sensitive_author_and_out_of_vocabulary_status_are_not_echoed(rig):
-    """Every provenance string is gated, and ``status`` by the write vocabulary.
+    """Every provenance string is gated, ``status`` by the write vocabulary, and
+    every freshness timestamp by the write path's numeric rule.
 
     ``author`` is free text and ``status`` is a closed vocabulary at write; an
     imported row can hold anything in either, and both reach the screen. The
     PAN here is a value ``guard()`` AND ``validate_fact()`` both refuse, so a
-    row carrying it is exactly the import this reader exists for.
+    row carrying it is exactly the import this reader exists for. The same
+    poison goes into ``created_at``/``verified_at``/``expires_at``: those reach
+    ``--json`` and were echoed raw through three review rounds (R4-1/Q8), while
+    ``validate_fact`` refuses a non-numeric value outright.
     """
     root, identity, store = rig
     pan = "4111 1111 1111 1111"
@@ -511,6 +519,9 @@ def test_sensitive_author_and_out_of_vocabulary_status_are_not_echoed(rig):
         validate_fact({"title": "safe", "body": "safe body", "source": {"author": pan}})
     with pytest.raises(MemoryError):
         validate_fact({"title": "safe", "body": "safe body", "status": pan})
+    for field in ("created_at", "verified_at", "expires_at"):
+        with pytest.raises(MemoryError):
+            validate_fact({"title": "safe", "body": "safe body", field: pan})
 
     entity = _seed_legacy_row(
         store,
@@ -520,6 +531,7 @@ def test_sensitive_author_and_out_of_vocabulary_status_are_not_echoed(rig):
         body="Nothing sensitive in this body.",
         source={"kind": "reported", "author": pan, "session": "sess-inspect"},
         status=pan,
+        overrides={"verified_at": pan, "expires_at": pan, "created_at": pan},
     )
 
     report = inspect_entries(root, identity)
@@ -527,6 +539,10 @@ def test_sensitive_author_and_out_of_vocabulary_status_are_not_echoed(rig):
     assert entry["provenance_redacted"] is True
     assert "author" not in entry["provenance"]
     assert entry["status"] == "unknown"
+    assert entry["verified_at"] is None
+    assert entry["expires_at"] is None
+    assert entry["created_at"] is None
+    assert entry["age_seconds"] is None
     assert pan not in json.dumps(report)
 
     raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
@@ -539,6 +555,82 @@ def test_sensitive_author_and_out_of_vocabulary_status_are_not_echoed(rig):
     assert entry["provenance"]["kind"] == "reported"
     assert entry["provenance"]["session"] == "sess-inspect"
     assert "session sess-inspect" in human
+
+
+def test_every_exported_field_is_gated_by_the_table(rig):
+    """The exported row is exactly :data:`ENTRY_GATES`, and every entry has a gate.
+
+    This is the regression test for the CLASS of defect three review rounds kept
+    finding one field at a time: a field reaching ``--json`` with no gate in
+    front of it. ``_project`` iterates the table (so a key cannot be emitted
+    from anywhere else), and this test fails if a table entry is added with no
+    gate — ``None`` is not callable, and an inline lambda or a module-function
+    passthrough is not a ``_gate_*`` in this module.
+    """
+    root, identity, store = rig
+    _seed_all_scopes(store, identity)
+    report = inspect_entries(root, identity)
+    assert report["entries"]
+    for entry in report["entries"]:
+        assert set(entry) == set(ENTRY_GATES)
+    for name, gate in ENTRY_GATES.items():
+        assert callable(gate), f"{name} is exported with no gate"
+        assert gate.__module__ == "local_operator.memory_inspect", name
+        assert gate.__name__.startswith("_gate_"), f"{name}: gate must be a named _gate_*"
+
+
+def test_poison_in_every_stored_field_stays_out_of_the_report(rig):
+    """A row whose every stored field is a PAN says nothing but the safe header.
+
+    End-to-end twin of the table test: it poisons every key a stored fact can
+    carry (what ``validate_fact`` normalises, plus the unexported ones) and
+    asserts the serialised report and the human page contain none of it. A new
+    output field sourced from a stored field without a gate fails here.
+    """
+    root, identity, store = rig
+    pan = "4111 1111 1111 1111"
+    entity = _seed_legacy_row(
+        store,
+        "global",
+        "global",
+        title=pan,
+        body=pan,
+        source={
+            "kind": pan,
+            "author": pan,
+            "session": pan,
+            "tool": pan,
+            "uri": pan,
+            "entry": pan,
+        },
+        overrides={
+            "subject": pan,
+            "tags": [pan],
+            "aliases": [pan],
+            "status": pan,
+            "created_at": pan,
+            "verified_at": pan,
+            "expires_at": pan,
+            "source_time": pan,
+            "replaces": pan,
+        },
+    )
+
+    report = inspect_entries(root, identity)
+    entry = next(item for item in report["entries"] if item["id"] == entity)
+    assert pan not in json.dumps(report)
+    # The row is shown, redacted, rather than dropped: a listing that hides a
+    # row entirely is a listing a person cannot act on.
+    assert entry["redacted"] is True
+    assert entry["title"] is None and entry["title_exported"] is False
+    assert entry["body_preview"] is None and entry["body_exported"] is False
+    assert entry["provenance"] == {}
+    assert entry["provenance_redacted"] is True
+    assert entry["status"] == "unknown"
+
+    raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
+    assert failed is False
+    assert pan not in render_human(raw, prefix="lop memory")
 
 
 def test_stale_cursor_reports_real_totals_and_says_start_from_the_top(rig):

@@ -602,6 +602,12 @@ class MemoryIdentity:
 #: surface ends up showing a value the other refuses.
 FACT_STATUSES = ("active", "candidate", "disputed", "superseded", "expired")
 
+#: The inclusive upper bound on any stored freshness timestamp (year 3000).
+#: Named and exported for the same reason as ``FACT_STATUSES``: the read-only
+#: inspector gates fields with the writer's rule, and a second literal in that
+#: reader is how the two drift apart silently.
+MAX_FACT_TIMESTAMP = 32503680000
+
 
 def validate_fact(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
@@ -669,7 +675,7 @@ def validate_fact(raw: Any) -> dict[str, Any]:
         raise MemoryError("Invalid memory status or pinned flag.")
     for key in ("verified_at", "expires_at", "created_at", "source_time"):
         x = fact[key]
-        if x is not None and (type(x) not in (int, float) or not 0 <= x <= 32503680000):
+        if x is not None and (type(x) not in (int, float) or not 0 <= x <= MAX_FACT_TIMESTAMP):
             raise MemoryError("Freshness timestamps must be finite Unix seconds or null.")
     source = fact["source"]
     if (
