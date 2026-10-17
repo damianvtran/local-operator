@@ -158,8 +158,16 @@ def test_the_activated_files_lost_their_ceilings() -> None:
     assert not (
         SLICE_NINE in baseline["enforced"] and SLICE_NINE in baseline["files"]
     ), f"{SLICE_NINE} is both enforced and ceilinged"
-    for path in ("local_operator/tui/widgets/session_sidebar.py",):
-        assert path not in baseline["enforced"], f"{path} was activated without its class decision"
+    # Slice 10 shipped with session_sidebar deliberately unactivated ("the class
+    # decision gets its own slice"). Slice 11 made that decision — all six
+    # findings classified in writing, its test asserting the five ignores carry
+    # their reason — so the guard flips to the same shape as its siblings: now
+    # that it IS activated it must be ceiling-free, and it may never go back to
+    # carrying a ceiling. The guard was never "never activate it"; it was
+    # "never activate it WITHOUT the decision".
+    sidebar = "local_operator/tui/widgets/session_sidebar.py"
+    assert sidebar in baseline["enforced"], f"{sidebar} lost its activation"
+    assert sidebar not in baseline["files"], f"{sidebar} has a ceiling again"
 
 
 def test_a_planted_literal_fails_the_activated_checker(tmp_path, monkeypatch, i18n_check) -> None:
