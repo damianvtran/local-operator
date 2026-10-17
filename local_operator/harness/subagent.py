@@ -2610,25 +2610,40 @@ def _final_answer_text(messages: "list[Any]") -> str:
     """
     from local_operator.harness.loop import CONTINUE_TRUNCATED_ANSWER_PROMPT
 
+    # The walk STARTS at the last assistant row, and only when that row HAS
+    # text. An empty final row means the run produced no answer at all (a
+    # wordless stop), and starting the walk past it would hand the parent an
+    # EARLIER assistant message -- stale narration like "Let me check the files."
+    # in place of the "" it has always received (agent review round 2, M-1). So
+    # an empty start keeps the old answer, exactly.
+    start = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if getattr(messages[i], "role", "") == "assistant":
+            start = i
+            break
+    if start < 0 or not (getattr(messages[start], "text", "") or ""):
+        return ""
+
     parts: list[str] = []
-    idx = len(messages) - 1
+    idx = start
     while idx >= 0:
-        message = messages[idx]
-        if getattr(message, "role", "") == "assistant":
-            text = getattr(message, "text", "") or ""
-            if text:
-                parts.append(text)
-                idx -= 1
-                if (
-                    idx >= 0
-                    and getattr(messages[idx], "role", "") == "user"
-                    and (getattr(messages[idx], "text", "") or "")
-                    == CONTINUE_TRUNCATED_ANSWER_PROMPT
-                ):
-                    idx -= 1
-                    continue
-                break
-        idx -= 1
+        text = getattr(messages[idx], "text", "") or ""
+        if not text:
+            break
+        parts.append(text)
+        prompt_idx = idx - 1
+        if (
+            prompt_idx >= 0
+            and getattr(messages[prompt_idx], "role", "") == "user"
+            and (getattr(messages[prompt_idx], "text", "") or "")
+            == CONTINUE_TRUNCATED_ANSWER_PROMPT
+        ):
+            prev = prompt_idx - 1
+            while prev >= 0 and getattr(messages[prev], "role", "") != "assistant":
+                prev -= 1
+            idx = prev
+            continue
+        break
     return "".join(reversed(parts))
 
 
