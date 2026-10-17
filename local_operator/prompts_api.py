@@ -1292,7 +1292,18 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
 #: longer produced may be shipped as "" (the removal stays authoritative).
 #: (2) A section whose EXACT text is already visible to the model — in the
 #: frozen prefix or in a ``[session-state]`` record still in context — need not
-#: be shipped again: re-sending it buys nothing the model cannot already read.
+#: be shipped again.
+#:
+#: What (2) actually gives up must be stated, because the next reader reasons
+#: from it: after A -> (empty) -> A, or A -> B -> A, the LAST surviving record
+#: about the section still says ``(empty)`` or B while an older copy of A stays
+#: readable in the prefix. Suppressing the re-send therefore leaves the model's
+#: most recent STATEMENT about that section stale. That is acceptable ONLY
+#: because these sections are declared untrusted hints — a candidate the model
+#: was told to verify, a compaction notice — so the copy already in front of it
+#: may legitimately be superseded. For any section whose latest value must be
+#: authoritative that staleness would be a correctness bug.
+#:
 #: That second rule is what stops the measured duplication: a suggestion set
 #: frozen into the prefix, then dropped and re-produced verbatim on a later
 #: turn, used to be re-appended every time because the delta was compared

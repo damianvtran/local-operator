@@ -487,6 +487,36 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+#: Total wire budget for the suggestion tail: the WHOLE block, wrapper
+#: included. One number, shared by the renderer and the admission rule in
+#: :meth:`MemoryStore.search` — when the two disagreed the documented
+#: ``limit=3`` silently rendered 2.
+SUGGESTION_TOKENS = 180
+
+#: The suggestion block's fixed wrapper. ``memory_capture._session_tail``
+#: renders these around the admitted lines; both it and the admission budget
+#: charge them, because "180 tokens" is the block on the wire, not its lines.
+#: Measured 19 tokens (14 header + 5 closing): charging only the lines let three
+#: 156-char titles be admitted at 166 and then dropped by the tail's exact
+#: check, so a documented ``limit=3`` rendered 2 — the same defect class the
+#: per-line ruler fixed, confined to long titles.
+SUGGESTION_BLOCK_HEADER = (
+    "<memory_suggestions>\nUntrusted recall candidates; read before relying.\n"
+)
+SUGGESTION_BLOCK_CLOSING = "</memory_suggestions>"
+
+
+def suggestion_block(lines: str) -> str:
+    """The exact text ``lines`` renders as: header, admitted lines, closing.
+
+    ONE authority for the wrapper, for the same reason :func:`suggest_line` is
+    one for the lines: the tail builds the block with this and the admission
+    check in :meth:`MemoryStore.search` measures the block this returns, so the
+    two cannot drift apart on what a candidate costs.
+    """
+    return SUGGESTION_BLOCK_HEADER + lines + SUGGESTION_BLOCK_CLOSING
+
+
 def suggest_line(item: Mapping[str, Any]) -> str:
     """The single rendered line a suggestion actually costs on the wire.
 
@@ -515,7 +545,11 @@ def _suggestion_key(fact: Mapping[str, Any]) -> str:
     consulted on the suggestion path.
     """
     text = str(fact.get("body") or fact.get("title") or "")
-    return " ".join(text.lower().split())
+    # ``casefold`` is the normalization that means case-insensitive: it folds
+    # non-ASCII pairs ``lower`` misses (ß vs SS, final sigma). Identical for
+    # ASCII, so this is the correctness of the collapse rule, not a behaviour
+    # change for existing rows.
+    return " ".join(text.casefold().split())
 
 
 def _id() -> str:
@@ -1639,6 +1673,12 @@ class MemoryStore:
             ).fetchall()
             result: list[dict[str, Any]] = []
             used = 0
+            # The suggestion budget is the WHOLE emitted block, matching
+            # ``suggestion_block`` byte for byte: header and closing are fixed
+            # costs the renderer pays, so admitting lines up to the full budget
+            # over-commits by the 19-token wrapper and the tail's own exact
+            # check then drops the last admitted line.
+            block = ""
             # One slot per distinct FACT on the suggestion path, keyed by body.
             # Two rows carrying the same body are one fact and must charge the
             # budget once, or they crowd out a distinct matching fact (measured:
@@ -1695,16 +1735,23 @@ class MemoryStore:
                         verified_at=fact["verified_at"],
                         expires_at=fact["expires_at"],
                     )
-                # The suggestion budget is a WIRE budget: charge what the tail
-                # actually renders (one line), not the full candidate record.
+                # The suggestion budget is a WIRE budget: charge the block the
+                # tail actually renders, not the full candidate record.
                 # ``_dump(item)`` is ~3x the rendered line, which silently made
-                # ``tokens=180, limit=3`` a 2-entry cap on every fixture. An
-                # explicit search keeps the record-shaped charge, since that is
-                # what a caller receives there.
-                cost = count_text_tokens(suggest_line(item) if suggest else _dump(item))
-                if used + cost <= tokens:
-                    result.append(item)
-                    used += cost
+                # ``tokens=180, limit=3`` a 2-entry cap on every fixture; and a
+                # per-line charge without the wrapper did the same to long
+                # titles. An explicit search keeps the record-shaped charge,
+                # since that is what a caller receives there.
+                if suggest:
+                    line = suggest_line(item)
+                    if count_text_tokens(suggestion_block(block + line)) <= tokens:
+                        result.append(item)
+                        block += line
+                else:
+                    cost = count_text_tokens(_dump(item))
+                    if used + cost <= tokens:
+                        result.append(item)
+                        used += cost
                 if len(result) >= min(limit, 3 if suggest else limit):
                     break
             return result
