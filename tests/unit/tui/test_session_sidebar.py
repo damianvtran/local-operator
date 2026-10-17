@@ -654,7 +654,12 @@ async def test_switch_does_not_fire_under_a_pushed_modal():
 async def test_list_window_current_cursor_and_footer_are_independent():
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        # The boot adoption re-publishes ``current_id`` on its own edge
+        # (``_adopt_session`` -> ``set_current('sess')``); on a loaded shard the
+        # bind lands after this cell's manual write below and clobbers it. Wait
+        # for the bind first so the write cannot race it (main run 38970728658:
+        # ``assert 'sess' == 'current'``).
+        await _await_first_attach(app, pilot)
         sidebar = app._session_sidebar
         sidebar.current_id = "current"
         entries = [CatalogEntry(SessionRow("current", 1, "Current conversation"))]
