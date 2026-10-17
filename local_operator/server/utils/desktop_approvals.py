@@ -61,7 +61,13 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
     """
     import time
 
+    from local_operator.network import enrollment
+
+    if approval_id.startswith("apn_"):
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
     record = approval_store.load_record(approval_id, root=root)
+    if record.get("kind") not in approval_store.KINDS:
+        raise MeshRefusal("approval_invalid", "This build cannot approve this authority kind")
     if inheritance.intent(record) is not None:
         # REFUSED BEFORE THE SIGNER RUNS. The desktop card cannot yet state what a credential
         # permission signs (it would read the request's operator-key anchor as an

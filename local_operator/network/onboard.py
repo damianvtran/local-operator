@@ -58,9 +58,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 
 from local_operator.network import onboard_approvals as approvals_adapter
 from local_operator.network.types import MeshRefusal
@@ -1117,6 +1118,11 @@ class OnboardRun:
         role = str(self.view.what.get("role") or "drive")
         device_id = str(self.view.device.get("device_id") or "")
         argv = [*self.local_cli, "network", "invite", "--role", role, "--json"]
+        # A selected/signed network is not a suggestion. With multiple local
+        # networks the ambient CLI default may refuse or choose a different one.
+        network_id = str(self.view.what.get("network_id") or "")
+        if network_id:
+            argv += ["--network", network_id]
         if device_id:
             argv += ["--device", device_id]
         result = self.run_local(argv, timeout=self._step_timeout("invite"))
@@ -2123,6 +2129,17 @@ class OnboardRun:
         refuses, or no identity to write with. Resumable like every other step:
         ``mark_failed`` + retry reruns it, and every write here is idempotent.
         """
+        from local_operator.network import enrollment
+
+        if self.view.kind == enrollment.KIND:
+            enrollment.checked(self.view.record, approval_id=self.approval_id)
+            return _StepOutcome(
+                True,
+                "SKIPPED: network enrollment only; no account logins, credential placement, "
+                "broker access, definitions, MCP, git or model configuration was provisioned",
+                {"provisioning": "network_only", "skipped": True},
+            )
+
         from local_operator.network import identity as identity_mod
         from local_operator.network import readiness as readiness_mod
         from local_operator.network import store as network_store
@@ -2535,6 +2552,75 @@ class OnboardRun:
     def _service_name(self) -> str:
         return "systemd --user" if self.facts.get("systemctl") == "yes" else "launchd"
 
+    def _verify_network_only(self) -> _StepOutcome:
+        """Prove enrollment, retaining raw readiness rather than calling it task-ready."""
+        from local_operator.network import enrollment
+
+        enrollment.checked(self.view.record, approval_id=self.approval_id)
+        target = self._node_json("lop network identity show", timeout=60.0)
+        node_id = str((target or {}).get("device_id") or "")
+        if not target or target.get("ok") is not True or not node_id:
+            return _StepOutcome(
+                False, "Enrollment verification could not establish the target identity"
+            )
+        named_id = str(self.view.device.get("device_id") or "")
+        if named_id and named_id != node_id:
+            return _StepOutcome(
+                False, "Enrollment verification identified a different target device"
+            )
+        admitted = self._join_already_active(node_id)
+        if admitted is None or not admitted.ok:
+            return _StepOutcome(
+                False, "Enrollment verification lacks positive membership in the signed network"
+            )
+        anchor_ok = any(
+            r.get("step") == "anchor"
+            and r.get("ok") is True
+            and r.get("run_id") == self.view.run_id
+            for r in self.view.receipts
+        )
+        if not anchor_ok:
+            return _StepOutcome(
+                False, "Enrollment verification lacks this run's signed operator-anchor proof"
+            )
+        doctor = self._node_json("lop network doctor", timeout=self._step_timeout("verify"))
+        if not doctor or doctor.get("ok") is not True or not doctor.get("checks"):
+            return _StepOutcome(
+                False, "Enrollment verification could not establish the target's mesh health"
+            )
+        result = self.run_local(
+            [*self.local_cli, "network", "ready", "--peer", node_id, "--json"],
+            timeout=self._step_timeout("verify"),
+        )
+        ready = _json_from(result.stdout or "")
+        if not isinstance(ready, dict):
+            return _StepOutcome(False, "Enrollment verification received no readiness report")
+        try:
+            warnings = enrollment.ready_evidence(
+                ready, device_id=node_id, network_id=str(self.view.what["network_id"])
+            )
+        except MeshRefusal as refusal:
+            return _StepOutcome(False, refusal.sentence)
+        raw_ready_ok = ready.get("ok") is True
+        detail = (
+            "Network enrollment verified; account logins were not shared; "
+            "task readiness is not established"
+        )
+        if warnings:
+            detail += "; equipment warnings: " + "; ".join(r["capability"] for r in warnings)
+        return _StepOutcome(
+            True,
+            detail,
+            {
+                "peer": node_id,
+                "enrollment_verified": True,
+                "ready_ok": raw_ready_ok,
+                "task_ready": False,
+                "doctor_ok": doctor["ok"],
+                "equipment_warnings": warnings,
+            },
+        )
+
     def step_verify(self) -> _StepOutcome:
         """§3.3 step 10: the acceptance surface, then the fold to ``connected``.
 
@@ -2550,6 +2636,11 @@ class OnboardRun:
         point of use. A failing admission row (or a still-gating equipment row,
         e.g. operator authority) fails the step, each named by its own key.
         """
+        from local_operator.network import enrollment
+
+        if self.view.kind == enrollment.KIND:
+            return self._verify_network_only()
+
         name = str(self.view.device.get("name") or "")
         device_id = ""
         for receipt in reversed(self.view.receipts):
@@ -2675,9 +2766,85 @@ def _receipt(
     }
 
 
+@contextmanager
+def approval_run(approval_id: str, *, root: Any = None) -> Iterator[approvals_adapter.ApprovalView]:
+    """Shared CLI/desktop target lease around the EXISTING signed run admission.
+
+    Distinct cards for one network/SSH target must not install concurrently. The
+    file claim is nonblocking and per target, not a fleet-wide queue, and its
+    inode is never removed. Existing begin_run still verifies signature, expiry,
+    state and per-record stale-run semantics before any step/credential lookup.
+    """
+    from local_operator.config_writer import nonblocking_file_claim
+    from local_operator.network import approvals as store
+
+    if approval_id.startswith("apn_"):
+        store.enrollment.bound_profile(root)
+    proposed = approvals_adapter.load(approval_id, root=root)
+    if proposed is None:
+        raise MeshRefusal("approval_missing", "No such onboarding request on this device")
+    if proposed.kind not in (store.KIND_DEVICE_ONBOARD, store.enrollment.KIND):
+        raise MeshRefusal(
+            "onboarding_kind_required", "Only a device onboarding card may run remote setup"
+        )
+    # Credential-inheritance/finite-share cards also use device_onboard storage;
+    # begin_run retains their dedicated inherit_apply_required/finite_apply_required
+    # refusals. A generic remote runner never consumes that signed authority.
+    host = str(proposed.device.get("host") or "")
+    port = int(proposed.device.get("port") or 0) or _port_from(host) or 22
+    host = host.partition(":")[0] if ":" in host else host
+    # Same parser/ordering as the executor; explicit :22 and implicit :22
+    # must claim ONE target across both authority namespaces.
+    key = json.dumps(
+        [
+            proposed.what.get("network_id", ""),
+            f"{host.lower()}:{port}",
+            proposed.device.get("user", ""),
+        ],
+        separators=(",", ":"),
+    )
+    target = store.ensure_approvals_dir(root) / (
+        ".target-" + hashlib.sha256(key.encode()).hexdigest() + ".lock"
+    )
+    with nonblocking_file_claim(target) as acquired:
+        if not acquired:
+            raise MeshRefusal(
+                "approval_target_in_flight",
+                "Setup already owns this SSH target; read its progress before retrying",
+            )
+        yield approvals_adapter.begin_run(approval_id, root=root)
+
+
 def execute_approval(
     approval_id: str,
     *,
+    transport: Transport | None = None,
+    transport_factory: Callable[[Any], Transport] | None = None,
+    resolve: Callable[[dict[str, Any]], ResolvedCredential] | None = None,
+    local_cli: Sequence[str] | None = None,
+    run_local: Callable[..., CommandResult] = _run_local,
+    clock: Callable[[], float] = _now,
+    root: Any = None,
+) -> dict[str, Any]:
+    """One runner for CLI and desktop; hold admission until all nine steps drain."""
+    with approval_run(approval_id, root=root) as view:
+        return _execute_admitted_approval(
+            approval_id,
+            view=view,
+            transport=transport,
+            transport_factory=transport_factory,
+            resolve=resolve,
+            local_cli=local_cli,
+            run_local=run_local,
+            clock=clock,
+            root=root,
+        )
+
+
+def _execute_admitted_approval(
+    approval_id: str,
+    *,
+    view: approvals_adapter.ApprovalView,
     transport: Transport | None = None,
     transport_factory: Callable[[Any], Transport] | None = None,
     resolve: Callable[[dict[str, Any]], ResolvedCredential] | None = None,
@@ -2698,7 +2865,6 @@ def execute_approval(
     unit cells drive the whole machine against a scripted fake with no SSH
     anywhere in CI.
     """
-    view = approvals_adapter.begin_run(approval_id, root=root)
     if transport is None:
         if transport_factory is None:
             device = view.device
@@ -2753,6 +2919,16 @@ def execute_approval(
                     step=step,
                     detail=contradiction.sentence,
                     root=root,
+                    **(
+                        {
+                            "enrollment_failure": {
+                                "failure_kind": "changed_facts",
+                                "replacement_id": contradiction.refiled,
+                            }
+                        }
+                        if view.kind == "device_onboard_network_only"
+                        else {}
+                    ),
                 )
                 state = "failed"
                 next_step = step
@@ -2784,6 +2960,11 @@ def execute_approval(
                     step=step,
                     detail=outcome.detail,
                     root=root,
+                    **(
+                        {"enrollment_report": outcome.data}
+                        if view.kind == "device_onboard_network_only"
+                        else {}
+                    ),
                 )
                 state = "connected"
                 break

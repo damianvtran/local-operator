@@ -72,6 +72,7 @@ from pathlib import Path
 from secrets import token_bytes
 from typing import Any, Iterator, Mapping
 
+from local_operator.network import enrollment
 from local_operator.network.identity import network_root
 from local_operator.network.types import MeshRefusal
 from local_operator.network.wire import canonical_json, crockford
@@ -86,7 +87,7 @@ INDEX_FILENAME = "index.jsonl"
 #: fold helpers are kind-agnostic) but nothing here creates one.
 KIND_DEVICE_ONBOARD = "device_onboard"
 KIND_LOCAL_AUTHORITY = "local_authority"
-KINDS: tuple[str, ...] = (KIND_DEVICE_ONBOARD, KIND_LOCAL_AUTHORITY)
+KINDS: tuple[str, ...] = (KIND_DEVICE_ONBOARD, KIND_LOCAL_AUTHORITY, enrollment.KIND)
 
 STATE_REQUESTED = "requested"
 STATE_APPROVED = "approved"
@@ -190,41 +191,74 @@ APPROVAL_DOMAIN_LITERAL = b"lop-approval-v1\x00"
 # ---------------------------------------------------------------------------
 
 
-def approvals_dir(root: Path | None = None) -> Path:
+def approvals_dir(root: Path | None = None, *, enrollment_only: bool = False) -> Path:
     """``<config>/network/approvals`` — the path, never created by a reader.
 
     A listing over a directory that is not there answers "nothing pending",
     which is the truth on a fresh install; writers use
     :func:`ensure_approvals_dir`.
     """
-    return network_root(root) / APPROVALS_DIRNAME
+    dirname = enrollment.DIRECTORY_NAME if enrollment_only else APPROVALS_DIRNAME
+    path = network_root(root) / dirname
+    if enrollment_only:
+        enrollment.require(
+            not path.is_symlink() and not path.parent.is_symlink(),
+            "Enrollment authority requires its own non-symlink namespace",
+        )
+    return path
 
 
-def ensure_approvals_dir(root: Path | None = None) -> Path:
+def ensure_approvals_dir(root: Path | None = None, *, enrollment_only: bool = False) -> Path:
     """``<config>/network/approvals``, created 0700 down the chain — WRITERS ONLY."""
     from local_operator.network.identity import ensure_network_root
 
     ensure_network_root(root)
-    path = approvals_dir(root)
+    path = approvals_dir(root, enrollment_only=enrollment_only)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
 
 
+def _namespace(approval_id: str, *, request_lock: bool = False) -> bool:
+    """Prefixes are authority namespaces, never arbitrary path components.
+
+    Legacy IDs retain their existing spelling (including synthetic safe IDs in
+    callers); new IDs have the closed Crockford grammar from the freeze.
+    """
+    import re
+
+    if approval_id.startswith("apn_"):
+        enrollment.require(enrollment.ID.fullmatch(approval_id) is not None)
+        return True
+    prefix = "req_" if request_lock and approval_id.startswith("req_") else "ap_"
+    _require(
+        re.fullmatch(prefix + r"[A-Za-z0-9_-]+", approval_id) is not None,
+        "approval id must be a device-local, path-safe identifier",
+    )
+    return False
+
+
 def record_path(approval_id: str, root: Path | None = None) -> Path:
-    return approvals_dir(root) / f"{approval_id}.json"
+    return approvals_dir(root, enrollment_only=_namespace(approval_id)) / f"{approval_id}.json"
 
 
-def lock_path(approval_id: str, root: Path | None = None) -> Path:
+def lock_path(
+    approval_id: str, root: Path | None = None, *, enrollment_only: bool | None = None
+) -> Path:
     """The per-record flock target. One name per record, and the NAME is stable
     across processes — that is the whole mechanism (two opens of one file are
     two lock holders only if the path, and so the inode, agrees)."""
-    return approvals_dir(root) / f"{approval_id}.lock"
+    # Request-ID locks need an explicit namespace; record locks derive it from ID.
+    selected = (
+        _namespace(approval_id, request_lock=True) if enrollment_only is None else enrollment_only
+    )
+    _namespace(approval_id, request_lock=True)
+    return approvals_dir(root, enrollment_only=selected) / f"{approval_id}.lock"
 
 
-def index_path(root: Path | None = None) -> Path:
+def index_path(root: Path | None = None, *, enrollment_only: bool = False) -> Path:
     """The append-only tombstone index. Rows outlive the records they guard."""
-    return approvals_dir(root) / INDEX_FILENAME
+    return approvals_dir(root, enrollment_only=enrollment_only) / INDEX_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +292,9 @@ def new_run_id() -> str:
 
 
 @contextmanager
-def _record_lock(approval_id: str, root: Path | None = None) -> Iterator[None]:
+def _record_lock(
+    approval_id: str, root: Path | None = None, *, enrollment_only: bool | None = None
+) -> Iterator[None]:
     """Hold ``flock(LOCK_EX)`` on this record's lock file across a read-modify-write.
 
     WHY A CROSS-PROCESS LOCK AT ALL (F3): ``store.py``'s lock serialises threads
@@ -274,8 +310,11 @@ def _record_lock(approval_id: str, root: Path | None = None) -> Iterator[None]:
     """
     import fcntl
 
-    ensure_approvals_dir(root)
-    target = lock_path(approval_id, root)
+    selected = (
+        _namespace(approval_id, request_lock=True) if enrollment_only is None else enrollment_only
+    )
+    ensure_approvals_dir(root, enrollment_only=selected)
+    target = lock_path(approval_id, root, enrollment_only=selected)
     fd = os.open(target, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -297,8 +336,12 @@ def _write_record(record: Mapping[str, Any], root: Path | None = None) -> Path:
     """
     from local_operator.network import store
 
-    ensure_approvals_dir(root)
-    return store._write_private_json(record_path(str(record["approval_id"]), root), dict(record))
+    selected = _namespace(str(record["approval_id"]))
+    ensure_approvals_dir(root, enrollment_only=selected)
+    payload = enrollment.encode(record) if selected else dict(record)
+    if not selected and record.get("kind") == enrollment.KIND:
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
+    return store._write_private_json(record_path(str(record["approval_id"]), root), payload)
 
 
 def _read_json(path: Path) -> Any | None:
@@ -342,6 +385,8 @@ def request_digest(record: Mapping[str, Any]) -> str:
     nothing produce the same bytes — the property the whole idempotency rule
     rests on.
     """
+    if enrollment.restricted(record):
+        return enrollment.commitment(record)
     payload = canonical_json(_immutable_request(record))
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -366,6 +411,8 @@ def _digest_adopting_window(
     host follows.
     """
     rebuilt = dict(candidate)
+    if enrollment.restricted(existing):
+        rebuilt["approval_id"] = existing["approval_id"]
     rebuilt["created_at"] = existing.get("created_at", rebuilt.get("created_at"))
     rebuilt["expires_at"] = existing.get("expires_at", rebuilt.get("expires_at"))
     return request_digest(rebuilt)
@@ -404,7 +451,14 @@ def _load_raw(approval_id: str, root: Path | None = None) -> dict[str, Any]:
     fail-closed direction (a corrupt record must not be re-interpreted as a
     valid authority).
     """
-    data = _read_json(record_path(approval_id, root))
+    path = record_path(approval_id, root)
+    if _namespace(approval_id):
+        enrollment.require(not path.is_symlink(), "Enrollment authority may not be a file alias")
+    data = _read_json(path)
+    if data is not None and _namespace(approval_id):
+        return enrollment.decode(data, approval_id)
+    if isinstance(data, dict) and data.get("kind") == enrollment.KIND:
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
     if not isinstance(data, dict) or data.get("approval_id") != approval_id:
         # Design round 1, D5: a pointer, not a command — this sentence travels
         # verbatim to the desktop route's ``{code, message}``, where "type this
@@ -441,6 +495,18 @@ def badge_row(record: Mapping[str, Any]) -> dict[str, Any]:
     row["machine" if "machine" in record else "device"] = (
         record.get("machine") or record.get("device") or {}
     )
+    if record.get("kind") == enrollment.KIND:
+        row.update(
+            summary="Network enrollment only; account logins are not shared",
+            can_approve_here=False,
+            approve_remedy=enrollment.REMEDY,
+            typed_approval={
+                "action": "approve-network-enrollment",
+                "authority_version": 1,
+                "scope": "network_only",
+                "request_digest": record["request_digest"],
+            },
+        )
     return row
 
 
@@ -460,30 +526,36 @@ def list_records(*, root: Path | None = None, now: float | None = None) -> list[
     wrong, so it must be the last surface to break.
     """
     directory = approvals_dir(root)
-    if not directory.is_dir():
-        return []
     records: list[dict[str, Any]] = []
     for path in sorted(directory.glob("ap_*.json")):
         data = _read_json(path)
         if isinstance(data, dict) and isinstance(data.get("approval_id"), str):
             records.append(presented(data, now))
+    for path in sorted(approvals_dir(root, enrollment_only=True).glob("apn_*.json")):
+        try:
+            records.append(presented(_load_raw(path.stem, root), now))
+        except MeshRefusal:
+            continue
     records.sort(key=lambda row: float(row.get("created_at") or 0.0))
     return records
 
 
-def _find_by_request_id(request_id: str, root: Path | None = None) -> dict[str, Any] | None:
+def _find_by_request_id(
+    request_id: str, root: Path | None = None, *, enrollment_only: bool = False
+) -> dict[str, Any] | None:
     """The live record for a request id, or ``None`` — the idempotency lookup.
 
     A scan, not an index: the directory is small by design (the flat-store
     discipline, §2.3) and only CREATE pays it.
     """
-    directory = approvals_dir(root)
+    directory = approvals_dir(root, enrollment_only=enrollment_only)
     if not directory.is_dir():
         return None
-    for path in sorted(directory.glob("ap_*.json")):
+    for path in sorted(directory.glob("apn_*.json" if enrollment_only else "ap_*.json")):
         data = _read_json(path)
-        if isinstance(data, dict) and data.get("request_id") == request_id:
-            return data
+        logical = data.get("record") if enrollment_only and isinstance(data, dict) else data
+        if isinstance(logical, dict) and logical.get("request_id") == request_id:
+            return _load_raw(path.stem, root) if enrollment_only else logical
     return None
 
 
@@ -493,7 +565,7 @@ def _find_by_request_id(request_id: str, root: Path | None = None) -> dict[str, 
 
 
 @contextmanager
-def _index_flock(root: Path | None = None) -> Iterator[int]:
+def _index_flock(root: Path | None = None, *, enrollment_only: bool = False) -> Iterator[int]:
     """flock the tombstone index's ONE lock file, as the index's only lock.
 
     Every read-modify-write of the index must be born under this flock. The
@@ -506,8 +578,8 @@ def _index_flock(root: Path | None = None) -> Iterator[int]:
     """
     import fcntl
 
-    ensure_approvals_dir(root)
-    lock = index_path(root).with_name(f".{INDEX_FILENAME}.lock")
+    ensure_approvals_dir(root, enrollment_only=enrollment_only)
+    lock = index_path(root, enrollment_only=enrollment_only).with_name(f".{INDEX_FILENAME}.lock")
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -516,23 +588,25 @@ def _index_flock(root: Path | None = None) -> Iterator[int]:
         os.close(fd)
 
 
-def _append_index_row(row: Mapping[str, Any], root: Path | None = None) -> None:
+def _append_index_row(
+    row: Mapping[str, Any], root: Path | None = None, *, enrollment_only: bool = False
+) -> None:
     """Append one tombstone row under the index's own flock, ``O_APPEND``.
 
     The index has MANY writers (every prune) and one reader (create's
     tombstone guard), so it gets the same discipline the ask log does: a whole
     line per write, appended at the end, torn lines skipped by the reader.
     """
-    target = index_path(root)
+    target = index_path(root, enrollment_only=enrollment_only)
     line = json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
-    with _index_flock(root):
+    with _index_flock(root, enrollment_only=enrollment_only):
         with open(target, "a", encoding="utf-8") as handle:
             handle.write(line)
 
 
-def read_index(root: Path | None = None) -> list[dict[str, Any]]:
+def read_index(root: Path | None = None, *, enrollment_only: bool = False) -> list[dict[str, Any]]:
     """Every parseable tombstone row. A missing index answers ``[]``."""
-    path = index_path(root)
+    path = index_path(root, enrollment_only=enrollment_only)
     if not path.is_file():
         return []
     rows: list[dict[str, Any]] = []
@@ -554,7 +628,11 @@ def read_index(root: Path | None = None) -> list[dict[str, Any]]:
 
 
 def _tombstone_for(
-    request_id: str, root: Path | None = None, *, now: float | None = None
+    request_id: str,
+    root: Path | None = None,
+    *,
+    now: float | None = None,
+    enrollment_only: bool = False,
 ) -> dict[str, Any] | None:
     """A tombstone guarding ``request_id``, or ``None`` once it has aged out.
 
@@ -564,7 +642,7 @@ def _tombstone_for(
     it. Both agree because both compare against the same constant.
     """
     moment = time.time() if now is None else now
-    for row in read_index(root):
+    for row in read_index(root, enrollment_only=enrollment_only):
         if row.get("request_id") != request_id:
             continue
         pruned_at = row.get("pruned_at")
@@ -629,7 +707,8 @@ def create_request(
     _require(isinstance(what, Mapping), "what must be an object")
     surface = str(requested_by.get("surface") or "")
     _require(0 < len(surface) <= _SURFACE_LIMIT, "requested_by.surface must name the surface")
-    if kind == KIND_DEVICE_ONBOARD:
+    restricted = kind == enrollment.KIND
+    if kind in (KIND_DEVICE_ONBOARD, enrollment.KIND):
         _require(isinstance(device, Mapping), "a device_onboard request needs a device block")
         _require(machine is None, "device_onboard carries a device block, not a machine block")
     else:
@@ -657,19 +736,22 @@ def create_request(
         record["expires_at"] = float(expires_at)
     else:
         record["expires_at"] = record["created_at"] + DEFAULT_EXPIRY_S
-    if kind == KIND_DEVICE_ONBOARD:
+    if kind in (KIND_DEVICE_ONBOARD, enrollment.KIND):
         record["device"] = dict(device or {})
     else:
         record["machine"] = dict(machine or {})
-    record["request_digest"] = request_digest(record)
+    if restricted:
+        record["authority_version"] = enrollment.VERSION
+    else:
+        record["request_digest"] = request_digest(record)
 
     # The create target's lock is keyed on the REQUEST id: the approval id does
     # not exist yet, and two concurrent creates of the same id must not both
     # mint one (the digest lookup is the thing being serialised).
-    with _record_lock(request_id, root):
-        existing = _find_by_request_id(request_id, root)
+    with _record_lock(request_id, root, enrollment_only=restricted):
+        existing = _find_by_request_id(request_id, root, enrollment_only=restricted)
         if existing is not None:
-            if existing.get("request_digest") == record["request_digest"]:
+            if not restricted and existing.get("request_digest") == record["request_digest"]:
                 return presented(existing, moment)
             if existing.get("request_digest") == _digest_adopting_window(record, existing):
                 return presented(existing, moment)
@@ -678,7 +760,7 @@ def create_request(
                 f"request {request_id} already exists with a different payload; "
                 "a changed request is a NEW request id",
             )
-        tomb = _tombstone_for(request_id, root, now=moment)
+        tomb = _tombstone_for(request_id, root, now=moment, enrollment_only=restricted)
         if tomb is not None:
             raise MeshRefusal(
                 "approval_request_conflict",
@@ -686,19 +768,23 @@ def create_request(
                 f"({tomb.get('terminal_state', 'terminal')}); re-minting a spent id is refused",
             )
         for _ in range(5):
-            approval_id = new_approval_id()
+            approval_id = ("apn_" + crockford(token_bytes(8))) if restricted else new_approval_id()
             if not record_path(approval_id, root).exists():
                 break
         else:  # pragma: no cover — 64 random bits, five collisions is not a real case
             raise MeshRefusal("approval_invalid", "could not mint a free approval id")
         record["approval_id"] = approval_id
+        if restricted:
+            record["request_digest"] = request_digest(record)
         _write_record(record, root)
     # RETENTION RIDES CREATION (§2.4): the sweep has no timer process, so the
     # one writer every approval flow passes through is where untouched records
     # get their due expiry materialized and 30-day terminals pruned. Best-effort
     # — retention must never be the reason a request cannot be filed.
     try:
-        sweep(root=root)
+        # A request's housekeeping stays in its own authority namespace.
+        # Explicit sweep() still services both with this same implementation.
+        _sweep_namespace(root=root, enrollment_only=kind == enrollment.KIND)
     except Exception:  # noqa: BLE001 — see above; the record is already written
         pass
     _audit(
@@ -766,7 +852,7 @@ def signed_payload(
     if APPROVAL_DOMAIN != APPROVAL_DOMAIN_LITERAL:  # pragma: no cover — a drift guard
         raise MeshRefusal("approval_invalid", "the approval domain tag drifted between modules")
     return (
-        APPROVAL_DOMAIN
+        (enrollment.DECISION_DOMAIN if kind == enrollment.KIND else APPROVAL_DOMAIN)
         + _lp(str(kind))
         + _lp(str(request_id))
         + _lp(str(request_digest))
@@ -951,10 +1037,13 @@ def _record_decision(
     decided_at: float | None,
     signature_hex: str | None,
     root: Path | None,
+    expected_digest: str | None = None,
 ) -> dict[str, Any]:
     """The shared spine of approve/deny: guards, signature, write-once, audit."""
     with _record_lock(approval_id, root):
         record = _load_raw(approval_id, root)
+        if expected_digest is not None and record.get("request_digest") != expected_digest:
+            raise MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
         moment = time.time()
         if _materialize_expiry(record, moment, root):
             raise MeshRefusal(
@@ -1152,6 +1241,8 @@ def approve(
     and compared first (``approval_anchor_mismatch``). Write-once: any state
     that has already been decided refuses (``approval_decision_conflict``).
     """
+    if approval_id.startswith("apn_"):
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
     return _record_decision(
         approval_id,
         decision="approve",
@@ -1561,6 +1652,7 @@ def mark_failed(
     step: str,
     detail: str = "",
     root: Path | None = None,
+    enrollment_failure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``connecting → failed``: a step failed; the receipt names it.
 
@@ -1582,6 +1674,10 @@ def mark_failed(
                 "digest": "",
             }
         )
+        if enrollment_failure is not None:
+            record["receipts"][-1]["data"] = enrollment.failure_report(
+                record, enrollment_failure, root=root
+            )
         record["audit"].append("onboard_failed")
         _write_record(record, root)
         _audit(
@@ -1601,6 +1697,7 @@ def mark_connected(
     step: str = "verify",
     detail: str = "",
     root: Path | None = None,
+    enrollment_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``connecting → connected``: every step verified. TERMINAL.
 
@@ -1609,7 +1706,12 @@ def mark_connected(
     """
     with _record_lock(approval_id, root):
         return _mark_connected_locked(
-            approval_id, run_id=run_id, step=step, detail=detail, root=root
+            approval_id,
+            run_id=run_id,
+            step=step,
+            detail=detail,
+            root=root,
+            **({"enrollment_report": enrollment_report} if enrollment_report is not None else {}),
         )
 
 
@@ -1620,6 +1722,7 @@ def _mark_connected_locked(
     step: str = "verify",
     detail: str = "",
     root: Path | None = None,
+    enrollment_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``connecting → connected``: every step verified. TERMINAL.
 
@@ -1639,6 +1742,9 @@ def _mark_connected_locked(
             "digest": "",
         }
     )
+    if enrollment_report is not None:
+        enrollment.require(record.get("kind") == enrollment.KIND)
+        record["receipts"][-1]["data"] = enrollment.public_report(enrollment_report)
     record["audit"].append("onboard_connected")
     _write_record(record, root)
     _audit(
@@ -1749,6 +1855,14 @@ def _terminal_at(record: Mapping[str, Any]) -> float:
 
 
 def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, int]:
+    """One state machine/retention rule over two isolated authority namespaces."""
+    rows = [_sweep_namespace(root=root, now=now, enrollment_only=ns) for ns in (False, True)]
+    return {key: sum(row[key] for row in rows) for key in rows[0]}
+
+
+def _sweep_namespace(
+    *, root: Path | None = None, now: float | None = None, enrollment_only: bool = False
+) -> dict[str, int]:
     """Materialize due expiries, prune 30-day-terminal records, age tombstones.
 
     NO TIMER PROCESS EXISTS by design (§2.4): this runs opportunistically from
@@ -1765,13 +1879,16 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
     moment = time.time() if now is None else now
     materialized = pruned = 0
     tombstones = 0
-    directory = approvals_dir(root)
+    directory = approvals_dir(root, enrollment_only=enrollment_only)
     if directory.is_dir():
-        for path in sorted(directory.glob("ap_*.json")):
+        for path in sorted(directory.glob("apn_*.json" if enrollment_only else "ap_*.json")):
             data = _read_json(path)
-            if not isinstance(data, dict) or not isinstance(data.get("approval_id"), str):
+            if enrollment_only:
+                approval_id = path.stem
+            elif isinstance(data, dict) and isinstance(data.get("approval_id"), str):
+                approval_id = data["approval_id"]
+            else:
                 continue
-            approval_id = data["approval_id"]
             try:
                 with _record_lock(approval_id, root):
                     record = _load_raw(approval_id, root)
@@ -1808,6 +1925,7 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
                                 "pruned_at": moment,
                             },
                             root,
+                            enrollment_only=enrollment_only,
                         )
                         os.unlink(record_path(approval_id, root))
                         lock = lock_path(approval_id, root)
@@ -1824,8 +1942,8 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
         # unlocked read and this replace would be dropped by the rewrite — the
         # race agent review round 1 flagged as F3, widened by the second sweep
         # trigger (relay start as well as create).
-        with _index_flock(root):
-            rows = read_index(root)
+        with _index_flock(root, enrollment_only=enrollment_only):
+            rows = read_index(root, enrollment_only=enrollment_only)
             fresh = [
                 row
                 for row in rows
@@ -1838,7 +1956,7 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
                 text = "".join(
                     json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in fresh
                 )
-                store._write_private_text(index_path(root), text)
+                store._write_private_text(index_path(root, enrollment_only=enrollment_only), text)
             tombstones = len(fresh)
     return {"materialized": materialized, "pruned": pruned, "tombstones": tombstones}
 
@@ -1879,3 +1997,76 @@ def _audit(
             log.close()
     except Exception:  # noqa: BLE001 — the mutation already landed; never raise here
         pass
+
+
+def enrollment_snapshot(
+    approval_id: str,
+    *,
+    authority_version: int,
+    scope: str,
+    digest: str,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Validate a displayed new-format snapshot BEFORE any presence/signing call.
+
+    Typed acknowledgment prevents an ordinary older UI's generic Approve from
+    obtaining a new-format signature. It is not proof of rendered pixels, nor a
+    defense against arbitrary same-UID code. No lock spans the OS prompt.
+    """
+    enrollment.bound_profile(root)
+    enrollment.require(
+        approval_id.startswith("apn_")
+        and type(authority_version) is int
+        and authority_version == 1
+        and scope == "network_only"
+    )
+    record = _load_raw(approval_id, root)
+    if record.get("state") != STATE_REQUESTED:
+        raise MeshRefusal(
+            "approval_decision_conflict", "This enrollment card is no longer awaiting approval"
+        )
+    if time.time() >= record["expires_at"]:
+        raise MeshRefusal(
+            "approval_expired", "This enrollment window expired; review a new request"
+        )
+    if digest != record["request_digest"]:
+        raise MeshRefusal("network_enrollment_snapshot_changed", enrollment.REMEDY)
+    trio = local_anchor_trio(root)
+    if trio is None or any(
+        record["what"]["anchor"][key] != trio[key]
+        for key in ("key_id", "spki_fp", "statement_digest")
+    ):
+        raise MeshRefusal(
+            "approval_anchor_mismatch",
+            "Review a new enrollment card against this device's current operator key",
+        )
+    return record
+
+
+def approve_network_enrollment(
+    approval_id: str,
+    *,
+    authority_version: int,
+    scope: str,
+    digest: str,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """The SAME presence signer over one validated snapshot; recheck at write."""
+    record = enrollment_snapshot(
+        approval_id, authority_version=authority_version, scope=scope, digest=digest, root=root
+    )
+    decided_at = time.time()
+    signature = sign_decision(
+        kind=record["kind"],
+        request_id=record["request_id"],
+        request_digest=record["request_digest"],
+        decided_at=decided_at,
+    )
+    return _record_decision(
+        approval_id,
+        decision="approve",
+        decided_at=decided_at,
+        signature_hex=signature,
+        root=root,
+        expected_digest=digest,
+    )
