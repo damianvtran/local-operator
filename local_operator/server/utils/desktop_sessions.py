@@ -8228,6 +8228,7 @@ class DesktopSessions:
         scope: CatalogueScope | None = None,
         cursor: str | None = None,
         with_counts: bool = False,
+        sort: str = "",
     ) -> SessionPage:
         """One page of rows, plus the pinned rows the page does not carry.
 
@@ -8328,6 +8329,12 @@ class DesktopSessions:
                 scope=scope,
                 cursor=cursor,
                 limit=limit,
+                # The order the caller asked for (``""`` = the rank order, the
+                # only one that existed before this parameter). Threaded here
+                # rather than re-decided: the page function owns both orders and
+                # the cursor that resumes them, and this route's job is to carry
+                # the request's own value to the one implementation.
+                sort=sort,
                 pinned_off_page=tuple(pins) if scope is None else (),
                 # THE ARCHIVE FILTER, at the one choke point the two surfaces
                 # share. ``catalogue_page`` reaches the predicate through
