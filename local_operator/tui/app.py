@@ -130,6 +130,8 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -547,6 +549,9 @@ from local_operator.tui.widgets.wake_panel import WakePanel
 # while the splash showed the moved word (round-1 F1, reproduced).
 from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
+# Resolved once at import: `tr` reads the active locale per CALL, so this binding
+# follows a live language change without re-importing (see docs/I18N.md).
+_t = tr("tui.app")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
@@ -576,8 +581,6 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: across two sessions must meet one vocabulary. Kept short on purpose: the
 #: access note leads the footer and leaves ~39 cells for this clause at 100
 #: columns (see `_catalogue_status`).
-STALE_LIST_LABEL = "stale list:"
-
 #: Discovery statuses that mean "this provider produced a listing" (live or
 #: stored). The complement — ``static`` and ``unauthenticated`` — produced no
 #: listing, so they are not part of "every provider is stale". ``static`` is
@@ -10828,11 +10831,11 @@ class OperatorApp(App[None]):
                 if terminal_reason:
                     why.append(terminal_reason)
                 if source.connect_attempts > SIDEBAR_CONNECT_ATTEMPTS:
-                    why.append("retry budget exhausted")
+                    why.append(_t(_x.sidebar_why_retry_budget()))
                 if source.retired:
-                    why.append("source retired")
+                    why.append(_t(_x.sidebar_why_retired()))
                 if not self._is_current(source):
-                    why.append("source left the screen")
+                    why.append(_t(_x.sidebar_why_left_screen()))
                 logger.warning(
                     "sidebar connect latched (%s): %s",
                     ", ".join(why) or "not retryable",
@@ -20188,7 +20191,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("teams", style=section)]
+        rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for team in teams:
             # ``member_count()`` for the D2 reason the picker documents: the
             # manager is often ON the roster, so `len(members) + 1` overcounts,
@@ -20205,10 +20208,12 @@ class OperatorApp(App[None]):
             # row names the manager separately ("Led by <manager> · N
             # members"), so calling the roster count "roles" also double-counted
             # him in the reader's head.
-            member_word = "member" if slots == 1 else "members"
             rows.append(
                 Padding(
-                    Text(f"Led by {team.manager} · {slots} {member_word}", style=body),
+                    Text(
+                        _t(_x.skills_led_by(manager=team.manager, count=slots, shown=str(slots))),
+                        style=body,
+                    ),
                     (0, 0, 0, 4),
                 )
             )
@@ -21142,7 +21147,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        out: list[Any] = [Text("agents", style=section)]
+        out: list[Any] = [Text(_t(_x.skills_agents_heading()), style=section)]
         for name, label, facts, summary in rows:
             out.append(
                 Padding(Text(self._agent_listing_form(name, label), style=heading), (0, 0, 0, 2))
@@ -21164,11 +21169,11 @@ class OperatorApp(App[None]):
         # it is keyed to the same seam rather than left to be re-noticed.
         if callable(getattr(self._session, "attach_agent_profile", None)):
             out.append(Text())
-            out.append(Text("Send: /agent <name> <message>", style=body))
+            out.append(Text(_t(_x.skills_send_agent()), style=body))
             # The detach verb belongs in the listing so a user who attached a
             # profile can find their way back to base instructions without
             # guessing.
-            out.append(Text("Detach: /agent clear", style=body))
+            out.append(Text(_t(_x.skills_detach_agent()), style=body))
         return RichBlock(Group(*out))
 
     def _sync_agent_band(self) -> None:
@@ -38470,7 +38475,7 @@ class OperatorApp(App[None]):
             # own line behind a dangling em-dash that read as truncation. This
             # also front-loads the answer to "did it take effect?" instead of
             # burying it after up to six key names.
-            parts.append(f"applied: {', '.join(live)}")
+            parts.append(_t(_x.config_applied(keys=", ".join(live))))
         # Verb agreement per clause (design review round 1, D7). Each of these
         # was only ever exercised with one key, and the multi-key form is the
         # COMMON one for at least `hosting, model_name` — the pair a user
@@ -38478,11 +38483,13 @@ class OperatorApp(App[None]):
         # is to be trusted about what did and did not happen cannot visibly
         # disagree with itself.
         if new_sessions:
-            verb = "takes" if len(new_sessions) == 1 else "take"
-            parts.append(f"{', '.join(new_sessions)} {verb} effect on /new")
+            parts.append(
+                _t(_x.config_effect_new(names=", ".join(new_sessions), count=len(new_sessions)))
+            )
         if relaunch:
-            verb = "needs" if len(relaunch) == 1 else "need"
-            parts.append(f"{', '.join(relaunch)} {verb} a relaunch")
+            parts.append(
+                _t(_x.config_needs_relaunch(names=", ".join(relaunch), count=len(relaunch)))
+            )
         if retired:
             tail = (
                 "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
@@ -38541,18 +38548,19 @@ class OperatorApp(App[None]):
         # inventory reconciles at the turn boundary (`_reconcile_web_tools`),
         # and nothing on screen mentioned that lag.
         values = getattr(change, "values", {})
-        for key, label in (
-            ("web_search.enabled", "web search"),
-            ("web_fetch.enabled", "web fetch"),
+        for key, label_builder in (
+            ("web_search.enabled", _x.config_label_web_search),
+            ("web_fetch.enabled", _x.config_label_web_fetch),
         ):
             if key not in changed:
                 continue
             block = values.get(key.split(".")[0])
             enabled = bool(block.get("enabled", True)) if isinstance(block, Mapping) else True
+            label = _t(label_builder())
             parts.append(
-                f"{label} on — takes effect from your next turn"
+                _t(_x.config_toggle_on(label=label))
                 if enabled
-                else f"{label} off — calls will be refused until it is turned back on"
+                else _t(_x.config_toggle_off(label=label))
             )
         self._system_notice("config.yml changed: " + "; ".join(parts), kind)
 
@@ -39551,7 +39559,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("settled goals", style=section)]
+        rows: list[Any] = [Text(_t(_x.goals_settled_heading()), style=section)]
         for item in items:
             subject, facts = (list(item) + ["", ""])[:2]
             rows.append(Padding(Text(str(subject), style=heading), (0, 0, 0, 2)))
@@ -39571,7 +39579,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("teams", style=section)]
+        rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for item in items:
             name, facts, summary = (list(item) + ["", "", ""])[:3]
             rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
@@ -39599,7 +39607,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("agents", style=section)]
+        rows: list[Any] = [Text(_t(_x.skills_agents_heading()), style=section)]
         for item in items:
             name, facts, summary = (list(item) + ["", "", ""])[:3]
             rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
@@ -39609,8 +39617,8 @@ class OperatorApp(App[None]):
                 rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
         if callable(getattr(self._session, "attach_agent_profile", None)):
             rows.append(Text())
-            rows.append(Text("Send: /agent <name> <message>", style=body))
-            rows.append(Text("Detach: /agent clear", style=body))
+            rows.append(Text(_t(_x.skills_send_agent()), style=body))
+            rows.append(Text(_t(_x.skills_detach_agent()), style=body))
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
@@ -40446,10 +40454,10 @@ class OperatorApp(App[None]):
         reopen = f"/resume {resumable_id}" if resumable_id else "/resume"
         parked: list[str] = []
         if wakes:
-            parked.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
+            parked.append(_t(_x.parked_wakes(count=wakes, shown=str(wakes))))
         if monitors:
-            parked.append(f"{monitors} monitor{'s' if monitors != 1 else ''}")
-        dormant_part = f" — {' and '.join(parked)} dormant until then" if parked else ""
+            parked.append(_t(_x.parked_monitors(count=monitors, shown=str(monitors))))
+        dormant_part = _t(_x.parked_dormant(parked=" and ".join(parked))) if parked else ""
         self._system_notice(f'stopped "{name}" — {reopen} reopens it{dormant_part}')
 
     def _mark_own_monitors_dormant(self, session: Any) -> int:
@@ -40942,7 +40950,7 @@ class OperatorApp(App[None]):
             # Named once, above the rows: every marked row below is a session the
             # press ASKS again and then leaves alone — the plain count would read
             # as "these will all be stopped".
-            qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
+            qualifiers.append(_t(_x.stop_all_already_leaving(shown=str(len(drained)))))
         if stalled_pids:
             # The other half: these are leaving too, but the press does NOT leave them
             # alone. CAUSE-NEUTRAL (design round 1 on #1541 D1, QA Q-1): the row tag
@@ -40950,10 +40958,7 @@ class OperatorApp(App[None]):
             # IS reporting — so a shared line naming one cause is false for the other.
             # FUTURE TENSE, because the identity gate can still refuse (QA Q-5 on #1527).
             n = len(stalled_pids)
-            qualifiers.append(
-                f"{n} leaving, but {'it' if n == 1 else 'they'} will be stopped, "
-                "not left to finish"
-            )
+            qualifiers.append(_t(_x.stop_all_will_be_stopped(count=n, shown=str(n))))
         # ONE LAYOUT, ONE QUALIFIER PER LINE, whenever any exists (design D2 on #1527 and
         # #1541, QA Q-2): folded into the header, the drained-only form alone was 72 cells
         # against the 70-cell notice body at 80 columns and wrapped, and a header wrap
@@ -40966,7 +40971,7 @@ class OperatorApp(App[None]):
             # never wrap off the row it qualifies.
             room = budget - len(lead) - len(tag)
             lines.append(f"{lead}{truncate_cells(name, room) if budget else name}{tag}")
-        lines.append(f"repeat /stop all within {STOP_ALL_WINDOW_S:g}s to stop them all")
+        lines.append(_t(_x.stop_all_repeat_hint(seconds=f"{STOP_ALL_WINDOW_S:g}")))
         self._stop_all_listed = frozenset(rec.pid for rec in targets)
         self._stop_all_listing = NoticeBlock("\n".join(lines), "warning")
         self._append_block(self._stop_all_listing)
@@ -43677,7 +43682,7 @@ class OperatorApp(App[None]):
                 current=self._current_selector(),
                 status=_status_line(
                     note,
-                    f"{STALE_LIST_LABEL} all providers — {error}",
+                    _t(_x.providers_stale_all_error(error=str(error))),
                     self._footer_persist_hint(),
                 ),
             )
@@ -49254,7 +49259,7 @@ class OperatorApp(App[None]):
         parts = [f"{AIDA_MARKER} {name}: {word}"]
         when = OperatorApp._aida_when(st)
         if when:
-            parts.append(f"next check-in {when}")
+            parts.append(_t(_x.aida_next_checkin(when=when)))
         # PLAIN COPY, not budget jargon (design round 1, D3): "0/2" never said
         # what counted as extra or what the ceiling was. The sentence keeps the
         # status line's label voice.
@@ -49263,8 +49268,12 @@ class OperatorApp(App[None]):
         # column a sidebar-open layout leaves, and "0 of\n2" split the pair
         # that D3's copy exists to make plain.
         parts.append(
-            f"extra check-ins used today: {int(st.get('extras_today', 0))}\u00a0"
-            f"of\u00a0{int(st.get('max_extra_per_day', 0))}"
+            _t(
+                _x.aida_extras_used(
+                    used=str(int(st.get("extras_today", 0))),
+                    maximum=str(int(st.get("max_extra_per_day", 0))),
+                )
+            )
         )
         return " — ".join(parts)
 
@@ -50863,7 +50872,7 @@ class OperatorApp(App[None]):
             short, rest = _split_launch_line(instructions)
             muted = Style(color=theme_mod.semantic_color("muted"))
             dim = Style(color=theme_mod.semantic_color("dim"))
-            lines = [Text(f"Opening your browser to sign in to {label}…", style=muted)]
+            lines = [Text(_t(_x.signin_opening(label=label)), style=muted)]
             if short:
                 lines.append(
                     Text.assemble(
@@ -50901,7 +50910,7 @@ class OperatorApp(App[None]):
             # user does not know: nothing to do here once the browser is done.
             lines.append(
                 Text(
-                    "Finished in the browser? This window continues on its own" " · ctrl+c cancels",
+                    _t(_x.signin_finished_hint()),
                     style=dim,
                 )
             )
@@ -50913,7 +50922,7 @@ class OperatorApp(App[None]):
                 # the screen — three wrapped lines of ~230 cells, uncopyable
                 # across the wrap — and it asked the user to choose between two
                 # URLs for one flow. The short link above already 302s here.
-                lines.append(Text(f"Full link: {url}", style=dim))
+                lines.append(Text(_t(_x.signin_full_link(url=url)), style=dim))
             self._append_block(RichBlock(Group(*lines)))
 
         def on_progress(message: str) -> None:
@@ -51605,7 +51614,7 @@ class OperatorApp(App[None]):
         paste_note = Text()
         paste_note.append("ctrl+v".ljust(name_width), style=muted)
         paste_note.append(
-            "attaches an image or file from the system clipboard",
+            _t(_x.help_paste_note()),
             style=dim,
         )
         # `ctrl+c` is documented for the same reason as `ctrl+v` above, and has
@@ -51653,11 +51662,11 @@ class OperatorApp(App[None]):
         # 74, and the bound is mutation-checked: a row padded to 75 fails it.
         copy_note = Text()
         copy_note.append("ctrl+c".ljust(name_width), style=muted)
-        copy_note.append("copies the highlighted range in the composer", style=dim)
+        copy_note.append(_t(_x.help_copy_note()), style=dim)
         copy_note_more = Text()
         copy_note_more.append("".ljust(name_width), style=muted)
         copy_note_more.append(
-            "move the caret to hand the key back; esc interrupts",
+            _t(_x.help_copy_note_more()),
             style=dim,
         )
         # The key reference joins the COMMAND TABLE directly, with no blank line
@@ -51682,7 +51691,7 @@ class OperatorApp(App[None]):
         # 63 — inside the bound with headroom, and pinned by the same test.
         skill_note = Text()
         skill_note.append("$<skill>".ljust(name_width), style=muted)
-        skill_note.append("runs a named skill on the rest of the line", style=dim)
+        skill_note.append(_t(_x.help_skill_note()), style=dim)
         # `/model saved` is documented here for the same reason as the rows
         # above: nothing else durable advertises it. The command table's
         # `/model` row is sized to 49 cells to stay whole at 80 columns and
@@ -51704,7 +51713,7 @@ class OperatorApp(App[None]):
         # composing to 61.
         model_saved_note = Text()
         model_saved_note.append("/model saved".ljust(name_width), style=muted)
-        model_saved_note.append("switches back to the config.yml default", style=dim)
+        model_saved_note.append(_t(_x.help_model_saved_note()), style=dim)
         lines.append(model_saved_note)
         lines.append(copy_note)
         lines.append(copy_note_more)
@@ -51755,7 +51764,7 @@ class OperatorApp(App[None]):
         cmd_paste_note = Text()
         cmd_paste_note.append("cmd+v".ljust(name_width), style=muted)
         cmd_paste_note.append(
-            "same, where the terminal forwards it; not Terminal.app",
+            _t(_x.help_cmd_paste_note()),
             style=dim,
         )
         lines.append(cmd_paste_note)
@@ -51902,15 +51911,13 @@ class OperatorApp(App[None]):
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(
-            "shows session state outside the app; shell: "
-            "`lop config edit display.terminal_title false`",
+            _t(_x.help_title_note()),
             style=dim,
         )
         title_note_more = Text()
         title_note_more.append("".ljust(name_width), style=muted)
         title_note_more.append(
-            "or set `LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`; legend: "
-            "`lo ›` idle, `lo ⣾` running, `lo !` waiting for approval",
+            _t(_x.help_title_note_more()),
             style=dim,
         )
         # The notification note sits beside the title's for a reason: they are
@@ -51932,15 +51939,13 @@ class OperatorApp(App[None]):
             # the terminal is unfocused" describes the in-band focus gate,
             # which a detached runtime has no terminal to consult: it sends
             # precisely when NO terminal is watching.
-            "desktop toast when a turn finishes here, or when a detached "
-            "session needs you; shell: `lop config edit display.notifications false`",
+            _t(_x.help_notify_note()),
             style=dim,
         )
         notify_note_more = Text()
         notify_note_more.append("".ljust(name_width), style=muted)
         notify_note_more.append(
-            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for "
-            "the terminal to be unfocused, detached ones click to reopen",
+            _t(_x.help_notify_note_more()),
             style=dim,
         )
         if not lines or lines[-1].plain:
@@ -59234,17 +59239,17 @@ def _notifications_listing(
     if total > NOTIFICATIONS_LISTING_ROWS:
         # The count of what is hidden, in BOTH forms: it is what lets the reader
         # reconcile the rows above with the number the receipt will name.
-        bound = f"  …{total - NOTIFICATIONS_LISTING_ROWS} more"
-        lines.append(bound if clearing else f"{bound} — ctrl+b shows or hides the sidebar")
+        bound = _t(_x.notifications_more(shown=str(total - NOTIFICATIONS_LISTING_ROWS)))
+        lines.append(bound if clearing else _t(_x.notifications_sidebar_hint(bound=bound)))
     if not clearing:
         # "all N" once the bound bites, "these" only when every row is on screen:
         # at 38 unread the short form named the ten rows above it while the write
         # covered all 38, one Enter away from a permanent clear of rows nobody
         # had seen (design round 1, D2).
         if total > NOTIFICATIONS_LISTING_ROWS:
-            lines.append(f"/notifications read marks all {total} read")
+            lines.append(_t(_x.notifications_mark_all_read(count=str(total))))
         else:
-            lines.append("/notifications read marks these read")
+            lines.append(_t(_x.notifications_mark_these_read()))
     return "\n".join(lines)
     return "\n".join(lines)
 
@@ -59451,7 +59456,7 @@ def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
     row = Text()
     legs = [status for status in statuses if status.enabled]
     if not legs:
-        row.append("(none)", style=dim)
+        row.append(_t(_x.providers_none()), style=dim)
         return row
     for index, status in enumerate(legs):
         if index:
@@ -59828,11 +59833,11 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     listed = sum(1 for s in statuses.values() if s in LISTED_STATUSES)
     bits: list[str] = []
     if len(stale) > 1 and len(stale) == listed:
-        bits.append(f"{STALE_LIST_LABEL} all providers")
+        bits.append(_t(_x.providers_stale_all()))
     elif stale:
-        bits.append(f"{STALE_LIST_LABEL} {', '.join(stale)}")
+        bits.append(_t(_x.providers_stale_named(names=", ".join(stale))))
     if empty:
-        bits.append(f"no live list: {', '.join(empty)}")
+        bits.append(_t(_x.providers_no_live_list(names=", ".join(empty))))
     return " · ".join(bits)
 
 
