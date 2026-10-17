@@ -7121,8 +7121,16 @@ class FrontendStateStore:
             # anyway would blank the pair AND disarm the equal-receipt guard: the
             # next replay would see a different receipt and revert a settled
             # post-compaction estimate (review round 2, R2-1).
+            #
+            # AND ONLY WHEN THE CHECKPOINT HAS A PAIR TO MOVE. A row written
+            # before the pair existed restores ``last_usage: None`` and the
+            # serving host RE-MATERIALIZES it at adopt (``refresh_frontend_usage``,
+            # pinned by ``test_serving``'s "restored checkpoint must lack the
+            # pair"); installing one here would take that seam's job and change
+            # the first-frame contract other hosts assert. The numerator still
+            # advances — it is the count the conversation actually has.
             changes = _replayed_context_change(state, usage.context_tokens)
-            if changes:
+            if changes and state.last_usage is not None:
                 # Through the wire form and back, as every other writer of this
                 # field does: ``model_copy`` does not validate, so the receipt
                 # has to be a ``FrontendUsage`` rather than the dump itself
