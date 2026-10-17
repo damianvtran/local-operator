@@ -224,6 +224,24 @@ def test_block_cancelled_and_failed_lines() -> None:
     assert cold.disposition() == "files_cancelled_retry"
 
 
+def test_block_failed_line_names_the_typed_cause_when_present() -> None:
+    """A typed cause says WHICH wall the retry would meet (operator, 2026-10-17); the bare
+    sentence above stays byte-identical for rows without one."""
+    quota = _rows([], state="failed")
+    quota["cause"] = "provider_quota"
+    assert _painted(_block(quota)).plain == (
+        "  Couldn't prepare highlights — provider quota exhausted"
+    )
+    # An UNKNOWN cause string (a newer build's vocabulary) renders no phrase: inventing
+    # prose for a vocabulary this build does not know is worse than the bare sentence.
+    unknown = _rows([], state="failed")
+    unknown["cause"] = "provider_from_the_future"
+    assert _painted(_block(unknown)).plain == "  Couldn't prepare highlights"
+    # The pure helper: absent and unknown both map to "".
+    assert supplement_mod.cause_phrase(None) == "" and supplement_mod.cause_phrase("") == ""
+    assert supplement_mod.cause_phrase("provider_quota") == "provider quota exhausted"
+
+
 def test_block_superseded_and_dismissed_render_nothing() -> None:
     for state, extra in (("cancelled", {"error": "superseded"}), ("skipped", {})):
         details = _rows([_file("reports/q3.md")], state=state)

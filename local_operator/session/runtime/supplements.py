@@ -833,6 +833,11 @@ class SupplementRunner:
                     # reported here, never as ``error`` on a ``done`` row (memo §2.5 as
                     # amended; round-1 R7).
                     final["detail"] = list(outcome.detail)
+                if outcome.cause:
+                    # The typed cause of a provider-terminal failure: the allowlisted
+                    # ``provider_<kind>`` vocabulary only (``generator.failure_kind``), never
+                    # provider prose (secret-safety rule).
+                    final["cause"] = outcome.cause
                 return final
 
             final = await self._commit_row(
