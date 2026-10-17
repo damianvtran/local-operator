@@ -257,7 +257,15 @@ class SupplementBlock(TranscriptBlock):
         if disposition in ("cancelled_retry", "files_cancelled_retry"):
             return self._line(supplement_mod.COPY_CANCELLED, style=self._muted_style())
         if disposition in ("failed_retry", "files_failed_retry"):
-            return self._line(supplement_mod.COPY_FAILED, style=self._muted_style())
+            # A typed cause names the wall the retry would meet; rows without one keep the
+            # copy byte-identical (the bare sentence stays pinned). The variant is reviewed
+            # by the design round (2026-10-17 operator report: "Retry that will hit the
+            # same wall is not useful" -- the state line should say which wall).
+            phrase = supplement_mod.cause_phrase(self._details.get("cause"))
+            label = (
+                f"{supplement_mod.COPY_FAILED} — {phrase}" if phrase else supplement_mod.COPY_FAILED
+            )
+            return self._line(label, style=self._muted_style())
         return None
 
     def _file_rows(self, body: int, files: Sequence[Mapping[str, Any]]) -> list[Text]:

@@ -693,11 +693,34 @@ known, graphics queued" (which paints as `queued`).
 | done | the line is replaced by the block (below) |
 | user cancel (`cancelled`, no error or a non-`superseded` error) | `Highlights cancelled · Retry` (neutral ink, never error ink) |
 | superseded (`error="superseded"`) | nothing — the line disappears silently; no Retry under an answer the user moved past |
-| failure (any other error) | `Couldn't prepare highlights · Retry` |
+| failure (any other error) | `Couldn't prepare highlights [— typed cause phrase when the row carries one] · Retry` |
 | frame-level `{t:"error"}`, or a torn-down or hung frame (§4.1/§4.2) **with the job settled `done`** | the frame is replaced by one quiet line, `Couldn't render this graphic`; a `supplement_restart` Retry is offered when the job is settled. **Precedence (round-2 R2-4):** the row's committed `state` decides which line renders — a job-level `failed` renders the failure line above, never this one, and this line never rewrites a settled row |
 | `skipped`/dismissed | nothing |
 
 Steer and cancel render as a **pair** — `Adjust…` · `Cancel`, one `text-meta`/`ink-dim` line — never one hover-only while the other persists; on touch surfaces both are visible, tap targets ≥ 44 px (D10).
+
+**The failed line's typed-cause phrases (round-1 design D1–D3, 2026-10-17).** When the row
+carries a typed `cause` (`provider_<kind>`, the allowlisted vocabulary in
+`supplements/generator.py`; written only when the failure that ended the job is the
+provider's own), the failed line reads
+`Couldn't prepare highlights — <phrase>`. This is the ONE word list every surface transcribes
+(TUI `_CAUSE_PHRASES`, phone `causePhrase`):
+
+| `cause` | phrase |
+|---|---|
+| `provider_quota` | `provider limit reached` |
+| `provider_auth` | `provider sign-in needed` |
+| `provider_transient` | `provider temporarily unavailable` |
+| `provider_timeout` | `provider timed out` |
+| `provider_request` | `provider refused the request` |
+| `provider_content` | `provider blocked the content` |
+| `provider_context` | `provider context limit` |
+
+`provider_quota` says "limit reached", never "exhausted": the kind covers rate limits too,
+and a spent-quota reading stops a user retrying a retryable wall (round-1 design D1).
+`provider_unknown` — and any token a build does not know — renders the bare sentence:
+`unknown` folds `aborted` in, and inventing a failure mode for a catch-all is worse than
+naming none (D2).
 
 **Block anatomy (round-1 design D1; header rule amended 2026-10-10).**
 - **No header, label or title — on any surface (TUI, UI, relay, native).** The block starts directly with its content, seamlessly under the answer's text; spacing and rhythm alone carry the seam (§0). No section heading, no "Highlights" label, no separator labelled as such, no badge or chip.
