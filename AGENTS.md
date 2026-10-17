@@ -1487,7 +1487,7 @@ gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/ma
 # 5. Install and verify — REQUIRED: the release is not complete until this
 #    step lands, and it does NOT wait for the fleet. `lop-update` (a thin
 #    delegation over `lop update --from-snapshot`) is the IMMUTABLE generation
-#    route: it builds a new `generations/<stamp>-<version>` and flips
+#    route: it builds a new `generations/<stamp>-<sha-or-version>` and flips
 #    `current` atomically, so busy sessions are never displaced — they keep
 #    their loaded roots and roll over when idle, and the machine's services
 #    move onto the new build. Never drain for it; never skip it. The drain
@@ -1498,7 +1498,7 @@ lop-update   # this host's command; defaults to the local `main` advanced in ste
 # The revision record lives INSIDE the installed generation, at `sys.prefix`:
 # a git build writes "<sha> <ref>"; a PyPI install writes "pypi <version>".
 cat "$(readlink ~/.local/share/lop/current)/tools/local-operator/.lop-source"
-readlink ~/.local/share/lop/current   # -> .../generations/<stamp>-<new version>
+readlink ~/.local/share/lop/current   # -> .../generations/<stamp>-<sha-or-version>
 # Smoke the built command from outside the repository, naming the uv-tool build
 # by path where the host has more than one `lop`: a bare `lop` can resolve to a
 # different install and report a version that is not this one.
