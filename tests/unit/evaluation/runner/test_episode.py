@@ -3040,44 +3040,52 @@ async def test_the_episodes_own_path_is_not_a_canary(tmp_path: Path, episode_id:
 def test_canary_drop_requires_path_shape(tmp_path: Path) -> None:
     """The drop is scoped to path-shaped locations, not bare containment.
 
-    Round-1 hardening: an identifier-shaped value that merely collides with a
-    path component (``osworld-21``) must STAY a canary -- dropping it on a
-    containment test alone would let text like "credential osworld-21
-    accepted" publish untouched, which is exactly the class of miss a
-    redaction scan must never make.
+    Round-1 hardening, made DISCRIMINATING in round 2: the roots live under a
+    directory literally named ``[redacted]`` and the secret value is that same
+    bare identifier, so the PRE-remediation predicate (bare containment)
+    drops it and this test fails -- which is exactly the collision the
+    narrowing exists to keep as a canary (a details artifact carrying
+    "credential [redacted] accepted" must still be refused).
     """
 
-    roots = (tmp_path / "a", tmp_path / "b")
+    base = tmp_path / "[redacted]"
+    roots = (base / "a", base / "b")
     values = (
         str(tmp_path),
-        str(tmp_path / "a"),
-        str(tmp_path / "a" / "x"),
-        "osworld-21",
+        str(base / "a"),
+        str(base / "a" / "x"),
+        "[redacted]",
         "not-a-path-but-text",
     )
     kept = _canary_values_outside_own_roots(values, roots)
     # The three path-shaped locations are dropped (ancestor, equal, inside);
-    # the two values that only collide textually are kept, in order.
-    assert kept == ("osworld-21", "not-a-path-but-text")
+    # the identifier that is merely a path COMPONENT of every root, and the
+    # non-path text, are kept -- in order.
+    assert kept == ("[redacted]", "not-a-path-but-text")
 
 
 @pytest.mark.asyncio
 async def test_scoring_details_publish_own_path_but_refuse_real_secret(
     tmp_path: Path, episode_id: str
 ) -> None:
-    """The exit criterion, pinned at the ACTUAL failing path.
+    """The exit criterion at the ACTUAL failing path, from both directions.
 
-    Two scenarios through the real scoring publication: (a) details bytes that
-    name the episode's own tree -- the shape that killed every 2026-10-17
-    episode -- must publish and the run must seal scored; (b) the same shape
-    with a real key-shaped secret resolved must be refused at publication, and
-    the bundle must take the ambiguity path rather than seal.
+    DISCRIMINATING since round 2: the episode's roots live under a directory
+    literally named ``[redacted]`` and the secret value is that same bare
+    identifier, so under the PRE-remediation predicate every root contains it,
+    the capture carrying it publishes, and the refusal assertion below fails.
+    With the path-shape rule the identifier stays a canary and the refusal is
+    real. (a) own-path-only details bytes publish and the run seals scored;
+    (b) the same capture plus the identifier-shaped secret [redacted]
+    refused at the receipt and the bundle takes the ambiguity path.
     """
 
-    own_path = str(tmp_path)
-    secret = "sk-canary-9f2c7a41"
+    base = tmp_path / "[redacted]"
+    base.mkdir()
+    identifier = "[redacted]"
+    own_path = str(base)
 
-    async def _run_with_details(text: str, suffix: str) -> Any:
+    async def _run_with_details(text: str, suffix: str, secrets: dict[str, str]) -> Any:
         # The supervision layer's reference check enforces the declared media
         # type, so the capture is canonical JSON with the payload text inside
         # -- the same envelope the real evaluator diagnostics use.
@@ -3087,7 +3095,7 @@ async def test_scoring_details_publish_own_path_but_refuse_real_secret(
             sort_keys=True,
         ).encode()
         sha = hashlib.sha256(payload).hexdigest()
-        artifacts = tmp_path / "artifacts"
+        artifacts = base / "artifacts"
         artifacts.mkdir(exist_ok=True)
         (artifacts / sha).write_bytes(payload)
         details = EvidenceArtifactRef(
@@ -3095,22 +3103,24 @@ async def test_scoring_details_publish_own_path_but_refuse_real_secret(
         )
         case_id = f"{episode_id}-{suffix}"
         adapter = FakeAdapter(
-            tmp_path, case_id, score=ScoreArtifact(status="scored", binary=0, details=details)
+            base, case_id, score=ScoreArtifact(status="scored", binary=0, details=details)
         )
         return await _runner(
-            tmp_path,
+            base,
             case_id,
             adapter=adapter,
             model=ScriptedModel(["step", "finish"]),
             spec=replace(
                 build_spec(case_id),
-                secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+                secret_refs=tuple(SecretRef(name=name) for name in secrets),
             ),
-            secrets=StaticSecretResolver({"OWN_PATH_ROW": own_path, "AWS_ACCESS_KEY_ID": secret}),
+            secrets=StaticSecretResolver(secrets),
         ).run()
 
     # (a) The measured case: own-path text publishes, episode seals scored.
-    sealed = await _run_with_details(f"fetching {own_path}/cache/file.ics", "own")
+    sealed = await _run_with_details(
+        f"fetching {own_path}/cache/file.ics", "own", {"OWN_PATH_ROW": own_path}
+    )
     assert sealed.status == "completed", sealed.diagnostic
     assert sealed.score is not None and sealed.score.status == "scored"
     assert sealed.bundle_root is not None and verify_bundle(sealed.bundle_root).valid
@@ -3121,20 +3131,25 @@ async def test_scoring_details_publish_own_path_but_refuse_real_secret(
         if path.is_file()
     )
 
-    # (b) The same shape carrying a real key-shaped secret: publication
-    # refuses, and the bundle takes the ambiguity path rather than sealing.
-    refused = await _run_with_details(f"carrying {own_path} under {secret}", "secret")
+    # (b) The collision: the identifier-shaped secret stays a canary, so the
+    # capture carrying it is refused and the bundle takes the ambiguity path.
+    refused = await _run_with_details(
+        f"carrying {own_path} under {identifier}",
+        "secret",
+        {"OWN_PATH_ROW": own_path, "IDENT_ROW": identifier},
+    )
     assert refused.status == "abandoned", refused.diagnostic
     assert refused.score is None
     assert refused.bundle_root is not None
     report = verify_bundle(refused.bundle_root)
     assert report.abandonment is not None
     # The recorded terminal says the run died on evidence, which is this
-    # case's whole point: the resolved secret made the receipt unpublishable.
+    # case's whole point: the identifier-shaped secret made the receipt
+    # unpublishable.
     assert report.abandonment.diagnostic_code == "evidencefailure"
     assert report.abandonment.reason == "ambiguous_finalization"
     assert not any(
-        secret.encode() in path.read_bytes()
+        identifier.encode() in path.read_bytes()
         for path in (refused.bundle_root / "artifacts").iterdir()
         if path.is_file()
     )

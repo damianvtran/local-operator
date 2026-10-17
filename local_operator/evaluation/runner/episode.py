@@ -144,9 +144,10 @@ _PROVISIONAL_CLEANUP_ACTION = "close-session"
 
 #: How many rescue workers ONE episode may launch in total (the first
 #: attempt plus one retry). Refusing a third launch is deliberate: every
-#: launch is a fresh worker process with its own handshake, and both the
-#: close-out and evidence-failure paths can ask for a rescue, so an
-#: unbounded retry loop would turn a stuck teardown into a runaway.
+#: launch is a fresh worker process with its own handshake, and three call
+#: sites (close-out, _abandon_after_scoring_failure and _abandon_for_evidence)
+#: can ask for a rescue, so an unbounded retry loop would turn a stuck
+#: teardown into a runaway.
 _RESCUE_LAUNCH_BUDGET = 2
 
 # Infra values whose EFFECT a caller discloses in the sealed manifest, and which
@@ -541,10 +542,13 @@ def _canary_values_outside_own_roots(
     directory, measured value ``/Users/damian/worktrees/osworld/osworld-21``
     -- became a canary. The scoring-details capture carries the evaluator's
     log lines, and those name the run's cache path UNDER that directory; the
-    scoring receipt's publication scan then refused the artifact wholesale
-    ("evidence redaction rejected content") and every episode that reached
-    scoring died with ``evidencefailure`` -- five paid episodes and probes on
-    2026-10-17.
+    scoring record's artifact publication then refused the capture wholesale
+    -- the measured incident logged the ARTIFACT-level refusal ("evidence
+    redaction rejected content", the store's ``Scanner.feed`` raised through
+    ``record_scoring_result``); its receipt-level sibling ("secret canary
+    survived evidence redaction", receipts.py) is the same refusal one layer
+    up -- and every episode that reached scoring died with ``evidencefailure``
+    -- five paid episodes and probes on 2026-10-17.
 
     THE RULE, SCOPED. A value is dropped ONLY when it is absolute-path-shaped
     AND a location of the episode itself: equal to one of the episode's own
@@ -2251,11 +2255,11 @@ class EpisodeRunner:
         # on the first attempt (launch, handshake, all three cleanup actions,
         # close), so one immediate retry covers the transient class. The
         # budget is per EPISODE, not per call: this method is reachable from
-        # both the close-out and evidence-failure paths, and a per-call bound
-        # let one episode launch up to four workers and grow its teardown
-        # tail to ~15 minutes. The sweep stays the unbounded net for anything
-        # this bound refuses, and the descriptor is retired only on a complete
-        # aggregate.
+        # THREE sites (close-out, _abandon_after_scoring_failure and
+        # _abandon_for_evidence), and a per-call bound let one episode launch
+        # up to six workers and grow its teardown tail to ~15 minutes. The
+        # sweep stays the unbounded net for anything this bound refuses, and
+        # the descriptor is retired only on a complete aggregate.
         while self._rescue_launches < _RESCUE_LAUNCH_BUDGET:
             self._rescue_launches += 1
             try:
