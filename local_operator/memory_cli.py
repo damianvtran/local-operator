@@ -628,6 +628,16 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
         # an 80-column wrap would split it mid-flag. The 80-column bar applies
         # to the prose and row blocks, not to a command token stream.
         lines.append(f"More: {more}")
+    elif value.get("next_cursor_withheld"):
+        lines.append("")
+        # The listing is longer than what was shown, but the key to the next
+        # page is itself a withheld identifier. Saying nothing here would read
+        # as "that is all there is" in an audit view that exists to be trusted.
+        lines += _shaped(
+            "More rows exist, but paging cannot reach them: the next row's "
+            "identifier is withheld by the privacy guard, so no cursor can be "
+            "printed. Raise --limit to see the following rows on this page."
+        )
     # The recipe, not just the implication: a move is a write in the destination
     # scope followed by a forget of the original, and forget needs the revision
     # the read just printed.
