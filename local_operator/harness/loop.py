@@ -1676,6 +1676,225 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     return message.model_copy(update={"tool_calls": calls})
 
 
+def _plan_guard_arguments(name: str, arguments: Any) -> Any:
+    """``arguments`` with the two ADMITTED reference positions left out of the guard.
+
+    Each position mirrors, on the same classifier, what the TOOL layer exempts — the
+    plan gate must ask its question about the same copy the tools ask theirs of, or the
+    call is refused one level above the exemption that was meant to admit it:
+
+    * a ``memory`` call with ``op=recall`` whose ``text`` IS a minted reference
+      (``tools/memory_tools._guarded_fact_args``, #2524 — spelled here because that
+      helper is not on main yet; the masking is identical: the ``text`` VALUE is
+      emptied, the parameter and every sibling argument are kept);
+    * a ``read`` call whose ``path`` carries an admitted ``q`` VALUE, built from
+      ``memory_tools``' own ``_recall_reference``/``_guarded_path`` (#2511) so the two
+      layers cannot drift on which character of the call is removed.
+
+    Both are decided by ``memory.structural_reference``, so a secret-shaped value in
+    either position is left in place and still trips the guard. A call with no admitted
+    position — every other op, name and shape — is returned BY IDENTITY, which is what
+    lets the caller keep today's inputs, and today's verdict, exactly.
+
+    A masked copy is handed over only if the guard's own walk of it ANSWERS, which is what
+    ``_plan_guard_copy_encodable`` decides by ASKING that walk — read it for why no check
+    of a serialization can answer this question. A copy the walk cannot be asked about is
+    not used, and the caller's ORIGINALS go to the guard instead: that is the copy, and
+    therefore the verdict, of the tree before this change.
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+    if name == "memory" and arguments.get("op") == "recall":
+        from local_operator.memory import structural_reference
+
+        if structural_reference(arguments.get("text")):
+            masked = {**arguments, "text": ""}
+            return masked if _plan_guard_copy_encodable(masked) else arguments
+        return arguments
+    # ``memory_tools`` (sqlite3, urllib) is imported only where it can be used: every
+    # planned call in every session reaches this helper, and only a read's ``path`` can
+    # carry the exempt ``q``. The two clauses below mirror ``_recall_reference``'s own
+    # first line, so a call they skip is one that helper answers ``None`` for too.
+    if name != "read" or not isinstance(arguments.get("path"), str):
+        return arguments
+    from local_operator.tools.memory_tools import _guarded_path, _recall_reference
+
+    if _recall_reference(name, arguments.get("path")) is not None:
+        masked = {**arguments, "path": _guarded_path(arguments["path"])}
+        return masked if _plan_guard_copy_encodable(masked) else arguments
+    return arguments
+
+
+def _plan_guard_copy_encodable(value: Any) -> bool:
+    """Whether the guard's own walk over ``value`` ANSWERS, rather than raising out of it.
+
+    ``retained_arguments`` walks a memory call with ``memory_privacy.guard_encoded``, and
+    that walk ENCODES every string it reaches (``guard()``'s byte-cap arm is
+    ``len(value.encode("utf-8"))``) and re-serializes every dict/list with
+    ``ensure_ascii=False``. A wire document carrying a lone-surrogate escape (``"\\ud800"``)
+    decodes to a bare surrogate character, which the re-serialization writes back
+    UNWRAPPED, so encoding it raises ``UnicodeEncodeError``. Nothing on the path catches
+    it — it is a ``ValueError``, and ``retained_arguments`` catches ``MemoryError`` — so
+    it would leave the planning loop and abort the rest of the batch's planning rather
+    than produce a verdict.
+
+    The walk is MORE than a serialization of ``value``: it also ``json.loads``es any
+    string that ``lstrip()``s to ``{``/``[`` and walks the DECODED copy (depth <= 4, see
+    ``memory_privacy.guard_encoded``). That decoded copy is where a wire document can carry
+    the character as PLAIN ASCII text — ``{"a": "\\ud800"}`` is thirteen characters that
+    encode fine, and only the string's own re-DECODE reaches the bare surrogate. MEASURED
+    on ``d259fb91d``: for a read whose admitted ``q`` reference was blanked and which
+    carried that spelling as a sibling, a check of the copy's JSON spelling answered
+    ``True``, the masked copy was handed over, and the walk raised ``UnicodeEncodeError``
+    out of the seam two frames later.
+
+    Which is why this helper asks the question OF the walk instead of re-spelling its
+    reach: the copy it approves is the copy the walk then gets, so the two cannot
+    disagree about which strings are reached. The cost is one extra walk, paid only by the
+    calls that HAVE an admitted reference position.
+    """
+    from local_operator.memory import MemoryError
+    from local_operator.memory_privacy import guard_encoded
+
+    try:
+        guard_encoded(value)
+    except UnicodeEncodeError:
+        # The one failure this helper screens for: a string the walk must encode holds a
+        # character UTF-8 cannot carry, and the walk has no verdict to give about it.
+        return False
+    except MemoryError:
+        # The walk stopped with an ANSWER (the byte cap, or a recognised sensitive
+        # value). That is the outcome this helper exists to secure, and the verdict it
+        # belongs to is ``retained_arguments``' to make, on this same copy, a moment
+        # later — never this helper's to pre-empt.
+        return True
+    return True
+
+
+def _decode_plan_guard_raw(raw: str) -> tuple[Any, bool]:
+    """``json.loads(raw)``, and whether decode -> encode provably keeps every value.
+
+    ``_plan_guard_raw`` replaces the guard's copy of the wire JSON with a decode ->
+    re-serialize round trip while the executor still dispatches the ORIGINAL
+    ``call.raw_arguments``. So anything that trip cannot carry across is content the
+    guard stops seeing: a call the guard refuses today would run. A JSON document has
+    exactly two spellings a provider can stream where that happens, and both are
+    DETECTED here rather than judged safe one by one:
+
+    * a DUPLICATE KEY — ``json.loads`` keeps the last occurrence and silently drops the
+      earlier value, and the value it drops leaves the guard's copy while the original
+      raw still carries it. Measured: a read whose raw is
+      ``{"path":"memory://global?q=<colliding id>","raw":"<Luhn-valid card>","raw":"true"}``
+      is refused when the raw reaches the guard and RUNS on the re-encoded copy.
+      ``json.dumps`` cannot emit a duplicate key at all, so no corpus row spelled with
+      it can express this case: the tests spell that raw by hand.
+    * a NUMBER LITERAL whose own spelling the encoder does not reproduce, because
+      ``json.dumps`` writes ``repr()`` of the parsed value (``1E5`` -> ``100000.0``),
+      which can shorten a digit run the card/IBAN arms look for. The review's second
+      spelling does NOT reproduce: ``4111111111111111.0`` parses to a float whose
+      ``repr()`` is that same literal, so the encoder emits ``4111111111111111.0`` —
+      MEASURED, and therefore no test asserts an evasion for it.
+
+    Escape and whitespace spellings are NOT lossy in the direction that matters: the
+    decoded copy holds the same or more literal characters than the wire spelling did,
+    so they are left to the round trip — which is what keeps an ordinary spaced
+    ``{"path": "memory://global?q=<ref>"}`` masking exactly as it does today. A raw
+    this cannot PROVE lossless makes the caller hand the guard the original (fail
+    closed), so the refusal it produces today still fires.
+    """
+    duplicated = False
+    respelled = False
+
+    def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicated
+        if len({key for key, _ in pairs}) != len(pairs):
+            duplicated = True
+        return dict(pairs)
+
+    def _int(text: str) -> int:
+        nonlocal respelled
+        value = int(text)
+        respelled |= repr(value) != text
+        return value
+
+    def _float(text: str) -> float:
+        nonlocal respelled
+        value = float(text)
+        respelled |= repr(value) != text
+        return value
+
+    # ``NaN`` / ``Infinity`` / ``-Infinity`` are deliberately NOT hooked: ``parse_constant``
+    # is not passed. They are tokens this round trip re-emits IDENTICALLY — ``json.dumps``
+    # writes the same three words back (measured: ``{"a": NaN}`` -> ``{"a":NaN}``) — so the
+    # guard's copy holds exactly what the wire held and no value is dropped. Flagging them
+    # as respelled would close no hole and would fail closed on calls that work today
+    # (``repr(float("nan"))`` is ``'nan'``, not ``'NaN'``, so hooking them would mark every
+    # such document lossy): over-refusal, not safety. QA round 2's gap 3 — recorded here so
+    # a later reader does not "fix" this into refusing calls that work.
+    decoded = json.loads(raw, object_pairs_hook=_object, parse_int=_int, parse_float=_float)
+    return decoded, not (duplicated or respelled)
+
+
+def _plan_guard_raw(name: str, raw: str) -> str:
+    """``raw`` with the same two positions blanked, or ``raw`` itself unchanged.
+
+    The streamed wire JSON is a SEPARATE carrier: ``retained_arguments`` decodes it
+    and guards its text as well, so masking the argument dict alone would leave a
+    live (streamed) call refused on its raw spelling. Only a parseable ``raw`` whose
+    own copy holds an admitted reference is re-serialized, and only when the decoder
+    and the encoder can carry the rest of it ACROSS UNCHANGED (see
+    ``_decode_plan_guard_raw``) — an unparseable ``raw``, a non-object one, one whose
+    own value is NOT an admitted reference, one whose masked copy the guard's walk cannot
+    be asked about (``_plan_guard_copy_encodable``), and one whose round trip is lossy are
+    all returned untouched, so the fail-closed refusal each produces today is unchanged.
+    """
+    try:
+        decoded, lossless = _decode_plan_guard_raw(raw)
+    except (ValueError, TypeError):
+        return raw
+    masked = _plan_guard_arguments(name, decoded)
+    if masked is decoded or not lossless:
+        return raw
+    try:
+        return json.dumps(masked, ensure_ascii=False, separators=(",", ":"))
+    except (ValueError, TypeError):
+        return raw
+
+
+def _plan_guard_inputs(name: str, arguments: Any, raw: str | None) -> tuple[Any, str | None]:
+    """The inputs the plan-time sensitivity guard is asked about, and NOTHING else.
+
+    ``_plan_call`` asks ``retained_arguments`` whether one call carries a recognised
+    sensitive memory value, and refuses the call before any schema validator or tool
+    sees it. That question is asked of the WHOLE argument dict and of the whole wire
+    JSON, so the exemption PR #2511 gave a read's ``q`` and PR #2524 gave a recall's
+    ``text`` — both applied at the TOOL layer — never got to run: the call was
+    refused one level ABOVE them, and every live path (native dispatch, the eval
+    bridge's ``dispatch_tool``, the monitor runner) funnels through this seam.
+
+    So the guard is handed a MASKED COPY that blanks exactly those two value
+    positions, each classified by the same ``structural_reference`` the tool layer
+    uses. It is for the DECISION alone: ``_plan_call`` still dispatches the caller's
+    original arguments, and ``retained_arguments`` keeps computing its own redacted
+    copies for history/events from those originals. A masked copy that still trips
+    the guard — a secret in a sibling parameter, a secret-shaped value in either of
+    the two positions, an unparseable raw — refuses through the very same branch,
+    byte-identically to today. A masked copy the guard's walk cannot be ASKED about
+    (see ``_plan_guard_copy_encodable``) is not handed over at all, in either carrier.
+    """
+    masked_arguments = _plan_guard_arguments(name, arguments)
+    if masked_arguments is arguments:
+        return arguments, raw
+    masked_raw = _plan_guard_raw(name, raw) if raw else raw
+    # The wire JSON is a SECOND carrier of the same call and the walk re-decodes it too,
+    # so a masked raw the walk cannot be asked about makes the pair no more usable than
+    # an unwalkable argument copy: BOTH go back, and the guard is then asked exactly what
+    # the tree before this change asked it.
+    if raw and not _plan_guard_copy_encodable(masked_raw):
+        return arguments, raw
+    return masked_arguments, masked_raw
+
+
 #: User-facing copy for the input-refusal recovery tokens the failover walk
 #: records on the end event (``provider_payload["input_refusal_recovery"]``).
 #: A token this map does not know degrades to its underscores read as spaces:
@@ -4446,9 +4665,16 @@ class AgentLoop:
         # Refuse recognised sensitive memory values BEFORE a schema validator
         # can quote an invalid value in its diagnostic. Keep the original call
         # for this guard/executor; history/events alone receive redacted copies.
+        # The guard is asked about a MASKED COPY so the two reference positions
+        # the tools exempt (a read's ``q``, a recall's ``text``) are decided here
+        # too — see _plan_guard_inputs; the executor below still gets the
+        # caller's own arguments.
         from local_operator.memory_privacy import retained_arguments
 
-        _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
+        guard_arguments, guard_raw = _plan_guard_inputs(
+            call.name, call.arguments, call.raw_arguments
+        )
+        _, _, sensitive_memory = retained_arguments(call.name, guard_arguments, guard_raw)
         if sensitive_memory:
             from local_operator.memory import (
                 MEMORY_TOOL_CONTRACT_ERROR,
