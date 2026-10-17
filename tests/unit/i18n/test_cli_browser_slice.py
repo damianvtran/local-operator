@@ -1,6 +1,6 @@
 """Ratchet slice 12: `lop browser` — the first CLI tranche, AND its CLASS DECISION.
 
-cli.py carries 798 findings in a 16,080-line file: it is a PROGRAMME, not a
+cli.py carries 807 findings in a 16,112-line file: it is a PROGRAMME, not a
 slice. Root accepted the decomposition by sub-app ("a PR no reviewer can hold
 in their head" is a gate-quality criterion, not a convenience one) and required
 the print/echo class decision as an artifact of the first tranche, PER SITE,
@@ -36,7 +36,7 @@ subparser group), every other command family in the file (`main` 35, `mobile`
 assignment-class English the collector cannot see (`_waiting_label(...)`'s
 labels, and whatever else a file-wide sweep finds). **cli.py is NOT
 activated**: activation happens when the FILE reaches zero findings; this
-tranche is one region, so it shrinks the recorded ceiling by exactly the 60 it
+tranche is one region, so it shrinks the recorded ceiling by exactly the 61 it
 cleared — a map, not a certificate.
 """
 
@@ -103,7 +103,10 @@ def test_the_ignores_do_not_mask_live_english() -> None:
 
 def test_the_usage_line_renders_its_literal_braces() -> None:
     """The one value carrying literal braces: encoded as a quoted ICU run, and
-    verified by rendering — the engine's per-brace form does NOT work here."""
+    verified by rendering. The measured failure was the na\u00efve per-brace
+    composition I first tried (quote before each brace separately): it raises
+    `MessageSyntaxError: unmatched '}'` at parse. The correct encoding is the
+    quoted RUN around the whole group `'{...}'`, which is what ships here."""
     assert (
         _bw(_b.usage())
         == "usage: lop browser {install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
