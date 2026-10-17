@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The SIX, and why each is persisted:
+    The SEVEN, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
@@ -162,6 +162,10 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     - ``LENGTH_STOP_RECOVERY_PROMPT`` — the re-ask after a turn was cut off at
       the model's OUTPUT limit with nothing visible, on a model with no cheaper
       effort rung to retreat to; the live run showed a notice instead.
+    - ``CONTINUE_TRUNCATED_ANSWER_PROMPT`` — the continuation after the output
+      limit cut a delegated CHILD's answer off mid-prose; the live run showed a
+      notice instead, and the child finishes the deliverable rather than its
+      parent paying a resume for the rest.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -188,6 +192,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     """
     from local_operator.harness.loop import (
         CONNECTIVITY_CONTINUATION_PROMPT,
+        CONTINUE_TRUNCATED_ANSWER_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
@@ -202,6 +207,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
+        CONTINUE_TRUNCATED_ANSWER_PROMPT,
     )
 
 

@@ -61,6 +61,7 @@ from local_operator.harness.comms import (
     TO_CHILD_INSTRUCTIONS,
 )
 from local_operator.harness.loop import (
+    CONTINUE_TRUNCATED_ANSWER_PROMPT,
     LENGTH_ENDED_CALL_RESULT_TEXT,
     LENGTH_STOP_RECOVERY_PROMPT,
     TRUNCATED_RESULT_TEXT,
@@ -577,11 +578,12 @@ def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     # The count is a drift tripwire: a new chrome prompt must be added HERE on
     # purpose, not slip into the shared tuple unnoticed. The membership lines
     # name which prompt took it to the count (the wordless-stop re-ask, then the
-    # length-stop re-ask), so the pin says what grew it rather than only how many
-    # there are.
-    assert len(prompts) == 6
+    # length-stop re-ask, then the truncated-answer continuation), so the pin
+    # says what grew it rather than only how many there are.
+    assert len(prompts) == 7
     assert WORDLESS_STOP_RECOVERY_PROMPT in prompts
     assert LENGTH_STOP_RECOVERY_PROMPT in prompts
+    assert CONTINUE_TRUNCATED_ANSWER_PROMPT in prompts
 
     assert _page_rows([Message.user(p) for p in prompts]) == []
 
