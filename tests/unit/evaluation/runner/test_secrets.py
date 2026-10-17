@@ -304,6 +304,45 @@ def test_a_zero_budget_disables_the_bound(tmp_path: Path, monkeypatch: pytest.Mo
     assert resolver.resolve(["SLOW_OK"])[0].value == CANARY
 
 
+def test_a_malformed_budget_is_announced_and_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo'd override must say so -- and must not read as the off-switch.
+
+    On the change that exists to end silent fallbacks, an unusable knob value
+    being ignored in silence (or a NEGATIVE one silently disabling the bound)
+    would be the same defect one level up (review NIT-1, 2026-10-17).
+    """
+    import logging
+
+    from local_operator.evaluation.runner import host_secrets
+
+    for malformed in ("not-a-number", "-5", ""):
+        monkeypatch.setenv(host_secrets.RESOLUTION_TIMEOUT_ENV, malformed)
+        with caplog.at_level(logging.WARNING, logger=host_secrets.__name__):
+            budget = host_secrets._resolution_timeout_s()
+        assert budget == host_secrets.DEFAULT_RESOLUTION_TIMEOUT_MS / 1000.0, malformed
+        assert any(
+            host_secrets.RESOLUTION_TIMEOUT_ENV in record.getMessage() for record in caplog.records
+        ), malformed
+        caplog.clear()
+
+
+def test_the_unset_budget_is_the_default_and_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Absent knob: the default, no announcement (nothing was overridden)."""
+    import logging
+
+    from local_operator.evaluation.runner import host_secrets
+
+    monkeypatch.delenv(host_secrets.RESOLUTION_TIMEOUT_ENV, raising=False)
+    with caplog.at_level(logging.WARNING, logger=host_secrets.__name__):
+        budget = host_secrets._resolution_timeout_s()
+    assert budget == host_secrets.DEFAULT_RESOLUTION_TIMEOUT_MS / 1000.0
+    assert caplog.records == []
+
+
 # ---------------------------------------------------------------------------
 # MAJOR-1: an over-long value never reaches a message
 # ---------------------------------------------------------------------------

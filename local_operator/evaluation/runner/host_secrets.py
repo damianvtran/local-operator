@@ -18,8 +18,11 @@ were swallowed, so the boot showed nothing at all -- the worst reading, an
 apparent hang with no output. The resolver therefore (a) reads ONLY the
 requested names, (b) checks a whole-resolution budget between fetches, and
 (c) raises a NAMED failure when the budget expires instead of continuing
-silently. Both ``run_episode.py`` call sites already print a ``ValueError``
-and exit ``EXIT_PREFLIGHT``, so the failure is loud and pre-allocation.
+silently. ``run_episode.py`` routes the failure to a printed refusal that
+exits ``EXIT_PREFLIGHT`` before any allocation: the infra-refs site catches
+the ``ValueError`` directly, and the secret-refs site classifies the
+diagnostic (this class is named in its ``_SECRET_DIAGNOSTICS`` tuple), so
+both paths agree.
 
 This is the SECOND runner module allowed to reach into the application (the
 first is ``provider_client.py``, for the same reason: a real episode needs a
@@ -52,12 +55,15 @@ own proof.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any, Sequence
 
 from local_operator.evaluation.adapters.api import ResolvedSecret
 from local_operator.evaluation.runner.secrets import build_resolved_secret
+
+logger = logging.getLogger(__name__)
 
 #: Default whole-resolution budget in ms; ``LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS``
 #: overrides, ``0`` disables. NOT a per-read timer: the store and broker calls
@@ -78,10 +84,12 @@ RESOLUTION_TIMEOUT_ENV = "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS"
 class SecretResolutionTimeout(ValueError):
     """The resolution did not finish inside its budget. Names the ref; never a value.
 
-    A ``ValueError`` subclass ON PURPOSE: ``scripts/run_episode.py`` routes
-    ``ValueError`` from both of its resolution call sites (infra refs, secret
-    refs) to a printed sentence and ``EXIT_PREFLIGHT`` -- the loud pre-allocation
-    refusal the silent storm lacked. It deliberately does NOT subclass
+    A ``ValueError`` subclass ON PURPOSE: ``scripts/run_episode.py`` routes the
+    failure from both of its resolution call sites (infra refs, secret refs) to
+    a printed, named, pre-allocation ``EXIT_PREFLIGHT`` -- the loud refusal the
+    silent storm lacked. The infra site catches the ``ValueError``; the
+    secret-refs site classifies the diagnostic, which is why the class is named
+    in the script's ``_SECRET_DIAGNOSTICS``. It deliberately does NOT subclass
     :class:`MissingSecret`: "the store did not answer in time" and "the store
     does not hold this name" are different problems with different fixes, and a
     reader must be able to tell them apart without reading this module.
@@ -104,16 +112,34 @@ class SecretResolutionTimeout(ValueError):
 
 
 def _resolution_timeout_s() -> float | None:
-    """Resolve the whole-resolution budget in seconds (``None`` = off)."""
+    """Resolve the whole-resolution budget in seconds (``None`` = off).
+
+    ``0`` disables the bound (documented, deliberate). Anything else that
+    cannot be read as a POSITIVE number is ANNOUNCED and falls back to the
+    default: on the change that exists to end silent fallbacks, a typo'd
+    override must not be ignored in silence -- and a NEGATIVE one must not be
+    silently read as the off-switch (review NIT-1, 2026-10-17).
+    """
     raw = os.environ.get(RESOLUTION_TIMEOUT_ENV)
-    if raw is not None:
-        try:
-            ms = float(raw)
-        except ValueError:
-            ms = DEFAULT_RESOLUTION_TIMEOUT_MS
-    else:
-        ms = DEFAULT_RESOLUTION_TIMEOUT_MS
-    return None if ms <= 0 else ms / 1000.0
+    default_s = DEFAULT_RESOLUTION_TIMEOUT_MS / 1000.0
+    if raw is None:
+        return default_s
+    try:
+        ms = float(raw)
+    except ValueError:
+        ms = None
+    if ms is not None and ms > 0:
+        return ms / 1000.0
+    if ms == 0.0:
+        return None
+    logger.warning(
+        "ignoring %s=%r (expected a positive number of milliseconds, or 0 to "
+        "disable); using the %gs default",
+        RESOLUTION_TIMEOUT_ENV,
+        raw[:64],
+        default_s,
+    )
+    return default_s
 
 
 class CredentialStoreResolver:
