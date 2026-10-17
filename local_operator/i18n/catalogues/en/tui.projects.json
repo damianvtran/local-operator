@@ -89,5 +89,9 @@
   "tui.projects.render.next_clause": " — next: {joined}",
   "tui.projects.render.todo_snapshots_none": "todo snapshots: none yet",
   "tui.projects.render.more_lines_hint": "[{count} more {noun} — ↵ {verb}]",
-  "tui.projects.render.older_updates": "… {count} older updates"
+  "tui.projects.render.older_updates": "… {count} older updates",
+  "tui.projects.start.title": "start session",
+  "tui.projects.start.filter_placeholder": "type to filter",
+  "tui.projects.start.legend": "type to filter · ↑↓ move · ↵ select · esc close",
+  "tui.projects.start.more": "+{count} more"
 }

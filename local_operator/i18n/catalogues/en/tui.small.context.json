@@ -498,5 +498,80 @@
     "role": "choice label",
     "tone": "plain",
     "note": "Boolean FALSE choice label; paired with bool_on and equally short because the column is narrow."
+  },
+  "tui.small.todo_panel.header": {
+    "role": "heading",
+    "tone": "muted",
+    "note": "Panel header; one key for both the flat and the staged header, which carry identical bytes."
+  },
+  "tui.small.todo_panel.resolved": {
+    "role": "count",
+    "tone": "muted",
+    "note": "Resolved-over-total counter in the header; both digits are raw and the slash is layout."
+  },
+  "tui.small.todo_panel.dropped": {
+    "role": "count",
+    "tone": "muted",
+    "note": "Dropped counter appended to the header only when non-zero."
+  },
+  "tui.small.todo_panel.more_todos": {
+    "role": "overflow",
+    "tone": "dim",
+    "note": "Overflow row for items the screen cannot afford; the ellipsis and the noun are both part of the copy."
+  },
+  "tui.small.todo_panel.stage": {
+    "role": "label",
+    "tone": "dim",
+    "note": "Stage counter after the header; the leading separator attaches it to the line it follows."
+  },
+  "tui.small.todo_panel.more_hidden": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Collapsed-count affordance before the collapse hint; the trailing separator is layout."
+  },
+  "tui.small.todo_panel.done_hidden": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Same affordance when the hidden remainder is all done (two-valued switch)."
+  },
+  "tui.small.todo_panel.collapse": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The key name is display vocabulary; only the verb translates."
+  },
+  "tui.small.todo_panel.expand": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The other half of the same two-valued hint."
+  },
+  "tui.small.todo_panel.more_below": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Scroll cue; the digit may arrive pre-padded to pin the column, so it is a string, not a number."
+  },
+  "tui.small.todo_panel.more_below_padded": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "The end-state variant, where a run of spaces of the same width stands in for the count."
+  },
+  "tui.small.todo_panel.blocked": {
+    "role": "status",
+    "tone": "muted",
+    "note": "Status marker appended to a row; the leading space-dash-space is part of the marker."
+  },
+  "tui.small.todo_panel.dropped_row": {
+    "role": "status",
+    "tone": "dim",
+    "note": "The dropped variant of the same marker."
+  },
+  "tui.small.command_picker.projects": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Availability count in the command palette's status line; the plural moves into the message so a translator can inflect it."
+  },
+  "tui.small.command_picker.entries": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Same shape for the entries count, joined to the projects count with a separator in code."
   }
 }
