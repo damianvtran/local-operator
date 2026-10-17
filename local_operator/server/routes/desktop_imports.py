@@ -141,7 +141,7 @@ async def import_status(job_id: str) -> CRUDResponse[Any]:
 @router.delete("/jobs/{job_id}")
 async def import_cancel(job_id: str, request: Request) -> CRUDResponse[Any]:
     _job_or_404(job_id)
-    cancelled = JOBS.cancel(service_for(request), job_id)
+    cancelled = JOBS.cancel(job_id)
     if cancelled.get("settled"):
         return CRUDResponse(
             status=200,

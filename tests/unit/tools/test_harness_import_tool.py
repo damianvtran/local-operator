@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,8 @@ import pytest
 
 from local_operator.harness.types import ToolContext
 from local_operator.harness_import.jobs import JOBS
+from local_operator.harness_import.service import HarnessImportService
+from local_operator.harness_import.types import ImportResult
 from local_operator.session.transcript import Transcript
 from local_operator.tools.harness_import_tool import _PREVIEWS, execute_harness_import
 from local_operator.tools.registry import TOOL_BUILDERS
@@ -225,28 +229,126 @@ async def test_explicit_import_replay_and_source_immutability(import_home):
 
 
 @pytest.mark.asyncio
-async def test_status_and_cancel_are_shared_with_routes(import_home):
+async def test_tool_cancel_reaches_the_running_job(import_home, monkeypatch):
+    """A fresh service per call must not cancel a throwaway event.
+
+    The fake import only returns after the service instance OWNING the job sees
+    its cancellation event. The old wiring passed a new service to cancel, so
+    this test would hang and time out instead of reporting cancelled.
+    """
     home, config = import_home
+
+    async def slow_import(self, request, progress=None):
+        while not self._cancel.is_set():
+            await asyncio.sleep(0.01)
+        return ImportResult(job_id="slow", state="cancelled")
+
+    monkeypatch.setattr(HarnessImportService, "import_sessions", slow_import)
     preview = await _call({"op": "preview", "source": SOURCE})
-    token = _details(preview)["preview_token"]
     started = await _call(
         {
             "op": "import",
             "source": SOURCE,
             "all": True,
             "confirm": True,
-            "preview_token": token,
+            "preview_token": _details(preview)["preview_token"],
         }
     )
     job_id = _details(started)["job_id"]
-    cancelled = await _call({"op": "cancel", "job_id": job_id})
-    assert not cancelled.is_error
     job = JOBS.get(job_id)
     assert job is not None and job.task is not None
-    await job.task
+    cancelled = await _call({"op": "cancel", "job_id": job_id})
+    assert not cancelled.is_error
+    await asyncio.wait_for(job.task, timeout=2)
     status = await _call({"op": "status", "job_id": job_id})
-    assert _details(status)["state"] in ("cancelled", "done")
-    assert JOBS.get(job_id) is job
+    assert _details(status)["state"] == "cancelled"
+    assert not (config / "sessions").exists()
+
+
+@pytest.mark.asyncio
+async def test_jobs_are_scoped_to_the_calling_agent_session(import_home, monkeypatch):
+    home, config = import_home
+
+    async def slow_import(self, request, progress=None):
+        while not self._cancel.is_set():
+            await asyncio.sleep(0.01)
+        return ImportResult(job_id="slow", state="cancelled")
+
+    monkeypatch.setattr(HarnessImportService, "import_sessions", slow_import)
+    preview = await _call({"op": "preview", "source": SOURCE})
+    started = await _call(
+        {
+            "op": "import",
+            "source": SOURCE,
+            "all": True,
+            "confirm": True,
+            "preview_token": _details(preview)["preview_token"],
+        }
+    )
+    job_id = _details(started)["job_id"]
+    other = ToolContext(cwd=".", session_id="another-agent")
+    hidden = await execute_harness_import(
+        "call-2", {"op": "status", "job_id": job_id}, None, None, other
+    )
+    assert hidden.is_error and "no import job" in _text(hidden)
+    hidden_cancel = await execute_harness_import(
+        "call-3", {"op": "cancel", "job_id": job_id}, None, None, other
+    )
+    assert hidden_cancel.is_error
+    owner_cancel = await _call({"op": "cancel", "job_id": job_id})
+    assert not owner_cancel.is_error
+    job = JOBS.get(job_id)
+    assert job is not None and job.task is not None
+    await asyncio.wait_for(job.task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_preview_redacts_titles_and_strips_private_glyphs(import_home):
+    home, config = import_home
+    body = home / ".omp" / "agent" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    lines = body.read_text(encoding="utf-8").splitlines()
+    title = {"type": "title", "title": "\U000f0016 ghp_" + "A" * 36, "v": 1}
+    lines[0] = json.dumps(title)
+    body.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    preview = await _call({"op": "preview", "source": SOURCE})
+    sessions = await _call({"op": "sessions", "source": SOURCE})
+    for result in (preview, sessions):
+        row = _details(result)["sessions"][0]
+        assert "ghp_" not in row["title"]
+        assert "\U000f0016" not in row["title"]
+        assert "[redacted]" in row["title"] or row["title"].startswith("synthetic")
+
+
+@pytest.mark.asyncio
+async def test_all_and_session_ids_are_refused_together(import_home):
+    ambiguous = await _call(
+        {
+            "op": "preview",
+            "source": SOURCE,
+            "session_ids": {SOURCE: [SESSION_ID]},
+            "all": True,
+        }
+    )
+    assert ambiguous.is_error and "never both" in _text(ambiguous)
+    preview = await _call(
+        {
+            "op": "preview",
+            "source": SOURCE,
+            "session_ids": {SOURCE: [SESSION_ID]},
+        }
+    )
+    result = await _call(
+        {
+            "op": "import",
+            "source": SOURCE,
+            "session_ids": {SOURCE: [SESSION_ID]},
+            "all": True,
+            "confirm": True,
+            "preview_token": _details(preview)["preview_token"],
+        }
+    )
+    assert result.is_error
+    assert "never both" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -255,6 +357,10 @@ async def test_import_reports_the_instruction_review_path(import_home):
     shutil.copytree(FIXTURES / "claude", home / ".claude")
     (home / ".claude" / "CLAUDE.md").write_text(
         "# Synthetic instructions\n- Use fake text only.\n", encoding="utf-8"
+    )
+    (home / ".claude" / "memory").mkdir()
+    (home / ".claude" / "memory" / "notes.md").write_text(
+        "- synthetic untethered work state\n", encoding="utf-8"
     )
     preview = await _call(
         {
@@ -280,7 +386,11 @@ async def test_import_reports_the_instruction_review_path(import_home):
     review_path = _details(status)["result"]["instruction_review_path"]
     assert review_path.endswith("instructions/claude.md")
     assert Path(review_path).is_file()
+    memory_path = _details(status)["result"]["memory_review_path"]
+    assert memory_path.endswith("memory-review-claude.jsonl")
+    assert Path(memory_path).is_file()
     assert "Instructions saved for review at" in _text(status)
+    assert "Untethered memory saved for review at" in _text(status)
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from local_operator.harness.types import (
     AbortSignal,
@@ -32,8 +32,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness_import.jobs import JOBS, ImportJobBusy
-from local_operator.harness_import.redact import redact_text
-from local_operator.harness_import.service import HarnessImportService
+from local_operator.harness_import.service import HarnessImportService, normalise_title
 from local_operator.harness_import.types import ImportRequest
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import _error, _guard, _text, _validation_error
@@ -56,36 +55,16 @@ _ABS_PATH = re.compile(
 class HarnessImportParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["sources", "sessions", "preview", "import", "status", "cancel"] = Field(
-        description="The action to run."
-    )
-    source: str | None = Field(
-        default=None,
-        description="Harness name: claude, codex or omp (required for sessions/preview/import).",
-    )
-    session_ids: dict[str, list[str]] | None = Field(
-        default=None,
-        description=(
-            "Explicit {source: [session_id]} selection; required for import " "unless all=true."
-        ),
-    )
-    all: bool = Field(
-        default=False,
-        description="Import every listed session for the source. Never a default.",
-    )
-    include_subagents: bool = Field(default=False)
-    include_memory: bool = Field(default=True)
-    include_instructions: bool = Field(default=True)
-    confirm: bool = Field(
-        default=False,
-        description="import: must be true; preview first and pass its preview_token.",
-    )
-    preview_token: str | None = Field(
-        default=None, description="import: token returned by the preview for this exact selection."
-    )
-    job_id: str | None = Field(
-        default=None, description="status/cancel: job id; latest when absent."
-    )
+    op: Literal["sources", "sessions", "preview", "import", "status", "cancel"]
+    source: str | None = None
+    session_ids: dict[str, list[str]] | None = None
+    all: bool = False
+    include_subagents: bool = False
+    include_memory: bool = True
+    include_instructions: bool = True
+    confirm: bool = False
+    preview_token: str | None = None
+    job_id: str | None = None
 
 
 #: ``token -> (expires_at, agent_session_key, request)``. Process-local and
@@ -129,11 +108,19 @@ def _strip_paths(text: str) -> str:
 
 def _public(value: Any, *, key: str = "") -> Any:
     """Strip foreign paths and keep the one path the contract allows."""
-    if key in {"instruction_review_path", "instruction_review_paths"}:
+    if key in {
+        "instruction_review_path",
+        "instruction_review_paths",
+        "memory_review_path",
+    }:
         return value
     if isinstance(value, dict):
         return {
-            str(item_key): _public(item, key=str(item_key))
+            str(item_key): (
+                _public_title(item)
+                if item_key == "title" and isinstance(item, str)
+                else _public(item, key=str(item_key))
+            )
             for item_key, item in value.items()
             if item_key not in _BLOCKED_KEYS
         }
@@ -144,6 +131,10 @@ def _public(value: Any, *, key: str = "") -> Any:
     if isinstance(value, str):
         return _strip_paths(value)
     return value
+
+
+def _public_title(value: Any) -> str:
+    return normalise_title(str(value)) if value else ""
 
 
 def _public_source(info: Any) -> dict[str, Any]:
@@ -158,11 +149,10 @@ def _public_source(info: Any) -> dict[str, Any]:
 
 
 def _public_session(session: Any) -> dict[str, Any]:
-    title, _ = redact_text(session.title or "")
     return {
         "source": session.source,
         "source_id": session.source_id,
-        "title": title,
+        "title": _public_title(session.title),
         "created_ts": session.created_ts,
         "updated_ts": session.updated_ts,
         "message_count": session.message_count,
@@ -209,6 +199,8 @@ def _selection_error(params: HarnessImportParams) -> str | None:
         return (
             "import needs an explicit session_ids selection or all=true; there is no default-all."
         )
+    if params.all and has_sessions:
+        return "import accepts all=true or session_ids, never both; choose one scope."
     if params.all and not params.source:
         return "import all=true needs a source (claude, codex or omp)."
     if params.source and session_ids and set(session_ids) != {params.source}:
@@ -270,6 +262,12 @@ async def execute_harness_import(
     if params.op == "preview":
         if not params.source and not params.session_ids:
             return _error(tool_call_id, TOOL_NAME, "preview needs a source or session_ids.")
+        if params.all and any((params.session_ids or {}).values()):
+            return _error(
+                tool_call_id,
+                TOOL_NAME,
+                "preview accepts all=true or session_ids, never both; choose one scope.",
+            )
         unknown = _unknown_source(service, params)
         if unknown:
             return _error(tool_call_id, TOOL_NAME, unknown)
@@ -288,8 +286,8 @@ async def execute_harness_import(
             f"Preview: {preview.total_sessions} session(s), "
             f"{preview.total_messages} message(s){estimated}, "
             f"{preview.total_compactions} compaction(s). Nothing has been "
-            "imported. Pass preview_token with confirm=true and an explicit "
-            "selection."
+            "imported. Pass preview_token with confirm=true and either the "
+            "previewed session_ids or all=true."
         )
         if preview.instruction_review_paths:
             text += " Instructions will be saved for review at " + ", ".join(
@@ -326,7 +324,7 @@ async def execute_harness_import(
                 "request; preview again.",
             )
         try:
-            job = JOBS.start(service, request)
+            job = JOBS.start(service, request, session_key=key)
         except ImportJobBusy as exc:
             return _error(tool_call_id, TOOL_NAME, f"import refused: {exc}")
         return _text(
@@ -337,7 +335,11 @@ async def execute_harness_import(
         )
 
     if params.op == "status":
-        job = JOBS.get(params.job_id) if params.job_id else JOBS.latest()
+        job = (
+            JOBS.get(params.job_id, session_key=key)
+            if params.job_id
+            else JOBS.latest(session_key=key)
+        )
         if job is None:
             return _error(tool_call_id, TOOL_NAME, "no import job found.")
         payload = _public(JOBS.payload(job))
@@ -347,11 +349,13 @@ async def execute_harness_import(
         )
         if job.result is not None and job.result.instruction_review_path:
             text += " Instructions saved for review at " f"{job.result.instruction_review_path}."
+        if job.result is not None and job.result.memory_review_path:
+            text += " Untethered memory saved for review at " f"{job.result.memory_review_path}."
         return _text(tool_call_id, TOOL_NAME, text, details=payload)
 
     if params.op == "cancel":
         try:
-            cancelled = _public(JOBS.cancel(service, params.job_id))
+            cancelled = _public(JOBS.cancel(params.job_id, session_key=key))
         except KeyError:
             return _error(tool_call_id, TOOL_NAME, "no running import job found to cancel.")
         return _text(
@@ -379,9 +383,7 @@ def build_harness_import_tool(context: ToolContext | None = None) -> AgentTool:
         label="Import conversations",
         description=(
             "Import conversations and memory from Claude Code, Codex or omp; "
-            "read-only on the source; preview first. Actions: sources, sessions, "
-            "preview, import, status, cancel. Import requires preview_token, "
-            "confirm=true and an explicit selection."
+            "read-only on the source; preview first."
         ),
         parameters=HarnessImportParams.model_json_schema(),
         approval_tier="write",
