@@ -5086,7 +5086,10 @@ class ServingSessionHandle(SessionHandle):
         seeds the model's own default level and a pair-only switch would
         therefore silently replace the chosen one — ``Session.set_model``
         assigns the new spec before its same-pair early return, so nothing else
-        would restore it. ``None`` is byte-for-byte the old behaviour.
+        would restore it. ``None`` now means "no level was chosen by the
+        caller": the session's existing level is carried across instead of the
+        model seed (see the ``elif`` below), because a re-pick of the model
+        already in force used to erase the user's choice.
 
         CLAMPED with ``resolve_effort_in`` against THIS spec's ladder rather than
         refused: the level comes from a durable record the catalogue can move
@@ -5143,6 +5146,45 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
+        elif (
+            current is not None
+            and current.reasoning_effort
+            and current.reasoning_effort != current.reasoning_default_effort
+        ):
+            # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
+            #
+            # ``build_model_spec`` seeds the model's OWN default, and
+            # ``Session.set_model`` assigns the spec BEFORE its same-pair early
+            # return. So every level-less switch -- including a re-pick of the
+            # row already in force, which is what the composer's model chip
+            # sends whenever the user opens it and picks the current model --
+            # silently rewrote the session's chosen depth to the seed. That is
+            # the reported "I set Max and it went back to High": the model did
+            # not change, so nothing on screen explained the revert, and every
+            # later turn ran (and the selection journal stored) the seed.
+            #
+            # What carries is a CHOICE, not the current value: the level must
+            # differ from the model's own default, which is the same
+            # discriminator the terminal uses (``_spec_with_chosen_effort``).
+            # Carrying an unchanged seed would promote it to a decision -- on a
+            # switch it would be journalled as one, and the birth path (which
+            # sends pair-only exactly when its resolved level is empty, see
+            # ``attached._consume_model_override``) would store a level nobody
+            # picked, against the documented "a seed, not a choice: it is never
+            # STORED". A seed-level session therefore keeps this method's
+            # historical behaviour.
+            #
+            # The level is carried through ``resolve_effort_in`` so a new
+            # model that cannot express it lands on its nearest rung instead
+            # of one it rejects -- the same stale-level clamp the ``if effort``
+            # arm above applies.
+            carried = resolve_effort_in(
+                spec.reasoning_efforts,
+                spec.reasoning_default_effort,
+                current.reasoning_effort,
+            )
+            if carried is not None:
+                spec = spec.model_copy(update={"reasoning_effort": carried})
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
@@ -5470,8 +5512,10 @@ class ServingSessionHandle(SessionHandle):
         validate against THIS runtime's config and credentials (off the loop —
         the catalogue and the credential store are blocking reads), apply
         through :meth:`set_model_effort` — the same switch the phone's model
-        sheet uses, so effort falls to the model's own default (effort is not on
-        the wire in v1) — read back the model actually in force, and record a
+        sheet uses, so the conversation keeps the reasoning level it already
+        chose (effort is not on the wire in v1, and an absent level is carried
+        across rather than reset to the model's seed — see ``set_model_effort``)
+        — read back the model actually in force, and record a
         record-only peer card naming the sender, the old model and the new one.
 
         A refusal raises ``ValueError`` BEFORE anything is mutated, so it cannot
