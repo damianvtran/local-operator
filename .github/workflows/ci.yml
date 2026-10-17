@@ -834,7 +834,14 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: junit-timings-${{ matrix.python-version }}-${{ matrix.shard }}
-          path: junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+          # Keep the timing XML contract intact. Only the two real-App proof
+          # tests publish this bounded, sanitized image/geometry allowlist;
+          # never upload arbitrary test scratch or an entire working tree.
+          path: |
+            junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+            test-artifacts/tui-proof/**/*.svg
+            test-artifacts/tui-proof/**/*.geometry.json
+            test-artifacts/tui-proof/manifest.json
           # 7 days, not 1: post-hoc flake/review evidence reads must survive past
           # the next day (PR #2470: XML expired at ~24.5 h, forced a re-run).
           retention-days: 7
