@@ -5924,12 +5924,23 @@ class Session:
         dropped when the next message did not match, and then re-produced
         verbatim on a later turn is appended again every time: measured on the
         real wire as 4 verbatim copies / 352 tokens / 9.68% of the request by
-        turn 8, for ONE distinct fact. Skipping is safe only because these
-        sections are untrusted, best-effort hints — their content is already
-        in front of the model, and the removal record still ships when the
-        section genuinely goes away. Prefix stability is untouched: this only
-        suppresses an APPEND, never a rewrite, so the frozen prefix and every
-        committed message stay byte-identical.
+        turn 8, for ONE distinct fact.
+
+        Skipping a text the model can still read has a cost that must be named:
+        after A -> (empty) -> A, or A -> B -> A, the LAST surviving record about
+        the section still says ``(empty)`` or B, so suppression leaves the
+        model's most recent STATEMENT about the section stale while an older
+        copy of A stays readable in the prefix. That is tolerable ONLY because
+        these sections are declared untrusted hints whose copy may be
+        superseded (a recall candidate the model was told to verify, a
+        compaction notice) — and it is why the rule is confined to
+        :data:`ADVISORY_TAIL_SECTIONS`: an authoritative section (goal, team,
+        tools, credentials) must reach the model even beside an identical older
+        copy, because the intervening record may have said something else. The
+        removal record still ships when the section genuinely goes away.
+        Prefix stability is untouched: this only suppresses an APPEND, never a
+        rewrite, so the frozen prefix and every committed message stay
+        byte-identical.
         """
         previous = self._last_system_blocks or self._frozen_system_blocks or desired
         # Compaction may replace the record that carried the latest state.
