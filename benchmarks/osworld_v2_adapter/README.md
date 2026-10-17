@@ -726,5 +726,14 @@ was never established (refused, connect timeout, name resolution) sent no byte:
 the message reads `guest action N was not sent (...)` and carries
 `delivery=not_sent`. Everything else (a read timeout, a dropped or reset
 connection, an HTTP error) stays `outcome is unknown ... delivery=ambiguous`
-and is never replayed. Neither verdict triggers a retry: with the control
-server gone a retry cannot succeed.
+and is never replayed. Neither verdict triggers a retry of the batch: with the
+control server gone a retry cannot succeed. The `delivery=ambiguous` verdict
+does feed exactly ONE gated harness measure: after such a failure the session
+asks a single read-only question, `probe` -- a bounded GET to the guest's
+readiness endpoint (`providers.aws._READY_PATH`) -- and only an ANSWERING
+control server lets the episode continue, with the model told the batch's
+effect is UNKNOWN and instructed to verify the screen before re-issuing
+anything. A probe that cannot answer fails closed, and an adapter that does
+not implement `probe` at all stays loadable and keeps its previous endings
+(its one `probe` request is answered as an adapter error the caller reads as
+"did not answer").

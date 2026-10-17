@@ -68,6 +68,7 @@ from local_operator.evaluation.protocol import (
 )
 from local_operator.evaluation.record_sink import RecordSinkError
 from local_operator.evaluation.session_arm import (
+    AMBIGUOUS_REBIND_BUDGET,
     BRIDGE_WEDGED_TERMINAL,
     EPISODE_TOOL_SURFACE,
     RECOVERY_AFTER_READBACK_LOSS,
@@ -298,6 +299,31 @@ def _invalid_state_error() -> RpcRemoteError:
             message="method is invalid in current state",
             method="execute",
             operation_id="exec-5fdcadffdce7-obs2",
+        ),
+    )
+
+
+def _ambiguous_delivery_error() -> RpcRemoteError:
+    """The wire error a worker answers when the guest's control server dropped
+    an in-flight ``execute`` -- the adapter's ``delivery=ambiguous`` verdict.
+
+    The token rides the MESSAGE text because the RPC error envelope has no
+    adapter field for it (``GuestExecutionError`` documents the channel:
+    "across the worker boundary only the message text travels (the ``delivery=``
+    token in it)"). The measured shape is the incident's own: a guest-side
+    ``RemoteDisconnected`` mid-batch (ep-fec998d9dec5, 330 applied batches).
+    """
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="GuestExecutionError",
+            message=(
+                "guest action 1 outcome is unknown; batch not retried; delivery=ambiguous"
+            ),
+            method="execute",
+            operation_id="exec-330-b14d1b7bcfdd",
         ),
     )
 
@@ -2033,6 +2059,213 @@ class TestFailedExecuteRecovery:
         assert recorded[1][1]["transport_error"].startswith("RpcRemoteError")
 
 
+class TestAmbiguousDeliveryRebind:
+    """The ``delivery=ambiguous`` sibling: a bounded, PROBED re-bind.
+
+    The wedge this closes: the guest's control server restarted under an
+    in-flight execute, the adapter classified the delivery ``ambiguous``
+    (ep-fec998d9dec5, after 330 applied batches), and the episode died even
+    though the same guest was serving again seconds later. The SESSION now runs
+    a bounded liveness probe against the guest control server BEFORE its poison
+    decision; only a probe that ANSWERS clears the failure for the same kind of
+    read-only re-bind the committed class already gets (``_make_recover``'s
+    ``observe``), and the claim the model is handed is deliberately weaker than
+    the committed sibling's: the batch's effect is UNKNOWN, not "it ran".
+
+    The bridge trusts the session's CLEARANCE (the ``AmbiguousRebindCleared``
+    the session raises), never the error class alone -- so a probe that failed
+    or a budget that ran out reaches ``_end_wedged`` exactly as it did before
+    the probe existed, with the same sentence and no re-read attempted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_cleared_ambiguous_delivery_re_binds_and_the_episode_can_seal(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+        from local_operator.evaluation.session_arm import RECOVERY_AFTER_AMBIGUOUS_DELIVERY
+
+        obs0 = _observation()
+        obs1 = _observation(sequence=1, text="screen B")
+        executed: list[Any] = []
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            if len(executed) == 1:
+                raise AmbiguousRebindCleared(
+                    _ambiguous_delivery_error(), attempt=1, attempts=2
+                )
+            return _result(input_observation=obs0, output_observation=obs1)
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return obs0
+
+        bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover)
+        wait = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+
+        first = await bridge.call(wait)
+        # The call is an error -- the batch may have partly applied -- but the
+        # episode is not lost with it.
+        assert first["is_error"] is True
+        assert first["details"]["recovered"] is True
+        assert first["details"]["ambiguous_rebind"] is True
+        assert len(first["content"]) == 1
+        assert first["content"][0].text == RECOVERY_AFTER_AMBIGUOUS_DELIVERY
+        assert bridge.end_requested is None
+        assert len(executed) == 1 and len(re_reads) == 1
+        assert bridge.steps == 1
+
+        # The same one-batch-per-turn discipline as every other recovery: a
+        # second call in the SAME turn finds nothing pending.
+        same_turn = await bridge.call(wait)
+        assert same_turn["details"]["rejection_class"] == "second-batch"
+        bridge.fold(TurnEndEvent())
+
+        # The next batch is delivered against the re-bound observation, and the
+        # episode can seal.
+        after = await bridge.call(wait)
+        assert after["is_error"] is False
+        assert len(executed) == 2
+        assert bridge.steps == 2
+        bridge.fold(TurnEndEvent())
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "recovered"}]}
+        challenged = await bridge.call(claim)
+        assert challenged["details"]["terminal"] == "completion-challenged"
+        sealed = await bridge.call(claim)
+        assert sealed["details"]["terminal"] == "finish"
+        assert bridge.end_requested == "finish"
+
+    @pytest.mark.asyncio
+    async def test_the_ambiguous_warning_asserts_unknown_outcome_semantics(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+        from local_operator.evaluation.session_arm import RECOVERY_AFTER_AMBIGUOUS_DELIVERY
+
+        obs0 = _observation()
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
+
+        async def recover() -> Observation:
+            return obs0
+
+        bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        text = reply["content"][0].text
+
+        # The claim is the weaker one, deliberately: the harness CANNOT know
+        # whether the batch applied, so the model must be told exactly that.
+        assert text == RECOVERY_AFTER_AMBIGUOUS_DELIVERY
+        assert "UNKNOWN" in text
+        assert "may or may not have applied" in text
+        assert "verify the screen before re-issuing" in text
+        # It must NOT make the committed sibling's claim ("your last batch
+        # ran") -- a read-back that was lost is not a delivery that was lost.
+        assert "your last batch ran" not in text
+        # And it must still say how to get current.
+        assert "`wait` batch changes nothing" in text
+
+    @pytest.mark.asyncio
+    async def test_the_ambiguous_re_bind_is_journalled_with_count_and_cause(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+
+        obs0 = _observation()
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
+
+        async def recover() -> Observation:
+            return obs0
+
+        bridge = _bridge(
+            tmp_path,
+            observation=obs0,
+            execute=execute,
+            recover=recover,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert [kind for kind, _ in recorded] == ["output_epoch", "ambiguous_rebind"]
+        payload = recorded[1][1]
+        # The retry count and the cause: which re-bind this was, out of how
+        # many this episode may make, and the transport failure that earned it.
+        assert payload["attempt"] == 1
+        assert payload["attempts"] == 2
+        assert payload["observation_id"] == obs0.observation_id
+        assert payload["attempted_epoch"] is True
+        assert payload["transport_error"].startswith("RpcRemoteError")
+        assert "delivery=ambiguous" in payload["transport_error"]
+
+    @pytest.mark.asyncio
+    async def test_an_uncleared_ambiguous_delivery_wedges_exactly_as_before(
+        self, tmp_path: Path
+    ) -> None:
+        """The clearance is the gate, not the error class.
+
+        A plain ``delivery=ambiguous`` error without the session's clearance
+        (probe failed, budget exhausted) must wedge with the SAME sentence and
+        terminal the pre-change build produced: no re-read is attempted, and
+        the sentence still says why re-reading is not safe.
+        """
+
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _ambiguous_delivery_error()
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_requested == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == []
+        diagnostic = bridge.end_diagnostic
+        assert diagnostic is not None
+        assert "did not declare the batch committed" in diagnostic
+        assert "ambiguous" in diagnostic and "re-reading is not safe" in diagnostic
+        assert "delivery=ambiguous" in diagnostic
+
+    @pytest.mark.asyncio
+    async def test_a_cleared_re_bind_whose_read_fails_still_wedges_truthfully(
+        self, tmp_path: Path
+    ) -> None:
+        """Probe answered, but the re-read did not: the wedge names both facts."""
+
+        from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            raise _observation_phase_error()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert len(re_reads) == 1
+        diagnostic = bridge.end_diagnostic
+        assert diagnostic is not None
+        assert "a re-read of the environment's current observation failed too" in diagnostic
+
+
 # ---------------------------------------------------------------------------
 # The wedge as the DRIVER sees it: the outcome it reports, the turn it stops
 # ---------------------------------------------------------------------------
@@ -2214,6 +2447,47 @@ class _WedgeAdapter(FakeAdapter):
         return await super()._call_raw(method, params, result_type, **kwargs)
 
 
+class _AmbiguousAdapter(FakeAdapter):
+    """FakeAdapter with the session arm's capability, plus the guest-restart
+    ambiguity: the first ``ambiguous_executes`` executes raise the adapter's
+    declared ambiguous-delivery verdict, and ``probe`` answers
+    ``probe_reachable`` -- False models the guest that never came back."""
+
+    def __init__(
+        self,
+        *args: Any,
+        ambiguous_executes: int,
+        probe_reachable: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.ambiguous_executes = ambiguous_executes
+        self.probe_reachable = probe_reachable
+        self.executes = 0
+        self.probes = 0
+
+    async def handshake(self, *, timeout: float = 10.0) -> Any:
+        base = await super().handshake(timeout=timeout)
+        capabilities = base.metadata.capabilities.model_copy(
+            update={"ask_user_answer_owner": "adapter"}
+        )
+        return base.model_copy(
+            update={"metadata": base.metadata.model_copy(update={"capabilities": capabilities})}
+        )
+
+    async def _call_raw(self, method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+        if method == "execute":
+            self.executes += 1
+            if self.executes <= self.ambiguous_executes:
+                raise _ambiguous_delivery_error()
+        if method == "probe":
+            from local_operator.evaluation.adapters.api import ProbeResult
+
+            self.probes += 1
+            return ProbeResult(reachable=self.probe_reachable)
+        return await super()._call_raw(method, params, result_type, **kwargs)
+
+
 class TestBridgeWedgeOutcome:
     """The wedge through ``run_session_episode``: an outcome that says what
     happened, and a turn the driver stops instead of letting the model spin."""
@@ -2371,6 +2645,189 @@ class TestBridgeWedgeOutcome:
         # harness bridged it"), not a suspiciously clean run.
         events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
         assert "action_recovered" in events
+
+
+class TestAmbiguousDeliveryOutcome:
+    """The probed ambiguous delivery through ``run_session_episode``: both
+    ends of the same gate, over the REAL session (its probe decision, its
+    budget, its clearance) and the REAL bridge (its warning, its re-bind).
+
+    Live guest: the episode keeps its applied work and can seal; dead guest or
+    a spent budget: today's ending, byte for byte.
+    """
+
+    def _fixture(
+        self,
+        *,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        scratch_root: Path,
+        script: list[list[dict[str, Any]]],
+        ambiguous_executes: int,
+        probe_reachable: bool = True,
+    ) -> tuple[Any, _ScriptedSession, _AmbiguousAdapter]:
+        home = scratch_root / "home"
+        config_dir = home / ".local-operator"
+        agent_home = home / "local-operator-home"
+        work = home / "work"
+        for path in (config_dir, agent_home, work):
+            path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(agent_home))
+        roots = SessionRoots(
+            config_dir=config_dir, agent_home=agent_home, cwd=work, allow_volatile=True
+        )
+        spec = build_spec("ep-ambiguous")
+        config = build_config(tmp_path, observation_retry_delay=0.0)
+        adapter = _AmbiguousAdapter(
+            tmp_path,
+            spec.episode_id,
+            ambiguous_executes=ambiguous_executes,
+            probe_reachable=probe_reachable,
+            score=ScoreArtifact(status="scored", binary=1),
+        )
+        session = _ScriptedSession(scratch_root, script)
+        session_spec = SessionSpec(
+            hosting="test",
+            model="mock",
+            world_root=tmp_path / "world",
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-ambiguous",
+        )
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            del descriptor, kwargs
+            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+        def launch(selected: Any) -> Any:
+            del selected
+            return adapter
+
+        def opener(selected: Any, *, roots: Any, mode: Any = None) -> Any:
+            del selected, roots, mode
+            return _OpenContext(session)
+
+        async def run() -> Any:
+            return await run_session_episode(
+                spec=spec,
+                config=config,
+                selector=selector(tmp_path),
+                roots=roots,
+                scratch_root=scratch_root,
+                session_spec=session_spec,
+                secrets=(),
+                launch=launch,
+                rescue=rescue,
+                session_opener=opener,
+            )
+
+        return run, session, adapter
+
+    @pytest.mark.asyncio
+    async def test_a_live_guest_keeps_the_episode_and_it_can_seal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "finish", "status": "done", "reason": "recovered"}],
+                [{"kind": "finish", "status": "done", "reason": "recovered"}],
+            ],
+            ambiguous_executes=1,
+        )
+        outcome = await run()
+
+        assert outcome.status == "completed"
+        assert outcome.rescue_required is False
+        assert adapter.probes == 1
+        # Two non-finish batches, two execute calls: the failed delivery is not
+        # retried, and the model's next wait runs once against the live guest.
+        assert adapter.executes == 2
+        # The model was handed the UNKNOWN-outcome warning, not the committed
+        # sibling's "your last batch ran".
+        first = json.dumps(session.replies[0])
+        assert "may or may not have applied" in first
+        assert "your last batch ran" not in first
+        assert session.replies[0]["is_error"] is True
+        # The recovery is in the sealed trail, with its count and cause.
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert "action_ambiguous_rebind" in events
+        row = next(
+            json.loads(line)
+            for line in events.splitlines()
+            if "action_ambiguous_rebind" in line
+        )
+        assert row["kind"] == "action_ambiguous_rebind"
+        assert row["attempt"] == 1
+        assert row["attempts"] == AMBIGUOUS_REBIND_BUDGET
+        assert "delivery=ambiguous" in row["transport_error"]
+
+    @pytest.mark.asyncio
+    async def test_a_dead_guest_fails_exactly_as_before(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+            ],
+            ambiguous_executes=1,
+            probe_reachable=False,
+        )
+        outcome = await run()
+
+        # The pre-probe ending, unchanged: failed / bridge-wedged, rescue
+        # demanded, the episode's own sentence naming the ambiguity.
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == "bridge-wedged"
+        assert outcome.diagnostic is not None
+        assert "did not declare the batch committed" in outcome.diagnostic
+        assert "re-reading is not safe" in outcome.diagnostic
+        assert outcome.rescue_required is True
+        # One probe was asked, answered False, and nothing was retried off it.
+        assert adapter.probes == 1
+        assert adapter.executes == 1
+        assert len(session.cancels) == 1
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert "action_bridge_wedged" in events
+        assert "action_ambiguous_rebind" not in events
+
+    @pytest.mark.asyncio
+    async def test_the_third_ambiguous_delivery_does_not_re_bind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+            ],
+            ambiguous_executes=3,
+        )
+        outcome = await run()
+
+        # Two re-binds, then the budget is spent and the third delivery ends
+        # the episode; the third is not even probed.
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == "bridge-wedged"
+        assert adapter.probes == 2
+        assert adapter.executes == 3
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert events.count("action_ambiguous_rebind") == 2
+        assert "action_bridge_wedged" in events
 
 
 # ---------------------------------------------------------------------------

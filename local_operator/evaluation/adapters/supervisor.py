@@ -7,6 +7,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -17,7 +18,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from pydantic import field_validator, model_validator
 
@@ -41,6 +42,8 @@ from local_operator.evaluation.adapters.api import (
     ObserveParams,
     PrepareParams,
     PrepareResult,
+    ProbeParams,
+    ProbeResult,
     RequirementsResult,
     RescueDescriptor,
     ResetStartParams,
@@ -82,6 +85,16 @@ MAX_DIAGNOSTIC_TAIL = 64 * 1024
 STDERR_SETTLE_QUIET_S = 0.25
 STDERR_SETTLE_TIMEOUT_S = 2.0
 TERM_GRACE_SECONDS = 5.0
+#: The deadline the ambiguous-delivery probe carries, in seconds. Deliberately
+#: short and fixed: the observed live guest answered its control server in
+#: ~0.2 s, and the probe runs only on an episode that, before it existed, DIED
+#: at this failure -- so a genuinely dead guest pays this deadline plus the RPC
+#: layer's 1 s cancel grace and then ends exactly as it did before. Not a
+#: config knob for the same reason the re-bind itself is not one: the
+#: conservatism lives in the probe's fail-closed answer, and a gate would only
+#: add a way for the feature to be silently off during the paid run it exists
+#: to save.
+AMBIGUOUS_PROBE_TIMEOUT_S = 10.0
 OWNER_FD_ENV = "LO_ADAPTER_OWNER_FD"
 LAUNCH_IDENTITY_ENV = "LO_ADAPTER_LAUNCH_IDENTITY"
 REQUEST_FD_ENV = "LO_ADAPTER_REQUEST_FD"
@@ -97,6 +110,42 @@ _DENIED_MARKERS = ("OPENAI", "OPENROUTER", "ANTHROPIC", "MODEL", "PROVIDER")
 
 class SupervisionError(RuntimeError):
     pass
+
+
+class AmbiguousRebindCleared(Exception):
+    """A probed ``delivery=ambiguous`` execute failure, cleared for ONE re-bind.
+
+    Raised by ``VerifiedAdapterSession._mutating_call`` INSTEAD of the original
+    wire error when, and only when, the failure carries the adapter's declared
+    ambiguous-delivery shape (``_ambiguous_delivery_failure``), the session
+    still has re-bind budget, and a bounded probe of the environment's control
+    server ANSWERED. The original ``RpcRemoteError`` rides along as
+    :attr:`original` so every downstream reader -- the bridge's wedge sentence,
+    the record, a test -- still sees the real cause, and it is what makes the
+    action bridge's re-bind gate depend on the SESSION's verdict rather than on
+    the error class alone: an ambiguous delivery the probe could not clear
+    arrives as the untouched original and ends the episode exactly as it did
+    before the probe existed.
+
+    Deliberately NOT a ``SupervisionError``: this is not a fault of the
+    supervision layer, and the poisoned-session gate raises ``SupervisionError``
+    for the OPPOSITE ending -- conflating the two would let one be read as the
+    other.
+    """
+
+    def __init__(self, original: Exception, *, attempt: int, attempts: int) -> None:
+        super().__init__(
+            f"ambiguous delivery cleared for a bounded re-bind "
+            f"(attempt {attempt} of {attempts})"
+        )
+        #: The original wire error (an answered ``adapter_error``), so every
+        #: downstream reader still sees the real cause.
+        self.original = original
+        #: 1-based count of this episode's re-binds and its bound -- the same
+        #: shape ``observation_retry`` records, so the event trail spells both
+        #: bounded recoveries the same way (``session_arm`` renders them).
+        self.attempt = attempt
+        self.attempts = attempts
 
 
 def _mutation_committed(error: BaseException) -> bool:
@@ -118,7 +167,13 @@ def _mutation_committed(error: BaseException) -> bool:
       the parent's own verification arrives as a different exception type and
       never reaches this branch.
     * A ``phase`` of ``"unknown"`` -- the default, and what every adapter that
-      has not adopted the contract emits -- is ambiguous by definition.
+      has not adopted the contract emits -- is ambiguous by definition, with
+      ONE post-hoc exception: a session wired with a re-bind budget may, on
+      the declared ambiguous-delivery shape ONLY, run a bounded probe of the
+      environment's control server BEFORE the poison decision
+      (``_ambiguous_delivery_failure``). A probe that answers clears that one
+      failure for the bridge's read-only re-bind; a probe that cannot answer,
+      or any other unknown-phase failure, poisons exactly as below.
 
     A session kept alive here is NOT trusted further than before: the resume
     call re-enters ``_mutating_call``, so a second failure poisons normally.
@@ -149,6 +204,67 @@ def _refused_before_dispatch(error: BaseException) -> bool:
     """
 
     return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
+
+
+#: The token an adapter embeds in the execute failure's message when the
+#: DELIVERY of the batch is ambiguous -- "the request may have been written,
+#: and the guest may have acted on it" (the OSWorld adapter's ``guest_loss``).
+#: The adapter side documents both the channel and the spelling: the
+#: ``delivery=`` token "is machine-greppable and sits in the HEAD of the line"
+#: because "across the worker boundary only the message text travels (the
+#: ``delivery=`` token in it), because the RPC error envelope has no adapter
+#: field for it".
+#:
+#: WHY READING A MESSAGE IS DEFENSIBLE HERE when ``_mutation_committed``
+#: deliberately keys on a declared closed enum. The two drive opposite
+#: decisions. ``phase`` licenses an AUTOMATIC resend (``resume_observation``)
+#: -- a wrong read would re-apply a mutation, so only an adapter-declared type
+#: may say it. This token licenses nothing on its own: a match is followed by
+#: a bounded probe of the guest's control server, and the only thing a false
+#: match can buy is that probe plus an UNKNOWN-outcome warning to the model
+#: (never a replay, never a "committed" claim). Its failure mode is a probe
+#: that fails closed, and producer and consumer ship in the same repository.
+#: ANCHORED at the token's end, so a longer value a future adapter spells
+#: cannot match by prefix; the message ends at the token today.
+_AMBIGUOUS_DELIVERY_RE = re.compile(r"delivery=ambiguous(?:[;\s]|$)")
+
+
+def _ambiguous_delivery_failure(error: BaseException) -> TypeGuard[RpcRemoteError]:
+    """Is this the adapter's declared AMBIGUOUS-DELIVERY execute failure?
+
+    True only for an answered ``adapter_error`` whose worker-built detail is an
+    ``execute`` call with the default (``unknown``) phase and the adapter's own
+    ``delivery=ambiguous`` token in its bounded message. Everything else stays
+    on the pre-existing poison path, and the exclusions matter most:
+
+    * The ``not_sent`` verdict is provably un-delivered, and the adapter ships
+      it deliberately WITHOUT a retry (the preserved loss refused every
+      request for the rest of its episode, so a retry could only lengthen the
+      dead time); it is not admitted here either.
+    * A ``phase == "observation"`` failure is the declared-committed class
+      with its own, stricter route (``_mutation_committed``). The structured
+      phase outranks the message prose.
+    * A message is never trusted for the METHOD or the phase, only for the
+      delivery verdict its producer marks machine-greppable.
+
+    The readers: :meth:`VerifiedAdapterSession._mutating_call` uses this to
+    decide whether a probe may run before the poison decision -- and the
+    :class:`TypeGuard` return is load-bearing there: the cleared branch hands
+    the original error to ``AmbiguousRebindCleared``, whose contract is an
+    ``Exception``, and the narrowing is what lets the supervisor do so without
+    a cast. The action bridge does NOT read this predicate -- it trusts the
+    session's ``AmbiguousRebindCleared`` verdict instead, so a failed probe and
+    an exhausted budget reach ``_end_wedged`` unchanged.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.method == "execute"
+        and error.detail.phase == "unknown"
+        and _AMBIGUOUS_DELIVERY_RE.search(error.detail.message) is not None
+    )
 
 
 class _Tail:
@@ -716,9 +832,23 @@ class VerifiedAdapterSession:
         rescue_required: Callable[[], None] | None = None,
         answer_owner: str = "host",
         execution_overhead_seconds_per_action: float = 0.0,
+        ambiguous_rebind_budget: int = 0,
     ) -> None:
         if answer_owner not in ("host", "adapter"):
             raise SupervisionError("invalid ask-user answer ownership")
+        # A bool or a negative here would silently mean something else: the
+        # budget is compared with ``<`` against a count of re-binds, so ``True``
+        # would read as a budget of 1 and a negative value as a gate that is
+        # off for a reason nobody can see in the constructor call. Same trap,
+        # same treatment as the episode config's counters.
+        if (
+            isinstance(ambiguous_rebind_budget, bool)
+            or not isinstance(ambiguous_rebind_budget, int)
+            or ambiguous_rebind_budget < 0
+        ):
+            raise SupervisionError(
+                "ambiguous_rebind_budget must be a non-negative integer"
+            )
         self._answer_owner = answer_owner
         self._supervisor = supervisor
         self._execution_overhead_seconds_per_action = execution_overhead_seconds_per_action
@@ -727,6 +857,13 @@ class VerifiedAdapterSession:
         self._rescue_descriptor_id: Digest | None = None
         self._cleanup_plan: CleanupPlan | None = None
         self._poisoned = False
+        #: The episode's ambiguous-delivery re-bind budget and its count. The
+        #: budget is supplied by the ARM that wires the consumer (the session
+        #: arm's bridge); the default 0 means an ambiguous delivery poisons
+        #: exactly as it did before the probe existed, which is what every
+        #: other caller -- the runner's reply-channel arm today -- keeps.
+        self._ambiguous_rebind_budget = ambiguous_rebind_budget
+        self._ambiguous_rebinds = 0
 
     def mark_rescue_persisted(self, descriptor_id: Digest) -> None:
         self._rescue_descriptor_id = descriptor_id
@@ -741,6 +878,42 @@ class VerifiedAdapterSession:
         self._poisoned = True
         self._rescue_required()
         await asyncio.shield(self._supervisor.terminate())
+
+    async def _probe_control_server(self) -> bool:
+        """ONE bounded liveness question to the environment's control server.
+
+        Sent only on the ambiguous-delivery path (see
+        ``_ambiguous_delivery_failure``) and only while the episode's re-bind
+        budget stands. The deadline is ``AMBIGUOUS_PROBE_TIMEOUT_S`` -- a
+        short, fixed bound, not a step timeout -- so a genuinely dead guest
+        still fails fast: the caller then poisons and re-raises the original
+        error exactly as it did before this method existed. Every way the
+        probe can fail (the RPC refused, the worker gone, the guest not
+        answering, an adapter predating the method) returns False, and False
+        never clears a re-bind.
+
+        WHY NOT ``observe``. ``observe`` deliberately answers the LAST
+        ACCEPTED observation from the worker's own memory and never touches
+        the guest -- the read-back recovery depends on that (an observe that
+        live-read would turn every read-back recovery into a wedge; pinned in
+        ``test_fake_end_to_end``). It therefore cannot say whether the control
+        server that dropped the in-flight execute is serving again, which is
+        the one fact this gate turns on.
+        """
+
+        try:
+            result = await self._supervisor._call_raw(
+                "probe",
+                ProbeParams(episode_id=self.verifier.episode_id),
+                ProbeResult,
+                timeout=AMBIGUOUS_PROBE_TIMEOUT_S,
+            )
+        except Exception:
+            # Fail closed, and do not let the probe's OWN failure become a
+            # second diagnostic: the caller re-raises the original error, so
+            # the ending stays the one the episode actually died from.
+            return False
+        return isinstance(result, ProbeResult) and result.reachable is True
 
     async def _mutating_call(
         self,
@@ -779,8 +952,29 @@ class VerifiedAdapterSession:
             stays_usable = _mutation_committed(error) or (
                 method == "execute" and _refused_before_dispatch(error)
             )
-            if not stays_usable:
-                await self._poison_after_ambiguous_mutation()
+            if stays_usable:
+                raise
+            # The ambiguous-delivery gate (``_ambiguous_delivery_failure``):
+            # the one failure that may still be CLARIFIED after the fact. A
+            # bounded probe of the environment's control server decides
+            # whether the session stays usable for the bridge's read-only
+            # re-bind, and the original error rides the clearance so no reader
+            # loses the cause. Everything the probe cannot answer -- including
+            # an exhausted budget -- keeps today's poison-and-end path
+            # untouched, byte for byte.
+            if (
+                method == "execute"
+                and _ambiguous_delivery_failure(error)
+                and self._ambiguous_rebinds < self._ambiguous_rebind_budget
+                and await self._probe_control_server()
+            ):
+                self._ambiguous_rebinds += 1
+                raise AmbiguousRebindCleared(
+                    error,
+                    attempt=self._ambiguous_rebinds,
+                    attempts=self._ambiguous_rebind_budget,
+                ) from error
+            await self._poison_after_ambiguous_mutation()
             raise
 
     async def inspect_requirements(

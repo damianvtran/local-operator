@@ -257,3 +257,88 @@ def test_capability_drag_is_omitted_while_false_and_rides_when_true() -> None:
     assert round_trip.drag is False
     assert off.action_surface().drag is False
     assert on.action_surface().drag is True
+
+
+def test_the_method_tables_stay_in_lockstep_with_the_vocabulary() -> None:
+    """Every table that distributes over ``AdapterMethod`` covers it exactly.
+
+    A method added to the literal without its state/params/result rows is a
+    mid-episode ``KeyError`` inside the worker's ``_handle`` -- the worst place
+    to discover a contract change -- so the tables are pinned as one set, and
+    the probe's own row (read-only, RUNNING, no operation key) with them.
+    """
+
+    from typing import get_args
+
+    from local_operator.evaluation.adapters.api import (
+        KEYED_METHODS,
+        METHOD_NEXT_STATE,
+        METHOD_STATES,
+        PARAM_MODELS,
+        READ_ONLY_METHODS,
+        RESULT_MODELS,
+        AdapterMethod,
+        ProbeParams,
+        ProbeResult,
+    )
+
+    vocabulary = set(get_args(AdapterMethod))
+    assert set(METHOD_STATES) == vocabulary
+    assert set(METHOD_NEXT_STATE) == vocabulary
+    assert set(PARAM_MODELS) == vocabulary
+    assert set(RESULT_MODELS) == vocabulary
+    assert READ_ONLY_METHODS <= vocabulary
+    assert KEYED_METHODS <= vocabulary
+    assert "probe" in vocabulary
+    assert METHOD_STATES["probe"] == frozenset({"RUNNING"})
+    assert METHOD_NEXT_STATE["probe"] == "RUNNING"
+    assert PARAM_MODELS["probe"] is ProbeParams
+    assert RESULT_MODELS["probe"] is ProbeResult
+    assert "probe" in READ_ONLY_METHODS
+    assert "probe" not in KEYED_METHODS
+
+
+class _MinimalAdapter:
+    """The REQUIRED adapter surface, nothing else -- no ``probe``."""
+
+    metadata = object()
+
+    async def inspect_requirements(self, params: object) -> object: ...
+
+    async def prepare(self, params: object) -> object: ...
+
+    async def reset_start(self, params: object) -> object: ...
+
+    async def observe(self, params: object) -> object: ...
+
+    async def execute(self, params: object) -> object: ...
+
+    async def ask_user_exchange(self, params: object) -> object: ...
+
+    async def score(self, params: object) -> object: ...
+
+    async def cleanup(self, params: object) -> object: ...
+
+    async def close(self, params: object) -> object: ...
+
+
+def test_probe_is_optional_at_the_plugin_surface() -> None:
+    """``EvaluationAdapter`` deliberately does not require ``probe``.
+
+    It is the one method whose ABSENCE degrades exactly to the pre-existing
+    behaviour -- a failed probe never re-binds -- and leaving it outside the
+    structural check is what keeps an adapter built before the method LOADABLE
+    (``load_selected_adapter`` refuses anything failing ``isinstance``), so a
+    new harness can still run an arm built earlier. The converse half keeps
+    the check honest: a surface missing a REQUIRED method is still refused.
+    """
+
+    from local_operator.evaluation.adapters.api import EvaluationAdapter
+
+    assert isinstance(_MinimalAdapter(), EvaluationAdapter)
+    missing_observe = type(
+        "_MissingObserve",
+        (),
+        {name: value for name, value in vars(_MinimalAdapter).items() if name != "observe"},
+    )
+    assert not isinstance(missing_observe(), EvaluationAdapter)

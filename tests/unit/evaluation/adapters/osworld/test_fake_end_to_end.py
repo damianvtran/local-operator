@@ -564,6 +564,181 @@ async def test_the_recovery_seam_answers_the_last_accepted_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_a_probed_ambiguous_delivery_continues_instead_of_wedging(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The guest restarted, the probe answered, the episode lives.
+
+    The REAL adapter mid-episode, with its control server dropping one
+    in-flight execute (``delivery=ambiguous``) and then serving again -- the
+    incident's own shape (ep-fec998d9dec5, after 330 applied batches). The
+    session is wired with a re-bind budget, so the failure is CLEARED by one
+    bounded probe of the guest control server instead of poisoning; the
+    read-only ``observe`` re-bind then re-establishes the binding the
+    committed class already gets, and the next execute runs exactly once.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+
+    provider = FakeProvider(scripted_score=1.0, transport_failures=1)
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    verifier = HostVerifier("task_plain", episode_id, artifacts)
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        shim,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+    session.mark_rescue_persisted("a" * 64)
+
+    await session.prepare(
+        PrepareParams(
+            operation_id="op-prepare",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA_VALUES,
+        ),
+        timeout=10.0,
+    )
+    reset = await session.reset_start(
+        ResetStartParams(
+            operation_id="op-reset",
+            task_id="task_plain",
+            episode_id=episode_id,
+            artifact_root=str(artifacts),
+        ),
+        timeout=10.0,
+    )
+    initial = reset.observation
+    assert initial.sequence == 0
+
+    batch = ActionBatch(
+        protocol_version=PROTOCOL_VERSION,
+        task_id="task_plain",
+        episode_id=episode_id,
+        observation_id=initial.observation_id,
+        actions=(TypeAction(observation_id=initial.observation_id, text="x"),),
+    )
+    params = ExecuteParams(
+        operation_id="op-exec-1",
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+        action_batch=batch,
+    )
+
+    with pytest.raises(AmbiguousRebindCleared) as cleared:
+        await session.execute(params, timeout=10.0)
+    assert cleared.value.attempt == 1
+    assert cleared.value.attempts == 2
+    # The original wire error rides the clearance, token and all.
+    original = cleared.value.original
+    assert isinstance(original, RpcRemoteError)
+    assert original.detail is not None
+    assert "delivery=ambiguous" in original.detail.message
+    assert original.detail.phase == "unknown"
+
+    # The probe really asked the guest's control server, and the failed
+    # delivery applied NOTHING (the fake fails before any statement runs).
+    assert provider.probe_calls == 1
+    assert provider.executed_statements == []
+
+    # The recovery's read-only call answers the last accepted observation, as
+    # it does for the committed class -- the binding is re-established.
+    recovered = await session.observe(ObserveParams(episode_id=episode_id), timeout=10.0)
+    assert recovered.observation == initial
+
+    # The next execute runs the batch ONCE -- the failed delivery is not
+    # replayed, and the episode continues on a live guest.
+    resumed = await session.execute(
+        params.model_copy(update={"operation_id": "op-exec-2"}), timeout=10.0
+    )
+    assert resumed.observation.sequence == 1
+    assert len(provider.executed_statements) == 1
+    assert not shim.terminated and rescue_required == []
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_delivery_with_a_dead_guest_fails_fast_as_before(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The conservative rule: probe fails -> today's ending, unchanged.
+
+    The SAME ambiguous delivery, but the guest is genuinely gone (the probe's
+    bounded GET does not answer): the ORIGINAL error is raised untouched, the
+    session is poisoned, rescue is demanded, and no ``observe`` re-bind runs.
+    A genuinely dead guest must fail exactly as it does today -- the probe
+    only ever ADDS a way to continue.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import SupervisionError
+
+    provider = FakeProvider(scripted_score=1.0, transport_failures=1, probe_reachable=False)
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    verifier = HostVerifier("task_plain", episode_id, artifacts)
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        shim,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+    session.mark_rescue_persisted("a" * 64)
+
+    await session.prepare(
+        PrepareParams(
+            operation_id="op-prepare",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA_VALUES,
+        ),
+        timeout=10.0,
+    )
+    reset = await session.reset_start(
+        ResetStartParams(
+            operation_id="op-reset",
+            task_id="task_plain",
+            episode_id=episode_id,
+            artifact_root=str(artifacts),
+        ),
+        timeout=10.0,
+    )
+    initial = reset.observation
+
+    batch = ActionBatch(
+        protocol_version=PROTOCOL_VERSION,
+        task_id="task_plain",
+        episode_id=episode_id,
+        observation_id=initial.observation_id,
+        actions=(TypeAction(observation_id=initial.observation_id, text="x"),),
+    )
+    params = ExecuteParams(
+        operation_id="op-exec-1",
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+        action_batch=batch,
+    )
+
+    with pytest.raises(RpcRemoteError) as failure:
+        await session.execute(params, timeout=10.0)
+    # The untouched original: still the adapter's ambiguous verdict.
+    assert failure.value.detail is not None
+    assert failure.value.detail.phase == "unknown"
+    assert "delivery=ambiguous" in failure.value.detail.message
+
+    assert provider.probe_calls == 1
+    assert shim.terminated and rescue_required == [True]
+    with pytest.raises(SupervisionError, match="poisoned"):
+        await session.observe(ObserveParams(episode_id=episode_id), timeout=10.0)
+
+
+@pytest.mark.asyncio
 async def test_adapter_owned_responder_override_fails_before_prepare(
     tmp_path: Path, episode_id: str
 ) -> None:

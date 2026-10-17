@@ -78,6 +78,8 @@ from local_operator.evaluation.adapters.api import (
     ObserveParams,
     PrepareParams,
     PrepareResult,
+    ProbeParams,
+    ProbeResult,
     RequirementsResult,
     ResetStartParams,
     ResolvedSecret,
@@ -106,6 +108,14 @@ _VERSION = "0.1.3"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 _ACTION_SETTLE_POLICY = "OSWORLD_ACTION_SETTLE_POLICY"
 _SETTLE_POLICIES = frozenset({"throughput", "paper"})
+#: The guest-side deadline one ``probe`` gives the control server's readiness
+#: endpoint. The harness's own probe deadline (``AMBIGUOUS_PROBE_TIMEOUT_S`` =
+#: 10 s, plus the RPC layer's 1 s cancel grace) is the OUTER bound; this inner
+#: one fires first, so the worker still has time to ANSWER ``reachable: false``
+#: instead of being cancelled mid-probe. Mirrors the 5 s the allocation
+#: readiness loop gives the same endpoint (``providers.aws._READY_PATH``), so
+#: "reachable" means the same thing here as at admission.
+_PROBE_TIMEOUT_S = 5.0
 
 
 class AdapterStateError(RuntimeError):
@@ -964,6 +974,29 @@ class OSWorldV2Adapter:
         if self._current_observation is None:
             raise AdapterStateError("observe before reset_start")
         return ObservationResult(observation=self._current_observation)
+
+    async def probe(self, params: ProbeParams) -> ProbeResult:
+        """One bounded liveness question to the guest's control server.
+
+        The harness asks this exactly once after an execute it refuses to
+        replay (the ambiguous-delivery gate in ``VerifiedAdapterSession``), to
+        decide whether the session may stay usable for the bridge's read-only
+        re-bind. Read-only and state-free: the provider does one GET to the
+        endpoint the allocation readiness check already trusts, and nothing
+        here advances, mutates, or records.
+
+        Unlike ``observe`` -- which answers the LAST ACCEPTED observation from
+        memory and deliberately never touches the guest -- this method's whole
+        value is that it does touch the guest, so its answer can differ from
+        the cached one when the control server is gone. State-gated like every
+        other RUNNING call: before ``reset_start`` there is no guest to ask,
+        and the worker's state table refuses it first.
+        """
+
+        if self._current_observation is None or self._provider is None:
+            raise AdapterStateError("probe before reset_start")
+        reachable = await self._provider.probe_control_server(_PROBE_TIMEOUT_S)
+        return ProbeResult(reachable=reachable)
 
     async def execute(self, params: ExecuteParams) -> ExecuteResult:
         if self._provider is None or self._observation_builder is None:
