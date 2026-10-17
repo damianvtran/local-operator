@@ -83,11 +83,13 @@ def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
     no site inside the block carries an ignore (there is none to carry)."""
     source = (REPO / CLI).read_text(encoding="utf-8")
     start = source.index("sessions_parser = subparsers.add_parser(")
-    # the exec parser follows (its add_parser is multi-line, so name the end
-    # explicitly rather than searching for `add_parser("` on one line)
-    end = source.index("exec_parser = subparsers.add_parser(")
-    assert end > start
-    block = source[start:end]
+    # end at the NEXT top-level section (resume-click), NOT at a named later
+    # parser: any block extracted between `sessions` and that name would land
+    # inside this span and inflate the count — the exact stale-span class this
+    # file's own tranche remediated elsewhere (help tranche 3 hit it, 50->69).
+    after = start + len("sessions_parser = subparsers.add_parser(")
+    nxt = after + source[after:].index(" = subparsers.add_parser(")
+    block = source[start:nxt]
     calls = block.count("_sh.")
     assert calls == 50, calls
     assert block.count('.envelope(locale=help_locale)["text"]') == 50
