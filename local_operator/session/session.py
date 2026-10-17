@@ -21651,6 +21651,10 @@ class Session:
         enabled = policy(self._config_dir)
         if not enabled["enabled"] or not enabled["capture"] or not self._session_id:
             return
+        from local_operator.memory_capture import import_capture_disabled
+
+        if import_capture_disabled(getattr(self._transcript, "directory", None)):
+            return
         # The task returns data only. It is not a session background job and
         # cannot wake/continue a turn; stale speculative plans simply lose it.
         task = asyncio.create_task(
