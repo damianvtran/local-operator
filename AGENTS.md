@@ -1372,8 +1372,13 @@ it landed.
    uses that same verified commit. The release tag remains metadata, not a later
    source resolver. Dispatch remains rehearsal-only.
 
-4. **Tag and publish** from the merge commit of that bump, then install and
-   smoke (mechanics below). **The public-copy contract is
+4. **Tag and publish** from the merge commit of that bump, then **install and
+   verify — the install half is a required part of the release, not a
+   follow-up**: the release is not complete until step 5's verification passes
+   (`lop --version` and the `current` pointer both report the new generation;
+   smoke from outside the repository). On this host that install needs no
+   drained fleet. A tag whose install never ran leaves the whole fleet on the
+   previous build, and nothing on the tag says so. **The public-copy contract is
    [`.github/RELEASE_NOTES_TEMPLATE.md`](.github/RELEASE_NOTES_TEMPLATE.md), not
    previous release bodies.** Follow it in both the claim/bump PR's
    `## Public release notes` section and the exact `--notes-file`: a short
@@ -1404,9 +1409,9 @@ it landed.
    `secrets.MACOS_SIGNING_P12_BASE64` / `secrets.MACOS_SIGNING_PROFILE_BASE64`, not a
    skipped job. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
    not bump that pin during a release window.
-5. **Post the refs** (tag, release URL, installed `.lop-source` revision) as a
-   comment on every PR in the window, and `send` them to each contributor
-   still running.
+5. **Post the refs** (tag, release URL, installed `.lop-source` revision and
+   the verified `lop --version`) as a comment on every PR in the window, and
+   `send` them to each contributor still running.
 
 ### Mechanics, in order
 
@@ -1415,7 +1420,8 @@ is untouched, but `lop-update` itself runs against `~/local-operator`: it
 gates on `-d "$REPO/.git"`, and a worktree's `.git` is a *file*, so pointing
 `LOCAL_OPERATOR_REPO` at a worktree fails with `local-operator repository not
 found` (reproduced). The owner fetches and advances the root checkout's
-`main` ref, then runs the drained install there (see "Installing over a live
+`main` ref, then runs the install there — on this host an immutable
+generation install that needs no drained fleet (see "Installing over a live
 fleet"). The order matters: the bump PR is opened
 first as the lock, merged only after every PR in the window has merged, and
 nothing is installed until the tag exists. The claim and the bump are ONE
@@ -1478,18 +1484,30 @@ $EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # publ
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
-# 5. Install and verify — with the fleet DRAINED: wait until no session
-#    reports `busy`, install, then re-engage what the swap displaced.
-#    See "Installing over a live fleet" below; a plain `lop-update` is only
-#    safe when nothing is running.
-<install>
+# 5. Install and verify — REQUIRED: the release is not complete until this
+#    step lands, and it does NOT wait for the fleet. `lop-update` (a thin
+#    delegation over `lop update --from-snapshot`) is the IMMUTABLE generation
+#    route: it builds a new `generations/<stamp>-<version>` and flips
+#    `current` atomically, so busy sessions are never displaced — they keep
+#    their loaded roots and roll over when idle, and the machine's services
+#    move onto the new build. Never drain for it; never skip it. The drain
+#    rule belongs only to a genuinely mutable install (see "Installing over a
+#    live fleet" below).
+lop-update   # this host's command; defaults to the local `main` advanced in step 3
+# VERIFICATION — the pointer and the command must BOTH report the NEW build:
 # The revision record lives INSIDE the installed generation, at `sys.prefix`:
 # a git build writes "<sha> <ref>"; a PyPI install writes "pypi <version>".
 cat "$(readlink ~/.local/share/lop/current)/tools/local-operator/.lop-source"
+readlink ~/.local/share/lop/current   # -> .../generations/<stamp>-<new version>
 # Smoke the built command from outside the repository, naming the uv-tool build
 # by path where the host has more than one `lop`: a bare `lop` can resolve to a
 # different install and report a version that is not this one.
 cd /tmp && ~/.local/bin/lop --version
+# Not-behind gate: prints "local-operator X.Y.Z is the latest" and exits 0 once
+# the pointer's install and the published release agree; "run `lop update` to
+# install" with exit 2 means the install half did not land. (A version whose
+# files are still publishing says so instead — retry in a few minutes.)
+~/.local/bin/lop update --check
 # Two checks, two different questions — do not use one to answer the other:
 #   * `.lop-source` (above) says WHICH BUILD is installed (ref, or `pypi <v>`);
 #   * a symbol check in the installed tree answers a DIFFERENT question — what
@@ -1583,6 +1601,15 @@ unchanged, advance the clone's own `main` first.
 
 ### Installing over a live fleet
 
+Two routes exist, and which one a command takes is decided by the install
+kind and the platform, not by the command's name. On this machine — a uv-tool
+install on POSIX — BOTH `lop-update` and a bare `lop update` take the
+IMMUTABLE rolling-promotion route described below (a new generation plus an
+atomic `current` flip; no drain). The mutable route is the in-place `uv tool
+install --force` a non-POSIX uv-tool host still degrades to, the pipx/pip
+upgrades `lop update` runs on those install kinds, and a hand-run `uv tool
+install --force` on any host.
+
 **Mutable/in-place installs must not run against a busy fleet.** The command
 that carries this out is the host's business. An in-place install replaces
 site-packages inside a shared environment **under whatever runtimes are running**,
@@ -1620,7 +1647,7 @@ capable controller route; downloading a release or hot-editing installed code is
 not an activation proof. Live activation remains separately authorized and
 verified; these source rules do not grant a live install, prune, or forced kill.
 
-Two cautions that hold wherever the install runs:
+Two cautions — the first for the mutable route, the second wherever the install runs:
 
 - **Never force an in-place install past a busy fleet to save time.** Displacing
 someone's turn is a real cost, and an expired drain budget means waiting and
@@ -1756,9 +1783,10 @@ Warnings that still hold, each of which has already cost a release:
   before any install work unless `--allow-downgrade` says otherwise.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
   command back to in-progress work. Publication is always the separate final
-  step: merge, bump, tag, the drained install, verify `.lop-source`, then smoke
-  the built command from outside the repository — naming the uv-tool build by
-  path, because a bare `lop` can resolve to a different install.
+  step: merge, bump, tag, the install (no drained fleet needed — step 5),
+  verify `.lop-source` and the `current` pointer, then smoke the built command
+  from outside the repository — naming the uv-tool build by path, because a
+  bare `lop` can resolve to a different install.
 
 Every agent asked to "update local-operator" or make a change available through
 `lop` follows this protocol: merge the tested change when its rounds are clean,
