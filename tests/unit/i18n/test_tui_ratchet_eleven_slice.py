@@ -24,11 +24,17 @@ of being forgotten — are extracted in the same slice: `lead` (esc return / f9
 focus), `pin_suffix`, `asks_suffix`, `hide_suffix`. `layer` (` · ctrl+a ⌥`) and
 `key_short` (` · ctrl+f`) are word-free and stay as they are.
 
-**What this slice still does NOT extract, said out loud:** the `_tail(...)`
-composition's `ask_note`/`hub_note`/`chip` contents, and `AGENT_OPENED_MARK`
-("agent-opened"), which is owned by `local_operator/session/preview.py` — a
-different file's slice. So the sidebar's footer copy is not fully translated by
-this slice, and the file is not "done" in the sense that would fool anyone.
+**What this slice still does NOT extract — and the list is NOT exhaustive**
+(the review's sweep found more than my first draft named, which is the honest
+correction): the `_tail(...)` composition's `ask_note`/`hub_note`/`chip`
+contents; `AGENT_OPENED_MARK` ("agent-opened"), owned by
+`local_operator/session/preview.py`; `"Refresh failed"` and `"Opening…"` in the
+same `_footer_line` builder the ladder lives in; and file-wide residuals the
+collector does not see at all — section headings, the `"+n more pinned — scroll"`
+affordance, empty/loading/error states, `"on {device}"` / `" (last known state)"`
+/ `"unreachable · …"`, and `WEDGED_REMEDY`. So this file activated at zero
+findings while carrying English beyond its perimeter: it is not "done", and the
+paragraph is a map rather than a certificate.
 """
 
 from __future__ import annotations
@@ -67,13 +73,13 @@ BASE = {
 
 def test_the_six_keys_are_exactly_their_base_bytes() -> None:
     live = catalogues.load_catalogue("en", "tui.small")
-    assert (
-        live
-        == json.loads(
-            (REPO / "tests/unit/i18n/fixtures/tui_small_en_golden.json").read_text(encoding="utf-8")
-        )
-        or live
+    golden = json.loads(
+        (REPO / "tests/unit/i18n/fixtures/tui_small_en_golden.json").read_text(encoding="utf-8")
     )
+    # A REAL equality: the review caught that the first draft could not fail
+    # (F2/Q1) — a comparison that passes when the dicts differ is decoration.
+    assert live == golden, "the shipped catalogue and the fixture golden drifted"
+    assert len(golden) == 121, len(golden)
     for key, value in BASE.items():
         assert live[key] == value, key
     sidecar = catalogues.context("en", "tui.small")
