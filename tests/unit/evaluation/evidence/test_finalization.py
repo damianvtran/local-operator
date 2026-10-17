@@ -991,6 +991,92 @@ def test_crash_abandonment_fallback_now_succeeds(tmp_path: Path) -> None:
     assert report.terminal_state == "abandoned"
 
 
+def test_abandonment_of_terminal_step_without_lifecycle_succeeds(tmp_path: Path) -> None:
+    """A truncated rollout that died mid-finalization can still be abandoned.
+
+    The measured failure this closes: an OSWorld probe reached its step-budget
+    end (a TRUNCATED environment step), began scoring, and died before any
+    terminal snapshot could be written. ``verify_bundle`` requires a terminal
+    lifecycle snapshot for a terminal last step -- and that snapshot is
+    written only by the seal path. The abandonment is the only terminal such a
+    bundle can ever carry, and it was refused with the same
+    ``finalization_invalid`` code, so the probes sealed ``abandonment_failed``
+    and stayed "finalizing" forever, losing episodes that had already done all
+    their work. The check now carries its own ``terminal_output_unresolved``
+    code so ``abandon`` can tolerate exactly this unmet requirement while
+    every other ``finalization_invalid`` finding stays fatal.
+    """
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        clock = 0
+        _append_provenance(writer, monotonic_ns=clock, wall_time_ms=clock)
+        clock += 2
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=action_artifact,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=False,
+                truncated=True,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        # The scoring intent, as the runner writes it before calling score():
+        # finalization_start + scoring_start, then the death.
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        before = verify_bundle(root)
+        assert ("terminal_output_unresolved", "events.jsonl") in {
+            (issue.code, issue.location) for issue in before.issues
+        }
+        record = writer.abandon("ambiguous_finalization", "evidencefailure")
+        assert record.reason == "ambiguous_finalization"
+        assert record.finalization_id == "final"
+        assert record.diagnostic_code == "evidencefailure"
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert report.terminal_state == "abandoned"
+    # The one unmet requirement is reported, and nothing else is: the
+    # abandonment is the record that this ending is unresolved.
+    assert {
+        (issue.code, issue.location) for issue in report.issues if issue.severity == "error"
+    } == {("terminal_output_unresolved", "events.jsonl")}
+
+
 def test_crash_bundle_missing_terminal_event_still_refuses(tmp_path: Path) -> None:
     """Do not over-correct: a genuinely incomplete bundle must stay unsealed.
 

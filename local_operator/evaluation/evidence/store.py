@@ -67,12 +67,17 @@ _STATE = "state.json"
 _OUTCOME = "outcome.json"
 _ABANDONMENT = "abandonment.json"
 _DIGEST_CHARS = frozenset("0123456789abcdef")
-# Only this exact semantic issue is expected when the finalizing marker reaches
-# disk before scoring_start. Integrity and confinement findings always block.
+# Only these exact semantic issues are expected when the finalizing marker
+# reaches disk before (or at) scoring_start and the process then dies
+# mid-finalization. Integrity and confinement findings always block. The
+# second entry is the truncated-rollout cutpoint added alongside the
+# dedicated code: a step-budget end followed by a death before the terminal
+# snapshot is an interruption, not a corruption (see verify.py).
 _AMBIGUOUS_FINALIZATION_ISSUES = frozenset(
     {
         ("score_invalid", "state.json"),
         ("finalization_invalid", "events.jsonl"),
+        ("terminal_output_unresolved", "events.jsonl"),
     }
 )
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
@@ -1575,6 +1580,24 @@ class EvidenceWriter:
                 if self._recovery_only and reason == "ambiguous_finalization"
                 else frozenset()
             )
+            if reason == "ambiguous_finalization":
+                # An episode whose LAST step was terminal (step-budget
+                # truncation, environment termination) must normally be
+                # explained by a terminal lifecycle snapshot -- and that
+                # snapshot is written only by the seal path, which a bundle
+                # that died mid-finalization (e.g. a scoring failure) never
+                # reached. The ambiguity abandonment IS the record that the
+                # ending is unresolved, so refusing it would strand a bundle
+                # that has nothing else wrong with it: measured on OSWorld
+                # probes, three runs sealed ``abandonment_failed``, kept
+                # state "finalizing" forever, and lost an episode that had
+                # already done all its work. Scoped to this one code and
+                # location so every integrity, confinement and binding
+                # finding still blocks; an outcome/abandonment already on
+                # disk was rejected above.
+                allowed_errors = allowed_errors | {
+                    ("terminal_output_unresolved", "events.jsonl")
+                }
             if report.manifest is None or any(
                 issue.severity == "error" and (issue.code, issue.location) not in allowed_errors
                 for issue in report.issues
