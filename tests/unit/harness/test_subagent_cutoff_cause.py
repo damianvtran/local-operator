@@ -539,3 +539,28 @@ def test_the_relay_does_not_join_across_a_non_continuation_message() -> None:
     )
 
     assert final["text"] == "the final answer"
+
+
+def test_the_relay_keeps_an_empty_final_answer_empty() -> None:
+    """NEGATIVE CONTROL (review round 2, M-1): a wordless stop keeps its "".
+
+    Walking back past an EMPTY final assistant row would hand the parent stale
+    narration ("Let me check the files.") instead of the empty result it has
+    always received — a regression the rejoin must not introduce.
+    """
+    final: dict[str, Any] = {"text": "", "error": None}
+    relay = _relay(final)
+    asyncio.run(
+        relay(
+            AgentEndEvent(
+                messages=[
+                    Message.user("go"),
+                    Message.assistant("Let me check the files."),
+                    Message.assistant(""),
+                ],
+                aborted=False,
+            )
+        )
+    )
+
+    assert final["text"] == "", "an empty final answer must stay empty"
