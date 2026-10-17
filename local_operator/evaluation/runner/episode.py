@@ -34,7 +34,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 from pydantic import ValidationError
 
@@ -519,6 +519,36 @@ class _EvidenceFailure(Exception):
     """
 
 
+def _canary_values_outside_own_roots(
+    values: Iterable[str], roots: Iterable[Path | str]
+) -> tuple[str, ...]:
+    """Resolved values a leak check can still use, in resolution order.
+
+    WHY THIS EXISTS (the measured failure, 2026-10-17). ``run_episode``
+    resolves the episode's sealed refs through the credential store and every
+    resolved value widens the evidence redaction set. In the OSWorld rig the
+    sealed INFRA refs join that same channel (``run_episode.py``:
+    ``secret_refs = ref_names + infra_ref store names``), so
+    ``OSWORLD_INFRA_OSWORLD_INPUTS_ROOT`` -- the benchmark's own inputs
+    DIRECTORY, a plain path -- became a canary. The scoring-details capture
+    carries the evaluator's log lines, and those name the run's cache path
+    UNDER that directory; the scoring receipt's publication scan then refused
+    the artifact wholesale ("secret canary survived evidence redaction") and
+    every episode that reached scoring died with ``evidencefailure`` -- five
+    paid episodes and probes in one day (see the OSWorld campaign logs).
+
+    A credential can never be a substring of the episode's own roots, and
+    neither can a root be one of a credential: a value in that relationship
+    is a location, and every path the harness writes into its own evidence
+    contains it BY CONSTRUCTION, so it cannot distinguish leakage from
+    ordinary operation. Such values are dropped from the canary set; every
+    other resolved value still widens the set exactly as before.
+    """
+
+    own = tuple(str(root) for root in roots)
+    return tuple(value for value in values if not any(value in root or root in value for root in own))
+
+
 class EpisodeRunner:
     """Drives one episode from launch to a sealed or abandoned bundle."""
 
@@ -682,7 +712,15 @@ class EpisodeRunner:
         self._resolved_secrets = self._secrets.resolve([ref.name for ref in self._spec.secret_refs])
         if self._resolved_secrets:
             self._redactions = self._redactions.with_values(
-                secret.value for secret in self._resolved_secrets
+                _canary_values_outside_own_roots(
+                    (secret.value for secret in self._resolved_secrets),
+                    (
+                        self._config.evidence_root,
+                        self._config.artifact_root,
+                        self._config.rescue_root,
+                        self._selector.workspace,
+                    ),
+                )
             )
 
         # STAGE 1 of two-stage rescue persistence.

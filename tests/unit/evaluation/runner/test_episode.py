@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
+from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue, SecretRef
 from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
@@ -86,6 +86,7 @@ def _runner(
     redactions: RedactionSet | None = None,
     spec: Any = None,
     config: Any = None,
+    secrets: Any = None,
 ) -> EpisodeRunner:
     return EpisodeRunner(
         spec or build_spec(episode_id),
@@ -96,7 +97,11 @@ def _runner(
         launch=lambda _: adapter,
         rescue=_rescue_ok,
         redactions=redactions,
+        secrets=secrets,
     )
+
+
+from local_operator.evaluation.runner.secrets import StaticSecretResolver
 
 
 def _kinds(root: Path) -> list[str]:
@@ -2889,6 +2894,72 @@ async def test_a_secret_in_the_stderr_tail_withholds_the_tail_whole(
     assert "upstream said" not in text
     assert _TAIL_HEADER in text and WITHHELD in text
     assert text.startswith("SupervisionError: worker died mid-observe")
+
+
+@pytest.mark.asyncio
+async def test_the_episodes_own_path_is_not_a_canary(tmp_path: Path, episode_id: str) -> None:
+    """A resolved value the episode's own roots contain cannot prove a leak.
+
+    Measured failure this closes (2026-10-17): the OSWorld rig's sealed infra
+    refs widen the redaction set, so the benchmark's own INPUTS ROOT -- a path
+    prefix of the run's cache directories -- became a canary; the scoring
+    details capture carries the evaluator's log lines, which name those cache
+    paths; the scoring receipt's scan then refused the artifact wholesale and
+    every episode that reached scoring died with ``evidencefailure``. A
+    location cannot distinguish leakage from ordinary operation, so values in
+    that relationship with the episode's own roots are dropped from the
+    canary set; a real secret still widens it, and still withholds the text
+    that carries it.
+    """
+
+    own_path = str(tmp_path)
+    secret = "S3CRET-CANARY-6c1f"
+    spec = replace(
+        build_spec(episode_id),
+        secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+    )
+    resolver = StaticSecretResolver({"OWN_PATH_ROW": own_path, "AWS_ACCESS_KEY_ID": secret})
+
+    # (a) Text naming the episode's own tree SURFACES: the path value was
+    # resolved but is not a canary (it is a substring of the roots themselves).
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(f"fetching {own_path}/cache/file.ics\n".encode())
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "step", "finish"]),
+        spec=spec,
+        secrets=resolver,
+    ).run()
+    assert outcome.status == "failed", outcome.diagnostic
+    assert outcome.bundle_root is not None
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert f"fetching {own_path}/cache/file.ics" in text
+
+    # (b) The resolved SECRET still withholds a tail that carries it: the
+    # drop is scoped to values the episode's own roots contain, not a
+    # weakening of the canary set.
+    second = tmp_path / "secret-case"
+    second.mkdir()
+    adapter2 = _fatal_adapter(second, f"{episode_id}-secret")
+    adapter2.stderr_tail = _StubTail(f"carrying {secret}\n".encode())
+    outcome2 = await _runner(
+        second,
+        f"{episode_id}-secret",
+        adapter=adapter2,
+        model=ScriptedModel(["step", "step", "finish"]),
+        spec=replace(
+            build_spec(f"{episode_id}-secret"),
+            secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+        ),
+        secrets=resolver,
+    ).run()
+    assert outcome2.status == "failed", outcome2.diagnostic
+    assert outcome2.bundle_root is not None
+    text2 = _fatal_detail_text(outcome2.bundle_root)
+    assert secret not in text2 and "carrying" not in text2
+    assert WITHHELD in text2
 
 
 @pytest.mark.asyncio
