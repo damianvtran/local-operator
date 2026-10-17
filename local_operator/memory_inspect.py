@@ -1,0 +1,325 @@
+"""Read-only inspection and re-scope PREVIEW over the existing memory store.
+
+Why this module exists: agents sometimes store session-scoped work in the
+GLOBAL bank. The operator needs to see that mess and decide what to do about
+it. Deciding is a human act, so this surface only *reports*: it lists entries
+across every authorized scope with provenance, withholds anything the existing
+privacy guard would refuse, and shows a proposed destination beside each entry.
+
+It is READ-ONLY by construction, not by convention:
+
+* it never calls ``MemoryStore.put``/``apply_ops``/``import_session``/``resolve``
+  — those are the store's only mutating entry points;
+* it opens the database with ``mode=ro`` and ``PRAGMA query_only=ON``, so the
+  connection itself cannot write, checkpoint or create a store. A missing
+  database is reported as empty, never created;
+* it does not reindex, migrate, tombstone or export anything.
+
+There is deliberately NO ``--apply`` flag, no hidden write path and no
+"migrate" verb. A future reader who is tempted to add one is adding a data
+migration to a command whose whole contract is that a human can look without
+changing anything; do that as a separate, explicitly reviewed surface.
+
+Bodies and titles are withheld when ``local_operator.memory.guard`` refuses
+them. Such a row is already in the store (an import or an older build can put
+it there), but re-exporting it through a listing would defeat the rule the
+guard exists to enforce. What remains is the safe header: ID, scope, status,
+age, provenance and the preview disposition. ``lop memory show`` is the
+deliberate per-ID read a human uses after this preview; it is not a bulk
+export either.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+from local_operator.memory import (
+    MemoryError,
+    MemoryIdentity,
+    MemoryStore,
+    guard,
+    origin_label,
+    safe_segment,
+    work_progress_markers,
+)
+
+#: Stable contract for `--json` consumers. Bump only on a breaking shape change;
+#: additive keys keep this value so an agent's parser does not need a version
+#: dance for a new column.
+SCHEMA = "memory.inspect.v1"
+
+#: Human-readable body preview length. Full bodies are NOT exported: the preview
+#: exists to let a person recognise the row, and `lop memory show <ref>` is the
+#: deliberate read of one full fact.
+PREVIEW_CHARS = 160
+
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 50
+
+HELP = (
+    "Read-only preview. Nothing listed here is moved, edited or forgotten. A proposal "
+    "is a suggestion for a human to act on with memory:// or `lop memory`; it is never "
+    "applied by this command. Bodies the privacy guard refuses are withheld."
+)
+
+
+@contextmanager
+def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open the store without any write capability.
+
+    ``query_only=ON`` is belt-and-braces beside ``mode=ro``: it also refuses a
+    write that a future edit might attempt through this connection. Opening a
+    missing file is impossible by design — the caller checks ``exists`` first,
+    so inspection can never initialise an empty store the way the mutable
+    connection does.
+    """
+    # ``immutable=1`` keeps SQLite from creating even the empty ``-wal``/``-shm``
+    # sidecars, but it also skips WAL replay. It is therefore used ONLY when no
+    # live writer is attached (a WAL-mode writer holds ``-shm``, and pending
+    # committed frames live in a non-empty ``-wal``); otherwise ``mode=ro``
+    # reads through the WAL so the preview shows committed state. Both forms
+    # refuse writes at the file level.
+    sidecars = [Path(str(path) + suffix) for suffix in ("-wal", "-shm")]
+    quiet = not any(item.exists() for item in sidecars)
+    uri = f"{path.resolve().as_uri()}?mode=ro" + ("&immutable=1" if quiet else "")
+    db = sqlite3.connect(uri, uri=True, timeout=5)
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA query_only=ON")
+        yield db
+    finally:
+        db.close()
+
+
+def _exportable(text: Any) -> bool:
+    """Whether the existing privacy guard would let this value out.
+
+    Uses the store's own rule rather than a second opinion: a value the write
+    path refuses is exactly a value a listing must not print (the proposal
+    recorded ``body_exported``/``title_exported`` as false for these).
+    """
+    if not isinstance(text, str):
+        return False
+    try:
+        guard(text)
+    except MemoryError:
+        return False
+    return True
+
+
+def _provenance(fact: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Safe provenance fields; refused values are dropped, never echoed.
+
+    Session IDs are structural and always pass. URIs and entry locators can
+    contain sensitive paths, so each one goes through the same guard.
+    """
+    source = fact.get("source")
+    if not isinstance(source, dict):
+        return {}, False
+    kept: dict[str, Any] = {}
+    redacted = False
+    for key in ("kind", "author", "session", "tool", "uri", "entry"):
+        value = source.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        if key in ("kind", "author", "session") or _exportable(value):
+            kept[key] = value
+        else:
+            redacted = True
+    return kept, redacted
+
+
+def _disposition(
+    scope: str,
+    markers: list[str],
+    provenance: dict[str, Any],
+    team_id: str,
+) -> dict[str, Any]:
+    """The PREVIEW proposal for one entry. Descriptive only — nothing consumes it.
+
+    The vocabulary is closed on purpose (keep / session-scoped / team /
+    review-work-scope) so a pager, a human and an agent all read the same four
+    words. ``applied`` is emitted as a literal ``False`` on every row: a caller
+    that tries to treat this as a plan receipt has to ignore an explicit field,
+    not merely the prose around it.
+    """
+    if scope != "global":
+        return {
+            "proposal": "keep",
+            "destination": f"{scope} bank",
+            "reason": f"Already in the {scope} bank; re-scoping is not proposed.",
+            "applied": False,
+        }
+    if not markers:
+        return {
+            "proposal": "keep",
+            "destination": "global",
+            "reason": "No work/lane/progress marker; a durable global fact is plausible.",
+            "applied": False,
+        }
+    marker_text = ", ".join(markers)
+    session = provenance.get("session")
+    if session:
+        return {
+            "proposal": "session-scoped",
+            "destination": f"session/{session}",
+            "reason": (
+                f"Work-shaped content ({marker_text}) in the global bank, and the recorded "
+                "source session is the likely home."
+            ),
+            "applied": False,
+        }
+    if team_id:
+        return {
+            "proposal": "team",
+            "destination": f"team/{team_id}",
+            "reason": (
+                f"Work-shaped content ({marker_text}) in the global bank, no source session "
+                "recorded; this inspector is bound to a team, but ownership must be "
+                "confirmed before anything is shared with it."
+            ),
+            "applied": False,
+        }
+    return {
+        "proposal": "review-work-scope",
+        "destination": "needs a human decision",
+        "reason": (
+            f"Work-shaped content ({marker_text}) in the global bank with no recorded "
+            "source session; the destination needs a human, not a guess."
+        ),
+        "applied": False,
+    }
+
+
+def _entry(row: sqlite3.Row, now: float, team_id: str) -> dict[str, Any]:
+    fact = json.loads(row["fact"])
+    scope = str(row["scope"])
+    title = fact.get("title")
+    body = fact.get("body")
+    title_ok = _exportable(title)
+    body_ok = _exportable(body)
+    provenance, provenance_redacted = _provenance(fact)
+    # Same field set as ``scope_fit`` on the write path: a row this listing
+    # calls a candidate is exactly a row a new global write would refuse.
+    haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
+    for key in ("tags", "aliases"):
+        value = fact.get(key) or []
+        if isinstance(value, list):
+            haystack += "\n" + "\n".join(str(item) for item in value)
+    markers = work_progress_markers(haystack)
+    created_at = fact.get("created_at")
+    return {
+        "id": row["entity_id"],
+        "reference": f"{scope}/{row['entity_id']}",
+        "scope": scope,
+        "status": fact.get("status") or "unknown",
+        "origin": origin_label(fact),
+        "created_at": created_at if isinstance(created_at, (int, float)) else None,
+        "age_seconds": (
+            max(0.0, now - float(created_at)) if isinstance(created_at, (int, float)) else None
+        ),
+        "verified_at": fact.get("verified_at"),
+        "expires_at": fact.get("expires_at"),
+        "revision": row["op_id"],
+        "revisions": int(row["revisions"]),
+        "provenance": provenance,
+        "provenance_redacted": provenance_redacted,
+        "title": title if title_ok else None,
+        "title_exported": title_ok,
+        "body_preview": (body[:PREVIEW_CHARS] if body_ok and isinstance(body, str) else None),
+        "body_truncated": bool(body_ok and isinstance(body, str) and len(body) > PREVIEW_CHARS),
+        "body_exported": False,
+        "redacted": not (title_ok and body_ok),
+        "scope_fit_candidate": scope == "global" and bool(markers),
+        "work_markers": markers,
+        "disposition": _disposition(scope, markers, provenance, team_id),
+    }
+
+
+def inspect_entries(
+    root: Path,
+    identity: MemoryIdentity,
+    *,
+    scope: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+    cursor: str | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """List authorized entries and their preview dispositions; change nothing.
+
+    Paging mirrors ``MemoryStore.inventory`` (newest/ID-descending, cursor is the
+    last ID shown) so a person who already pages ``lop memory list`` does not
+    have to learn a second scheme.
+    """
+    if not 1 <= limit <= MAX_LIMIT:
+        raise MemoryError(f"Inspection limit must be 1–{MAX_LIMIT}.")
+    if cursor:
+        # Same structural rule inventory applies; the cursor is spliced into SQL.
+        safe_segment(cursor)
+    store = MemoryStore(root, identity)
+    current = time.time() if now is None else now
+    authorized = [name for name, _ in identity.scopes()]
+    report: dict[str, Any] = {
+        "schema": SCHEMA,
+        "read_only": True,
+        "store": {"path": str(store.path), "exists": store.path.exists()},
+        "generated_at": current,
+        "authorized_scopes": authorized,
+        "scope": scope,
+        "limit": limit,
+        "cursor": cursor or None,
+        "counts": {"returned": 0, "total": 0, "by_scope": {}},
+        "entries": [],
+        "has_more": False,
+        "next_cursor": None,
+        "help": HELP,
+    }
+    if not store.path.exists():
+        return report
+    # The store's single authorization rule (authorized owner pairs per scope).
+    # Reused rather than restated: two surfaces answering "who may read this?"
+    # differently is the defect this shares the rule to avoid.
+    where, values = store._where(scope)
+    page_where = where + (" AND entity_id<?" if cursor else "")
+    page_values: list[Any] = [*values, cursor] if cursor else list(values)
+    try:
+        with _read_only_connection(store.path) as db:
+            has_current = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='current'"
+            ).fetchone()
+            if not has_current:
+                return report
+            rows = db.execute(
+                "SELECT entity_id,scope,op_id,fact,"
+                "(SELECT count(*) FROM ops o WHERE o.entity_id=current.entity_id) "
+                f"AS revisions FROM current WHERE {page_where} "
+                "ORDER BY entity_id DESC LIMIT ?",
+                # One extra row answers "is there more?" truthfully instead of
+                # treating a full page as proof of a next one.
+                [*page_values, limit + 1],
+            ).fetchall()
+            totals = db.execute(
+                f"SELECT scope,count(*) FROM current WHERE {where} GROUP BY scope", values
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise MemoryError(
+            "Memory store could not be read read-only (SQLite "
+            + type(exc).__name__
+            + "); no memory was changed."
+        ) from exc
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    by_scope = {str(row[0]): int(row[1]) for row in totals}
+    report["counts"]["by_scope"] = by_scope
+    report["counts"]["total"] = sum(by_scope.values())
+    report["entries"] = [_entry(row, current, identity.team_id) for row in page]
+    report["counts"]["returned"] = len(report["entries"])
+    if has_more:
+        report["has_more"] = True
+        report["next_cursor"] = page[-1]["entity_id"]
+    return report

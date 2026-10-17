@@ -23,7 +23,7 @@ from local_operator.memory import SCOPES, MemoryError, MemoryIdentity, MemorySto
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
 from local_operator.paths import config_dir
 
-OPERATIONS = ("list", "show", "search", "edit", "forget", "status")
+OPERATIONS = ("list", "show", "search", "edit", "forget", "status", "inspect")
 #: Fields a flag-based edit may change; everything else is carried over from the
 #: revision being corrected, so a one-word fix never needs the whole record retyped.
 _EDITABLE = (
@@ -42,7 +42,7 @@ _EDITABLE = (
     "replaces",
 )
 USAGE = (
-    "Commands: list · show ID · search WORDS · status · "
+    "Commands: list · show ID · search WORDS · status · inspect (read-only preview) · "
     "edit ID --revision REV (--title T | --body B | --tag T | --alias A | --verified) · "
     "forget ID --revision REV --yes. ID is the SCOPE/ID printed by list."
 )
@@ -123,7 +123,15 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--yes", action="store_true", help="forget: confirm the removal")
     parser.add_argument("--related", action="store_true", help="show: also list linked facts")
-    parser.add_argument("--cursor", default="", help="list: continue after this ID")
+    parser.add_argument(
+        "--cursor", default="", help="list/inspect: continue after this ID (printed as More:)"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="inspect: entries per page (1–50, default 20)",
+    )
     parser.add_argument(
         "--json", dest="raw", action="store_true", help="print machine-readable JSON"
     )
@@ -208,6 +216,29 @@ def execute(
     scope = args.scope
     if args.operation == "status":
         return _status(root, store)
+    if args.limit is not None and args.operation != "inspect":
+        # A silently ignored flag reads as a filter that was applied.
+        raise MemoryError("--limit applies to `inspect` only.")
+    if args.operation == "inspect":
+        # Deliberately BEFORE import_session(): that call writes a session's
+        # portable log into the store. Inspection must not change a row, so it
+        # never reaches any mutable store method.
+        from local_operator.memory_inspect import DEFAULT_LIMIT, inspect_entries
+
+        _bound(store, scope)
+        return {
+            **inspect_entries(
+                root,
+                current,
+                scope=scope,
+                limit=DEFAULT_LIMIT if args.limit is None else args.limit,
+                cursor=args.cursor or None,
+            ),
+            "agent_memory": policy(root)["enabled"],
+            "searched": _searched(store, scope),
+            "bound_session": current.session_id,
+            "context": _context(args, store, prefix),
+        }
     _bound(store, scope)
     store.import_session()
     words = list(args.target)
@@ -447,11 +478,90 @@ def _status_text(value: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_PROPOSALS = {
+    "keep": "keep",
+    "session-scoped": "move to a session",
+    "team": "move to a team",
+    "review-work-scope": "review as work scope",
+}
+
+
+def _inspect_text(value: dict[str, Any], prefix: str) -> str:
+    """Render the read-only preview.
+
+    The word "proposal" and the trailing "NOT applied" are load-bearing: a person
+    must never read this page as a record of a change. Withheld content says WHY
+    it is withheld, in the same voice the write guard refuses it.
+    """
+    entries = value["entries"]
+    counts = value["counts"]
+    now = value.get("generated_at") or time.time()
+    lines = ["Read-only preview — nothing below is moved, edited or forgotten."]
+    if not value.get("agent_memory", True):
+        lines.append("Agent memory is OFF (memory.enabled=false): agents cannot use these.")
+    by_scope = counts.get("by_scope") or {}
+    summary = " · ".join(f"{name} {count}" for name, count in sorted(by_scope.items()))
+    lines.append(
+        f"{counts['total']} entr{'y' if counts['total'] == 1 else 'ies'} in the authorized "
+        f"scopes ({summary or 'none'}) · {counts['returned']} shown"
+    )
+    if not entries:
+        lines.append("Nothing retained in these scopes.")
+        return "\n".join(lines)
+    for entry in entries:
+        proposed = entry["disposition"]
+        state = (
+            entry["origin"]
+            if entry["status"] in ("active", "candidate")
+            else f"{entry['origin']} · {entry['status']}"
+        )
+        age = _date(entry["created_at"], "age unknown", now=now)
+        lines.append("")
+        lines.append(f"{entry['reference']}  [{state} · {age}]")
+        if entry["title_exported"]:
+            lines.append(f"  {entry['title']}")
+        else:
+            lines.append("  [title withheld — the privacy guard would refuse it]")
+        provenance = entry["provenance"]
+        author = provenance.get("author") or "unknown"
+        kind = provenance.get("kind") or "unknown"
+        meta = [f"by {author} ({kind})"]
+        if provenance.get("session"):
+            meta.append(f"session {provenance['session']}")
+        if provenance.get("redacted"):
+            meta.append("locator withheld by the privacy guard")
+        lines.append(
+            "  Source: " + " · ".join(meta) + f" · revision {entry['revision']}"
+            f" · {entry['revisions']} revision(s)"
+        )
+        if entry["body_preview"] is not None:
+            suffix = "…" if entry["body_truncated"] else ""
+            lines.append(f"  Preview: {entry['body_preview']}{suffix}")
+        else:
+            lines.append("  Preview withheld — the privacy guard would refuse this body.")
+        markers = ", ".join(entry["work_markers"]) or "none"
+        lines.append(
+            f"  Proposal: {_PROPOSALS.get(proposed['proposal'], proposed['proposal'])}"
+            f" → {proposed['destination']} — {proposed['reason']} (markers: {markers}; "
+            "NOT applied)"
+        )
+    if value.get("next_cursor"):
+        lines.append("")
+        lines.append(f"More: {prefix} inspect --cursor {value['next_cursor']}{value['context']}")
+    lines.append(
+        "No change was made. A proposal is for a human to carry out with memory:// or "
+        f"{prefix} edit/forget after reading one fact with {prefix} show SCOPE/ID."
+    )
+    return "\n".join(lines)
+
+
 def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> str:
     """Readable receipt for CLI and slash command; ``--json`` keeps the raw payload."""
     if failed:
         return text
     value = json.loads(text)
+    if "entries" in value:
+        return _inspect_text(value, prefix)
     if "results" in value:
         rows = value["results"]
         if not rows:
