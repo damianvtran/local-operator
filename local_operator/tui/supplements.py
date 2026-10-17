@@ -40,6 +40,7 @@ __all__ = [
     "COPY_CANCELLED",
     "COPY_FAILED",
     "COPY_PREPARING",
+    "cause_phrase",
     "display_text",
     "file_row_parts",
     "file_size_text",
@@ -55,6 +56,28 @@ __all__ = [
 COPY_PREPARING = "Preparing highlights…"
 COPY_CANCELLED = "Highlights cancelled"
 COPY_FAILED = "Couldn't prepare highlights"
+
+#: The failed line's typed-cause phrases, one per allowlisted ``failure_kind`` (the
+#: ``provider_<kind>`` vocabulary the row's ``cause`` carries). The state line says WHICH
+#: wall was hit, because a Retry that will hit the same wall is not useful (operator,
+#: 2026-10-17). Unknown values render NO phrase -- inventing prose for a vocabulary this
+#: build does not know is worse than the bare sentence.
+_CAUSE_PHRASES: dict[str, str] = {
+    "provider_quota": "provider quota exhausted",
+    "provider_auth": "provider sign-in needed",
+    "provider_transient": "provider temporarily unavailable",
+    "provider_timeout": "provider timed out",
+    "provider_request": "provider refused the request",
+    "provider_content": "provider blocked the content",
+    "provider_context": "provider context limit",
+    "provider_unknown": "provider unavailable",
+}
+
+
+def cause_phrase(cause: object) -> str:
+    """The muted phrase for a failed row's typed ``cause``; ``""`` when absent/unknown."""
+    return _CAUSE_PHRASES.get(str(cause), "") if cause else ""
+
 
 #: How far along a state is, for "is this row newer than what we hold".
 #: The journaled arms only (memo §2.4): live beats are never journaled, so a

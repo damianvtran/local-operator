@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import ModelSpec, StreamEndEvent
+from local_operator.providers.failover import ProviderError
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -195,6 +196,39 @@ async def test_a_graphics_job_writes_decided_then_one_terminal_row(
         # The reader rule: the newest version wins, and the pair is terminal.
         assert reader_disposition(done, job_live=False) == "block"
         assert handle._supplements.is_live(done["job"]) is False
+    finally:
+        await handle.dispose()
+
+
+async def test_a_provider_terminal_failure_lands_the_typed_cause_on_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider-terminal failure keeps the pinned ``error`` spelling AND adds the typed
+    ``cause`` (an allowlisted ``provider_<kind>`` token, never provider prose)."""
+    session = _make_session(tmp_path / "sessions" / "cause", tmp_path)
+    handle = await _handle(session, tmp_path)
+    runner = handle._supplements
+
+    def resolve(settings: Any) -> generator.DesignModel:
+        return generator.DesignModel(MODEL, "session", "test/m")
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        raise generator.CompletionFailure(
+            ProviderError(None, "quota exhausted", kind="quota"), _Usage()
+        )
+
+    monkeypatch.setattr(runner, "_resolve_model", resolve)
+    monkeypatch.setattr(runner, "_complete", complete)
+    try:
+        runner._render("anchor-cause", _decision(), DATASETS, "u", "a", _settings())
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        assert [row["state"] for row in rows] == ["decided", "failed"], rows
+        failed = rows[-1]
+        assert failed["error"] == "generator:ProviderError", "the pinned spelling stays"
+        assert failed["cause"] == "provider_quota"
+        assert any("kind=quota" in line for line in failed["detail"])
+        assert failed["turns"] == 0, "no completion returned: no turn was consumed"
     finally:
         await handle.dispose()
 
