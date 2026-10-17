@@ -29,12 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 from pydantic import ValidationError
 
@@ -140,6 +141,14 @@ from local_operator.evaluation.runner.secrets import (
 # session is the one resource the parent always knows exists before the adapter
 # has described anything, which is what makes the provisional plan expressible.
 _PROVISIONAL_CLEANUP_ACTION = "close-session"
+
+#: How many rescue workers ONE episode may launch in total (the first
+#: attempt plus one retry). Refusing a third launch is deliberate: every
+#: launch is a fresh worker process with its own handshake, and three call
+#: sites (close-out, _abandon_after_scoring_failure and _abandon_for_evidence)
+#: can ask for a rescue, so an unbounded retry loop would turn a stuck
+#: teardown into a runaway.
+_RESCUE_LAUNCH_BUDGET = 2
 
 # Infra values whose EFFECT a caller discloses in the sealed manifest, and which
 # an adapter that does not understand them would silently ignore.
@@ -519,6 +528,58 @@ class _EvidenceFailure(Exception):
     """
 
 
+def _canary_values_outside_own_roots(
+    values: Iterable[str], roots: Iterable[Path | str]
+) -> tuple[str, ...]:
+    """Resolved values a leak check can still use, in resolution order.
+
+    WHY THIS EXISTS (the measured failure, 2026-10-17). ``run_episode``
+    resolves the episode's sealed refs through the credential store and every
+    resolved value widens the evidence redaction set. In the OSWorld rig the
+    sealed INFRA refs join that same channel (``run_episode.py``:
+    ``secret_refs = ref_names + infra_ref store names``), so
+    ``OSWORLD_INFRA_OSWORLD_INPUTS_ROOT`` -- the benchmark's own inputs
+    directory, measured value ``/Users/damian/worktrees/osworld/osworld-21``
+    -- became a canary. The scoring-details capture carries the evaluator's
+    log lines, and those name the run's cache path UNDER that directory; the
+    scoring record's artifact publication then refused the capture wholesale
+    -- the measured incident logged the ARTIFACT-level refusal ("evidence
+    redaction rejected content", the store's ``Scanner.feed`` raised through
+    ``record_scoring_result``); its receipt-level sibling ("secret canary
+    survived evidence redaction", receipts.py) is the same refusal one layer
+    up -- and every episode that reached scoring died with ``evidencefailure``
+    -- five paid episodes and probes on 2026-10-17.
+
+    THE RULE, SCOPED. A value is dropped ONLY when it is absolute-path-shaped
+    AND a location of the episode itself: equal to one of the episode's own
+    roots, an ancestor of one, or itself inside one. Every path the harness
+    writes into its own evidence contains such a value by construction, so it
+    cannot distinguish leakage from ordinary operation -- while an
+    identifier- or key-shaped value that merely collides with a path
+    component (say ``osworld-21``, or any bare substring of a root) STAYS a
+    canary, because dropping one on a containment test alone is exactly the
+    class of miss a redaction scan must never make. Every other resolved
+    value still widens the set exactly as before.
+    """
+
+    own = tuple(str(root).rstrip(os.sep) or os.sep for root in roots)
+    if not own:
+        return tuple(values)
+
+    def _is_own_location(value: str) -> bool:
+        candidate = value.rstrip(os.sep) or os.sep
+        if not os.path.isabs(candidate):
+            return False
+        return any(
+            candidate == root
+            or root.startswith(candidate + os.sep)
+            or candidate.startswith(root + os.sep)
+            for root in own
+        )
+
+    return tuple(value for value in values if not _is_own_location(value))
+
+
 class EpisodeRunner:
     """Drives one episode from launch to a sealed or abandoned bundle."""
 
@@ -567,6 +628,9 @@ class EpisodeRunner:
         self._synthetic_model = synthetic_model
         self._launch = launch
         self._rescue = rescue
+        # Episode-level rescue launch budget (see ``_attempt_rescue``);
+        # a per-call bound could quadruple it across the two call sites.
+        self._rescue_launches = 0
 
         self._writer: EvidenceWriter | None = None
         self._session: VerifiedAdapterSession | None = None
@@ -682,7 +746,15 @@ class EpisodeRunner:
         self._resolved_secrets = self._secrets.resolve([ref.name for ref in self._spec.secret_refs])
         if self._resolved_secrets:
             self._redactions = self._redactions.with_values(
-                secret.value for secret in self._resolved_secrets
+                _canary_values_outside_own_roots(
+                    (secret.value for secret in self._resolved_secrets),
+                    (
+                        self._config.evidence_root,
+                        self._config.artifact_root,
+                        self._config.rescue_root,
+                        self._selector.workspace,
+                    ),
+                )
             )
 
         # STAGE 1 of two-stage rescue persistence.
@@ -2175,15 +2247,38 @@ class EpisodeRunner:
         descriptor = self._descriptor
         if descriptor is None:
             return False
-        try:
-            # The rescue worker is a fresh process with nothing but the
-            # descriptor; it needs the credentials again to tear down. These
-            # are the values resolved at launch, so an in-process rescue never
-            # re-reads the store mid-failure.
-            aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
-        except BaseException:
-            return False
-        complete = bool(aggregate.complete)
+        complete = False
+        # BOUNDED, EPISODE-LEVEL retry. The measured leak (2026-10-17,
+        # ep-4386740c6af0) failed once, fast and silently, and left its
+        # instance running for hours while the descriptor sat in the rescue
+        # inbox; a replay of the same descriptor on the same build completed
+        # on the first attempt (launch, handshake, all three cleanup actions,
+        # close), so one immediate retry covers the transient class. The
+        # budget is per EPISODE, not per call: this method is reachable from
+        # THREE sites (close-out, _abandon_after_scoring_failure and
+        # _abandon_for_evidence), and a per-call bound let one episode launch
+        # up to six workers and grow its teardown tail to ~15 minutes. The
+        # sweep stays the unbounded net for anything this bound refuses, and
+        # the descriptor is retired only on a complete aggregate.
+        while self._rescue_launches < _RESCUE_LAUNCH_BUDGET:
+            self._rescue_launches += 1
+            try:
+                # The rescue worker is a fresh process with nothing but the
+                # descriptor; it needs the credentials again to tear down.
+                # These are the values resolved at launch, so an in-process
+                # rescue never re-reads the store mid-failure.
+                aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # Cancellation and an operator interrupt outrank the retry: a
+                # swallowed CancelledError would launch a second worker after
+                # the run was told to stop, and the episode's own shutdown
+                # composition owns what happens next.
+                raise
+            except BaseException:
+                continue
+            complete = bool(aggregate.complete)
+            if complete:
+                break
         if complete:
             self._retire_descriptor()
         return complete
