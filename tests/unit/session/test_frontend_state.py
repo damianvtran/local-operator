@@ -2191,6 +2191,30 @@ def test_a_checkpoint_cannot_pin_occupancy_below_the_journals_newest_receipt() -
     assert restored.last_usage.context_tokens == 433_000
 
 
+def test_a_checkpoint_without_a_pair_still_advances_the_numerator() -> None:
+    """The half the serving host owns: no receipt pair, but the count is current.
+
+    ``from_checkpoint`` installs the receipt only when the row had one (the
+    serving host materializes it at adopt), and the NUMERATOR still advances:
+    the journal's newest receipt is what the conversation actually has, and a
+    checkpoint restored onto the older figure is the backwards first frame this
+    change exists to remove. Pinned separately because a guard on the whole
+    block would stay green while reintroducing exactly that (review round 4,
+    R4-1).
+    """
+    checkpoint = _state(last_usage=None, context_tokens=402_000)
+    owner = SimpleNamespace(
+        session_id="s1",
+        _transcript=_CheckpointTranscript(checkpoint),
+        restored_usage=lambda: Usage(input_tokens=433_000, context_tokens=433_000),
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.context_tokens == 433_000
+    assert restored.last_usage is None
+
+
 def test_an_equal_receipt_leaves_a_settled_compaction_estimate_standing() -> None:
     """The guard is the shared rule, not "take the receipt": an already-folded
     receipt moves nothing, so a post-pass estimate is not reverted to the
