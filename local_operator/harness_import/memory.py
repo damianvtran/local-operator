@@ -86,9 +86,7 @@ def _save_ledger(config: Path, source: str, ledger: dict[str, Any]) -> None:
     )
 
 
-def collect_instructions(
-    config: Path, source: str, records: Iterable[MemoryRecord]
-) -> str:
+def collect_instructions(config: Path, source: str, records: Iterable[MemoryRecord]) -> str:
     """Write instruction text to a review artifact; never touch live files."""
     parts: list[str] = []
     for record in records:
@@ -224,9 +222,7 @@ def import_memory(
                 continue
             try:
                 if scope == "global":
-                    store_obj = MemoryStore(
-                        config, MemoryIdentity(session_id=importing_session_id)
-                    )
+                    store_obj = MemoryStore(config, MemoryIdentity(session_id=importing_session_id))
                 else:
                     store_obj = MemoryStore(
                         config,

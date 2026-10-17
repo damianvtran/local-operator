@@ -30,6 +30,7 @@ from local_operator.harness_import.sources.base import (
     parse_ts,
 )
 from local_operator.harness_import.types import (
+    Availability,
     CompactionInfo,
     MemoryRecord,
     SourceEvent,
@@ -129,6 +130,25 @@ def _metadata(path: Path) -> dict[str, Any]:
     return result
 
 
+def _worst_availability(rows: list[SourceSession]) -> Availability:
+    if any(row.availability == "full" for row in rows):
+        return "full"
+    if any(row.availability == "metadata_only" for row in rows):
+        return "metadata_only"
+    return "unsupported"
+
+
+def encode_cwd(cwd: str) -> str:
+    """omp's ``--private-tmp--`` form for an absolute cwd.
+
+    Used for MATCHING rather than decoding: the encoding maps both ``/`` and a
+    literal ``-`` to ``-``, so a decoded path can never be trusted to equal the
+    original (``/tmp/synthetic-omp`` would decode as ``/tmp/synthetic/omp``).
+    Encoding the selected sessions' real cwds avoids guessing.
+    """
+    return "--" + cwd.strip("/").replace("/", "-") + "--"
+
+
 class OmpAdapter(SourceAdapter):
     source = "omp"
     label = "omp (oh-my-pi)"
@@ -136,20 +156,19 @@ class OmpAdapter(SourceAdapter):
     def detect(self) -> SourceInfo:
         root = resolve_agent_dir()
         detected = bool(root and (root / "sessions").is_dir())
-        count = 0
-        availability = "full"
-        if detected and root is not None:
+        rows: list[SourceSession] = []
+        if detected:
             try:
-                count = sum(1 for _ in _session_files(root))
+                rows = self.list_sessions()
             except OSError:
-                availability = "unsupported"
+                rows = []
         return SourceInfo(
             source="omp",
             label=self.label,
             root=root,
             detected=detected,
-            session_count=count,
-            availability=availability,  # type: ignore[arg-type]
+            session_count=len(rows),
+            availability=_worst_availability(rows),
             detail="" if detected else "no omp agent directory found",
         )
 
@@ -159,10 +178,22 @@ class OmpAdapter(SourceAdapter):
             return []
         rows: list[SourceSession] = []
         for path in _session_files(root):
-            header = _read_header(path)
-            if header is None:
+            try:
+                header = _read_header(path)
+                if header is None:
+                    continue
+                meta = _metadata(path)
+            except (OSError, ValueError) as exc:
+                rows.append(
+                    SourceSession(
+                        source="omp",
+                        source_id=f"unreadable:{path.name}",
+                        path=path,
+                        availability="unsupported",
+                        warnings=[f"source unreadable: {type(exc).__name__}"],
+                    )
+                )
                 continue
-            meta = _metadata(path)
             parent = meta.get("parent")
             nested = bool(parent) or _is_nested(path, root)
             if nested and not include_subagents:
@@ -188,14 +219,30 @@ class OmpAdapter(SourceAdapter):
         rows.sort(key=lambda row: row.updated_ts, reverse=True)
         return rows
 
+    def preview_counts(self, session: SourceSession) -> tuple[int, int]:
+        """Listing metadata only; preview must not build the mapped graph."""
+        return int(session.message_count or 0), int(session.compaction_count or 0)
+
     def read_session(self, session: SourceSession) -> Iterator[SourceEvent]:
+        stats: dict[str, int] = {}
         records: list[dict[str, Any]] = []
-        for _, record in store.iter_jsonl(session.path):
+        for _, record in store.iter_jsonl(session.path, stats=stats):
             if record.get("type") == "session":
                 continue
             records.append(record)
             if len(records) > 200_000:
                 break
+        if stats.get("skipped_lines"):
+            yield SourceEvent(
+                source_event_id="source:skipped-lines",
+                kind="unknown",
+                ts=session.updated_ts,
+                raw_flags={
+                    "warning": (
+                        f"{stats['skipped_lines']} malformed or oversized source " "line(s) skipped"
+                    )
+                },
+            )
         if not records:
             return
 
@@ -207,9 +254,7 @@ class OmpAdapter(SourceAdapter):
         # Build the parent tree for the active segment.
         segment = records[reset_index + 1 :] if reset_index >= 0 else records
         parent_of = {
-            _entry_id(record): record.get("parentId")
-            for record in segment
-            if _entry_id(record)
+            _entry_id(record): record.get("parentId") for record in segment if _entry_id(record)
         }
         has_child = {str(parent) for parent in parent_of.values() if parent}
         # The newest leaf can be a metadata ``custom`` row (a todo nudge, a
@@ -217,9 +262,7 @@ class OmpAdapter(SourceAdapter):
         # choosing the newest MESSAGE leaf instead would stop at the last
         # message and silently drop every message whose only child is metadata.
         leaves = [
-            record
-            for record in segment
-            if _entry_id(record) and _entry_id(record) not in has_child
+            record for record in segment if _entry_id(record) and _entry_id(record) not in has_child
         ]
         if not leaves:
             leaves = [record for record in segment if _entry_id(record)]
@@ -234,11 +277,11 @@ class OmpAdapter(SourceAdapter):
             path_ids.append(cursor)
             cursor = str(parent_of.get(cursor) or "")
         path_ids.reverse()
+        path_set = set(path_ids)
         active = [
             record
             for record in segment
-            if _entry_id(record) in set(path_ids)
-            or record.get("type") in ("title", "title_change")
+            if _entry_id(record) in path_set or record.get("type") in ("title", "title_change")
         ]
         order = {entry_id: index for index, entry_id in enumerate(path_ids)}
         active.sort(key=lambda record: order.get(_entry_id(record), -1))
@@ -266,6 +309,7 @@ class OmpAdapter(SourceAdapter):
             if isinstance(title, str) and title.strip():
                 yield SourceEvent(
                     source_event_id=rid or f"title:{ts}",
+                    parent_source_event_id=record.get("parentId"),
                     ts=ts,
                     kind="title",
                     text=[title.strip()],
@@ -277,6 +321,7 @@ class OmpAdapter(SourceAdapter):
             if isinstance(model, str) and model:
                 yield SourceEvent(
                     source_event_id=rid or f"model:{ts}",
+                    parent_source_event_id=record.get("parentId"),
                     ts=ts,
                     kind="model_change",
                     model=model,
@@ -288,6 +333,7 @@ class OmpAdapter(SourceAdapter):
             first_kept = record.get("firstKeptEntryId")
             yield SourceEvent(
                 source_event_id=rid or f"compaction:{ts}",
+                parent_source_event_id=record.get("parentId"),
                 ts=ts,
                 kind="compaction",
                 text=[],
@@ -296,9 +342,11 @@ class OmpAdapter(SourceAdapter):
                     first_kept_source_id=str(first_kept) if first_kept else None,
                     tokens_before=int(record.get("tokensBefore") or 0),
                     details=details,
-                    preserve_data={"short_summary": record.get("shortSummary")}
-                    if record.get("shortSummary")
-                    else {},
+                    preserve_data=(
+                        {"short_summary": record.get("shortSummary")}
+                        if record.get("shortSummary")
+                        else {}
+                    ),
                     summary_source_id=rid or None,
                 ),
                 raw_flags={
@@ -307,6 +355,20 @@ class OmpAdapter(SourceAdapter):
                 },
             )
             return
+        if kind == "custom":
+            # Structured metadata (todo nudges, session-exit markers) carries
+            # no conversation text but DOES carry the parent link that keeps
+            # the active-branch walk intact across it. Emit a silent event so
+            # the mapper can see that link without counting it as a skip.
+            if rid:
+                yield SourceEvent(
+                    source_event_id=rid,
+                    parent_source_event_id=record.get("parentId"),
+                    ts=ts,
+                    kind="unknown",
+                    raw_flags={"silent": True},
+                )
+            return
         if kind == "custom_message":
             if record.get("attribution") != "user":
                 return
@@ -314,6 +376,7 @@ class OmpAdapter(SourceAdapter):
             if text.strip():
                 yield SourceEvent(
                     source_event_id=rid or f"custom:{ts}",
+                    parent_source_event_id=record.get("parentId"),
                     ts=ts,
                     kind="user",
                     text=["[imported from omp] " + text],
@@ -348,9 +411,7 @@ class OmpAdapter(SourceAdapter):
                 if not isinstance(arguments, dict):
                     arguments = {}
                 raw = (
-                    block.get("partialArgs")
-                    if isinstance(block.get("partialArgs"), str)
-                    else None
+                    block.get("partialArgs") if isinstance(block.get("partialArgs"), str) else None
                 )
                 tool_calls.append(
                     {
@@ -367,9 +428,7 @@ class OmpAdapter(SourceAdapter):
                         ImageContent(
                             data=data,
                             mime_type=str(
-                                block.get("mimeType")
-                                or block.get("mime_type")
-                                or "image/png"
+                                block.get("mimeType") or block.get("mime_type") or "image/png"
                             ),
                         )
                     )
@@ -377,6 +436,7 @@ class OmpAdapter(SourceAdapter):
             if text_blocks or images:
                 yield SourceEvent(
                     source_event_id=rid or f"user:{ts}",
+                    parent_source_event_id=record.get("parentId"),
                     ts=ts,
                     kind="user",
                     text=text_blocks,
@@ -387,6 +447,7 @@ class OmpAdapter(SourceAdapter):
             if text_blocks or tool_calls or images:
                 yield SourceEvent(
                     source_event_id=rid or f"assistant:{ts}",
+                    parent_source_event_id=record.get("parentId"),
                     ts=ts,
                     kind="assistant",
                     text=text_blocks,
@@ -403,13 +464,12 @@ class OmpAdapter(SourceAdapter):
                     content.append(block)
             yield SourceEvent(
                 source_event_id=rid or f"tool:{ts}",
+                parent_source_event_id=record.get("parentId"),
                 ts=ts,
                 kind="tool_result",
                 tool_result={
                     "tool_call_id": str(
-                        message.get("toolCallId")
-                        or message.get("tool_call_id")
-                        or ""
+                        message.get("toolCallId") or message.get("tool_call_id") or ""
                     ),
                     "tool_name": str(message.get("toolName") or message.get("tool_name") or ""),
                     "content": content,
@@ -431,10 +491,6 @@ class OmpAdapter(SourceAdapter):
         memory_root = root / "memories"
         if not memory_root.is_dir():
             return []
-        by_cwd: dict[str, list[SourceSession]] = {}
-        for session in sessions:
-            if session.cwd:
-                by_cwd.setdefault(session.cwd, []).append(session)
         records: list[MemoryRecord] = []
         for path in sorted(memory_root.rglob("*.md")):
             if not store.is_confined(memory_root, path):
@@ -443,7 +499,9 @@ class OmpAdapter(SourceAdapter):
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            cwd_key = path.parent.name
+            encoded = path.parent.name
+            matching = [row.cwd for row in sessions if row.cwd and encode_cwd(row.cwd) == encoded]
+            cwd = matching[0] if len(matching) == 1 else None
             for index, line in enumerate(text.splitlines()):
                 stripped = line.strip()
                 if not stripped.startswith(("- ", "* ")):
@@ -462,7 +520,7 @@ class OmpAdapter(SourceAdapter):
                         uri=str(path),
                         status="candidate",
                         scope_hint="work" if path.name == "learned.md" else "personal",
-                        cwd=None if cwd_key.startswith("--") is False else None,
+                        cwd=cwd,
                     )
                 )
         return records

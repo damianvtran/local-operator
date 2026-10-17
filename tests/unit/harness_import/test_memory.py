@@ -51,9 +51,9 @@ def test_scope_classification_and_review_artifact(isolated):
     assert outcome.instruction_path.endswith("imports/instructions/claude.md")
     assert outcome.review_path.endswith("imports/memory-review-claude.jsonl")
 
-    global_hits = MemoryStore(
-        config, MemoryIdentity(session_id="importing-session")
-    ).search("synthetic jasmine tea", scope="global")
+    global_hits = MemoryStore(config, MemoryIdentity(session_id="importing-session")).search(
+        "synthetic jasmine tea", scope="global"
+    )
     assert any("jasmine" in hit["body"] for hit in global_hits)
     session_hits = MemoryStore(
         config,
@@ -118,6 +118,7 @@ def test_work_memory_with_ambiguous_cwd_goes_to_review(isolated):
     )
     assert outcome.imported == 0
     assert outcome.skipped == 1
-    assert "Ambiguous synthetic work note" in (
-        config / "imports" / "memory-review-omp.jsonl"
-    ).read_text()
+    assert (
+        "Ambiguous synthetic work note"
+        in (config / "imports" / "memory-review-omp.jsonl").read_text()
+    )

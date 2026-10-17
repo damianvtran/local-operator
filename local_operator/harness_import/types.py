@@ -123,9 +123,6 @@ class CompactionInfo:
     #: Source id of the summary/boundary row itself; becomes the target
     #: compaction row id and is never used as the kept-window anchor.
     summary_source_id: str | None = None
-    #: ``replacement_history`` emission: the first message/tool event after the
-    #: marker is synthetic retained history, and only it may anchor the cut.
-    anchor_after_marker: bool = False
 
 
 @dataclass(slots=True)

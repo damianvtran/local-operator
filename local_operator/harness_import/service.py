@@ -20,6 +20,7 @@ import hashlib
 import re
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
@@ -52,10 +53,17 @@ BATCH_BYTES = 4 * 1024 * 1024
 TITLE_MAX = 120
 
 
+class _ImportCancelled(RuntimeError):
+    """Raised between write batches when the operator cancelled the job."""
+
+
 def _normalise_title(text: str | None) -> str:
     if not text:
         return ""
-    text = " ".join(str(text).split())
+    # Drop control/format/private-use/surrogate characters: omp titles can
+    # begin with a private-use glyph that renders as tofu in lop's pickers.
+    text = "".join(char for char in str(text) if unicodedata.category(char)[0] != "C")
+    text = " ".join(text.split())
     text, _ = redact_text(text)
     return text[:TITLE_MAX].strip()
 
@@ -87,9 +95,7 @@ class HarnessImportService:
         adapter = self.adapters.get(source)
         if adapter is None:
             raise ValueError(f"unknown import source: {source}")
-        return await asyncio.to_thread(
-            adapter.list_sessions, include_subagents=include_subagents
-        )
+        return await asyncio.to_thread(adapter.list_sessions, include_subagents=include_subagents)
 
     def _select(self, request: ImportRequest) -> list[tuple[SourceAdapter, SourceSession]]:
         selected: list[tuple[SourceAdapter, SourceSession]] = []
@@ -125,34 +131,25 @@ class HarnessImportService:
     def _preview_sync(self, request: ImportRequest) -> ImportPreview:
         preview = ImportPreview()
         selected = self._select(request)
+        preview.warnings.extend(self._option_warnings(request, selected))
         for adapter, session in selected:
             row = session.to_dict()
             row["target_session_id"] = target_session_id(adapter.source, session.source_id)
-            existing = self._existing_manifest(session, adapter.source)
-            row["already_imported"] = bool(
-                existing and existing.get("status") == "complete"
+            manifests = self._existing_manifests(session, adapter.source)
+            row["already_imported"] = any(
+                manifest.get("status") == "complete" for manifest in manifests
             )
             warnings = list(session.warnings)
-            if session.availability == "full":
+            messages = session.message_count or 0
+            compactions = session.compaction_count or 0
+            # Preview must stay a metadata/count pass: it never builds the full
+            # mapped object graph a real import needs (design §6).
+            counter = getattr(adapter, "preview_counts", None)
+            if session.availability == "full" and counter is not None:
                 try:
-                    events = list(adapter.read_session(session))
-                    mapped = build_mapped_session(
-                        events,
-                        source=adapter.source,
-                        source_session_id=session.source_id,
-                        default_created_ts=session.created_ts,
-                    )
-                    row["message_count"] = mapped.stats["messages"]
-                    row["compaction_count"] = mapped.stats["compactions"]
-                    row["warnings"] = [*warnings, *mapped.warnings]
-                    preview.total_messages += mapped.stats["messages"]
-                    preview.total_compactions += mapped.stats["compactions"]
-                    preview.total_sessions += 1
+                    messages, compactions = counter(session)
                 except Exception as exc:  # noqa: BLE001 - a preview reports, never crashes
-                    row["warnings"] = [
-                        *warnings,
-                        f"body unreadable: {type(exc).__name__}",
-                    ]
+                    warnings.append(f"body unreadable: {type(exc).__name__}")
                     preview.warnings.append(
                         ImportWarning(
                             source=adapter.source,
@@ -161,8 +158,12 @@ class HarnessImportService:
                             message=f"body unreadable: {type(exc).__name__}",
                         )
                     )
-            else:
-                row["warnings"] = warnings
+            row["message_count"] = messages
+            row["compaction_count"] = compactions
+            row["warnings"] = warnings
+            preview.total_messages += messages
+            preview.total_compactions += compactions
+            preview.total_sessions += 1
             preview.sessions.append(row)
         if request.include_memory:
             for source, sessions in self._sessions_by_source(selected).items():
@@ -187,18 +188,7 @@ class HarnessImportService:
                     preview.instruction_review_paths.append(
                         str(memory_import.instruction_path(self.config, source))
                     )
-        preview.sources = [
-            {
-                "source": info.source,
-                "label": info.label,
-                "root": str(info.root) if info.root else "",
-                "detected": info.detected,
-                "session_count": info.session_count,
-                "availability": info.availability,
-                "detail": info.detail,
-            }
-            for info in (adapter.detect() for adapter in self.adapters.values())
-        ]
+        preview.sources = [adapter.detect().to_dict() for adapter in self.adapters.values()]
         return preview
 
     # -- import -------------------------------------------------------------
@@ -236,6 +226,7 @@ class HarnessImportService:
 
         try:
             selected = await asyncio.to_thread(self._select, request)
+            result.warnings.extend(self._option_warnings(request, selected))
             emit("importing", total=len(selected))
             imported_by_thread: dict[str, str] = {}
             imported_by_cwd: dict[str, list[str]] = {}
@@ -274,6 +265,11 @@ class HarnessImportService:
                     total=len(selected),
                     results=[row.to_dict() for row in result.sessions],
                 )
+                if self._cancel.is_set():
+                    result.state = "cancelled"
+                    state.state = "cancelled"
+                    emit("cancelled")
+                    break
                 if outcome.outcome == "failed":
                     continue
             result.messages = sum(row.messages for row in result.sessions)
@@ -290,12 +286,15 @@ class HarnessImportService:
                     session_dirs,
                     result,
                 )
-            if result.state != "cancelled":
+            if self._cancel.is_set():
+                result.state = "cancelled"
+                state.state = "cancelled"
+            elif result.state != "cancelled":
                 result.state = "done"
                 state.state = "done"
             emit("done")
             return result
-        except BaseException as exc:  # noqa: BLE001 - the job reports its own failure
+        except Exception as exc:  # noqa: BLE001 - the job reports its own failure
             result.state = "failed"
             result.error = f"{type(exc).__name__}: {exc}"
             state.state = "failed"
@@ -325,44 +324,71 @@ class HarnessImportService:
             return outcome
         try:
             fingerprint = store.fingerprint(self._primary_path(session))
-            existing = self._existing_manifest(session, adapter.source)
-            directory = self._existing_dir(existing)
-            if (
-                existing
-                and existing.get("status") == "complete"
-                and existing.get("source_fingerprint") == fingerprint
-                and manifest_store.prefix_sha256(directory)
-                == existing.get("target_prefix_sha256")
-            ):
-                outcome.outcome = "skipped_already_imported"
-                outcome.target_session_id = str(existing.get("target_session_id") or "")
-                return outcome
-            if existing and existing.get("status") == "complete":
-                previous = existing.get("source_fingerprint") or {}
-                previous_size = int(previous.get("size") or 0)
-                head_length = min(previous_size, store.FINGERPRINT_PREFIX)
-                rotated = (
-                    fingerprint.get("size", 0) < previous_size
-                    or store.sha256_prefix(self._primary_path(session), head_length)
-                    != previous.get("sha256_prefix")
-                )
-                edited = manifest_store.prefix_sha256(directory) != existing.get(
+            manifests = self._existing_manifests(session, adapter.source)
+            latest = manifests[0] if manifests else None
+            if latest is not None:
+                directory = Path(str(latest["target_session_dir"]))
+                prefix_ok = manifest_store.prefix_sha256(directory) == latest.get(
                     "target_prefix_sha256"
                 )
-                if not rotated and not edited:
-                    return self._resume(
-                        adapter, session, request, existing, directory, fingerprint, outcome
+                same_source = latest.get("source_fingerprint") == fingerprint
+                if latest.get("status") == "partial":
+                    # A crash left the rows we managed to write. Re-enter the
+                    # SAME directory; _create appends only missing ids.
+                    return self._create(adapter, session, directory, fingerprint, outcome, latest)
+                if prefix_ok and same_source:
+                    outcome.outcome = "skipped_already_imported"
+                    outcome.target_session_id = str(latest.get("target_session_id") or "")
+                    return outcome
+                if prefix_ok and self._source_grew(latest, session):
+                    mapped = self._map(adapter, session)
+                    old_leaf = str(latest.get("active_leaf_source_id") or "")
+                    # A linear append keeps the old leaf on the new active
+                    # branch. A rewritten branch does not, even though the
+                    # deterministic row ids would let a naive resume splice the
+                    # two branches into one history.
+                    same_branch = (
+                        adapter.source != "omp"
+                        or not old_leaf
+                        or old_leaf in mapped.active_branch_source_ids
                     )
-                directory = self._allocate_directory(
-                    adapter.source, session.source_id, force_new=True
+                    if same_branch:
+                        return self._resume(
+                            adapter, session, latest, directory, fingerprint, outcome, mapped
+                        )
+                    # A different active branch is a new conversation shape;
+                    # never splice both branches into one transcript.
+                    return self._create(
+                        adapter,
+                        session,
+                        self._allocate_directory(adapter.source, session.source_id, force_new=True),
+                        fingerprint,
+                        outcome,
+                        latest,
+                        mapped,
+                    )
+                # Rotated source or user-edited target: a fresh deterministic
+                # copy, never an append to bytes we do not own.
+                return self._create(
+                    adapter,
+                    session,
+                    self._allocate_directory(adapter.source, session.source_id, force_new=True),
+                    fingerprint,
+                    outcome,
+                    latest,
                 )
-            elif existing and existing.get("status") == "partial":
-                directory = self._allocate_directory(adapter.source, session.source_id)
-            else:
-                directory = self._allocate_directory(adapter.source, session.source_id)
             return self._create(
-                adapter, session, directory, fingerprint, request, outcome
+                adapter,
+                session,
+                self._allocate_directory(adapter.source, session.source_id),
+                fingerprint,
+                outcome,
+                None,
             )
+        except _ImportCancelled:
+            outcome.outcome = "failed"
+            outcome.warnings.append("import cancelled")
+            return outcome
         except Exception as exc:  # noqa: BLE001 - one bad session cannot kill the job
             outcome.outcome = "failed"
             outcome.warnings.append(f"{type(exc).__name__}: {exc}")
@@ -376,6 +402,15 @@ class HarnessImportService:
             )
             return outcome
 
+    def _map(self, adapter: SourceAdapter, session: SourceSession) -> MappedSession:
+        events = list(adapter.read_session(session))
+        return build_mapped_session(
+            events,
+            source=adapter.source,
+            source_session_id=session.source_id,
+            default_created_ts=session.created_ts,
+        )
+
     def _primary_path(self, session: SourceSession) -> Path:
         if session.path.exists():
             return session.path
@@ -384,24 +419,30 @@ class HarnessImportService:
                 return path
         return session.path
 
+    def _source_grew(self, manifest: dict[str, Any], session: SourceSession) -> bool:
+        previous = manifest.get("source_fingerprint") or {}
+        previous_size = int(previous.get("size") or 0)
+        current = self._primary_path(session).stat().st_size
+        if current < previous_size:
+            return False
+        head_length = min(previous_size, store.FINGERPRINT_PREFIX)
+        return store.sha256_prefix(self._primary_path(session), head_length) == previous.get(
+            "sha256_prefix"
+        )
+
     def _create(
         self,
         adapter: SourceAdapter,
         session: SourceSession,
         directory: Path,
         fingerprint: dict[str, Any],
-        request: ImportRequest,
         outcome: SessionResult,
+        predecessor: dict[str, Any] | None,
+        mapped: MappedSession | None = None,
     ) -> SessionResult:
         target_id = directory.name
         outcome.target_session_id = target_id
-        events = list(adapter.read_session(session))
-        mapped = build_mapped_session(
-            events,
-            source=adapter.source,
-            source_session_id=session.source_id,
-            default_created_ts=session.created_ts,
-        )
+        mapped = mapped or self._map(adapter, session)
         self._materialise_target(directory, session, mapped, adapter.source)
         manifest_store.write_manifest(
             directory,
@@ -413,6 +454,7 @@ class HarnessImportService:
                 mapped=mapped,
                 status="partial",
                 counts=self._counts(mapped),
+                predecessor=predecessor,
             ),
         )
         transcript = Transcript(directory, defer_materialise=True)
@@ -430,45 +472,29 @@ class HarnessImportService:
                 mapped=mapped,
                 status="complete",
                 counts=self._counts(mapped),
+                predecessor=predecessor,
             ),
         )
         self._apply_stats(outcome, mapped)
         outcome.outcome = "imported"
-        self._update_index(
-            adapter.source,
-            session,
-            target_id,
-            fingerprint,
-            outcome,
-        )
+        self._update_index(adapter.source, session, target_id, fingerprint, outcome)
         return outcome
 
     def _resume(
         self,
         adapter: SourceAdapter,
         session: SourceSession,
-        request: ImportRequest,
         existing: dict[str, Any],
         directory: Path,
         fingerprint: dict[str, Any],
         outcome: SessionResult,
+        mapped: MappedSession,
     ) -> SessionResult:
-        del request
         target_id = directory.name
-        events = list(adapter.read_session(session))
-        mapped = build_mapped_session(
-            events,
-            source=adapter.source,
-            source_session_id=session.source_id,
-            default_created_ts=session.created_ts,
-        )
-        transcript = Transcript(directory)
-        committed = {entry.id for entry in transcript.entries()}
+        committed = {entry.id for entry in Transcript(directory).entries()}
         new_rows = [row for row in mapped.rows if row.id not in committed]
         outcome.target_session_id = target_id
         if not new_rows:
-            # The body gained no rows (metadata-only growth). Record the new
-            # fingerprint, or the next run repeats this whole scan forever.
             manifest_store.write_manifest(
                 directory,
                 self._manifest(
@@ -479,33 +505,35 @@ class HarnessImportService:
                     mapped=mapped,
                     status="complete",
                     counts=self._counts(mapped),
+                    predecessor=existing,
                 ),
             )
             self._apply_stats(outcome, mapped)
             outcome.outcome = "skipped_already_imported"
             return outcome
+        transcript = Transcript(directory)
         self._append(transcript, mapped, outcome, rows=new_rows)
         self._apply_stats(outcome, mapped)
-        counts = self._counts(mapped)
-        payload = self._manifest(
-            source=adapter.source,
-            session=session,
-            directory=directory,
-            fingerprint=fingerprint,
-            mapped=mapped,
-            status="complete",
-            counts=counts,
+        manifest_store.write_manifest(
+            directory,
+            self._manifest(
+                source=adapter.source,
+                session=session,
+                directory=directory,
+                fingerprint=fingerprint,
+                mapped=mapped,
+                status="complete",
+                counts=self._counts(mapped),
+                predecessor=existing,
+            ),
         )
-        manifest_store.write_manifest(directory, payload)
         self._update_index(adapter.source, session, target_id, fingerprint, outcome)
         outcome.outcome = "resumed"
         return outcome
 
     # -- target construction ------------------------------------------------
 
-    def _allocate_directory(
-        self, source: str, source_id: str, *, force_new: bool = False
-    ) -> Path:
+    def _allocate_directory(self, source: str, source_id: str, *, force_new: bool = False) -> Path:
         sessions = self.config / "sessions"
         sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
         base = target_session_id(source, source_id)
@@ -528,9 +556,17 @@ class HarnessImportService:
                 continue
         raise RuntimeError("could not allocate a target session directory")
 
-    def _existing_manifest(self, session: SourceSession, source: str) -> dict[str, Any] | None:
+    def _existing_manifests(self, session: SourceSession, source: str) -> list[dict[str, Any]]:
+        """Every target this source session owns, NEWEST first.
+
+        A rotated source or an edited target creates -2, -3, ...; checking only
+        the first manifest made every later run allocate another copy. The
+        current-state match is chosen by the caller, so this returns the whole
+        family (newest first) rather than a single arbitrary member.
+        """
         base = target_session_id(source, session.source_id)
         sessions = self.config / "sessions"
+        found: list[dict[str, Any]] = []
         for attempt in range(100):
             name = base if attempt == 0 else f"{base}-{attempt + 1}"
             directory = sessions / name
@@ -543,16 +579,44 @@ class HarnessImportService:
                 value = dict(value)
                 value["target_session_id"] = name
                 value["target_session_dir"] = str(directory)
-                return value
+                found.append(value)
             if not directory.exists():
-                return None
-        return None
+                break
+        found.reverse()
+        return found
 
-    @staticmethod
-    def _existing_dir(existing: dict[str, Any] | None) -> Path:
-        if existing is None:
-            return Path()
-        return Path(str(existing.get("target_session_dir") or ""))
+    def _option_warnings(
+        self,
+        request: ImportRequest,
+        selected: Sequence[tuple[SourceAdapter, SourceSession]],
+    ) -> list[ImportWarning]:
+        """Surface options this slice cannot apply, instead of ignoring them."""
+        warnings: list[ImportWarning] = []
+        if request.include_cleared_segments:
+            warnings.append(
+                ImportWarning(
+                    source="",
+                    session_id="",
+                    code="option_unsupported",
+                    message=(
+                        "include_cleared_segments is not supported by this slice; "
+                        "only each source's active segment is imported"
+                    ),
+                )
+            )
+        if request.include_subagents and any(adapter.source == "claude" for adapter, _ in selected):
+            warnings.append(
+                ImportWarning(
+                    source="claude",
+                    session_id="",
+                    code="option_unsupported",
+                    message=(
+                        "Claude sidechain/subagent inclusion is not supported by "
+                        "this slice; sidechain records are skipped"
+                    ),
+                )
+            )
+        return warnings
 
     def _materialise_target(
         self,
@@ -571,9 +635,7 @@ class HarnessImportService:
         )
         from local_operator.resume import write_session_title
 
-        write_session_title(
-            directory, title, user_set=mapped.title_user_set, past_names=[]
-        )
+        write_session_title(directory, title, user_set=mapped.title_user_set, past_names=[])
 
     def _manifest(
         self,
@@ -585,6 +647,7 @@ class HarnessImportService:
         mapped: MappedSession,
         status: str,
         counts: dict[str, int],
+        predecessor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "v": 1,
@@ -598,6 +661,7 @@ class HarnessImportService:
             "imported_at": time.time(),
             "status": status,
             "active_leaf_source_id": mapped.active_leaf_source_id,
+            "active_branch_source_ids": list(mapped.active_branch_source_ids),
             "last_source_offset": fingerprint.get("size", 0),
             "imported_entries": len(mapped.rows),
             "counts": counts,
@@ -608,6 +672,11 @@ class HarnessImportService:
             "warnings": [*session.warnings, *mapped.warnings],
             "capture_memory": False,
             "target_prefix_sha256": manifest_store.prefix_sha256(directory),
+            "predecessor_target_session_id": (
+                str(predecessor.get("target_session_id") or "") or None
+                if predecessor is not None
+                else None
+            ),
         }
 
     @staticmethod
@@ -625,7 +694,7 @@ class HarnessImportService:
             "messages": mapped.stats["messages"],
             "tool_calls": mapped.stats["tool_calls"],
             "tool_results": mapped.stats["tool_results"],
-            "duplicate_results_skipped": 0,
+            "duplicate_results_skipped": mapped.stats.get("duplicate_results", 0),
             "compactions": mapped.stats["compactions"],
             "skipped": mapped.stats["skipped"],
             "redactions": mapped.stats["redactions"],
@@ -647,14 +716,12 @@ class HarnessImportService:
             nonlocal batch, size
             if not batch:
                 return
+            if self._cancel.is_set():
+                raise _ImportCancelled("import cancelled between write batches")
             batch_ids = {row.id for row in batch}
             await transcript.append_imported(
                 batch,
-                messages={
-                    key: value
-                    for key, value in mapped.messages.items()
-                    if key in batch_ids
-                },
+                messages={key: value for key, value in mapped.messages.items() if key in batch_ids},
             )
             batch = []
             size = 0
@@ -680,7 +747,7 @@ class HarnessImportService:
                 for row in selected[index:end]:
                     batch.append(row)
                     size += len(row.to_json())
-                if size >= BATCH_BYTES:
+                if len(batch) >= BATCH_ROWS or size >= BATCH_BYTES:
                     await flush()
                 index = end
             await flush()

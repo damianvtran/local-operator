@@ -20,6 +20,7 @@ row in that array — a leading compaction/encrypted item is not a message.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import sqlite3
@@ -37,6 +38,7 @@ from local_operator.harness_import.sources.base import (
     parse_ts,
 )
 from local_operator.harness_import.types import (
+    Availability,
     CompactionInfo,
     MemoryRecord,
     SourceEvent,
@@ -95,8 +97,18 @@ def _text_handle(path: Path) -> Iterator[TextIO]:
             from compression import zstd  # type: ignore
         except (ImportError, AttributeError) as exc:  # pragma: no cover - py<3.14
             raise UnsupportedBody("zstd rollout requires Python 3.14 compression.zstd") from exc
-        with zstd.ZstdFile(path, "rt", encoding="utf-8") as handle:  # type: ignore[attr-defined]
-            yield handle
+        try:
+            opener = getattr(zstd, "open", None)
+            if opener is not None:
+                # ``compression.zstd.open`` is the TEXT API on 3.14;
+                # ``ZstdFile`` is binary-only and rejects ``encoding``.
+                with opener(path, "rt", encoding="utf-8") as handle:  # type: ignore[attr-defined]
+                    yield handle
+                return
+            with zstd.ZstdFile(path, "rb") as raw:  # type: ignore[attr-defined]
+                yield io.TextIOWrapper(raw, encoding="utf-8", errors="replace")
+        except (TypeError, ValueError) as exc:
+            raise UnsupportedBody(f"zstd rollout unreadable: {type(exc).__name__}") from exc
         return
     with path.open(encoding="utf-8", errors="replace") as handle:
         yield handle
@@ -122,23 +134,46 @@ def _source_id_from_body(path: Path) -> str:
                 value = payload.get("id")
                 if isinstance(value, str) and value:
                     return value
-    except (OSError, UnsupportedBody):
+    except (OSError, UnsupportedBody, TypeError, ValueError):
         return ""
     return ""
 
 
-def _records(path: Path) -> list[dict[str, Any]]:
+def _records(path: Path, stats: dict[str, int] | None = None) -> list[dict[str, Any]]:
+    try:
+        return _records_uncapped(path, stats)
+    except (TypeError, ValueError) as exc:
+        raise UnsupportedBody(f"rollout unreadable: {type(exc).__name__}") from exc
+
+
+def _records_uncapped(path: Path, stats: dict[str, int] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    if path.suffix != ".zst":
+        # The plain-JSONL path uses the shared bounded reader: same 16 MiB
+        # line and 512 MiB file caps as every other adapter.
+        for _, record in store.iter_jsonl(path, stats=stats):
+            out.append(record)
+            if len(out) >= MAX_RECORDS:
+                break
+        return out
     with _text_handle(path) as handle:
         for line in handle:
             if len(out) >= MAX_RECORDS:
                 break
+            if len(line) > store.MAX_LINE_BYTES:
+                if stats is not None:
+                    stats["skipped_lines"] = stats.get("skipped_lines", 0) + 1
+                    stats["oversized_lines"] = stats.get("oversized_lines", 0) + 1
+                continue
             line = line.strip()
             if not line:
                 continue
             try:
                 record = json.loads(line)
             except ValueError:
+                if stats is not None:
+                    stats["skipped_lines"] = stats.get("skipped_lines", 0) + 1
+                    stats["malformed_lines"] = stats.get("malformed_lines", 0) + 1
                 continue
             if isinstance(record, dict):
                 out.append(record)
@@ -224,27 +259,46 @@ def _rollback(events: list[SourceEvent], turns: int) -> int:
     return turns
 
 
+def _worst_availability(rows: list[SourceSession]) -> Availability:
+    if any(row.availability == "full" for row in rows):
+        return "full"
+    if any(row.availability == "metadata_only" for row in rows):
+        return "metadata_only"
+    return "unsupported"
+
+
 class CodexAdapter(SourceAdapter):
     source = "codex"
     label = "Codex"
 
     def __init__(self, config: Path | None = None):
         self.config = Path(config) if config is not None else None
+        self._thread_warning = ""
 
     def detect(self) -> SourceInfo:
         root = resolve_root()
-        detected = root.is_dir() and (
-            _database(root).exists() or (root / "sessions").is_dir()
-        )
+        detected = root.is_dir() and (_database(root).exists() or (root / "sessions").is_dir())
+        rows: list[SourceSession] = []
+        if detected:
+            try:
+                rows = self.list_sessions()
+            except (OSError, sqlite3.Error):
+                rows = []
+        detail = "" if detected else f"no Codex store at {root}"
+        if detected and not rows and self._thread_warning:
+            detail = self._thread_warning
         return SourceInfo(
             source="codex",
             label=self.label,
             root=root,
             detected=detected,
-            detail="" if detected else f"no Codex store at {root}",
+            session_count=len(rows),
+            availability=_worst_availability(rows),
+            detail=detail,
         )
 
     def _threads(self) -> tuple[list[dict[str, Any]], str]:
+        self._thread_warning = ""
         root = resolve_root()
         database = _database(root)
         if self.config is None or not database.exists():
@@ -257,7 +311,8 @@ class CodexAdapter(SourceAdapter):
                         "SELECT name FROM sqlite_master WHERE type='table' AND name='threads'"
                     ).fetchone()
                     if not table:
-                        return [], "threads table missing"
+                        self._thread_warning = "threads table missing"
+                        return [], self._thread_warning
                     rows = db.execute(
                         "SELECT "
                         + ",".join(THREAD_COLUMNS)
@@ -266,7 +321,9 @@ class CodexAdapter(SourceAdapter):
                 finally:
                     db.close()
         except (sqlite3.Error, OSError) as exc:
-            return [], f"thread index unreadable ({type(exc).__name__})"
+            self._thread_warning = f"thread index unreadable ({type(exc).__name__})"
+            return [], self._thread_warning
+        self._thread_warning = ""
         return [dict(zip(THREAD_COLUMNS, row, strict=False)) for row in rows], ""
 
     def list_sessions(self, *, include_subagents: bool = False) -> list[SourceSession]:
@@ -279,7 +336,7 @@ class CodexAdapter(SourceAdapter):
             if not source_id:
                 continue
             body = _resolve_body(root, thread.get("rollout_path"), source_id)
-            availability: str = "full"
+            availability: Availability = "full"
             warning = ""
             if body is None:
                 availability = "metadata_only"
@@ -290,6 +347,9 @@ class CodexAdapter(SourceAdapter):
                 except (ImportError, AttributeError):
                     availability = "unsupported"
                     warning = "zstd rollout requires Python 3.14 compression.zstd"
+            elif body.stat().st_size > store.MAX_SOURCE_BYTES:
+                availability = "unsupported"
+                warning = "rollout exceeds the import size cap"
             rows[source_id] = SourceSession(
                 source="codex",
                 source_id=source_id,
@@ -300,8 +360,8 @@ class CodexAdapter(SourceAdapter):
                 updated_ts=parse_ts(thread.get("updated_at")),
                 message_count=0,
                 compaction_count=0,
-                availability=availability,  # type: ignore[arg-type]
-                warnings=[warning] if warning else [],
+                availability=availability,
+                warnings=[item for item in (warning, reason) if item],
                 model=str(thread.get("model") or "") or None,
             )
         # Rollout files not indexed by threads must still be listable.
@@ -310,9 +370,37 @@ class CodexAdapter(SourceAdapter):
             for path in sorted(sessions_root.rglob("rollout-*.jsonl*")):
                 if not store.is_confined(sessions_root, path):
                     continue
-                source_id = _source_id_from_body(path)
-                if not source_id or source_id in rows:
+                try:
+                    source_id = _source_id_from_body(path)
+                except (UnsupportedBody, OSError, TypeError, ValueError) as exc:
+                    source_id = f"unreadable:{path.name}"
+                    if source_id in rows:
+                        continue
+                    rows[source_id] = SourceSession(
+                        source="codex",
+                        source_id=source_id,
+                        path=path,
+                        availability="unsupported",
+                        warnings=[f"rollout unreadable: {type(exc).__name__}"],
+                    )
                     continue
+                if not source_id:
+                    key = f"unreadable:{path.name}"
+                    rows[key] = SourceSession(
+                        source="codex",
+                        source_id=key,
+                        path=path,
+                        availability="unsupported",
+                        warnings=["rollout unreadable or missing session_meta"],
+                    )
+                    continue
+                if source_id in rows:
+                    continue
+                availability: Availability = "full"
+                warnings: list[str] = []
+                if path.stat().st_size > store.MAX_SOURCE_BYTES:
+                    availability = "unsupported"
+                    warnings.append("rollout exceeds the import size cap")
                 rows[source_id] = SourceSession(
                     source="codex",
                     source_id=source_id,
@@ -320,18 +408,51 @@ class CodexAdapter(SourceAdapter):
                     title=None,
                     created_ts=path.stat().st_mtime,
                     updated_ts=path.stat().st_mtime,
+                    availability=availability,
+                    warnings=warnings,
                 )
         result = list(rows.values())
         result.sort(key=lambda row: row.updated_ts, reverse=True)
         del reason
         return result
 
+    def preview_counts(self, session: SourceSession) -> tuple[int, int]:
+        """Count readable message/tool rows and compactions without mapping."""
+        messages = 0
+        compactions = 0
+        for record in _records(session.path):
+            kind = record.get("type")
+            payload = json_object(record.get("payload"))
+            if kind == "compacted":
+                compactions += 1
+            elif kind == "response_item" and payload.get("type") in (
+                "message",
+                "function_call",
+                "custom_tool_call",
+                "function_call_output",
+                "custom_tool_call_output",
+            ):
+                if payload.get("type") == "message" and payload.get("role") == "developer":
+                    continue
+                messages += 1
+        return messages, compactions
+
     def read_session(self, session: SourceSession) -> Iterator[SourceEvent]:
         if session.availability != "full":
-            raise UnsupportedBody(
-                session.warnings[0] if session.warnings else "body unavailable"
+            raise UnsupportedBody(session.warnings[0] if session.warnings else "body unavailable")
+        stats: dict[str, int] = {}
+        records = _records(session.path, stats)
+        if stats.get("skipped_lines"):
+            yield SourceEvent(
+                source_event_id="source:skipped-lines",
+                kind="unknown",
+                ts=session.updated_ts,
+                raw_flags={
+                    "warning": (
+                        f"{stats['skipped_lines']} malformed or oversized source " "line(s) skipped"
+                    )
+                },
             )
-        records = _records(session.path)
         if not records:
             return
         canonical_users, canonical_assistants, canonical_calls = _canonical_texts(records)
@@ -565,7 +686,6 @@ class CodexAdapter(SourceAdapter):
                             summary=summary or "Context compacted by Codex.",
                             tokens_before=0,
                             details=details,
-                            anchor_after_marker=True,
                         ),
                     )
                 )

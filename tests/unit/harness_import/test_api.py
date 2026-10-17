@@ -28,9 +28,7 @@ def test_import_routes_end_to_end(omp_store, monkeypatch):
         assert sources.status_code == 200
         assert any(row["source"] == "omp" for row in sources.json()["result"]["sources"])
 
-        sessions = client.get(
-            "/v1/desktop/imports/sessions?source=omp", headers=headers
-        )
+        sessions = client.get("/v1/desktop/imports/sessions?source=omp", headers=headers)
         assert sessions.status_code == 200
         rows = sessions.json()["result"]["sessions"]
         assert [row["source_id"] for row in rows] == ["omp-synthetic"]

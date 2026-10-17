@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from local_operator.harness.types import CustomMessage
+from local_operator.harness.types import CustomMessage, Message
 from local_operator.harness_import.service import HarnessImportService
 from local_operator.harness_import.types import ImportRequest
 from local_operator.session.transcript import Transcript
@@ -53,8 +53,8 @@ async def test_omp_active_branch_and_compaction(omp_store):
     assert history[0].details["summary"] == "OMP SUMMARY"
     texts = []
     for message in history[1:]:
-        if getattr(message, "role", "") == "user":
-            texts.append(message.content[0].text)
+        if isinstance(message, Message) and message.role == "user":
+            texts.append(message.text)
     assert texts == [
         "first omp question",
         "kept omp question",
@@ -64,9 +64,7 @@ async def test_omp_active_branch_and_compaction(omp_store):
     # Tool call and result stay adjacent in source order and keep their ids.
     roles = [entry.payload.get("role") for entry in entries if entry.type == "message"]
     assert roles[:4] == ["user", "assistant", "tool", "assistant"]
-    tool_entry = next(
-        entry for entry in entries if entry.payload.get("role") == "tool"
-    )
+    tool_entry = next(entry for entry in entries if entry.payload.get("role") == "tool")
     assert tool_entry.payload["tool_call_id"] == "call-omp-1"
 
     title = json.loads((config / "sessions" / row.target_session_id / "title.json").read_text())

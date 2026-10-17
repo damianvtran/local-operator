@@ -28,6 +28,7 @@ from local_operator.harness_import.sources.base import (
     parse_ts,
 )
 from local_operator.harness_import.types import (
+    Availability,
     CompactionInfo,
     MemoryRecord,
     SourceEvent,
@@ -197,6 +198,24 @@ def _history_only(root: Path, seen: set[str]) -> list[SourceSession]:
     ]
 
 
+def _worst_availability(rows: list[SourceSession]) -> Availability:
+    if any(row.availability == "full" for row in rows):
+        return "full"
+    if any(row.availability == "metadata_only" for row in rows):
+        return "metadata_only"
+    return "unsupported"
+
+
+def _unreadable(path: Path, exc: Exception) -> SourceSession:
+    return SourceSession(
+        source="claude",
+        source_id=f"unreadable:{path.name}",
+        path=path,
+        availability="unsupported",
+        warnings=[f"source unreadable: {type(exc).__name__}"],
+    )
+
+
 class ClaudeAdapter(SourceAdapter):
     source = "claude"
     label = "Claude Code"
@@ -206,19 +225,32 @@ class ClaudeAdapter(SourceAdapter):
         sessions = root / "projects"
         jobs = root / "jobs"
         detected = sessions.is_dir() or jobs.is_dir()
+        rows: list[SourceSession] = []
+        if detected:
+            try:
+                rows = self.list_sessions()
+            except OSError:
+                rows = []
         return SourceInfo(
             source="claude",
             label=self.label,
             root=root,
             detected=detected,
+            session_count=len(rows),
+            availability=_worst_availability(rows),
             detail="" if detected else f"no Claude store at {root}",
         )
 
     def list_sessions(self, *, include_subagents: bool = False) -> list[SourceSession]:
         root = resolve_root()
         groups: dict[str, dict[str, Any]] = {}
+        rows: list[SourceSession] = []
         for path in _files(root):
-            scan = _scan_group(path)
+            try:
+                scan = _scan_group(path)
+            except (OSError, ValueError) as exc:
+                rows.append(_unreadable(path, exc))
+                continue
             sid = scan["session_id"]
             if not sid:
                 continue
@@ -248,19 +280,20 @@ class ClaudeAdapter(SourceAdapter):
             current["titles"] = {**scan["titles"], **current["titles"]}
             current["cwd"] = current["cwd"] or scan["cwd"]
             current["model"] = current["model"] or scan["model"]
-        rows: list[SourceSession] = []
         for sid, group in groups.items():
             scan = group["scan"]
             canonical = group["canonical"]
             alternates = group["alternates"]
             job = group["job"]
             title = scan["titles"].get("custom") or scan["titles"].get("ai")
+            primary = canonical or (alternates[0] if alternates else root)
+            other_paths = [p for p in alternates if p != primary]
             rows.append(
                 SourceSession(
                     source="claude",
                     source_id=sid,
-                    path=canonical or (alternates[0] if alternates else root),
-                    alternate_paths=list(alternates),
+                    path=primary,
+                    alternate_paths=other_paths,
                     fork_parent_source_id=job.get("forkParentSessionId"),
                     title=title,
                     cwd=scan["cwd"] or job.get("cwd"),
@@ -274,11 +307,32 @@ class ClaudeAdapter(SourceAdapter):
             )
         rows.extend(_history_only(root, set(groups)))
         rows.sort(key=lambda row: row.updated_ts, reverse=True)
-        del include_subagents  # Claude sidechains stay in the foreign store in v1
+        if include_subagents:
+            for row in rows:
+                row.warnings.append(
+                    "Claude sidechain/subagent inclusion is not supported; "
+                    "sidechain records were skipped"
+                )
         return rows
 
+    def preview_counts(self, session: SourceSession) -> tuple[int, int]:
+        """Listing metadata only; preview must not build the mapped graph."""
+        return int(session.message_count or 0), int(session.compaction_count or 0)
+
     def read_session(self, session: SourceSession) -> Iterator[SourceEvent]:
-        records = _load_records(session)
+        stats: dict[str, int] = {}
+        records = _load_records(session, stats)
+        if stats.get("skipped_lines"):
+            yield SourceEvent(
+                source_event_id="source:skipped-lines",
+                kind="unknown",
+                ts=session.updated_ts,
+                raw_flags={
+                    "warning": (
+                        f"{stats['skipped_lines']} malformed or oversized source " "line(s) skipped"
+                    )
+                },
+            )
         if not records:
             return
         segments, compactions = _segment(records)
@@ -359,9 +413,11 @@ class ClaudeAdapter(SourceAdapter):
                                 {
                                     "id": str(block.get("id") or ""),
                                     "name": str(block.get("name") or ""),
-                                    "arguments": block.get("input")
-                                    if isinstance(block.get("input"), dict)
-                                    else {},
+                                    "arguments": (
+                                        block.get("input")
+                                        if isinstance(block.get("input"), dict)
+                                        else {}
+                                    ),
                                 }
                             )
                     if text_blocks or thinking or tool_calls:
@@ -424,9 +480,7 @@ class ClaudeAdapter(SourceAdapter):
                 (cwd / ".claude" / "agent-memory-local", True),
             ):
                 if name.is_dir():
-                    records.extend(
-                        _memory_dir(name, "work", session.source_id, local=local)
-                    )
+                    records.extend(_memory_dir(name, "work", session.source_id, local=local))
         legacy = root / "memory"
         if legacy.is_dir():
             records.extend(_memory_dir(legacy, "work", None))
@@ -477,13 +531,15 @@ def _memory_dir(
     return records
 
 
-def _load_records(session: SourceSession) -> list[dict[str, Any]]:
+def _load_records(
+    session: SourceSession, stats: dict[str, int] | None = None
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
     for path in (session.path, *session.alternate_paths):
         if not path.exists():
             continue
-        for _, record in store.iter_jsonl(path):
+        for _, record in store.iter_jsonl(path, stats=stats):
             rid = _uuid(record)
             if rid and rid in seen:
                 continue
@@ -544,12 +600,14 @@ def _segment(
             compactions.append(
                 {
                     "boundary": record,
-                    "summary": summary
-                    if summary is not None
-                    else (
-                        record
-                        if record.get("isCompactSummary") or record.get("type") == "summary"
-                        else None
+                    "summary": (
+                        summary
+                        if summary is not None
+                        else (
+                            record
+                            if record.get("isCompactSummary") or record.get("type") == "summary"
+                            else None
+                        )
                     ),
                     "legacy": record.get("type") == "summary",
                 }

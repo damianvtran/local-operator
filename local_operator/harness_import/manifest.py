@@ -48,14 +48,6 @@ def prefix_sha256(session_dir: Path) -> str | None:
     return store.sha256_file(path)
 
 
-def captures_memory(session_dir: Path) -> bool:
-    """False only for an explicit ``capture_memory: false`` manifest."""
-    manifest = read_manifest(session_dir)
-    if manifest is None:
-        return True
-    return manifest.get("capture_memory", True) is not False
-
-
 def read_index(config: Path) -> dict[str, Any]:
     try:
         value = json.loads((store.imports_root(config) / INDEX_NAME).read_text(encoding="utf-8"))

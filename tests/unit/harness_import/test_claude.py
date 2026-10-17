@@ -6,11 +6,10 @@ import json
 
 import pytest
 
-from local_operator.harness.types import CustomMessage
+from local_operator.harness.types import CustomMessage, Message
 from local_operator.harness_import.service import HarnessImportService
 from local_operator.harness_import.types import ImportRequest
 from local_operator.session.transcript import Transcript
-
 
 SOURCE = "claude"
 SESSION_ID = "sess-claude"
@@ -66,7 +65,8 @@ async def test_claude_two_boundaries_emit_every_segment(claude_store):
     user_entry = next(
         entry
         for entry in entries
-        if entry.type == "message" and entry.payload.get("content")[0].get("text") == "hello world"
+        if entry.type == "message"
+        and str((entry.payload.get("content") or [{}])[0].get("text")) == "hello world"
     )
     assert user_entry.ts == pytest.approx(1767225601.0)
 
@@ -83,7 +83,11 @@ async def test_claude_two_boundaries_emit_every_segment(claude_store):
     # Preserved user turns are replayed AFTER the summary, in source order,
     # before the kept window — that is what stops a summary from erasing the
     # user's own instructions.
-    assert [message.content[0].text for message in history[1:4]] == [
+    users = []
+    for message in history[1:4]:
+        assert isinstance(message, Message)
+        users.append(message.text)
+    assert users == [
         "hello world",
         "second task",
         "third task",

@@ -42,3 +42,13 @@ def test_non_secret_env_names_survive():
     cleaned, count = redact_text(text)
     assert cleaned == text
     assert count == 0
+
+
+def test_credential_location_paths_survive():
+    text = (
+        "MINERVA_CREDENTIALS_DIR=/tmp/minerva/credentials\n"
+        "GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json"
+    )
+    cleaned, count = redact_text(text)
+    assert cleaned == text
+    assert count == 0
