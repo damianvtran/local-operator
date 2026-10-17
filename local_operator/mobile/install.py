@@ -1743,24 +1743,26 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
         if outcome.kind == "current":
-            # THE BUILD QUESTION IS DELIBERATELY NOT ASKED FOR THIS DAEMON (review
-            # round 1, R4). `update.refresh_mobile_after_upgrade` bounces this daemon
-            # UNCONDITIONALLY, through the new wheel's own `update --refresh-mobile`
-            # child — which since 2026-09-30 also performs THIS repair, so the plist
-            # and the bounce are one actor — on the UPGRADE path and on the hand-run
-            # `lop update --refresh-daemons` too (round 2, MINOR-2:
+            # THE BUILD QUESTION IS NOT ASKED HERE (review round 1, R4), and it IS
+            # asked — once, by the actor that bounces. `update.mobile_refresh_command`
+            # bounces this daemon after this repair, on the UPGRADE path and on the
+            # hand-run `lop update --refresh-daemons` too (round 2, MINOR-2:
             # `update._run_daemon_repair` composes it, because there is no other
-            # caller there). Asking the build question here as well would restart
-            # the phone relay twice for one upgrade and print two lines about it.
+            # caller there), and since D3 it skips the bounce when
+            # `update.generation_staleness_of_process` proves the running daemon is
+            # already on the generation `current` names (2026-10 update: the "always
+            # bounce" decision this comment used to record is replaced). Asking it
+            # HERE as well would restart the phone relay twice for one upgrade and
+            # print two lines about it.
             # Kept: that bounce, because it is the wheel-aware path with its own
             # failure reporting and the phone-UI notice, and because removing it
             # would be a change to what that step is for.
             #
-            # WHAT THIS COSTS, stated rather than hidden: if that unconditional bounce
-            # fails, this repair does not act as its fallback. The failure is reported
-            # where it happens, verbatim (`warning: mobile daemon did not restart:
-            # <error>; run lop mobile restart` — `update._mobile_daemon_refresh`), so
-            # the operator still gets a true line and the command that fixes it; what
+            # WHAT THIS COSTS, stated rather than hidden: if that bounce fails, this
+            # repair does not act as its fallback. The failure is reported where it
+            # happens, verbatim (`warning: mobile daemon did not restart: <error>;
+            # run lop mobile restart` — `update._mobile_daemon_refresh`), so the
+            # operator still gets a true line and the command that fixes it; what
             # they lose is a second automatic attempt.
             return outcome
         if outcome.kind != "repaired":
