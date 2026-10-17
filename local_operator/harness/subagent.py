@@ -2567,6 +2567,17 @@ def _make_relay(
             if event.cut_off_cause:
                 final["cut_off_cause"] = event.cut_off_cause
                 final["cut_off"] = event.cut_off
+            # REJOIN the answer across an output-limit continuation. The last
+            # assistant message is the right "what did it say" for every run
+            # whose answer is one message, and it is only the TAIL of one when
+            # ``continue_truncated_answer`` split the answer in two with the
+            # harness chrome prompt between them. Handing the parent that tail
+            # alone loses the beginning of the deliverable mid-word with no
+            # marker -- strictly worse than the cut-but-coherent beginning this
+            # change exists to repair (agent review round 1, B-1).
+            joined = _final_answer_text(event.messages)
+            if joined:
+                final["text"] = joined
         if progress is not None:
             # Same string into latest_details so the 1 Hz jobs.list() poll
             # and the event stream agree about what the child is doing.
@@ -2579,6 +2590,46 @@ def _make_relay(
             await emit(SubagentProgressEvent(job_id=job_id, label=label, progress=progress))
 
     return relay
+
+
+def _final_answer_text(messages: "list[Any]") -> str:
+    """The child's final answer, REJOINED across an output-limit continuation.
+
+    The relay's ``final["text"]`` is the last assistant message's text, which is
+    the correct deliverable for every run whose answer is one message. The
+    ``continue_truncated_answer`` arm splits ONE answer into two assistant
+    messages with ``CONTINUE_TRUNCATED_ANSWER_PROMPT`` between them; without this
+    join the parent's ``result_text`` is the second half only -- the beginning
+    gone, mid-word, with no marker -- so the repair would deliver a worse answer
+    than the truncation it repairs.
+
+    Walks back from the last assistant text and keeps walking ONLY across that
+    exact chrome prompt, so a run with ordinary tool narration still reports its
+    last message (the previous behaviour) and cannot accidentally concatenate
+    unrelated assistant turns.
+    """
+    from local_operator.harness.loop import CONTINUE_TRUNCATED_ANSWER_PROMPT
+
+    parts: list[str] = []
+    idx = len(messages) - 1
+    while idx >= 0:
+        message = messages[idx]
+        if getattr(message, "role", "") == "assistant":
+            text = getattr(message, "text", "") or ""
+            if text:
+                parts.append(text)
+                idx -= 1
+                if (
+                    idx >= 0
+                    and getattr(messages[idx], "role", "") == "user"
+                    and (getattr(messages[idx], "text", "") or "")
+                    == CONTINUE_TRUNCATED_ANSWER_PROMPT
+                ):
+                    idx -= 1
+                    continue
+                break
+        idx -= 1
+    return "".join(reversed(parts))
 
 
 def _accumulate_usage(job: Any, usage: "Usage | None") -> None:

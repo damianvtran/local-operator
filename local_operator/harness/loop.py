@@ -619,9 +619,12 @@ MAX_LENGTH_SILENT_RECOVERIES = 1
 #: report, a handoff), it arrives cut, and the only actor left is a parent that
 #: pays a resume to get the rest. ONE continuation finishes the answer in place;
 #: a second truncation ends the run NAMED (``incidents.OUTPUT_LIMIT_CAUSE``)
-#: rather than bare, so a cut report can never be read as a finished one. Gated
-#: by ``LoopConfig.continue_truncated_answer`` (children only): an interactive
-#: session keeps today's notice-and-end behaviour.
+#: rather than bare, so a cut PURE-PROSE deliverable can never be read as a
+#: finished one. Gated by ``LoopConfig.continue_truncated_answer`` (children
+#: only): an interactive session keeps today's notice-and-end behaviour. A
+#: text+call turn is deliberately NOT this arm's: its call is re-asked by the
+#: call arm, and this one does not claim its prose remainder is recovered
+#: (agent review round 1, M-1).
 MAX_TRUNCATED_ANSWER_CONTINUATIONS = 1
 
 #: What the loop tells the model after the output limit cut its answer off

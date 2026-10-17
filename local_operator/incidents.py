@@ -628,8 +628,15 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # ("could not continue it") deliberately -- the model DID produce a turn, so
     # the fact a reader needs is not "the model failed" but "this end is not the
     # end of the work".
+    #
+    # "before it could finish", NOT "with nothing produced": the arm this cause
+    # names covers TWO shapes -- a silent turn that produced nothing AND a prose
+    # answer that arrived cut off mid-report (the child continuation's exhausted
+    # budget). The old sentence was true only of the first, and a reader of the
+    # second was told a turn that visibly produced two partial answers had
+    # produced nothing (QA round 1, Q-1).
     OUTPUT_LIMIT_CAUSE: (
-        "the turn hit the model's output limit with nothing produced, and the harness could not "
+        "the turn hit the model's output limit before it could finish, and the harness could not "
         "continue it"
     ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
