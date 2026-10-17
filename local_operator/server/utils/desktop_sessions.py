@@ -3716,7 +3716,7 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
-        answer = self._with_peer_cycle_records(answer, [page])
+        answer = await self._with_peer_cycle_records(answer, [page])
         return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
     async def _open_frame_history(
@@ -3829,7 +3829,7 @@ class DesktopSessionBridge:
             # window, not a tail cut, so the only honest reading of ``head_cut``
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
-            answer = self._with_peer_cycle_records(answer, [page])
+            answer = await self._with_peer_cycle_records(answer, [page])
             return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
         collected: list[dict[str, Any]] = []
@@ -3982,7 +3982,7 @@ class DesktopSessionBridge:
         # page's oldest run from the rows it holds), which makes the false answer
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
-        answer = self._with_peer_cycle_records(answer, order_pages)
+        answer = await self._with_peer_cycle_records(answer, order_pages)
         return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
 
     @staticmethod
@@ -4330,15 +4330,38 @@ class DesktopSessionBridge:
                 "event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True, "peer_source": True}
             )
 
-    def _with_peer_cycle_records(self, answer: dict[str, Any], pages: list[Any]) -> dict[str, Any]:
+    async def _with_peer_cycle_records(
+        self, answer: dict[str, Any], pages: list[Any]
+    ) -> dict[str, Any]:
         """Join display-only proof for this selected page, never model context.
 
-        Decode existing JournalRows with the journal's own decoder, then use
-        deterministic root IDs and its bounded raw index. No full-history walk,
-        body inference, second source index or payload copied into checkpoints.
+        THE READ PATH PAYS NO SCAN. This method used to build ``Transcript(self.root
+        / "sessions" / self.session_id)`` purely to hand its ``directory`` to
+        ``discover_records``, and then let that function ``refresh_index``: the
+        first eagerly replays the WHOLE journal in its constructor (70,353 rows /
+        485 MB measured at 6.6-8.9 s on the operator's store) and the second
+        re-reads and re-parses the whole cache JSON (45 MB, 1.5-2.5 s), both
+        synchronously on the event loop, for every snapshot and every page --
+        while the two only ever needed the directory.
+
+        Now the page's own candidates are derived FIRST from the rows this read
+        already selected: a page with no ``eval``/``no_reply`` assistant tool
+        call owes no proof, so it performs no journal, index or cache I/O at all.
+        A page that does have candidates takes the index module's existing
+        hot-path door -- ``fresh_resident`` for a CURRENT index (two stats), and
+        ``start_refresh`` (single-flight, runs the build in a thread) when there
+        is none -- and answers WITHOUT proof for this read; the next read, once
+        that build settles, carries the records. ``refresh_index`` is never
+        called here, so a cold 1.5-2.5 s cache parse can no longer sit on the
+        event loop. The byte budget and both overflow/refusal shapes are
+        unchanged.
         """
-        from local_operator.harness.peer_cycle_display import discover_records
-        from local_operator.session.transcript import Transcript, _entry_to_message
+        from local_operator.harness.peer_cycle_display import (
+            candidate_record_ids,
+            discover_records,
+        )
+        from local_operator.session import transcript_index
+        from local_operator.session.transcript import _entry_to_message
 
         selected = {row.get("id") for row in answer.get("entries", ())}
         messages = []
@@ -4352,13 +4375,40 @@ class DesktopSessionBridge:
                         messages.append(message)
         if not messages:
             return answer
+        if not candidate_record_ids(self.session_id, messages):
+            # THE ZERO-COST DOOR: the shared derivation (``discover_records``
+            # uses the same one) says this page owns no proof, so it must not
+            # read a journal line or an index byte.
+            return answer
+        # ``fresh_resident`` is deliberately synchronous and costs two ``stat``
+        # calls; the module's own hot-path callers invoke it on the event loop
+        # for exactly that reason (see its docstring).
+        index = transcript_index.fresh_resident(self.root, self.session_id)
+        if index is None:
+            # No current index: build it off-request. This read is answered
+            # without proof (the same shape as "nothing to prove yet"); the
+            # next snapshot/page read finds the resident index and carries it.
+            # The build is single-flight, so concurrent opens share one scan.
+            try:
+                task, _started = transcript_index.start_refresh(self.root, self.session_id)
+                # Retrieve a failed build's exception: this caller owns no await on
+                # the task (the whole point is not to wait), and an unobserved
+                # failure would surface as a second, misleading traceback at GC.
+                task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            except Exception:  # noqa: BLE001 — a refresh is an optimisation
+                logger.debug("peer display: index refresh start failed", exc_info=True)
+            return answer
         baseline = len(json.dumps(answer, ensure_ascii=False).encode())
         budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
-        records = discover_records(
-            Transcript(self.root / "sessions" / self.session_id),
+        # The archive read itself is bounded (<=512 ids, byte-capped) but still
+        # file I/O, so it leaves the event loop.
+        records = await asyncio.to_thread(
+            discover_records,
+            self.root / "sessions" / self.session_id,
             messages,
             self.session_id,
             max_bytes=budget,
+            index=index,
         )
         if records is None:
             return answer
