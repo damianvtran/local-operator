@@ -156,6 +156,10 @@ def schema_valid(name: str, arguments: Any) -> bool:
     schema = spec["input_schema"]
     if any(field not in arguments for field in schema["required"]):
         return False
+    if schema.get("additionalProperties") is False and any(
+        field not in schema["properties"] for field in arguments
+    ):
+        return False
     return all(
         isinstance(arguments[field], str)
         for field in schema["required"]
@@ -243,8 +247,16 @@ async def call(client: Any, wire: str, key: str, messages: list[dict[str, Any]])
     return response.json()
 
 
-def parse_chat(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
-    """Split a chat payload into (text, tool calls, finish reason)."""
+def parse_chat(
+    payload: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], str, list[dict[str, Any]]]:
+    """Split a chat payload into (text, tool calls, finish reason, thinking).
+
+    The thinking list uses the Messages block shape so one history builder can
+    serve both wires; the Chat arm flattens it back to ``reasoning_content``.
+    DeepSeek rejects a tool-call turn whose reasoning is not passed back, so
+    dropping it here would measure a conversation the provider refuses.
+    """
     choice = (payload.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     calls = []
@@ -255,11 +267,17 @@ def parse_chat(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]
         except json.JSONDecodeError:
             arguments = None
         calls.append({"id": raw.get("id"), "name": function.get("name"), "arguments": arguments})
-    return message.get("content") or "", calls, str(choice.get("finish_reason") or "")
+    reasoning = message.get("reasoning_content") or ""
+    thinking = [{"type": "thinking", "thinking": reasoning}] if reasoning else []
+    return message.get("content") or "", calls, str(choice.get("finish_reason") or ""), thinking
 
 
-def parse_messages(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
-    """Split a Messages payload into (text, tool calls, stop reason)."""
+def parse_messages(
+    payload: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], str, list[dict[str, Any]]]:
+    """Split a Messages payload into (text, tool calls, stop reason, thinking)."""
+    blocks = payload.get("content") or []
+    thinking = [block for block in blocks if block.get("type") == "thinking"]
     text = "".join(
         block.get("text", "")
         for block in payload.get("content") or []
@@ -270,7 +288,7 @@ def parse_messages(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], 
         for block in payload.get("content") or []
         if block.get("type") == "tool_use"
     ]
-    return text, calls, str(payload.get("stop_reason") or "")
+    return text, calls, str(payload.get("stop_reason") or ""), thinking
 
 
 async def one_run(key: str, wire: str, workspace: Path, max_turns: int) -> dict[str, Any]:
@@ -294,9 +312,9 @@ async def one_run(key: str, wire: str, workspace: Path, max_turns: int) -> dict[
             turns += 1
             usage.append(usage_row(payload, wire))
             if wire == "chat":
-                text, calls, finish = parse_chat(payload)
+                text, calls, finish, thinking = parse_chat(payload)
             else:
-                text, calls, finish = parse_messages(payload)
+                text, calls, finish, thinking = parse_messages(payload)
             if not calls:
                 final_text = text
                 break
@@ -307,10 +325,12 @@ async def one_run(key: str, wire: str, workspace: Path, max_turns: int) -> dict[
                 elif not schema_valid(str(entry["name"]), entry["arguments"]):
                     invalid += 1
             if wire == "chat":
+                reasoning = "".join(block.get("thinking", "") for block in thinking)
                 messages.append(
                     {
                         "role": "assistant",
                         "content": text,
+                        **({"reasoning_content": reasoning} if reasoning else {}),
                         "tool_calls": [
                             {
                                 "id": entry["id"],
@@ -337,13 +357,17 @@ async def one_run(key: str, wire: str, workspace: Path, max_turns: int) -> dict[
                     {
                         "role": "assistant",
                         "content": [
-                            {
-                                "type": "tool_use",
-                                "id": e["id"],
-                                "name": e["name"],
-                                "input": e["arguments"],
-                            }
-                            for e in calls
+                            *thinking,
+                            *([{"type": "text", "text": text}] if text else []),
+                            *[
+                                {
+                                    "type": "tool_use",
+                                    "id": e["id"],
+                                    "name": e["name"],
+                                    "input": e["arguments"],
+                                }
+                                for e in calls
+                            ],
                         ],
                     }
                 )
@@ -379,6 +403,10 @@ async def one_run(key: str, wire: str, workspace: Path, max_turns: int) -> dict[
         "turns": turns,
         "tool_calls": tool_calls,
         "malformed": malformed,
+        # A malformed argument body only reaches the client on the Chat wire:
+        # the Messages API returns ``input`` already parsed and rejects a body
+        # it cannot parse, so a zero here is not evidence of zero attempts.
+        "malformed_observable": wire == "chat",
         "invalid": invalid,
         "correct": correct,
         "finish": finish if turns else "",

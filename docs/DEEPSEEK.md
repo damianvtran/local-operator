@@ -1,8 +1,9 @@
 # Direct DeepSeek
 
 The `deepseek` provider uses the native OpenAI-compatible Chat Completions
-endpoint. This document records the contract checked on 2026-09-12; it is not
-a claim that every optional feature of DeepSeek's official harness is present.
+endpoint. This document records the contract first checked on 2026-09-12, with
+the official-harness comparison re-audited on 2026-10-17; it is not a claim that
+every optional feature of DeepSeek's official harness is present.
 OpenRouter's DeepSeek routes retain OpenRouter's own routing, cache-affinity and
 effort behavior.
 
@@ -89,25 +90,25 @@ Cache persistence takes seconds and is best-effort, not a 100% hit guarantee.
 
 Audit reference: [`deepseek-ai/deepseek-harness` at
 `477b4f420553e8a52c2fbccc464d7561b239c443`](https://github.com/deepseek-ai/deepseek-harness/tree/477b4f420553e8a52c2fbccc464d7561b239c443)
-(dsh `0.1.7-rc.2`). The previous audit pinned
-`c291e7961a515f6d7af9304e7fd1d257929aef26`; the rows below were re-checked and
-extended against the newer reference.
+(dsh `0.1.7-rc.2`, MIT). The previous audit pinned
+`c291e7961a515f6d7af9304e7fd1d257929aef26`; rows are re-checked against the
+newer reference, and two of its rows were retired with the Chat adapter it
+described.
 
 | Surface | Official reference | Local Operator |
 | --- | --- | --- |
 | Discovery | Configured static `listModels` | Native live inventory, cached with documented fallback |
 | Wire | Anthropic-compatible Messages at `/anthropic/v1/messages` (`PUBLIC_BASE_URL` in `llm-deepseek/src/config.ts`) | Native OpenAI-compatible `/v1/chat/completions`; parity measured, see below |
-| Reasoning replay | Retains previous `reasoning_content` on every reasoned turn | Retains all provenance-valid native reasoning; raw arguments preserved |
-| Reasoned-turn echo | `serialize.ts` emits `reasoning_content` even without tool calls, because a re-encoding gateway hashes the chain of thought to recover its signature | Same: every assistant turn carrying reasoning replays it |
-| Tool screenshots | `serialize.ts`: user-only image projection after tool groups | Same role constraint and stable grouping |
-| Stream completion | `sse.ts`: requires `[DONE]`; `translate.ts`: malformed JSON fails | Native route requires `[DONE]` plus recognized finish; malformed/truncated streams use retryable provider errors |
+| Reasoning replay | `serialize.ts` replays every assistant turn's reasoning as a `thinking` block, carrying the provider `signature` when one was recorded | Replays native `reasoning_content` on every assistant turn — the Chat wire's spelling of the same obligation — and substitutes a visible `[thinking not recorded]` where a turn's reasoning was not captured, because this wire's validator rejects an absent field |
+| Stream completion | `translate.ts` completes only on `message_stop` with every block closed and a stop reason, and an unterminated stream is `STREAM_CLOSED`; `sse.ts` rejects invalid SSE JSON as `MALFORMED_RESPONSE` | Native route requires `[DONE]` plus a recognized finish; malformed and truncated streams use retryable provider errors |
+| Images | `images.ts` accepts them in user messages and tool results; assistant image output is unsupported | Accepted in user messages; images in a tool-result group are projected into a following synthetic user message |
 | Resource exhaustion | Explicit failure | `insufficient_system_resource` becomes retryable provider failure, never success |
-| Cache reuse | Preserves serialized conversation prefix; rewrites the leading prompt only on routes without `systemPromptUpdate: 'in-history'` | No direct explicit cache controls; append-only projected messages; measured native hit counters |
+| Cache reuse | Preserves the serialized conversation prefix; rewrites the leading prompt only on routes without `systemPromptUpdate: 'in-history'` | No direct explicit cache controls; append-only projected messages; measured native hit counters |
 | Cache-stable prompt changes | Appends a changed prompt as an in-history `system` message for `deepseek-flash`, so the prefix survives | Persists the initial four system blocks and journals later changes as host-state records at the history tail; a genuine head change starts a new prefix epoch |
 | Auxiliary calls | Forces reasoning effort `off` for `purpose: 'session-title'` | Errands clamp to the lowest real rung of the model's ladder, which is `none` — thinking disabled — for this model |
-| Oversized tool output | Head + "middle pruned" marker + bounded tail once compaction pressure qualifies; full original stays in the session log | `compaction/pruning.py`, with supersede-key and range semantics |
-| Empty terminal response | A `stop` with no content blocks becomes retryable `EMPTY_RESPONSE` | Empty-`length` truncation retry budget plus an effort-ceiling retreat (`harness/loop.py`) |
-| Session telemetry | `dsh_session_log` and `dsh_plugin_packages` body extensions plus `x-deepseek-harness-*` headers | Not adopted: they ship the session transcript, system prompts, tool output and package inventory to the model endpoint on every request |
+| Oversized tool output | `compaction-tool-result-pruner`: once compaction pressure qualifies, an over-budget text result becomes a bounded head, a "middle pruned" marker and a bounded tail, with the full original kept in the session log | `compaction/pruning.py` prunes by supersede key and byte range — a different mechanism toward the same end |
+| Contentless terminal turn | `translate.ts`: a terminal `stop` with zero content blocks becomes retryable `EMPTY_RESPONSE` | Different trigger: an empty `length` truncation (no text, no calls) is retried from its own budget, then steps the effort ceiling down (`harness/loop.py`); an empty `stop` is not what that code recovers |
+| Session telemetry | `dsh_session_log` and `dsh_plugin_packages` body extensions plus `x-deepseek-harness-*` headers | Not adopted: a session sends its whole transcript, system prompts and tool output on its first request and a suffix on each later one, and `dsh_plugin_packages` ships the active package inventory every time |
 
 Optional Files API uploads, Responses migration, a server-generated `user_id`
 policy and the official tokenizer are not introduced here. They are not needed
@@ -117,29 +118,40 @@ this change makes no universal “same or better” claim about those features.
 ## Measured parity against the official harness
 
 Measured 2026-10-17 against dsh `0.1.7-rc.2`, whose own DeepSeek models run on
-the Messages wire. The findings below decide whether that wire is worth
-migrating to.
+the Messages wire. The question was whether moving to that wire, or to anything
+else in that harness, buys a measurable improvement for this provider.
 
-**Both endpoints serve the same tokens.** `scripts/bench_deepseek_wire_parity.py`
-runs one verifiable tool task (read a spec, compute totals from a CSV, write
-`result.json`) over each wire with the same three tool schemas, the same
-executor and the same workspace. Eight runs per arm: both arms were correct on
-all 8, made the same 25 tool calls, and produced 0 malformed and 0
-schema-invalid calls. Turns had the same median (3) and near-identical means
-(3.1 Chat, 3.3 Messages). The two small differences point in opposite
-directions: Messages used 1.8% fewer prompt tokens (median 2087 vs 2048) and
-Chat was 7% faster (median 3.39 s vs 3.66 s). Both are inside run-to-run noise,
-and an earlier independent 5+5 replication showed the same parity, down to
-byte-identical per-turn cached tokens (256 / 512 / 640) on both wires.
+`scripts/bench_deepseek_wire_parity.py` runs one verifiable tool task (read a
+spec, compute totals from a CSV, write `result.json`) over each wire with the
+same three tool schemas, the same executor and the same workspace. Three
+independent 8-run datasets per arm; each cell lists those datasets in order:
 
-Prompt tokens are only comparable once the accounting convention is normalised:
-`usage.input_tokens` includes cached tokens on the Chat shape and excludes them
-on the Messages shape, so the two are the same figure only as
-`input + cache_read`.
+| | Chat | Messages |
+| --- | ---: | ---: |
+| correct | 24/24 | 24/24 |
+| tool calls | 24, 25, 24 | 25, 24, 26 |
+| schema-invalid calls | 0, 0, 0 | 0, 0, 0 |
+| turns (median) | 3, 3, 3 | 3, 3, 3 |
+| prompt tokens (median) | 2075, 2086, 2080 | 2070, 2070, 2074 |
+| cached share | 74.3%, 73.9%, 73.5% | 68.5%, 68.0%, 67.6% |
+| wall time (median) | 3.19 s, 3.35 s, 3.41 s | 3.48 s, 3.14 s, 3.36 s |
 
-Four separate `system` messages cost 2 prompt tokens over one joined string for
-an otherwise identical conversation (67 vs 65, twice) — the per-message framing
-and nothing else.
+No correctness, difficulty or speed difference survives replication: turn
+medians are 3 on both wires in every dataset, prompt-token medians agree within
+0.75%, and wall time changes direction between datasets (Chat faster in one,
+Messages in the next, a tie in the third). At this sample size that is noise,
+not an effect.
+
+One difference *is* repeatable across all three, and it favours the wire already
+in use: the Chat shape's four separate `system` messages keep a larger share of
+the prompt cached across runs than one joined `system` string (about 74% vs 68%,
+stable across every dataset). That is roughly 120 more uncached tokens per run on
+the Messages wire — small in absolute terms, consistent in direction, and not a
+reason to migrate.
+
+`malformed` is only observable on the Chat wire: the Messages API returns
+`input` already parsed (`translate.ts`), so a zero there is not evidence of zero
+attempts. Schema-invalid calls are counted on both.
 
 The Messages endpoint does accept what dsh relies on: `thinking`,
 `output_config.effort`, `cache_control` markers (accepted, and inert — the cache
@@ -147,35 +159,50 @@ is automatic), a mid-conversation `system` message that becomes the effective
 prompt, and the `mid-conversation-tool-changes-2026-07-01` beta (advertised; its
 block schema is not publicly documented and was not reproduced here).
 
-**The two wires disagree on multiple system messages, which is a reason not to
-migrate blind.** On Chat, four leading `system` messages concatenate: an
-instruction in block 0 survived three later neutral blocks. On Messages, a later
-`system` message is the *effective* prompt, so the same four-block shape would
-silently drop blocks 0-2. Any Messages route must join the blocks into one
-`system` string first.
+**The two wires disagree on multiple system messages, which makes a migration a
+correctness hazard rather than a swap.** On Chat, four leading `system` messages
+concatenate: an instruction in block 0 survived three later neutral blocks. On
+Messages, a later `system` message is the *effective* prompt, so the same
+four-block shape would silently drop blocks 0-2. Any Messages route must join
+the blocks into one `system` string first.
 
 **Cache headroom is already spent.** Over the 14 days to 2026-10-17, `deepseek`
 `purpose='turn'` calls read 81,619,038,707 cached of 82,864,969,705 prompt
 tokens — **98.5%** across 433,360 calls, and the same 98.5% over the 3,787
-sessions that made 5 or more calls. The residual 1.5% is the hard ceiling on any cache work, and it
-includes unavoidable first calls and native cache expiry. For contrast, the
-lowest provider in the same ledger is `meta-muse` at 91.1%; the mechanism dsh
-uses to keep a prefix warm is already present here and is visibly working on
-this provider.
+sessions that made 5 or more calls. The source is
+`~/.local-operator/analytics.db` and the formula is the one the app itself
+reports, `cache_read_tokens / context_tokens` restricted to `ok=1`
+(`local_operator/analytics/model.py::UsageAggregate.cache_hit_rate`); on this
+OpenAI-shaped wire `context_tokens` already includes the cached tokens. The
+residual 1.5% is the hard ceiling on any cache work, and it includes unavoidable
+first calls and native cache expiry. For
+contrast, the lowest provider in the same ledger is `meta-muse` at 91.1%; the
+mechanism dsh uses to keep a prefix warm is already present here and is visibly
+working on this provider.
 
-**Tool-call validity has little room either.** Over the same window, 0.56% of
-560,706 model-origin `deepseek` tool calls carried a model fault (0.55%
-`invalid_arguments`, 0.009% `unknown_tool`, 0 `duplicate_id`); the remaining
-2.3% of non-empty `fault` values are execution, denial and abort classes that
-are not the model's.
+**Tool-call validity has little room either.** The ledger records a `fault` at
+the source for every tool call, so model faults (`invalid_arguments`,
+`unknown_tool`, `duplicate_id`) are separable from execution, denial and abort
+classes. Over the same window, attributing calls by the session's dominant
+provider gives 0.56% model faults over 561,080 model-origin calls; counting
+every session that used DeepSeek at all gives 0.71% over 688,876. Both bounds
+leave under one percent, and neither moves the conclusion; the exact rate
+depends on which attribution the reader considers right, so both are stated
+rather than one being presented as fact.
 
 Reproduce:
 
 ```sh
-.venv/bin/python scripts/bench_deepseek_wire_parity.py --live --repeat 5
+.venv/bin/python scripts/bench_deepseek_wire_parity.py --live --repeat 8
 ```
 
-The conclusion this record supports: no runtime change was made, because no
-dsh-specific behaviour measurably improved this provider. Whatever advantage
-remains is model-side tuning against that harness, which these measurements
-could not attribute to anything a caller can send.
+### What this does not establish
+
+The benchmark isolates request shape. It does not exercise the telemetry
+extensions (deliberately not adopted), dsh's in-history prompt replacement, or
+reasoning replay under a long tool-using history beyond what the task above
+produces. On the two metrics the ledger can measure at this provider's scale —
+cache reuse and tool-call validity — a harness change has at most 1.5% of
+prompt tokens and 0.7% of tool calls to win. What remains unexplained is
+model-side tuning against that harness, which none of these measurements can
+attribute to anything a caller can send.
