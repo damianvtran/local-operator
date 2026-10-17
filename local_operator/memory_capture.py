@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import time
@@ -71,6 +72,27 @@ def policy(config: Path) -> dict[str, Any]:
         key: memory.get(key, MEMORY_DEFAULT_ENABLED) is True
         for key in ("enabled", "capture", "suggest")
     }
+
+
+def import_capture_disabled(session_dir: str | Path | None) -> bool:
+    """True for a session an import marked ``capture_memory: false``.
+
+    The import service writes ``harness-import.json`` into every target session
+    and sets that flag because an imported conversation has already been mined
+    by its SOURCE harness; re-mining it here would duplicate foreign facts into
+    this store under this harness's provenance. Absence of the manifest is the
+    ordinary live-session case and stays enabled. A malformed manifest also
+    stays enabled: this flag can only ever SUPPRESS capture, so failing open
+    preserves existing behaviour rather than silently disabling memory.
+    """
+    if not session_dir:
+        return False
+    path = Path(session_dir) / "harness-import.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(manifest, dict) and manifest.get("capture_memory") is False
 
 
 def carry_rows(carry: str, *, limit: int = 12) -> list[dict[str, Any]]:

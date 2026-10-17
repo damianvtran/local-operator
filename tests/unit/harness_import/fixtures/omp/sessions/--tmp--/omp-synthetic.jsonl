@@ -1,0 +1,13 @@
+{"type":"title","title":"Synthetic omp session","source":"auto","v":1,"pad":0,"updatedAt":"2026-01-03T00:00:00.000Z"}
+{"type":"session","version":3,"id":"omp-synthetic","timestamp":"2026-01-03T00:00:01.000Z","cwd":"/tmp/synthetic-omp"}
+{"type":"model_change","id":"m1","parentId":null,"timestamp":"2026-01-03T00:00:01.100Z","model":"omp-synthetic-model"}
+{"type":"message","id":"u1","parentId":"m1","timestamp":"2026-01-03T00:00:02.000Z","message":{"role":"user","timestamp":"2026-01-03T00:00:02.000Z","content":[{"type":"text","text":"first omp question"}]}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-01-03T00:00:03.000Z","message":{"role":"assistant","timestamp":"2026-01-03T00:00:03.000Z","content":[{"type":"thinking","thinking":"private omp reasoning"},{"type":"text","text":"checking"},{"type":"toolCall","id":"call-omp-1","name":"bash","arguments":{"command":"echo synthetic"},"partialArgs":"{\"command\":\"echo synthetic\"}"}]}}
+{"type":"message","id":"r1","parentId":"a1","timestamp":"2026-01-03T00:00:04.000Z","message":{"role":"toolResult","timestamp":"2026-01-03T00:00:04.000Z","toolCallId":"call-omp-1","toolName":"bash","isError":false,"content":[{"type":"text","text":"synthetic"}]}}
+{"type":"message","id":"branch-1","parentId":"u1","timestamp":"2026-01-03T00:00:04.500Z","message":{"role":"assistant","timestamp":"2026-01-03T00:00:04.500Z","content":[{"type":"text","text":"inactive branch text"}]}}
+{"type":"message","id":"a2","parentId":"r1","timestamp":"2026-01-03T00:00:05.000Z","message":{"role":"assistant","timestamp":"2026-01-03T00:00:05.000Z","content":[{"type":"text","text":"first omp answer"}]}}
+{"type":"compaction","id":"c1","parentId":"a2","timestamp":"2026-01-03T00:00:06.000Z","summary":"OMP SUMMARY","shortSummary":"short","firstKeptEntryId":"kept-1","tokensBefore":4321,"details":{"source":"omp"},"preserveData":{"custom":"snapshot"},"fromExtension":false}
+{"type":"message","id":"kept-1","parentId":"c1","timestamp":"2026-01-03T00:00:07.000Z","message":{"role":"user","timestamp":"2026-01-03T00:00:07.000Z","content":[{"type":"text","text":"kept omp question"}]}}
+{"type":"message","id":"a3","parentId":"kept-1","timestamp":"2026-01-03T00:00:08.000Z","message":{"role":"assistant","timestamp":"2026-01-03T00:00:08.000Z","content":[{"type":"text","text":"kept omp answer"}]}}
+{"type":"custom_message","id":"cm1","parentId":"a3","timestamp":"2026-01-03T00:00:09.000Z","customType":"launch-notice","attribution":"user","content":"injected omp note"}
+{"type":"custom","id":"meta1","parentId":"cm1","timestamp":"2026-01-03T00:00:10.000Z","customType":"session_exit","data":{}}

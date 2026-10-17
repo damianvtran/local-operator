@@ -402,6 +402,16 @@ _AMBIENT_VARS = (
     # the skip arm while looking like it tested the prime. Cells that want a
     # primed lineage set it explicitly (the helpers tests do).
     "LOCAL_OPERATOR_PATH_PRIMED",
+    # Foreign-harness stores: these name the operator's real Claude/Codex/omp
+    # roots. Inherited, an import test would read (and could import FROM) the
+    # live stores rather than its fixture. The harness-import fixtures set the
+    # roots they use explicitly.
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "PI_CODING_AGENT_DIR",
+    "PI_CONFIG_DIR",
+    "OMP_PROFILE",
+    "PI_PROFILE",
     # The brokered GitHub bearer's env names, read by the git credential helper
     # (``network/credentials/github.py``) and written into every bash child by the
     # session's injection (``tools/builtin.py``). They name a CREDENTIAL: an
