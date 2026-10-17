@@ -35,6 +35,7 @@ preview; it is not a bulk export either.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -51,6 +52,7 @@ from local_operator.memory import (
     guard,
     origin_label,
     safe_segment,
+    structural_reference,
     work_progress_markers,
 )
 
@@ -250,12 +252,19 @@ def _disposition(
 
 @dataclass(frozen=True, slots=True)
 class _Row:
-    """One row's raw material, BEFORE any field gate has run.
+    """One row's input to the FIELD gates in :data:`ENTRY_GATES`.
 
     A gate may read only fields declared here, and :func:`_project` is the ONLY
     builder of an exported row. Together those two facts are the structural
     guarantee: a stored value has no route to the human page or ``--json``
     except through a gate in :data:`ENTRY_GATES`.
+
+    Not everything here is raw: ``provenance``, ``provenance_redacted``,
+    ``markers`` and ``disposition`` arrive already gated by the write-path /
+    preview rules that produce them (``_provenance``,
+    ``work_progress_markers``, ``_disposition``), and their entries in the
+    table copy them out. The raw stored columns are ``entity_id``, ``scope``,
+    ``op_id``, ``revisions`` and ``fact``.
     """
 
     entity_id: Any
@@ -271,12 +280,10 @@ class _Row:
 
 
 def _gate_segment(value: Any) -> str | None:
-    """A store identifier or scope: shape-checked, never content-guarded.
+    """A SCOPE name: shape-checked, never content-guarded.
 
-    ``structural=True`` is the writer's own exemption for minted identifiers
-    (see ``memory.safe_segment``): a legitimate hex id can trip the guard's
-    card/IBAN shapes by chance, and guard-refusing it would blank every
-    install rather than withhold one suspicious row.
+    Identifiers use :func:`_gate_identifier` instead; a scope is a closed
+    vocabulary (``SCOPES``), so the shape rule alone is the right question.
     """
     try:
         return safe_segment(value, structural=True)
@@ -296,13 +303,51 @@ def _gate_timestamp(value: Any) -> float | None:
     return value
 
 
+#: The store's OWN minted hash identifiers: ``MemoryStore.apply_ops``'s promote
+#: branch rewrites a promoted op/entity id to
+#: ``sha256(session-id + "|" + id).hexdigest()`` (memory.py), so a promoted
+#: row's id IS a bare 64-hex digest. It is admitted beside the
+#: ``structural_reference`` shapes for the same reason those are: the value is
+#: MINTED, not user prose, and ``guard`` can refuse a legitimate digest by
+#: chance on its hex run (the collision ``memory.safe_segment`` documents).
+_IDENTIFIER_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def _gate_identifier(value: Any) -> str | None:
+    """An entity/operation identifier, held to a READ-side identity rule.
+
+    The shapes ``memory.structural_reference`` pins (a ``d_`` device id and a
+    canonical UUID) are minted by this codebase, so they pass unchanged and
+    skip the free-text guard: their hex runs collide with the card/IBAN shapes
+    by chance, and guard-refusing a real id would blank a legitimate row (and,
+    through ``next_cursor``, stall paging) rather than withhold a suspicious
+    one.
+
+    Anything else is an import or legacy candidate and is admitted only if the
+    ordinary write-path rule admits it: one safe segment (``safe_segment``,
+    which runs ``guard``). That is what makes an identifier column safe to
+    re-export — a PAN- or SSN-shaped id is refused instead of shown as
+    ``id``/``reference``/``revision``. The write path is laxer here by design
+    (``validate_op`` shape-checks ids without the guard); a listing only
+    repeats what its own gate admits.
+    """
+    if not isinstance(value, str):
+        return None
+    if structural_reference(value) or _IDENTIFIER_DIGEST.fullmatch(value):
+        return value
+    try:
+        return safe_segment(value)
+    except MemoryError:
+        return None
+
+
 def _gate_id(raw: _Row) -> str | None:
-    return _gate_segment(raw.entity_id)
+    return _gate_identifier(raw.entity_id)
 
 
 def _gate_reference(raw: _Row) -> str | None:
     scope = _gate_segment(raw.scope)
-    entity = _gate_segment(raw.entity_id)
+    entity = _gate_identifier(raw.entity_id)
     return f"{scope}/{entity}" if scope and entity else None
 
 
@@ -344,7 +389,7 @@ def _gate_expires_at(raw: _Row) -> float | None:
 
 
 def _gate_revision(raw: _Row) -> str | None:
-    return _gate_segment(raw.op_id)
+    return _gate_identifier(raw.op_id)
 
 
 def _gate_revisions(raw: _Row) -> int:
@@ -606,6 +651,9 @@ def inspect_entries(
     if has_more:
         report["has_more"] = True
         # Display order IS the paging order, so the last row shown is the key
-        # the next page continues strictly after.
-        report["next_cursor"] = page[-1]["entity_id"]
+        # the next page continues strictly after. Take it from the PROJECTED
+        # row, never the raw column: an id ``_gate_identifier`` refused must
+        # not leak through the paging hint that names it (the row itself shows
+        # ``id: null``). A refused id therefore ends the walk as ``null``.
+        report["next_cursor"] = report["entries"][-1]["id"]
     return report

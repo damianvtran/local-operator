@@ -142,6 +142,54 @@ def _seed_legacy_row(
     return entity
 
 
+def _apply_imported_row(
+    store: MemoryStore,
+    scope: str,
+    entity_id: str,
+    op_id: str,
+    *,
+    title: str,
+    body: str = "Imported body.",
+    created_at: float | None = None,
+    origin: str = "legacy-device",
+) -> None:
+    """Insert one row through the store's OWN merge path (no table editing).
+
+    ``apply_ops`` is the entry point a peer/imported batch really uses, and it
+    accepts any ``safe_segment``-shaped identifier (``validate_op`` skips the
+    free-text guard for ids). Driving it here — rather than the direct INSERT
+    in ``_seed_legacy_row`` — is what proves the inspector refuses ids the
+    WRITE path genuinely accepted and stored, not shapes only this test can
+    construct.
+    """
+    fact = store.prepare_fact(
+        {
+            "title": title,
+            "body": body,
+            "created_at": time.time() - 90 if created_at is None else created_at,
+        }
+    )
+    wire = json.dumps(fact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    store.apply_ops(
+        [
+            {
+                "v": 1,
+                "op_id": op_id,
+                "entity_id": entity_id,
+                "origin_device": origin,
+                "seq": 1,
+                "hlc": [int(time.time() * 1000), 0, origin],
+                "parents": [],
+                "kind": "put",
+                "scope": scope,
+                "owner_key": "global" if scope == "global" else store.identity.owner(scope),
+                "fact": fact,
+                "body_sha": hashlib.sha256(wire.encode()).hexdigest(),
+            }
+        ]
+    )
+
+
 def _snapshot(store: MemoryStore) -> dict[str, Any]:
     """Every row that a mutation would move: op log, current heads, metadata."""
     db = sqlite3.connect(f"{store.path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
@@ -633,9 +681,143 @@ def test_poison_in_every_stored_field_stays_out_of_the_report(rig):
     assert entry["provenance_redacted"] is True
     assert entry["status"] == "unknown"
 
+    # Identifier columns are stored fields too: an imported row can carry a
+    # PAN/SSN in entity_id/op_id (``validate_op`` shape-checks ids without the
+    # free-text guard). Seeded through ``apply_ops`` so this is the writer's
+    # own product, then held to the same no-echo promise.
+    ssn = "123-45-6789"
+    bare_pan = "4111111111111111"
+    _apply_imported_row(
+        store, "global", bare_pan, ssn, title="Imported identifiers", origin="legacy-ids"
+    )
+    report = inspect_entries(root, identity)
+    imported = next(item for item in report["entries"] if item["id"] is None)
+    assert imported["reference"] is None
+    assert imported["revision"] is None
+    assert bare_pan not in json.dumps(report)
+    assert ssn not in json.dumps(report)
+    assert imported["title"] == "Imported identifiers"
+
     raw, failed = run("inspect", config=root, identity=identity, prefix="lop memory")
     assert failed is False
-    assert pan not in render_human(raw, prefix="lop memory")
+    human = render_human(raw, prefix="lop memory")
+    assert pan not in human
+    assert bare_pan not in human
+    assert ssn not in human
+
+
+def test_real_minted_identifiers_pass_the_identifier_gate(rig):
+    """The identifier gate must not be collateral damage: real ids stay intact.
+
+    A row this build mints carries a canonical UUID; a promoted row carries a
+    bare 64-hex digest (``apply_ops``'s remap); a device id carries ``d_`` + 32
+    lowercase hex. All three are legitimate values the write path stored, so
+    the reader must show them unchanged — an over-strict gate would break
+    ``id``/``revision`` and paging for every normal row.
+    """
+    root, identity, store = rig
+    uuid_id = store.put("global", {"title": "Real UUID row", "body": "Body."})["id"]
+    device_id = "d_" + "0123456789abcdef" * 2
+    digest_id = hashlib.sha256(b"promoted-entity").hexdigest()
+    _apply_imported_row(
+        store, "global", device_id, digest_id, title="Minted shapes", origin="legacy-minted"
+    )
+
+    report = inspect_entries(root, identity)
+    by_title = {entry["title"]: entry for entry in report["entries"]}
+    real = by_title["Real UUID row"]
+    assert real["id"] == uuid_id
+    assert real["reference"] == f"global/{uuid_id}"
+    assert real["revision"]
+    minted = by_title["Minted shapes"]
+    assert minted["id"] == device_id
+    assert minted["reference"] == f"global/{device_id}"
+    assert minted["revision"] == digest_id
+
+    # And the digest branch is not hypothetical: promotion really mints one.
+    # ``apply_ops`` rewrites a promoted op/entity id to a bare sha256 digest,
+    # so a reader that only admits UUIDs would blank every promoted row.
+    peer = MemoryStore(
+        root,
+        MemoryIdentity("peer-session", "team-inspect", "agent-inspect"),
+        root / "sessions" / "peer-session",
+        origin="peer-device",
+    )
+    source = peer.put("session", {"title": "Promoted fact", "body": "Body."})["id"]
+    with peer.connection() as db:
+        operations = [
+            json.loads(row[0])
+            for row in db.execute("SELECT data FROM ops WHERE entity_id=?", (source,))
+        ]
+    store.apply_ops(operations, contiguous=False, portable=True, promote=True)
+    promoted = next(
+        entry
+        for entry in inspect_entries(root, identity)["entries"]
+        if entry["title"] == "Promoted fact"
+    )
+    assert promoted["id"] and len(promoted["id"]) == 64
+    assert promoted["revision"] and len(promoted["revision"]) == 64
+
+
+def test_refused_identifier_is_not_the_paging_cursor(rig):
+    """A gate-refused id must not ride out through ``next_cursor``/``More:``.
+
+    The cursor is the row's ordering key for the NEXT page, so reading the raw
+    column would re-export the very id the row itself shows as null. Here the
+    poisoned row is last on a full page with more rows behind it.
+    """
+    root, identity, store = rig
+    pan = "4111111111111111"
+    ssn = "123-45-6789"
+    now = time.time()
+    _apply_imported_row(
+        store,
+        "global",
+        "01a1b2c3-d4e5-7f60-8123-456789abcdef",
+        "01a1b2c3-d4e5-7f60-8123-456789abcdee",
+        title="Newest imported",
+        created_at=now - 10,
+        origin="legacy-new",
+    )
+    _apply_imported_row(
+        store,
+        "global",
+        pan,
+        ssn,
+        title="Poisoned middle",
+        created_at=now - 600,
+        origin="legacy-poison",
+    )
+    _apply_imported_row(
+        store,
+        "global",
+        "01a1b2c3-d4e5-7f60-8123-456789abcde1",
+        "01a1b2c3-d4e5-7f60-8123-456789abcde2",
+        title="Oldest imported",
+        created_at=now - 3600,
+        origin="legacy-old",
+    )
+
+    report = inspect_entries(root, identity, limit=2)
+    assert [entry["title"] for entry in report["entries"]] == [
+        "Newest imported",
+        "Poisoned middle",
+    ]
+    assert report["entries"][-1]["id"] is None
+    assert report["has_more"] is True
+    # No cursor at all rather than the refused column value.
+    assert report["next_cursor"] is None
+    assert pan not in json.dumps(report)
+    assert ssn not in json.dumps(report)
+
+    raw, failed = run("inspect --limit 2", config=root, identity=identity, prefix="lop memory")
+    assert failed is False
+    human = render_human(raw, prefix="lop memory")
+    assert "More:" not in human
+    assert "id withheld" in human
+    assert "revision withheld" in human
+    assert pan not in human
+    assert ssn not in human
 
 
 def test_stale_cursor_reports_real_totals_and_says_start_from_the_top(rig):

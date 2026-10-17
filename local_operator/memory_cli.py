@@ -579,7 +579,11 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
         # references still line up while suggestion rows stand out.
         marker = "→ " if proposed["proposal"] != "keep" else "  "
         lines.append("")
-        lines += _shaped(f"{marker}{entry['reference']}  [{state} · {age}]")
+        # A gate-refused identifier is shown as withheld, never as the literal
+        # "None" (which reads like an id) or the raw column (the leak itself).
+        reference = entry["reference"] or "[id withheld — the privacy guard would refuse it]"
+        revision = entry["revision"] or "withheld"
+        lines += _shaped(f"{marker}{reference}  [{state} · {age}]")
         if entry["title_exported"]:
             lines += _shaped(f"  {entry['title']}")
         else:
@@ -595,7 +599,7 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
         if entry["provenance_redacted"]:
             meta.append("locator withheld by the privacy guard")
         lines += _shaped(
-            "  Source: " + " · ".join(meta) + f" · revision {entry['revision']}"
+            "  Source: " + " · ".join(meta) + f" · revision {revision}"
             f" · {entry['revisions']} revision(s)"
         )
         if entry["body_preview"] is not None:
