@@ -36,6 +36,7 @@ import pytest
 from local_operator.i18n import catalogues, resolve, text
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.text import tr
+from local_operator.tui.app import _catalogue_status
 
 REPO = Path(__file__).resolve().parents[3]
 _app = tr("tui.app")
@@ -163,6 +164,19 @@ def test_plurals_render_the_base_sentence_and_keep_raw_digits() -> None:
         assert "," not in rendered
 
 
+def test_the_notifications_overflow_prefix_renders_through_its_key() -> None:
+    """The key the review caught minted-but-never-rendered (round 1, F2).
+
+    `bound` is assembled in an ASSIGNMENT, so the collector cannot see it; it
+    was left English while its key sat unused — an orphan that made the
+    namespace look fully extracted. It renders now, byte-identically.
+    """
+    assert _app(_x.notifications_more(shown="5")) == "  …5 more"
+    assert _app(_x.notifications_sidebar_hint(bound=_app(_x.notifications_more(shown="5")))) == (
+        "  …5 more — ctrl+b shows or hides the sidebar"
+    )
+
+
 def test_catalogue_status_keeps_its_bytes_end_to_end() -> None:
     """Drive the real function, not just the keys around it."""
     from local_operator.tui.app import _catalogue_status
@@ -226,6 +240,14 @@ def fr_catalogue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         (folder / "tui.app.json").write_text(json.dumps(values), encoding="utf-8")
     monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
     monkeypatch.setattr(text, "_active_locale", "en")
+    # The refreshers MUST be isolated: `set_active_locale` (here and in teardown)
+    # runs every registered re-materialiser, and a sibling module's constant
+    # re-materialised against THIS tmp root would come back as a key code and
+    # stay that way after the real root returns — a deterministic order defect
+    # in any suite that runs this file before the sibling slice tests (review
+    # round 1, B1). No module needs refreshing here: app.py holds no
+    # import-time copy, which is what this fixture exists to prove.
+    monkeypatch.setattr(text, "_refreshers", [])
     monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "fr"))
     monkeypatch.delenv("LOP_I18N", raising=False)
     text._sources.cache_clear()
@@ -239,10 +261,11 @@ def test_the_shell_copy_follows_a_live_language_change(fr_catalogue) -> None:
 
     A function written for a backends-locale switch reads the catalogue at each
     call; a constant would have kept English. The synthetic fr catalogue is
-    never eligible outside this fixture.
+    never eligible outside this fixture. `app.py` is imported at MODULE scope
+    above so its import chain's refresher registrations land in the real
+    registry, not in the empty one this fixture installs — otherwise a cold
+    single-test run would fire them against the tmp root (review round 1, B1).
     """
-    from local_operator.tui.app import _catalogue_status
-
     assert _catalogue_status({"xai": "empty"}) == "no live list: xai"
     assert _app(_x.sidebar_why_retired()) == "source retired"
     assert _app(_x.skills_teams_heading()) == "teams"
@@ -250,3 +273,4 @@ def test_the_shell_copy_follows_a_live_language_change(fr_catalogue) -> None:
     assert _catalogue_status({"xai": "empty"}) == "FR no live list: xai"
     assert _app(_x.sidebar_why_retired()) == "FR source retired"
     assert _app(_x.skills_teams_heading()) == "FR teams"
+    assert text._refreshers == []  # nothing was re-materialised against the tmp root

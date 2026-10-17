@@ -59241,7 +59241,7 @@ def _notifications_listing(
     if total > NOTIFICATIONS_LISTING_ROWS:
         # The count of what is hidden, in BOTH forms: it is what lets the reader
         # reconcile the rows above with the number the receipt will name.
-        bound = f"  …{total - NOTIFICATIONS_LISTING_ROWS} more"
+        bound = _t(_x.notifications_more(shown=str(total - NOTIFICATIONS_LISTING_ROWS)))
         lines.append(bound if clearing else _t(_x.notifications_sidebar_hint(bound=bound)))
     if not clearing:
         # "all N" once the bound bites, "these" only when every row is on screen:
