@@ -34,14 +34,22 @@ class ImportJobBusy(RuntimeError):
 
 
 class ImportJob:
-    """One accepted import: its live progress, result and asyncio task."""
+    """One accepted import: its live progress, result, task and owning service.
 
-    __slots__ = ("job_id", "progress", "result", "task")
+    ``service`` is the instance whose cancellation event the running task
+    observes. A caller must never pass a freshly constructed service to
+    ``cancel``: ``HarnessImportService.cancel`` flips an event on ``self``, so a
+    throwaway instance reports success while the real import keeps running.
+    """
 
-    def __init__(self, job_id: str, progress: ImportProgress):
+    __slots__ = ("job_id", "session_key", "progress", "result", "service", "task")
+
+    def __init__(self, job_id: str, progress: ImportProgress, *, session_key: str = ""):
         self.job_id = job_id
+        self.session_key = session_key
         self.progress = progress
         self.result: ImportResult | None = None
+        self.service: Any = None
         self.task: asyncio.Task[Any] | None = None
 
 
@@ -58,14 +66,25 @@ class ImportJobRegistry:
                 return job
         return None
 
-    def get(self, job_id: str) -> ImportJob | None:
-        return self.jobs.get(job_id)
+    def get(self, job_id: str, *, session_key: str | None = None) -> ImportJob | None:
+        job = self.jobs.get(job_id)
+        if job is not None and session_key is not None and job.session_key != session_key:
+            return None
+        return job
 
-    def latest(self) -> ImportJob | None:
-        return next(reversed(self.jobs.values()), None)
+    def latest(self, *, session_key: str | None = None) -> ImportJob | None:
+        for job in reversed(self.jobs.values()):
+            if session_key is None or job.session_key == session_key:
+                return job
+        return None
 
     def start(
-        self, service: Any, request: ImportRequest, *, job_id: str | None = None
+        self,
+        service: Any,
+        request: ImportRequest,
+        *,
+        job_id: str | None = None,
+        session_key: str = "",
     ) -> ImportJob:
         """Accept a job and run it on the current event loop."""
         if self.running() is not None:
@@ -77,7 +96,8 @@ class ImportJobRegistry:
             started_at=time.time(),
             updated_at=time.time(),
         )
-        job = ImportJob(progress.job_id, progress)
+        job = ImportJob(progress.job_id, progress, session_key=session_key)
+        job.service = service
 
         def on_progress(state: ImportProgress) -> None:
             job.progress = state
@@ -112,18 +132,30 @@ class ImportJobRegistry:
             payload["result"] = job.result.to_dict()
         return payload
 
-    def cancel(self, service: Any, job_id: str | None = None) -> dict[str, Any]:
-        """Request cancellation; returns the public status payload."""
-        job = self.get(job_id) if job_id else self.running()
+    def cancel(
+        self, job_id: str | None = None, *, session_key: str | None = None
+    ) -> dict[str, Any]:
+        """Cancel the job's OWN service; never a caller-supplied instance."""
+        job = (
+            self.get(job_id, session_key=session_key) if job_id else self.running_owned(session_key)
+        )
         if job is None:
             raise KeyError(job_id or "<running>")
         if job.task is None or job.task.done():
             return {"job_id": job.job_id, "cancelled": False, "settled": True}
         return {
             "job_id": job.job_id,
-            "cancelled": service.cancel(),
+            "cancelled": bool(job.service and job.service.cancel()),
             "settled": False,
         }
+
+    def running_owned(self, session_key: str | None) -> ImportJob | None:
+        running = self.running()
+        if running is None:
+            return None
+        if session_key is not None and running.session_key != session_key:
+            return None
+        return running
 
 
 #: The one process-local registry every surface uses.

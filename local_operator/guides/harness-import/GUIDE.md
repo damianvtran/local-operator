@@ -22,12 +22,14 @@ ids are the whole addressing surface.
 4. Ask the operator which conversations to bring over. Always show the preview
    before asking; never select silently on their behalf.
 5. `op="import", confirm=true, preview_token="…"` with either
-   `session_ids={"omp": ["…"]}` or `all=true`. There is no default-all. The
-   request must match the previewed selection and options exactly.
+   `session_ids={"omp": ["…"]}` or `all=true`. There is no default-all, and
+   `all=true` cannot be combined with `session_ids` in preview or import.
+   The import must match the previewed selection and options exactly.
 6. Poll `op="status", job_id="…"` until done/cancelled/failed. Re-running the
    same import is safe: an unchanged source is a no-op, a grown source resumes,
    and a rewritten source creates a new target instead of splicing histories.
-7. Read the result's warnings and `instruction_review_path`. Re-run is safe.
+7. Read the result's warnings, `instruction_review_path` and
+   `memory_review_path` (when present). Re-run is safe.
 
 ## What it does not do
 
@@ -50,9 +52,10 @@ instructions automatically. Tell the operator where the review copy is and let
 them choose what, if anything, to adopt.
 
 `include_memory=false` or `include_instructions=false` skips those stages.
-`include_subagents` and `include_cleared_segments` are not implemented in this
-slice; preview/result report an explicit unsupported-option warning rather than
-silently ignoring them.
+`include_subagents` is honored where the source has child transcripts: omp
+includes nested sessions, Claude reports its sidechain boundary, and Codex has
+no child transcript files. `include_cleared_segments` is not a parameter of
+this tool in the current slice; do not pass it.
 
 ## Cancel and failures
 
