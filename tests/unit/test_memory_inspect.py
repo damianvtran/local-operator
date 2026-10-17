@@ -272,6 +272,7 @@ def test_lists_every_authorized_scope_with_provenance_and_age(rig):
         assert entry["revisions"] == 1
         assert entry["disposition"]["applied"] is False
     assert report["has_more"] is False and report["next_cursor"] is None
+    assert report["next_cursor_withheld"] is False
 
 
 def test_guard_refused_title_and_body_are_withheld_without_echo(rig):
@@ -362,6 +363,7 @@ def test_paging_walks_more_than_one_page_without_gaps_or_duplicates(rig):
             break
         cursor = report["next_cursor"]
         assert cursor
+        assert report["next_cursor_withheld"] is False
         assert pages < 10
     assert pages == 3
     assert len(seen) == len(set(seen)) == 5
@@ -460,6 +462,7 @@ def test_cli_json_is_parseable_and_human_view_states_nothing_changed(tmp_path, m
         "entries",
         "has_more",
         "next_cursor",
+        "next_cursor_withheld",
     }
 
     human = cli("inspect", "--session", "cli-inspect")
@@ -758,6 +761,28 @@ def test_real_minted_identifiers_pass_the_identifier_gate(rig):
     assert promoted["id"] and len(promoted["id"]) == 64
     assert promoted["revision"] and len(promoted["revision"]) == 64
 
+    # The digest is also the paging key, so a gate that refused it would stall
+    # the walk on this row rather than merely blanking it.
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):
+        page = inspect_entries(root, identity, limit=1, cursor=cursor)
+        seen.extend(entry["id"] for entry in page["entries"])
+        if not page["has_more"]:
+            break
+        assert page["next_cursor"] and page["next_cursor_withheld"] is False
+        cursor = page["next_cursor"]
+    assert promoted["id"] in seen
+
+    # And ``show`` resolves the printed reference with the digest intact. The
+    # promoted row keeps the promoting session's scope, so follow its
+    # reference rather than assuming a destination scope.
+    raw, failed = run(
+        f"show {promoted['reference']}", config=root, identity=identity, prefix="lop memory"
+    )
+    assert failed is False
+    assert json.loads(raw)["reference"] == promoted["reference"]
+
 
 def test_refused_identifier_is_not_the_paging_cursor(rig):
     """A gate-refused id must not ride out through ``next_cursor``/``More:``.
@@ -807,6 +832,9 @@ def test_refused_identifier_is_not_the_paging_cursor(rig):
     assert report["has_more"] is True
     # No cursor at all rather than the refused column value.
     assert report["next_cursor"] is None
+    # ... and the page says WHY, so ``has_more`` plus a null cursor is not the
+    # silent contradiction it used to be ("3 entries ... 2 shown", no More:).
+    assert report["next_cursor_withheld"] is True
     assert pan not in json.dumps(report)
     assert ssn not in json.dumps(report)
 
@@ -814,8 +842,14 @@ def test_refused_identifier_is_not_the_paging_cursor(rig):
     assert failed is False
     human = render_human(raw, prefix="lop memory")
     assert "More:" not in human
-    assert "id withheld" in human
-    assert "revision withheld" in human
+    flat = " ".join(human.split())
+    assert "More rows exist, but paging cannot reach them" in flat
+    assert "identifier is withheld" in flat
+    # N6-1: the marker, not its wrapped position. The Source line lands on the
+    # 80-column bar here, so asserting the un-wrapped phrase made a one-char
+    # label change read as a product defect.
+    assert "revision withheld" in flat
+    assert "id withheld" in flat
     assert pan not in human
     assert ssn not in human
 

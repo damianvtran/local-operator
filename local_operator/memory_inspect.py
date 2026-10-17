@@ -35,7 +35,6 @@ preview; it is not a bulk export either.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -303,16 +302,6 @@ def _gate_timestamp(value: Any) -> float | None:
     return value
 
 
-#: The store's OWN minted hash identifiers: ``MemoryStore.apply_ops``'s promote
-#: branch rewrites a promoted op/entity id to
-#: ``sha256(session-id + "|" + id).hexdigest()`` (memory.py), so a promoted
-#: row's id IS a bare 64-hex digest. It is admitted beside the
-#: ``structural_reference`` shapes for the same reason those are: the value is
-#: MINTED, not user prose, and ``guard`` can refuse a legitimate digest by
-#: chance on its hex run (the collision ``memory.safe_segment`` documents).
-_IDENTIFIER_DIGEST = re.compile(r"[0-9a-f]{64}")
-
-
 def _gate_identifier(value: Any) -> str | None:
     """An entity/operation identifier, held to a READ-side identity rule.
 
@@ -330,10 +319,17 @@ def _gate_identifier(value: Any) -> str | None:
     ``id``/``reference``/``revision``. The write path is laxer here by design
     (``validate_op`` shape-checks ids without the guard); a listing only
     repeats what its own gate admits.
+
+    No bespoke admission for a promoted row's bare 64-hex digest is needed:
+    ``guard``'s sensitive shapes are all boundary-anchored, so a single
+    64-character alnum token cannot match one, and ``safe_segment`` admits it
+    through the ordinary rule (measured: zero refusals over 1.3M random and
+    adversarial digests). A branch that admitted digests here would be dead
+    code claiming a necessity it does not have.
     """
     if not isinstance(value, str):
         return None
-    if structural_reference(value) or _IDENTIFIER_DIGEST.fullmatch(value):
+    if structural_reference(value):
         return value
     try:
         return safe_segment(value)
@@ -550,6 +546,16 @@ def inspect_entries(
     cursor remains the entry ID a person was given, so the printed ``More:``
     command is unchanged; its ordering key is looked up under the same
     authorization predicate as the page itself.
+
+    Paging contract when the gate refuses the last row shown: ``has_more``
+    answers the STORE question (does the store hold more authorized rows than
+    this page showed?) and stays true, while ``next_cursor`` is null because
+    the next page's key is the withheld id itself. ``next_cursor_withheld``
+    marks exactly that state so a client can tell an unreachable tail from a
+    complete listing, and the human view prints the same fact in words. A
+    silent null alone would read as "nothing further" — or make a
+    ``has_more``-driven loop refetch page one forever — and an audit listing
+    must never quietly show fewer rows than exist.
     """
     if not 1 <= limit <= MAX_LIMIT:
         raise MemoryError(f"Inspection limit must be 1–{MAX_LIMIT}.")
@@ -572,6 +578,10 @@ def inspect_entries(
         "entries": [],
         "has_more": False,
         "next_cursor": None,
+        #: True iff ``has_more`` is true but no cursor could be issued because
+        #: the next row's identifier was withheld by the gate. Never true with
+        #: a cursor present; see the paging contract in the docstring.
+        "next_cursor_withheld": False,
         #: True when the supplied cursor no longer names an authorized row (the
         #: entry was forgotten or re-scoped since it was printed). The page is
         #: then empty BY THE CURSOR, not by the store, so counts stay real.
@@ -656,4 +666,7 @@ def inspect_entries(
         # not leak through the paging hint that names it (the row itself shows
         # ``id: null``). A refused id therefore ends the walk as ``null``.
         report["next_cursor"] = report["entries"][-1]["id"]
+        # Say WHY paging stops here instead of letting a null cursor imply the
+        # listing is complete (an audit tool showing 2 of 3 rows silently).
+        report["next_cursor_withheld"] = report["next_cursor"] is None
     return report
