@@ -1,0 +1,19 @@
+{
+  "cli.wake_help.wake": "Inspect scheduled wakes and the supervisor that fires them",
+  "cli.wake_help.status": "whether a supervisor is installed, and what it would fire next",
+  "cli.wake_help.json": "machine-readable output",
+  "cli.wake_help.status_install": "install the supervisor now rather than waiting for the next schedule",
+  "cli.wake_help.status_uninstall": "remove the supervisor; scheduled wakes then fire only when a session is open",
+  "cli.wake_help.install": "install or repair the supervisor now (restarts a stale or stopped one)",
+  "cli.wake_help.list": "every scheduled wake on this machine, soonest first",
+  "cli.wake_help.create": "schedule a wake for a session (installs the supervisor on demand)",
+  "cli.wake_help.create_session": "session id to wake",
+  "cli.wake_help.create_when": "when to fire: a duration (\"in 2m\", \"45s\") or a clock time (\"at 09:30\")",
+  "cli.wake_help.create_message": "the self-prompt delivered when it fires (at most {max} characters)",
+  "cli.wake_help.create_every": "repeat every DURATION after the first fire (\"5m\", \"1h\", \"8h30m\")",
+  "cli.wake_help.create_until": "stop repeating after this time (\"in 7d\", \"at 09:30\")",
+  "cli.wake_help.create_limit": "stop repeating after N fires",
+  "cli.wake_help.create_notify": "notify on completion of the wake's turn (default quiet: scripted arms match the contract; errored turns notify regardless)",
+  "cli.wake_help.serve": "run the supervisor in the foreground (what the LaunchAgent runs)",
+  "cli.wake_help.serve_once": "fire whatever is due right now, then exit"
+}
