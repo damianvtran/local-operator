@@ -4350,8 +4350,11 @@ class DesktopSessionBridge:
         A page that does have candidates takes the index module's existing
         hot-path door -- ``fresh_resident`` for a CURRENT index (two stats), and
         ``start_refresh`` (single-flight, runs the build in a thread) when there
-        is none -- and answers WITHOUT proof for this read; the next read, once
-        that build settles, carries the records. ``refresh_index`` is never
+        is none. A cold read answers with the EXPLICIT empty partition naming
+        those candidates ("no proof yet"), never a missing key: the key's absence
+        means "this page owes none", and a client that conflated the two could
+        not tell a cold index from a page with nothing to prove. The next read,
+        once that build settles, carries the records. ``refresh_index`` is never
         called here, so a cold 1.5-2.5 s cache parse can no longer sit on the
         event loop. The byte budget and both overflow/refusal shapes are
         unchanged.
@@ -4375,20 +4378,24 @@ class DesktopSessionBridge:
                         messages.append(message)
         if not messages:
             return answer
-        if not candidate_record_ids(self.session_id, messages):
+        candidates = candidate_record_ids(self.session_id, messages)
+        if not candidates:
             # THE ZERO-COST DOOR: the shared derivation (``discover_records``
-            # uses the same one) says this page owns no proof, so it must not
+            # uses the same one) says this page owes no proof, so it must not
             # read a journal line or an index byte.
             return answer
-        # ``fresh_resident`` is deliberately synchronous and costs two ``stat``
-        # calls; the module's own hot-path callers invoke it on the event loop
-        # for exactly that reason (see its docstring).
+        # ``fresh_resident`` is synchronous BY DESIGN and costs two ``stat``
+        # calls (see its docstring), so this call needs no thread hop; it is
+        # only ever a lookup, never a scan.
         index = transcript_index.fresh_resident(self.root, self.session_id)
         if index is None:
-            # No current index: build it off-request. This read is answered
-            # without proof (the same shape as "nothing to prove yet"); the
-            # next snapshot/page read finds the resident index and carries it.
-            # The build is single-flight, so concurrent opens share one scan.
+            # No current index: build it off-request and answer with the SAME
+            # explicit empty partition the index-unavailable answer always used,
+            # naming this page's candidates. A client can then tell "still
+            # building" from "this page owes no proof" (which is the key's
+            # absence), and the next read finds the resident index and carries
+            # the records. The build is single-flight, so concurrent opens share
+            # one scan.
             try:
                 task, _started = transcript_index.start_refresh(self.root, self.session_id)
                 # Retrieve a failed build's exception: this caller owns no await on
@@ -4397,21 +4404,22 @@ class DesktopSessionBridge:
                 task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
             except Exception:  # noqa: BLE001 — a refresh is an optimisation
                 logger.debug("peer display: index refresh start failed", exc_info=True)
-            return answer
-        baseline = len(json.dumps(answer, ensure_ascii=False).encode())
-        budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
-        # The archive read itself is bounded (<=512 ids, byte-capped) but still
-        # file I/O, so it leaves the event loop.
-        records = await asyncio.to_thread(
-            discover_records,
-            self.root / "sessions" / self.session_id,
-            messages,
-            self.session_id,
-            max_bytes=budget,
-            index=index,
-        )
-        if records is None:
-            return answer
+            records = {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
+        else:
+            baseline = len(json.dumps(answer, ensure_ascii=False).encode())
+            budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
+            # The archive read itself is bounded (<=512 ids, byte-capped) but
+            # still file I/O, so it leaves the event loop.
+            records = await asyncio.to_thread(
+                discover_records,
+                self.root / "sessions" / self.session_id,
+                messages,
+                self.session_id,
+                max_bytes=budget,
+                index=index,
+            )
+            if records is None:
+                return answer
         candidate = {**answer, "peer_cycle_display_records": records}
         if len(json.dumps(candidate, ensure_ascii=False).encode()) > OPEN_FRAME_MAX_BYTES:
             # Keep EVERY original row. If even the remaining-ID list cannot

@@ -7,12 +7,14 @@ JSON-decodes the complete journal. On the operator's Aida session that is 485 MB
 / 70,353 rows and a measured 6.6-8.9 s per read, synchronously on the event
 loop; the index refresh that followed cost another 1.5-2.5 s per request.
 
-The invariant asserted here is ROWS DECODED, not milliseconds: the product rule
-is that a page read may decode its own bounded page window, so these tests count
-``TranscriptEntry.from_json`` calls around one real HTTP request and bound the
-count to the page. A wall-clock threshold would fail on a loaded host without
-saying anything about the defect; a row count fails on exactly the regression
-this file exists for (the old code decoded every row in the seeded journal).
+The invariant asserted here is ROWS DECODED, not milliseconds: one test counts
+``TranscriptEntry.from_json`` calls around the join itself and bounds them to
+the page; the route-level tests count ``Transcript`` constructions and index
+lookups across a real HTTP request; and one bridge-level test guards that the
+warm door still serves proof. A wall-clock threshold would fail on a loaded host
+without saying anything about the defect; a row count fails on exactly the
+regression this file exists for (the old code decoded every row in the seeded
+journal).
 
 Row counts are also why the fixtures are a few thousand small rows rather than a
 half-gigabyte journal: the invariant is about rows DECODED, not bytes.
@@ -20,6 +22,7 @@ half-gigabyte journal: the invariant is about rows DECODED, not bytes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -257,7 +260,10 @@ async def test_a_repeat_open_never_constructs_a_transcript(
         original = Transcript.__init__
 
         def counting(self: Any, *args: Any, **kwargs: Any) -> None:
-            constructions.append(self.directory)
+            # Placeholder only: see the note in the repeat-open test -- reading
+            # ``self.directory`` before the original raises AttributeError on the
+            # very code whose behaviour this asserts about.
+            constructions.append(None)
             original(self, *args, **kwargs)
 
         monkeypatch.setattr(Transcript, "__init__", counting)
@@ -301,7 +307,11 @@ async def test_a_page_without_peer_roots_reads_no_journal_at_all(
         original_init = Transcript.__init__
 
         def counting_init(self: Any, *args: Any, **kwargs: Any) -> None:
-            constructions.append(self.directory)
+            # A placeholder, NOT ``self.directory``: that attribute is assigned
+            # by ``__init__`` itself, so reading it first would turn the
+            # pre-change failure into an AttributeError instead of the invariant
+            # this test asserts.
+            constructions.append(None)
             original_init(self, *args, **kwargs)
 
         monkeypatch.setattr(Transcript, "__init__", counting_init)
@@ -326,49 +336,56 @@ async def test_without_a_resident_index_the_read_builds_and_answers_no_proof(
 ) -> None:
     """A cold index starts the existing single-flight build, never a sync scan.
 
-    The request must answer WITHOUT ``peer_cycle_display_records`` and leave the
-    build to ``start_refresh`` (which parses in a thread and publishes the
-    resident index for the next read). ``refresh_index`` on the request path is
-    the regression -- 1.5-2.5 s of cache parsing on the event loop -- so it is
-    armed here to fail loudly if anything reaches for it.
+    The request answers with the EXPLICIT empty partition naming this page's
+    candidates ("no proof yet", distinguishable from the key's absence, which
+    means the page owes no proof) and leaves the build to ``start_refresh``
+    (which parses in a thread and publishes the resident index for the next
+    read). ``refresh_index`` on the request path is the regression -- 1.5-2.5 s
+    of cache parsing on the event loop -- so it is armed here to fail loudly if
+    anything reaches for it.
     """
     async with _Harness(tmp_path) as harness:
         harness.seed(rows=400)
         ti._reset_for_tests()
         started: list[tuple[Path, str]] = []
 
-        def fake_start(config_dir: str | Path, session_id: str) -> tuple[None, bool]:
+        def fake_start(config_dir: str | Path, session_id: str) -> tuple[asyncio.Task[None], bool]:
             started.append((Path(config_dir), session_id))
-            return None, True
+            # A REAL task, so the done-callback the bridge installs to retrieve a
+            # failed build's exception is actually exercised (a ``None`` return
+            # would be swallowed by the caller's broad except).
+            return asyncio.create_task(asyncio.sleep(0)), True
 
         def forbidden_refresh(*_: Any, **__: Any) -> Any:
             raise AssertionError("refresh_index must not run on the desktop read path")
 
         monkeypatch.setattr(ti, "start_refresh", fake_start)
         monkeypatch.setattr(ti, "refresh_index", forbidden_refresh)
-        assert harness.client is not None
-        response = await harness.client.get(
-            f"/v1/desktop/sessions/{harness.session_id}/history", params={"limit": 50}
-        )
-        assert response.status_code == 200, response.text
-        page = response.json()["result"]
+        # The BRIDGE's answer: the HTTP response model (``HistoryPage``) does not
+        # carry this renderer-only key, and this test is about the join.
+        async with harness.pool.session(harness.session_id) as bridge:
+            page = await bridge.history(limit=50)
         assert page["entries"][-1]["id"] == "a-last"
-        assert (
-            "peer_cycle_display_records" not in page
-        ), "a cold-index read answered with proof it could not have read"
+        expected = record_id(harness.session_id, "a-last", "root-call")
+        assert page["peer_cycle_display_records"] == {
+            "records": [],
+            "remaining": [],
+            "unavailable": [expected],
+            "bytes": 0,
+        }, "a cold index must answer the explicit empty partition, not omit the key"
         assert started == [
             (tmp_path, harness.session_id)
         ], "the cold read did not start the single-flight index build exactly once"
 
 
 @pytest.mark.asyncio
-async def test_the_snapshot_carries_proof_once_the_resident_index_is_current(
+async def test_the_bridge_history_serves_proof_once_the_resident_index_is_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The fast door is still a DOOR: a current index serves the join.
 
     Bounding the read is not permission to drop proof. With the resident index
-    warm, the very next snapshot takes the archive path: the seeded decoy row
+    warm, the next bridge read takes the archive path: the seeded decoy row
     carries the candidate's own id but is not a display record, so it must come
     back ``unavailable`` -- never silently omitted -- and its presence in the
     answer proves the index (not a journal replay) supplied the join.
