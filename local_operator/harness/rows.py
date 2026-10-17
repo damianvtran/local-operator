@@ -222,7 +222,7 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the prompts that are
-    single fixed strings (the six listed above); a producer-side recogniser covers each family the
+    single fixed strings (the seven listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's

@@ -3092,9 +3092,10 @@ class LoopConfig(BaseModel):
     #: a parent that can continue it solely by paying for a resume -- the cost
     #: this flag exists to remove. With this on, ONE run-scoped continuation asks
     #: the model to finish the answer in place; when that budget is spent the end
-    #: is stamped ``output-limit`` (``aborted=True``) so a cut report is never
-    #: read as a finished one. Off by default: every direct embedder keeps
-    #: today's ending exactly.
+    #: is stamped ``output-limit`` (``aborted=True``) so a cut PURE-PROSE report
+    #: is never read as a finished one -- a text+call turn is the call arm's and
+    #: keeps its own re-ask (``agent review round 1, M-1``). Off by default: every
+    #: direct embedder keeps today's ending exactly.
     continue_truncated_answer: bool = False
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
