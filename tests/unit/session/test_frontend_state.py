@@ -2225,6 +2225,10 @@ def test_a_receipt_with_no_context_number_cannot_move_occupancy() -> None:
     restored = FrontendStateStore.from_checkpoint(owner).state
 
     assert restored.context_tokens == 402_000
+    # The pair does not split for a receipt that says nothing about occupancy:
+    # blanking it would also disarm the equal-receipt guard on the next replay.
+    assert restored.last_usage is not None
+    assert restored.last_usage.context_tokens == 402_000
 
 
 def test_the_at_ms_stamp_survives_the_wire_and_the_frozen_wrapper() -> None:
