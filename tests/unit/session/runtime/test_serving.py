@@ -14,7 +14,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 
@@ -2157,6 +2157,11 @@ async def test_the_pair_only_re_pick_stores_the_chosen_level_in_the_journal(tmp_
     from local_operator.session.transcript import Transcript
 
     class _Stream:
+        async def __call__(self, request: Any, signal: Any = None) -> AsyncIterator[Any]:
+            """Never called: the switch and the journal write make no request."""
+            if False:  # pragma: no cover — makes this an async generator
+                yield
+
         def set_route_handler(self, handler: Any) -> None:  # noqa: ANN401 — test double
             pass
 
