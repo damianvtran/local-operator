@@ -62,6 +62,7 @@ from local_operator.env import get_env_config
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import cli_mcp_help as _mh
+from local_operator.i18n.keys import cli_mobile_help as _mb
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_wake_help as _wh
@@ -808,36 +809,37 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Same lazy-import rule as ``serve`` — the mobile modules pull starlette/
     # uvicorn only when a mobile command actually runs.
     mobile_parser = subparsers.add_parser(
-        "mobile", help="Phone access: control this machine's lop sessions", parents=[parent_parser]
+        "mobile", help=_mb.mobile().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     mobile_subparsers = mobile_parser.add_subparsers(dest="mobile_command")
-    mobile_subparsers.add_parser("install", help="Install the daemon, password and LaunchAgent")
-    mobile_subparsers.add_parser("status", help="Daemon health, gate and live sessions")
+    mobile_subparsers.add_parser("install", help=_mb.install().envelope(locale=help_locale)["text"])
+    mobile_subparsers.add_parser("status", help=_mb.status().envelope(locale=help_locale)["text"])
     for action in ("start", "stop", "restart"):
-        mobile_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
+        mobile_subparsers.add_parser(
+            action, help=_mb.daemon_action(action=action).envelope(locale=help_locale)["text"]
+        )
     logs_parser = mobile_subparsers.add_parser(
-        "logs", help="Tail the daemon's and the runtimes' logs"
+        "logs", help=_mb.logs().envelope(locale=help_locale)["text"]
     )
     logs_parser.add_argument(
-        "--lines", type=int, default=100, help="Lines per file (up to two are read)"
+        "--lines", type=int, default=100, help=_mb.logs_lines().envelope(locale=help_locale)["text"]
     )
     logs_parser.add_argument(
         "--follow",
         "-f",
         action="store_true",
-        help=(
-            "Follow by name, so a log created or rotated while you watch is seen "
-            "(a descriptor-bound follow misses both)"
-        ),
+        help=(_mb.logs_follow().envelope(locale=help_locale)["text"]),
     )
-    mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
+    mobile_subparsers.add_parser(
+        "password", help=_mb.password().envelope(locale=help_locale)["text"]
+    )
     # The operator surface ADR 0006 §4 names for the device lifecycle: the way
     # back from a revoke is never the device's own act, so it is a command a
     # human runs on this computer. Stdlib-only arguments here, like the rest of
     # the mobile block; the HTTP client is imported when the command runs.
     devices_parser = mobile_subparsers.add_parser(
         "devices",
-        help="List this computer's push devices, or revoke/unrevoke one",
+        help=_mb.devices().envelope(locale=help_locale)["text"],
         # Rendered from the constants the code returns, so the help cannot name a
         # status the command does not use (design round 1, D8: it promised "1 any
         # other failure" while a missing id returned 2).
@@ -854,22 +856,30 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="?",
         choices=("list", "revoke", "unrevoke"),
         default="list",
-        help="list (default), revoke <device_id>, or unrevoke <device_id>",
+        help=_mb.devices_command().envelope(locale=help_locale)["text"],
     )
     devices_parser.add_argument(
         "device_id",
         nargs="?",
-        help="the device_id `lop mobile devices` lists; required by revoke/unrevoke",
+        help=_mb.devices_device_id().envelope(locale=help_locale)["text"],
     )
     devices_parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help="the mobile daemon's port (default: the daemon's own default)",
+        help=_mb.devices_port().envelope(locale=help_locale)["text"],
     )
-    uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
-    uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
-    serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
+    uninstall_parser = mobile_subparsers.add_parser(
+        "uninstall", help=_mb.uninstall().envelope(locale=help_locale)["text"]
+    )
+    uninstall_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help=_mb.uninstall_purge().envelope(locale=help_locale)["text"],
+    )
+    serve_mobile_parser = mobile_subparsers.add_parser(
+        "serve", help=_mb.serve().envelope(locale=help_locale)["text"]
+    )
     serve_mobile_parser.add_argument("--port", type=int, default=4098)
 
     # Register only stdlib arguments here. JWT/HTTP/service code remains lazy
