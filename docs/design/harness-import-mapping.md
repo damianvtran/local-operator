@@ -17,10 +17,12 @@ existing durable formats:
   whose earlier source rows remain on disk before that anchor. Replay therefore sees
   the same "summary + kept window" the source saw, while the replaced span is still
   inspectable and re-importable. No LLM call is made during import.
-- **Memory** becomes atomic `MemoryStore` facts in the global bank for curated memory
-  stores, with provenance and source timestamps; instruction files (`CLAUDE.md` /
-  `AGENTS.md`) are written to a review artifact and become candidate facts only when the
-  operator explicitly asks, never silently appended to live instructions.
+- **Memory** becomes scope-classified `MemoryStore` facts for curated stores (global only
+  for durable personal facts; session scope for work memory tied to an imported
+  conversation; otherwise a review artifact), with provenance and source timestamps.
+  Instruction files (`CLAUDE.md` / `AGENTS.md`) are written to a review artifact and
+  become candidate facts only when the operator explicitly asks, never silently appended
+  to live instructions.
 - **Every surface** (TUI, desktop UI, agent tool, optional CLI) calls the same
   service. No surface re-implements parsing, dedupe or compaction mapping.
 
@@ -55,8 +57,8 @@ No message bodies or secrets are reproduced here.
 |---|---|---|---|
 | Claude Code | 2.1.274; `~/.claude` | `~/.claude/projects/` is absent, but a real daemon-job transcript exists at `~/.claude/jobs/<job>/tmp/parent-transcript.jsonl`: 33,803,325 bytes, 5,825 records (1,111 user / 2,244 assistant; 920 `tool_use` / 980 `tool_result`; 691 `thinking`; 13 image blocks; 2 `system/compact_boundary`; 2 `isCompactSummary`). Its embedded `sessionId` is one of the 39 ids in `history.jsonl` (322 rows); the job state calls it a fork parent. `~/.claude/CLAUDE.md` is 3,480 bytes. The binary contains `parentUuid`, `isSidechain`, `isCompactSummary`, `compactMetadata` (`preservedMessages`, `preservedSegment`), `compact_boundary`, `logicalParentUuid`, `toolUseResult`, `MEMORY.md`, `agent-memory/`, `agent-memory-local/` and `memory/`. | Claude has a real body and real compaction markers on this machine, just under `jobs/` rather than `projects/`. Discovery must scan both and dedupe by embedded `sessionId`; use a read-only copy of the job body in QA, not a committed fixture (it is user data). |
 | Codex | 0.147.0; `~/.codex` | `state_5.sqlite` has 1,203 threads (1,189 `legacy`, 14 `paginated`). Every sampled `rollout_path` under `~/.codex/sessions/...` is **missing**; `~/.codex/archived_sessions/` holds two real `rollout-*.jsonl.zst` files (88 and 42 records). `memories_1.sqlite` has the `stage1_outputs` memory table but **0 rows**. `AGENTS.md` is 3,480 bytes. The native binary contains `compacted`, `replacement_history`, `compaction_summary`, `encrypted_content`. | Most Codex conversations are index-only on this machine: list them with an explicit "body unavailable" state, do not silently omit. The two archived rollouts are the only real body fixtures available; `.jsonl.zst` is supported when the runtime has `compression.zstd` (the installed lop runtime is Python 3.14; the repo test venv is 3.12, so that test is skipped there). |
-| omp | 18.11.2; `~/.omp/agent` | 9 top-level session `.jsonl` files plus 17 nested subagent transcripts under `<session-stem>/<name>.jsonl`, each with a `session` header carrying `parentSession`. Top-level census: 913 messages and 521 custom entries. Sample entry types: `session` header, `title`/`title_change`, `model_change`, `thinking_level_change`, `message` (roles `user`/`assistant`/`toolResult`; blocks `text`/`thinking`/`toolCall`/`image`), `custom_message`, `custom`, `credential_pin`, `service_tier_change`, `model_usage`. `session-index.db` is stale (1 row); `history.db` has titles/history. No `compaction` entry exists locally, but the fork's `CompactionEntry` schema is: `summary`, `shortSummary`, `firstKeptEntryId`, `tokensBefore`, `details`, `preserveData`, `fromExtension`, `warning`. No `~/.omp/agent/memories/` tree exists; no `learned.md` found. | omp is the best real end-to-end fixture: full messages, tool calls, timestamps, branches and nested subagents. Compaction mapping is tested with synthetic entries built from the verified schema. Discovery must recurse one level, not just `<encoded-cwd>/*.jsonl`. |
-| lop target | `~/.local-operator` | 4,097 session `transcript.jsonl` files at QA time (4,091 at the first probe; live drift). Entry shape `{"id","ts","type","payload"}` with `type` in `message` / `compaction` / `custom` / `prune`; compaction payload includes `summary`, `first_kept_entry_id`, `tokens_before`, `preserve_data`, `preserved_user_turns`, `preserved_turns_cap`. `Message` roles are `user`/`assistant`/`tool`; content union is text/image/audio/attachment (**no thinking block**). Session sidecars: `created_at.json`, `title.json` (`{text,user_set,names}`), optional `origin.json`. `memory/memory.db` has 12,565 current facts at QA time (12,513 at the first probe); `MemoryStore.put` requires atomic title+body and validates source metadata; items cap at 256 tokens/8 KiB **including metadata**. | Target mapping is concrete: write `TranscriptEntry` rows with source `ts` and deterministic IDs; write `created_at.json` before materialising; write `title.json` through `resume.write_session_title`; store curated imported memory through `MemoryStore.put`, never direct SQLite writes. |
+| omp | 18.11.2; `~/.omp/agent` | 9 top-level session `.jsonl` files plus 17 nested subagent transcripts under `<session-stem>/<name>.jsonl` (up to depth 4), each with a `session` header carrying `parentSession`. Top-level census: 913 messages and 521 custom entries. Sample entry types: `session` header, `title`/`title_change`, `model_change`, `thinking_level_change`, `message` (roles `user`/`assistant`/`toolResult`; blocks `text`/`thinking`/`toolCall`/`image`), `custom_message`, `custom`, `credential_pin`, `service_tier_change`, `model_usage`. `session-index.db` is stale (1 row); `history.db` has titles for 9/9 top-level ids but 0/17 nested. No `compaction` entry exists locally, but the fork's `CompactionEntry` schema is: `summary`, `shortSummary`, `firstKeptEntryId`, `tokensBefore`, `details`, `preserveData`, `fromExtension`, `warning`. No `~/.omp/agent/memories/` tree exists; no `learned.md` found. | omp is the best real end-to-end fixture: full messages, tool calls, timestamps, branches and nested subagents. Compaction mapping is tested with synthetic entries built from the verified schema. Discovery must recurse fully (`**/*.jsonl`), not one level. |
+| lop target | `~/.local-operator` | 4,103 session `transcript.jsonl` files at the last QA observation (2026-10-17T17:57Z; 4,097 at round 2, 4,091 at the first probe — live drift). Entry shape `{"id","ts","type","payload"}` with `type` in `message` / `compaction` / `custom` / `prune`; compaction payload includes `summary`, `first_kept_entry_id`, `tokens_before`, `preserve_data`, `preserved_user_turns`, `preserved_turns_cap`. `Message` roles are `user`/`assistant`/`tool`; content union is text/image/audio/attachment (**no thinking block**). Session sidecars: `created_at.json`, `title.json` (`{text,user_set,names}`), optional `origin.json`. `memory/memory.db` has 12,613 current facts at the last observation (12,565 at round 2, 12,513 at the first probe); `MemoryStore.put` requires atomic title+body and validates source metadata; items cap at 256 tokens/8 KiB **including metadata**. | Target mapping is concrete: write `TranscriptEntry` rows with source `ts` and deterministic IDs; write `created_at.json` before materialising; write `title.json` through `resume.write_session_title`; store curated imported memory through `MemoryStore.put`, never direct SQLite writes. |
 
 Independent reference: `~/oss/oh-my-pi/packages/coding-agent/src/session/claude-session-store.ts`
 and `codex-session-store.ts` already parse both formats for omp's own importer. They
@@ -158,15 +160,22 @@ records.
 | `isCompactSummary: true` on a user record | the synthetic summary row; use its string content as the summary and do not import it as a normal user turn |
 | `isMeta: true` | skip (harness bookkeeping) |
 | `isSidechain: true` | subagent thread; skip by default, import as a separate session only when `include_subagents` |
-| `uuid` / `parentUuid` | branch tree; `logicalParentUuid` is recorded in the manifest only |
+| `uuid` / `parentUuid` | per-segment branch tree; `logicalParentUuid` links across compaction boundaries and is used for segmentation plus recorded in the manifest |
 | `custom-title` / `ai-title` | source title (custom wins); `user_set` true only for `custom-title` |
 | `timestamp`, `cwd`, `sessionId`, `gitBranch` | timestamps, session metadata, manifest provenance |
 
-Branch policy: choose the newest leaf (highest timestamp; tie → last record), walk
-`parentUuid` back to the root, reverse, and emit that active path. Inactive branches
-are recorded in the manifest as IDs only. A `summary` record with a `leafUuid` outside
-the active path is a branch summary; skip it with a warning rather than applying it to
-the active conversation.
+Branch policy: segment first. A `system/compact_boundary` or `summary`/`isCompactSummary`
+record whose `parentUuid` is null is a **continuation boundary**, not a new root. Partition
+the record stream at those markers, then for each segment choose the newest non-sidechain
+**message** leaf (ignore attachment-only/metadata leaves), walk `parentUuid` to the
+segment's first message, reverse, and emit that path. Emit **every** segment in source
+order: earlier segments are archive rows before their compaction markers, never dropped.
+If a later segment links to an earlier one via `logicalParentUuid`, use that ancestor to
+choose the earlier segment's leaf; otherwise choose the newest message leaf in that
+segment. Inactive branches are recorded as IDs only. A legacy summary row with no uuid or
+`sessionId` gets a synthetic source id (path + ordinal) and stays on its segment. Never
+use a single global `parentUuid` walk: the real Claude job body has two boundaries with
+`parentUuid: null`, and one walk loses most of the conversation.
 
 Compaction: a `system/compact_boundary` record carries `compactMetadata`; the adjacent
 `isCompactSummary` row (in source order) carries the summary string, so pair the two
@@ -239,8 +248,8 @@ agent dir (default `~/.omp/agent`); `PI_CONFIG_DIR` sets the config root (defaul
 Bodies: `<agentDir>/sessions/**/*.jsonl` — recurse, because nested subagent transcripts
 live at `<session-stem>/<name>.jsonl` and carry a `session` header with `parentSession`.
 Exclude index files. `<encoded-cwd>` is the `--path-with-dashes--` form (e.g.
-`--private-tmp--`). `session-index.db` and `history.db` are optional metadata and are
-stale here; the JSONL is authoritative.
+`--private-tmp--`). `session-index.db` is stale (1 row); `history.db` has titles for 9/9 top-level ids but
+0/17 nested. Both are optional metadata; the JSONL is authoritative.
 
 | omp entry | Use |
 |---|---|
@@ -278,8 +287,8 @@ instruction files use the review-artifact path described below.
 | Claude Code | `~/.claude/CLAUDE.md`, `~/.claude/CLAUDE.local.md` | instruction text; default: write to `<config>/imports/instructions/claude.md` as a review artifact, **not** to `MemoryStore`; optional append to `~/.agents/AGENTS.md` only after explicit confirmation; optional session-scope candidate facts for the importing session |
 | Claude Code | auto-memory: `user` = `~/.claude/agent-memory/<agentType>/`, `project` = `<cwd>/.claude/agent-memory/<agentType>/`, `local` = `<cwd>/.claude/agent-memory-local/<agentType>/` (project dir comes from the session `cwd`), plus legacy `memory/` | parse `MEMORY.md` index bullets and linked files; one atomic fact per bullet/section; title from the heading; body budgeted below the whole-fact cap; `source.uri` = file path |
 | Codex | `~/.codex/AGENTS.md` | same instruction review-artifact handling as Claude's `CLAUDE.md` |
-| Codex | `~/.codex/memories_1.sqlite` → `stage1_outputs` (`raw_memory`, `rollout_summary`, `rollout_slug`, `generated_at`, `usage_count`) | one or more atomic facts per row; title from `rollout_slug` or thread title; body split on paragraph boundaries and budgeted below the whole-fact cap; tags `codex`, `imported`, thread id; `source_time=generated_at`; `source.kind="summary"`; curated → active |
-| omp | `~/.omp/agent/memories/<encoded>/{MEMORY.md,memory_summary.md,learned.md}` | parse bullets/sections; `learned.md` bullets are facts; `MEMORY.md` index entries point at detail; `memory_summary.md` is a consolidated summary; curated → active |
+| Codex | `~/.codex/memories_1.sqlite` → `stage1_outputs` (`raw_memory`, `rollout_summary`, `rollout_slug`, `generated_at`, `usage_count`) | classify each fact: durable personal → global active; work-state tied to an imported thread → target session scope; no target conversation → review artifact. One or more atomic facts per row; title from `rollout_slug` or thread title; body split on paragraph boundaries and budgeted below the whole-fact cap; tags `codex`, `imported`, thread id; `source_time=generated_at`; `source.kind="summary"` |
+| omp | `~/.omp/agent/memories/<encoded>/{MEMORY.md,memory_summary.md,learned.md}` | cwd-keyed. If a conversation with the matching cwd is imported, work-state facts go to that target session; durable personal facts go global; otherwise they go to the review artifact. `learned.md` bullets are facts; `MEMORY.md` index entries point at detail; `memory_summary.md` is a consolidated summary |
 | omp | remote `hindsight` backend, or a `mnemopi` bank not on disk | skip with `remote_backend_no_network`; no HTTP call |
 | Any | `auth.json`, `auth.db`, `settings.json`, `.env`, credential/plugin stores | never read; not an import source |
 
@@ -289,27 +298,32 @@ Curated memory records use `MemoryStore.put(scope, fact)` with:
 scope:       "session" for work-state memory tied to an imported conversation
              (owner = target session id; session_dir = target session dir);
              "global" only for durable personal facts that pass scope_fit
-             (names, preferences, contacts, environment). A memory row with no
-             imported target conversation goes to the review artifact, not global.
+             (names, preferences, contacts, environment). Work-state memory with
+             no target conversation goes to the review artifact (or, on explicit
+             opt-in, a dedicated "imported memory" session bank), not global.
 title:       <=160 chars, source heading/slug or first sentence
 body:        atomic; budget below the whole serialized fact cap
              (<=256 tokens / 8 KiB including title, tags and source)
 tags:        ["imported", "source:<claude|codex|omp>", <source tag>] (<=12)
 source:      {kind: "reported"|"summary", uri: "harness-import:<source>:<id>",
-              author: "harness-import", session: "<target session id>"}
-             # session is omitted for memory derived from an instruction/memory
-             # file, which has no target conversation.
+              author: "harness-import"}
+             # source.session is HOST-STAMPED by MemoryStore from the store identity:
+             # the target session id for a session-scope put, the importing session
+             # id for a global put. The foreign id lives in source.uri.
 created_at:  source generated time when known, else source file mtime
 source_time: source timestamp
-status:      "active" for curated memory rows (Codex stage1_outputs, omp MEMORY.md)
+status:      "active" when the curated fact lands in a bank (global personal or
+             target session); review-artifact rows have no bank status; optional
+             instruction-derived session facts use "candidate"
 ```
 
 Scope classification is deliberate: foreign agent memory is usually work state, and
 lop's memory guide reserves global for durable personal facts. `scope_fit` refusals are
 surfaced in preview and in the result counts, never silently promoted to global. Session
 quotas (50k tokens per owner) are separate from the 16k global quota; preview reports
-both. If a source memory row cannot be tied to an imported conversation and is not a
-durable personal fact, it lands in the review artifact instead of a memory bank.
+both. A work-state row that cannot be tied to an imported conversation is not forced
+into global: it lands in the review artifact, unless the operator explicitly opts into a
+dedicated imported-memory session bank.
 
 Instruction files are not facts: they are work-state-shaped, `scope_fit` would refuse
 many global puts, and the memory guide says not to auto-promote captured work facts.
@@ -359,7 +373,9 @@ Manifest is durable, not LLM-visible:
   "v": 1,
   "source": "omp",
   "source_id": "01a14564-...",
-  "source_path": "/Users/.../.omp/agent/sessions/...",
+  "source_path": "~/.omp/agent/sessions/...",
+  "alternate_paths": ["~/.claude/jobs/<job>/tmp/parent-transcript.jsonl"],
+  "fork_parent_source_id": null,
   "source_fingerprint": {"size": 3490, "mtime_ns": 0, "sha256_prefix": "..."},
   "source_created_at": 1760629588.0,
   "imported_at": 1760...,
@@ -465,9 +481,12 @@ Rules:
    replay, not a summary-only one.
 2b. Never start replay on a `tool` row without its assistant call. If the chosen anchor is
    a tool result, snap backward to the owning assistant message when that message is still
-   after the cut; otherwise snap forward to the next user/assistant message. This mirrors
-   lop's own cut rule (`_is_valid_cut`/`_snap_to_valid_cut` reject a cut before a tool row)
-   and keeps every call/result pair together.
+   after the cut; otherwise snap forward to the next user/assistant message. If the owning
+   assistant message has multiple tool calls, keep the whole call/result group: move the
+   anchor to that assistant message even when some of its results precede the cut. Never
+   split a multi-call assistant turn. This mirrors lop's own cut rule
+   (`_is_valid_cut`/`_snap_to_valid_cut` reject a cut before a tool row) and keeps every
+   call/result pair together.
 3. `preserved_user_turns` carries every user-authored text in the summarized span,
    excluding synthetic summary/meta rows, in source order. With multiple compactions,
    accumulate the spans up to the **latest** compaction into that latest row (dedupe by
@@ -500,6 +519,11 @@ Rules:
   active segment is imported by default; `include_cleared_segments` imports earlier
   segments as separate target sessions linked in the manifest. This preserves "what was
   cleared" without replaying it as live context.
+- Claude compaction boundaries are **continuations, not session splits**. Emit each
+  detached pre-boundary segment as archive rows before its compaction row; the
+  post-latest-boundary segment is the live replay window. A `parentUuid: null` boundary
+  does not create a new target session and does not drop earlier rows. This is what makes
+  the real body's two compactions importable.
 - Branch alternates are not merged. The active branch is imported; inactive branches are
   recorded as IDs/paths in the manifest. `branch_summary` rows become metadata, not
   fake user messages.
@@ -548,7 +572,8 @@ manifest.py     harness-import.json read/write; source fingerprint; prefix check
 store.py        read-only path/SQLite helpers; size caps; stable IDs; import lock
 service.py      HarnessImportService: sources(), list_sessions(), preview(),
                 import_sessions(progress=...), cancel()
-memory.py       foreign memory -> MemoryStore.put, chunking/quota/dedupe
+memory.py       foreign memory -> scope-classified MemoryStore.put, instruction
+                review artifact, chunking/quota/service-side dedupe
 ```
 
 Service surface (in-process, async where I/O is involved):
@@ -562,9 +587,17 @@ import_sessions(request, progress) -> ImportResult
 cancel(job_id) -> bool
 ```
 
+`ImportResult` carries per-source/session rows (imported, skipped, metadata-only, failed),
+target session ids, message/compaction/memory counts, warnings, redaction counts, and
+`instruction_review_path` when instruction files were collected. The review path is a
+first-class result field, not a log line: every surface shows "Instructions saved for
+review at <path>" (TUI/UI/agent) and links it for the operator.
+
 `ImportRequest` carries: selected sources/session ids, `all`, `include_subagents`,
-`include_cleared_segments`, `include_memory`, `include_instructions` (default false),
-`memory_status` (`candidate`/`active`), and optional bounds. There is no arbitrary
+`include_cleared_segments`, `include_memory`, `include_instructions` (default true;
+writes only the review artifact, never the live instruction files), `memory_status`
+(`candidate` for optional instruction-derived session facts, `active` for curated
+memory that lands in a bank), and optional bounds. There is no arbitrary
 path parameter: adapters use environment overrides/known roots only.
 
 HTTP API (desktop-only, same `require_desktop` guard as other `/v1/desktop` routes):
@@ -630,7 +663,9 @@ runs with the normal write-approval policy. The tool description says: "Import
 conversations and memory from Claude Code, Codex or omp; read-only on the source; preview
 first."
 
-Add a packaged guide `guide://harness-import` with the safe flow. Extend Aida's seed
+The tool returns `instruction_review_path` in its result and says "Instructions saved for
+review at <path>" when applicable. Add a packaged guide `guide://harness-import` with
+the safe flow. Extend Aida's seed
 (`local_operator/agent_seeds/aida.md`, "First contact") with a fifth optional step:
 offer to bring over conversations/memory, list first, show what will be imported, never
 modify the other harness. Bump the seed version. The agent path is the first-run path:
@@ -644,15 +679,17 @@ with subcommands: bare = source picker; `list`; `preview <source> [id]`; `run <s
 (`/settings`, `/resume`) rather than inventing a new widget stack. The page shows:
 source cards with detected path/status/count; session rows with title, cwd, date,
 message/compaction counts, availability; space to select, `a` all, enter to import; a
-progress view with per-session rows and a result summary; warnings/errors and a
-"re-run is safe" note. Add i18n catalogue entries (`wire.slash`) and the echo-policy
+progress view with per-session rows and a result summary; warnings/errors, the
+`instruction_review_path` when present, and a "re-run is safe" note. Add i18n catalogue entries (`wire.slash`) and the echo-policy
 test row. Design/UX reviews use rendered SVG stills from the real app.
 
 ### 8.3 Desktop UI
 
 Add a Settings section "Import conversations" in `~/local-operator-ui`:
 source cards (Claude Code, Codex, omp), session list with search/select-all, preview
-pane, import button, progress, results and warnings. It calls the desktop API only.
+pane, import button, progress, results and warnings. Show the `instruction_review_path`
+when present ("Instructions saved for review") and make it copyable. It calls the desktop
+API only.
 Add Storybook stories for loading/empty/error/populated states and a live-app browser
 flow with screenshots for the same states. Design review (`D` findings) and UX review
 (`U` findings) are required before merge; re-capture after visual fixes.
@@ -663,8 +700,9 @@ Unit/integration tests (isolated `HOME`/`LOCAL_OPERATOR_CONFIG_DIR`, copied fixt
 
 - Per-source fixtures: Claude synthetic records exercising user/assistant/tool_use/
   tool_result/thinking/sidechain/summary/compactMetadata, **plus the real job transcript
-  under `~/.claude/jobs/dc65673d/tmp/parent-transcript.jsonl` used read-only from a copy
-  in QA scratch (not committed)**; Codex synthetic rollout with
+  under `~/.claude/jobs/<job>/tmp/parent-transcript.jsonl` used read-only from a copy
+  in QA scratch (not committed; discover the current job transcript rather than pinning
+  the transient job id)**; Codex synthetic rollout with
   session_meta/turn_context/response_item/event_msg/compacted/replacement_history/
   thread_rolled_back, plus the two real archived rollouts (which contain **zero**
   `compacted` records, so the Codex compaction fixture is synthetic); omp real-shaped
@@ -672,9 +710,10 @@ Unit/integration tests (isolated `HOME`/`LOCAL_OPERATOR_CONFIG_DIR`, copied fixt
   fixtures contain fake text only, no real user data.
 - Compaction: summary/anchor/tokens/preserved-user-turns; multiple compactions; anchor
   missing; summary-only; **anchor landing on a tool result snaps to the owning assistant
-  call or forward, never starts on an orphan tool row**; replay result equals expected
-  "summary + kept window"; pre-cut rows remain on disk; `compact_file` does not delete
-  them.
+  call or forward, never starts on an orphan tool row**; Claude segment emission (two
+  boundaries, every pre-boundary segment archived, newest non-sidechain message leaf);
+  replay result equals expected "summary + kept window"; pre-cut rows remain on disk;
+  `compact_file` does not delete them.
 - Tool structure: call/result pairing, multiple calls, orphan call, error result,
   interleaved user text.
 - Timestamps/order: exact source times, monotonic fill, session created_at; no import
@@ -682,9 +721,13 @@ Unit/integration tests (isolated `HOME`/`LOCAL_OPERATOR_CONFIG_DIR`, copied fixt
 - Idempotency/resume: twice = one session; append = only new rows; rotated source = new
   copy; user-edited target = no append; crash-prefix resume.
 - Memory: chunking to atomic facts under the whole-fact cap, curated-active vs
-  instruction-review-artifact/session-candidate, quota projection/skip, service-side
-  ledger dedupe, secret refusal, no transcript bulk-ingest, instruction append requires
-  confirmation, and `memory_capture.py` skips `capture_memory=false` sessions.
+  instruction-review-artifact/session-candidate, scope classification (global personal vs
+  session work vs review artifact), quota projection/skip, service-side ledger dedupe,
+  secret refusal, no transcript bulk-ingest, instruction append requires confirmation,
+  and `memory_capture.py` skips `capture_memory=false` sessions. No real foreign memory
+  source exists here (Codex `stage1_outputs` is empty; omp has no `memories/` tree), so
+  the memory path is exercised with a synthetic fixture in an isolated root; the real
+  Claude/omp conversation path is exercised separately. State that limitation.
 - Security: source hash unchanged; SQLite WAL mtimes unchanged; socket block; redaction
   false-positive controls; symlink escape refused; malformed/truncated lines skipped.
 - Bounds: large synthetic session stays under the RSS/entry caps; cancellation stops
@@ -754,9 +797,10 @@ route from 2.
 1. **Claude body is under `jobs/`, not `projects/`.** The real 33.8 MB job transcript is
    a fork-parent copy and can contain records from more than one session id. Dedupe by
    embedded `sessionId`, prefer the canonical `projects/` copy when it exists, and use a
-   read-only copy of the job body for QA (never commit it). Format drift across Claude
-   versions is the residual risk; verify the live schema before calling the adapter
-   complete.
+   read-only copy of the job body for QA (never commit it). The body is segmented by two
+   compaction boundaries with `parentUuid: null`; emit every segment in source order, not
+   a single parent chain. Format drift across Claude versions is the residual risk; verify
+   the live schema before calling the adapter complete.
 2. **Most Codex bodies are missing here.** 1,203 thread rows but no rollout files; only
    two archived `.zst` bodies, and those contain zero `compacted` records. The adapter
    must be honest about `metadata_only` sessions and the Codex compaction fixture is
@@ -794,6 +838,8 @@ print('history', len(c), sum(c.values()))
 for root, _dirs, files in os.walk(os.path.expanduser('~/.claude')):
     for name in files:
         if name.endswith('.jsonl') and name != 'history.jsonl':
+            if name != 'parent-transcript.jsonl' and '/projects/' not in root:
+                continue
             path=os.path.join(root,name)
             print('body', path, os.path.getsize(path))
 PY
