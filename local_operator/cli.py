@@ -61,6 +61,7 @@ from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
@@ -1065,36 +1066,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     sessions_parser = subparsers.add_parser(
         "sessions",
-        help=(
-            "List active lop sessions and their resource usage; "
-            "`sessions resume` reopens a set of stored sessions (paused/failed/all) "
-            "in one bounded batch; "
-            "`sessions cleanup` previews or runs the session cleanup policy; "
-            "`sessions reclaim` previews or ends runtimes nothing can reach"
-        ),
-        description=(
-            "List active lop sessions and their resource usage; "
-            "`sessions resume` reopens a set of stored sessions in one command; "
-            "`sessions cleanup` previews or runs the session cleanup policy; "
-            "`sessions reclaim` previews or ends runtimes nothing can reach."
-        ),
+        help=(_sh.sessions().envelope(locale=help_locale)["text"]),
+        description=(_sh.sessions_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sessions_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
     sessions_parser.add_argument(
         "--all",
         action="store_true",
-        help=(
-            "also list stored sessions that are not running (RSS/UPTIME/etc. are "
-            "shown as — for these; sorted newest-first by last activity)"
-        ),
+        help=(_sh.all().envelope(locale=help_locale)["text"]),
     )
     sessions_parser.add_argument(
         "--limit",
         type=_positive_int,
         default=None,
         metavar="N",
-        help="with --all (or a set filter), cap the stored rows listed; positive (default: 50)",
+        help=_sh.limit().envelope(locale=help_locale)["text"],
     )
     # THE TWO SET FILTERS (bulk resume, 2026-10-01). They are plain booleans
     # with NO argument-shaped requirement, because the sets are named by the
@@ -1112,20 +1101,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     sessions_parser.add_argument(
         "--paused",
         action="store_true",
-        help=(
-            "list only stored sessions whose last turn was STOPPED rather than "
-            "completed or lost — a deliberate stop or a build retirement "
-            "(the set the bulk-resume path selects; implies --all)"
-        ),
+        help=(_sh.paused().envelope(locale=help_locale)["text"]),
     )
     sessions_parser.add_argument(
         "--failed",
         action="store_true",
-        help=(
-            "list only stored sessions whose last recorded outcome was a failure "
-            "(an involuntary death with no deliberate-stop evidence; implies --all). "
-            "A death whose outcome was never imported is in neither set"
-        ),
+        help=(_sh.failed().envelope(locale=help_locale)["text"]),
     )
     # THE MESH'S TWO LISTING FLAGS (mesh-session-mobility.md §9.3). Both default
     # off, so a client that does not ask gets exactly today's answer — which is
@@ -1134,12 +1115,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--peer",
         default=None,
         metavar="DEVICE",
-        help="list the sessions held by one peer device (its own catalogue, over the mesh)",
+        help=_sh.peer().envelope(locale=help_locale)["text"],
     )
     sessions_parser.add_argument(
         "--all-peers",
         action="store_true",
-        help="also list the sessions other devices in this network are holding",
+        help=_sh.all_peers().envelope(locale=help_locale)["text"],
     )
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
@@ -1158,63 +1139,59 @@ def build_cli_parser() -> argparse.ArgumentParser:
     sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
-        help="Run the session cleanup policy now (use --dry-run to preview)",
-        description=(
-            "Apply session.cleanup.* from config (each limit overridable below) to the "
-            "session store, in two classes: your conversations (needs "
-            "session.cleanup.enabled: true unless --force) and delegated subagent/"
-            "background sessions (session.cleanup.delegated.*, on by default). "
-            "Every removal is recorded in <config>/sessions/.cleanup-log.jsonl."
-        ),
+        help=_sh.cleanup().envelope(locale=help_locale)["text"],
+        description=(_sh.cleanup_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     cleanup_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be removed and why, without removing anything",
+        help=_sh.cleanup_dry_run().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--force",
         action="store_true",
-        help="run even when session.cleanup.enabled is false (lists first, then asks)",
+        help=_sh.cleanup_force().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--yes",
         action="store_true",
-        help="do not ask for confirmation before removing",
+        help=_sh.cleanup_yes().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--max-sessions",
         type=_non_negative_int,
         default=None,
-        help="keep only the N most recently active sessions (overrides config)",
+        help=_sh.cleanup_max_sessions().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--max-inactive-days",
         type=_non_negative_int,
         default=None,
-        help="remove sessions idle longer than N days (overrides config)",
+        help=_sh.cleanup_max_inactive_days().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--max-total-bytes",
         type=_non_negative_int,
         default=None,
-        help="trim the least recently active sessions past this store size (overrides config)",
+        help=_sh.cleanup_max_total_bytes().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--remove-empty",
         action="store_true",
         default=None,
-        help="remove directories that never got a transcript (overrides config)",
+        help=_sh.cleanup_remove_empty().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--delegated-max-age-hours",
         type=_delegated_hours,
         default=None,
         metavar="N",
-        help="remove subagent/background sessions idle over N hours, 2-720 (overrides config)",
+        help=_sh.cleanup_delegated_max_age_hours().envelope(locale=help_locale)["text"],
     )
-    cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    cleanup_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # `lop sessions reclaim`: the external door to the residency sweep — the
     # same pass the wake supervisor runs on its own cadence, for the case where
@@ -1231,40 +1208,30 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # table question the sweep asks twice before it signals anything.
     reclaim_parser = sessions_subparsers.add_parser(
         "reclaim",
-        help="End session runtimes nothing can reach (dry run; --yes to act)",
-        description=(
-            "Find live session runtimes that no discovery record, no viewer, no "
-            "attach and no existing config root can reach, and ask them to leave "
-            "with SIGTERM. The runtime finishes any turn in flight first (its own "
-            "signal drain, bounded by SIGNAL_DRAIN_S) — this command never sends "
-            "SIGKILL. Any runtime with a record, an attached interface, a live root "
-            "it does not own, or CPU spent inside the confirm window is refused."
-        ),
+        help=_sh.reclaim().envelope(locale=help_locale)["text"],
+        description=(_sh.reclaim_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     reclaim_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be reclaimed, without signalling anything",
+        help=_sh.reclaim_dry_run().envelope(locale=help_locale)["text"],
     )
     reclaim_parser.add_argument(
         "--yes",
         action="store_true",
-        help="do not ask for confirmation before signalling",
+        help=_sh.reclaim_yes().envelope(locale=help_locale)["text"],
     )
     reclaim_parser.add_argument(
         "--confirm-s",
         type=_confirm_window,
         default=None,
         metavar="SECONDS",
-        help=(
-            "how long to watch before signalling (default: 60, minimum: 50). The "
-            "window is the safety property: a runtime that gains a record, an attach "
-            "or CPU inside it is dropped from the pass, and a window too short to "
-            "measure CPU would drop one of the four refusals"
-        ),
+        help=(_sh.reclaim_confirm_s().envelope(locale=help_locale)["text"]),
     )
-    reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    reclaim_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # `lop sessions resume`: the BULK door — resume a set of stored sessions in
     # one command. The operator escalation (2026-10-01): resuming 15+ paused/
@@ -1293,63 +1260,43 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # cap is named in the output whenever it truncated a set.
     resume_parser = sessions_subparsers.add_parser(
         "resume",
-        help="Resume a set of stored sessions in one command (bulk)",
-        description=(
-            "Resume stored sessions without a shell loop: `--paused` (the "
-            "interrupted/retired pair), `--failed` (error), or `--all` (every "
-            "stored, non-live session — the widest reading, so given with the "
-            "other selectors it wins). Newest first, capped at 20 unless "
-            "--limit is given. Each session is reopened headlessly as `lop exec "
-            "--resume <id> --background` with --message (default: a continuation). "
-            "Children run with bounded concurrency (6 at a time) and print one "
-            "line per session as it resolves. Exit codes: 0 = every selected "
-            "session resumed; 1 = at least one failed or was unresolved at the "
-            "bound; 2 = misuse (no set selected)."
-        ),
+        help=_sh.resume().envelope(locale=help_locale)["text"],
+        description=(_sh.resume_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     resume_parser.add_argument(
         "--paused",
         action="store_true",
-        help=(
-            "select stored sessions whose last outcome was interrupted/retired "
-            "(the 'Unseen interruption' pair; implies the store scope)"
-        ),
+        help=(_sh.resume_paused().envelope(locale=help_locale)["text"]),
     )
     resume_parser.add_argument(
         "--failed",
         action="store_true",
-        help="select stored sessions whose last outcome was error (implies the store scope)",
+        help=_sh.resume_failed().envelope(locale=help_locale)["text"],
     )
     resume_parser.add_argument(
         "--all",
         action="store_true",
         dest="all_sessions",
-        help=(
-            "select every stored, non-live session (newest first, capped); the "
-            "widest reading — given with --paused/--failed it wins"
-        ),
+        help=(_sh.resume_all().envelope(locale=help_locale)["text"]),
     )
     resume_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the selected set (newest first) and resume nothing",
+        help=_sh.resume_dry_run().envelope(locale=help_locale)["text"],
     )
     resume_parser.add_argument(
         "--limit",
         type=_positive_int,
         default=None,
         metavar="N",
-        help="cap the set at the N newest matches (default: 20)",
+        help=_sh.resume_limit().envelope(locale=help_locale)["text"],
     )
     resume_parser.add_argument(
         "--message",
         default=None,
         metavar="TEXT",
-        help=(
-            "the message each resumed session runs (default: a continuation — "
-            "'Continue the task from where it left off.')"
-        ),
+        help=(_sh.resume_message().envelope(locale=help_locale)["text"]),
     )
 
     # `lop sessions move`: hand a conversation to another device, or bring one
@@ -1363,32 +1310,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # push verb, and adding one would be a second copy path with its own bugs.
     move_parser = sessions_subparsers.add_parser(
         "move",
-        help="Move a conversation to another device, or bring one home",
-        description=(
-            "Hand a conversation to another device (`--to build-box`), or bring one "
-            "that lives elsewhere back here (`--to local`). The conversation keeps "
-            "its id and the copy on the device it left is deleted, unless `--keep` "
-            "is given, which leaves the original running and mints a NEW id for the "
-            "copy. A session with a turn in flight is refused, not interrupted."
-        ),
+        help=_sh.move().envelope(locale=help_locale)["text"],
+        description=(_sh.move_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     move_parser.add_argument(
         "session",
         nargs="?",
         default="",
-        help="the conversation id to move (with --cancel-queued, the id is that flag's value)",
+        help=_sh.move_session().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--to",
         metavar="DEVICE",
         default="",
-        help="a peer device (id or name), or `local` to bring the conversation here",
+        help=_sh.move_to().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--keep",
         action="store_true",
-        help="copy and leave the original running; the copy gets a new id and a fork marker",
+        help=_sh.move_keep().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--wait",
@@ -1402,7 +1343,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         const=-1,
         default=0,
         metavar="SECONDS",
-        help="re-check a busy conversation every 5s, up to SECONDS (bare: up to 30 min)",
+        help=_sh.move_wait().envelope(locale=help_locale)["text"],
     )
     # THE QUEUED MOVE (design note §5.4): today's answer to a busy source is a
     # refusal plus `--wait`; this is the explicit alternative — accept now, run at
@@ -1413,29 +1354,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
     move_parser.add_argument(
         "--queue",
         action="store_true",
-        help=(
-            "wait for the next safe point instead of refusing a busy conversation: the "
-            "move is queued durably on the conversation's device and runs when its "
-            "turn ends (attached clients there are announced and given a window to "
-            "follow or detach). Ignored with --keep"
-        ),
+        help=(_sh.move_queue().envelope(locale=help_locale)["text"]),
     )
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
         default="",
-        help=(
-            "cancel a queued move that has not started yet; takes the conversation id "
-            "and nothing else"
-        ),
+        help=(_sh.move_cancel_queued().envelope(locale=help_locale)["text"]),
     )
     move_parser.add_argument(
         "--from-replica",
         action="store_true",
-        help=(
-            "recover the last copy this device synced as a NEW session, for when the "
-            "device that held it is gone"
-        ),
+        help=(_sh.move_from_replica().envelope(locale=help_locale)["text"]),
     )
     # THE ONE OPT-IN ON THIS VERB. A move leaves a conversation COLD on purpose
     # (mesh-session-mobility.md §6.3 step 17: "It does not auto-engage a runtime"),
@@ -1457,36 +1387,33 @@ def build_cli_parser() -> argparse.ArgumentParser:
     move_parser.add_argument(
         "--engage-on-arrival",
         action="store_true",
-        help=(
-            "start the conversation on the destination as soon as it lands, so it is "
-            "live there without a first prompt; a conversation whose turn is in "
-            "flight is still refused rather than drained, and a failure to start it "
-            "does not affect the move — so the exit status is the MOVE's: a script "
-            "reads `engagement.engaged` in --json, and on a move to a peer that "
-            "device's own log is where the outcome shows"
-        ),
+        help=(_sh.move_engage_on_arrival().envelope(locale=help_locale)["text"]),
     )
-    move_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    move_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # `lop sessions sync`: pull the latest cut of a conversation another device
     # owns into this device's replica store. Explicit because the automatic cadence
     # (debounced pushes, a pull on attach) is not something a person can wait for.
     sync_parser = sessions_subparsers.add_parser(
         "sync",
-        help="Pull a copy of a conversation another device owns",
-        description=(
-            "Bring this device's copy of a conversation it does not own up to date. "
-            "The copy is stored outside the session store and is never opened as a "
-            "session; `lop sessions move <id> --to local --from-replica` recovers it "
-            "as a new one."
-        ),
+        help=_sh.sync().envelope(locale=help_locale)["text"],
+        description=(_sh.sync_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    sync_parser.add_argument("session", help="the conversation id to pull")
     sync_parser.add_argument(
-        "--owner", default="", metavar="DEVICE", help="the peer that holds it (default: ask)"
+        "session", help=_sh.sync_session().envelope(locale=help_locale)["text"]
     )
-    sync_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sync_parser.add_argument(
+        "--owner",
+        default="",
+        metavar="DEVICE",
+        help=_sh.sync_owner().envelope(locale=help_locale)["text"],
+    )
+    sync_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
