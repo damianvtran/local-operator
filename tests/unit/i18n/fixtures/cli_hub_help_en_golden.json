@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "Agent Hub update status",
+  "cli.hub_help.status": "Show which pulled agents and teams have hub updates",
+  "cli.hub_help.status_json": "Emit the desktop route payload",
+  "cli.hub_help.links": "List every hub link (healthy or not) with its source, scope and policy",
+  "cli.hub_help.links_json": "Emit the desktop links payload",
+  "cli.hub_help.link": "Edit one hub link's independent policy",
+  "cli.hub_help.link_set": "Set this link's subscribe and/or auto_push policy",
+  "cli.hub_help.link_set_link_id": "The link id from `lop hub links`",
+  "cli.hub_help.link_set_subscribe": "Unattended inbound synchronization for this link",
+  "cli.hub_help.link_set_auto_push": "Unattended outbound publication for this link",
+  "cli.hub_help.link_set_expected_revision": "The policy revision you last saw (CAS); omitted reads it fresh first",
+  "cli.hub_help.link_set_confirm_public_egress": "Explicit consent to publish authored changes to a PUBLIC origin"
+}
