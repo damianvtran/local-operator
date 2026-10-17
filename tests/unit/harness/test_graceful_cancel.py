@@ -301,7 +301,7 @@ async def test_empty_truncation_retreat_still_retries_without_a_cancel() -> None
     assert stream.calls == 2, "the retreat retry must still be spent"
     assert config.model.reasoning_effort == "medium", "the retry must step one rung down"
     notices = [event.text for event in events if isinstance(event, NoticeEvent)]
-    assert any("retrying at effort medium" in text for text in notices)
+    assert any("retrying once at effort medium" in text for text in notices)
     ends = [event for event in events if isinstance(event, AgentEndEvent)]
     assert ends and not ends[-1].aborted
 

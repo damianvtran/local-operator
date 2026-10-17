@@ -2255,6 +2255,18 @@ class AgentLoop:
                     if assistant is None:
                         raise RuntimeError("model turn produced no assistant message")
 
+                    # THE RETREAT IS SPENT BY THE ONE CALL IT PAID FOR. The
+                    # ceiling exists to stop a retry climbing back to the rung
+                    # that produced silence; leaving it set pinned every LATER
+                    # call in this run (the rest of a tool loop, a continuation
+                    # after this answer) to the cheaper rung with no notice and
+                    # no rung of the run's own choosing. The session's setting
+                    # was never touched either way (the loop's ``config.model``
+                    # is the run's snapshot, not the host's spec -- see
+                    # ``_current_model``), so clearing here is what keeps the
+                    # retreat bounded to the retry it announced.
+                    effort_ceiling = None
+
                     if not (turn_connectivity_loss or turn_retryable_interruption):
                         # A CLEAN turn reaps the fault-only window: the run has
                         # recovered (or never faulted under it), and the timer
@@ -3019,12 +3031,16 @@ class AgentLoop:
                                 config.model = config.model.model_copy(
                                     update={"reasoning_effort": lower}
                                 )
+                                # The ceiling covers the retry, not the run:
+                                # cleared immediately after that call returns
+                                # (see the note under ``assistant is None``).
                                 effort_ceiling = lower
                                 yield NoticeEvent(
                                     text=(
                                         f"model spent its whole output budget "
                                         f"thinking and produced nothing — "
-                                        f"retrying at effort {lower}"
+                                        f"retrying once at effort {lower} "
+                                        f"(your reasoning effort is unchanged)"
                                     ),
                                     kind="warning",
                                 )

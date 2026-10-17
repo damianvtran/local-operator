@@ -3493,7 +3493,7 @@ async def test_empty_length_truncation_retries_at_lower_effort():
     assert stream.requests[0].model.reasoning_effort == "high"
     assert stream.requests[1].model.reasoning_effort == "medium"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and not end.aborted
     # The empty assistant message must not survive into the context: it is an
@@ -3502,6 +3502,54 @@ async def test_empty_length_truncation_retries_at_lower_effort():
         not (m.role == "assistant" and not m.text and not m.tool_calls)
         for m in context.messages
         if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_empty_truncation_retreat_is_bounded_and_leaves_the_session_effort_alone():
+    """A step-down is a RETRY, not a rewrite of the level the user chose.
+
+    The reported symptom was "I set Max and it went back to High". The retreat
+    exists for a good reason -- a turn that spends its whole output budget
+    thinking and returns nothing should retry cheaper rather than be lost -- but
+    its ceiling must not outlive the call it paid for, and it must never mutate
+    the HOST's spec. (``config.model`` is the run's own snapshot; a host that
+    resolves per call, which is every real one, hands back its own spec, so the
+    snapshot is never the session.)
+
+    The stream below stages the three calls that separate the two claims: an
+    empty truncation at ``high``, the cheaper retry at ``medium``, then a tool
+    batch and a second model call in the SAME run. That third call is the
+    regression: with the ceiling left set it ran at ``medium`` -- silently, for
+    the rest of the turn -- and with the host spec mutated it would have run at
+    ``medium`` forever.
+    """
+    host_model = _laddered_model()  # effort ``high``
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    context = LoopContext(tools=[echo_tool(executed)])
+    config = make_config(stream, model=host_model, get_model=lambda: host_model)
+
+    events = [e async for e in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert [r.model.reasoning_effort for r in stream.requests] == ["high", "medium", "high"]
+    assert executed == ["echo"]
+    assert (
+        host_model.reasoning_effort == "high"
+    ), "the retreat must not rewrite the session's configured effort"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any(
+        "retrying once at effort medium (your reasoning effort is unchanged)" in n.text
+        for n in notices
     )
 
 
@@ -3537,7 +3585,7 @@ async def test_a_whitespace_only_length_stop_takes_the_silent_path_too():
     assert len(stream.requests) == 2
     assert stream.requests[1].model.reasoning_effort == "medium"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     # And the whitespace turn does not ride into the retry's history, for the
     # same reason the empty one does not.
     assert all(
@@ -3710,7 +3758,7 @@ async def test_a_silent_length_turn_with_a_lower_rung_still_takes_the_retreat():
     assert len(stream.requests) == 2
     assert [r.model.reasoning_effort for r in stream.requests] == ["high", "medium"]
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     assert not any("re-asking it to continue the work" in n.text for n in notices)
     # And the re-ask prompt for the no-rung arm is not what was appended.
     assert not any(
