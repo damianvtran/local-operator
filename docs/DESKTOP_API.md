@@ -2215,7 +2215,7 @@ and the other surfaces through the lazy read op.
 
 `payload.details` (`supplements.contract.SupplementDetails`); the required keys plus the
 staged optionals (`files_more`, `more`, `images`, `decision`, `instruction`, `model`,
-`turns`, `tokens_in`, `tokens_out`, `cost_usd`, `error`, `dismissed`):
+`turns`, `tokens_in`, `tokens_out`, `cost_usd`, `error`, `detail`, `cause`, `dismissed`):
 
 ```jsonc
 {

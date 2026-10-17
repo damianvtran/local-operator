@@ -301,8 +301,14 @@ def _numeric(value: Any) -> float | None:
 
 
 #: Markdown emphasis glyphs around or inside a table cell: ``**bold**``, ``*italic*``,
-#: ``__alt__``. Lone underscores in identifiers (``snake_case``) are content, not emphasis.
-_EMPHASIS_RE: Final = re.compile(r"\*+|(?<![A-Za-z0-9_])_{2,}|_{2,}(?![A-Za-z0-9_])")
+#: Emphasis glyphs around a cell's content: ``**bold**``, ``*italic*``, ``__alt__``. A run
+#: FLANKED BY WORD CHARACTERS on both sides is DATA, never emphasis -- ``5*12`` is arithmetic
+#: and ``foo__bar`` an identifier (round-1 review R1 / QA Q-1: the first cut removed every
+#: asterisk run, so a ``5*12`` cell canonicalised to ``512`` and a component claiming 512
+#: passed provenance; both probes are pinned in ``test_validate.py``).
+_EMPHASIS_RE: Final = re.compile(
+    r"(?<![A-Za-z0-9_*])\*+|\*+(?![A-Za-z0-9_*])|(?<![A-Za-z0-9_])_{2,}|_{2,}(?![A-Za-z0-9_])"
+)
 
 
 def _strip_emphasis(text: str) -> str:
@@ -313,6 +319,10 @@ def _strip_emphasis(text: str) -> str:
     2026-10-17 investigation (session 8197f86e639d) found the opposite: every bolded cell
     failed provenance as "not in the evidence", and a bolded LABEL as "an invented label is
     a fabrication" against glyphs that were sitting in the evidence itself.
+
+    The same word-adjacency rule guards both delimiters: a glyph run flanked by word
+    characters stays verbatim (``5*12``, ``foo__bar``), so tightening emphasis handling can
+    never fuse two datums into a third.
     """
     return _EMPHASIS_RE.sub("", text).strip()
 

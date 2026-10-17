@@ -128,6 +128,7 @@ function beat(over: Partial<SupplementBeat> = {}): SupplementBeat {
 		more: [],
 		components: [],
 		error: "",
+		cause: "",
 		dismissed: false,
 		...over,
 	};
@@ -222,7 +223,33 @@ describe("the states", () => {
 		await waitFor(() => expect(api.supplementRestart).toHaveBeenCalledWith("s1", ANCHOR, JOB));
 		unmount();
 
-		render(<SupplementBlock beat={beat({ state: "failed" })} sessionId="s1" jobLive={false} />);
+		const failedBare = render(
+			<SupplementBlock beat={beat({ state: "failed" })} sessionId="s1" jobLive={false} />,
+		);
+		expect(screen.getByText("Couldn't prepare highlights")).toBeTruthy();
+		failedBare.unmount();
+
+		// The typed cause names the wall, in the memo's one word list (identical to
+		// the TUI's words); an unknown token keeps the bare sentence.
+		const failedQuota = render(
+			<SupplementBlock
+				beat={beat({ state: "failed", cause: "provider_quota" })}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
+		expect(
+			screen.getByText("Couldn't prepare highlights — provider limit reached"),
+		).toBeTruthy();
+		failedQuota.unmount();
+
+		render(
+			<SupplementBlock
+				beat={beat({ state: "failed", cause: "provider_from_the_future" })}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
 		expect(screen.getByText("Couldn't prepare highlights")).toBeTruthy();
 	});
 

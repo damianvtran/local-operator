@@ -230,16 +230,18 @@ def test_block_failed_line_names_the_typed_cause_when_present() -> None:
     quota = _rows([], state="failed")
     quota["cause"] = "provider_quota"
     assert _painted(_block(quota)).plain == (
-        "  Couldn't prepare highlights — provider quota exhausted"
+        "  Couldn't prepare highlights — provider limit reached"
     )
     # An UNKNOWN cause string (a newer build's vocabulary) renders no phrase: inventing
     # prose for a vocabulary this build does not know is worse than the bare sentence.
     unknown = _rows([], state="failed")
     unknown["cause"] = "provider_from_the_future"
     assert _painted(_block(unknown)).plain == "  Couldn't prepare highlights"
-    # The pure helper: absent and unknown both map to "".
+    # The pure helper: absent, unknown and ``provider_unknown`` (the catch-all folds
+    # ``aborted`` in) all map to "".
     assert supplement_mod.cause_phrase(None) == "" and supplement_mod.cause_phrase("") == ""
-    assert supplement_mod.cause_phrase("provider_quota") == "provider quota exhausted"
+    assert supplement_mod.cause_phrase("provider_unknown") == ""
+    assert supplement_mod.cause_phrase("provider_quota") == "provider limit reached"
 
 
 def test_block_superseded_and_dismissed_render_nothing() -> None:
