@@ -229,7 +229,6 @@ class HarnessImportService:
         request: ImportRequest,
         progress: Callable[[ImportProgress], None] | None = None,
     ) -> ImportResult:
-        self._cancel.clear()
         result = ImportResult(job_id=uuid.uuid4().hex[:12])
         state = ImportProgress(
             job_id=result.job_id,
@@ -334,6 +333,15 @@ class HarnessImportService:
             return result
         finally:
             self._lock.release()
+
+    def clear_cancel(self) -> None:
+        """Clear a previous/cancel-in-queue request before a NEW job starts.
+
+        This lives on the service but is called by ``JOBS.start`` before the
+        task is scheduled: clearing inside ``import_sessions`` would discard a
+        cancel that arrived while the job was still queued.
+        """
+        self._cancel.clear()
 
     def cancel(self) -> bool:
         self._cancel.set()

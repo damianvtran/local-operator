@@ -405,3 +405,51 @@ async def test_discovery_and_preview_make_no_network_calls(import_home, monkeypa
     assert not (await _call({"op": "sources"})).is_error
     assert not (await _call({"op": "sessions", "source": SOURCE})).is_error
     assert not (await _call({"op": "preview", "source": SOURCE})).is_error
+
+
+@pytest.mark.asyncio
+async def test_preview_and_sessions_strip_paths_from_titles(import_home):
+    home, config = import_home
+    body = home / ".omp" / "agent" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    lines = body.read_text(encoding="utf-8").splitlines()
+    lines[0] = json.dumps(
+        {"type": "title", "title": "Investigate /Users/damian/secret/file.txt", "v": 1}
+    )
+    body.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for result in (
+        await _call({"op": "preview", "source": SOURCE}),
+        await _call({"op": "sessions", "source": SOURCE}),
+    ):
+        title = _details(result)["sessions"][0]["title"]
+        assert "/Users/" not in title
+        assert "<path>" in title
+
+
+@pytest.mark.asyncio
+async def test_cancel_in_the_queued_window_is_preserved(import_home):
+    """Cancel before the task first runs must survive into import_sessions.
+
+    This calls JOBS.cancel synchronously after start, so the event is set while
+    the job is still queued. The old service cleared it at import_sessions()
+    entry and imported; the fix clears only at JOBS.start().
+    """
+    home, config = import_home
+    preview = await _call({"op": "preview", "source": SOURCE})
+    started = await _call(
+        {
+            "op": "import",
+            "source": SOURCE,
+            "all": True,
+            "confirm": True,
+            "preview_token": _details(preview)["preview_token"],
+        }
+    )
+    job_id = _details(started)["job_id"]
+    job = JOBS.get(job_id)
+    assert job is not None and job.task is not None
+    cancelled = JOBS.cancel(job_id, session_key="agent-import-test")
+    assert cancelled["cancelled"] is True
+    await job.task
+    status = await _call({"op": "status", "job_id": job_id})
+    assert _details(status)["state"] == "cancelled"
+    assert not (config / "sessions").exists()
