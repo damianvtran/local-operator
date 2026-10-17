@@ -191,6 +191,22 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     # THE BIRTH TIME and a SCRATCHPAD with a file in it: the two entries whose
     # absence from the copy set let a move delete them for good (review round 1,
     # B-M2). In the fixture because every copy test should see them.
+    # Harness-import provenance travels with an imported conversation. Seeded
+    # here because the round trip below asserts every COPY_SET_NAMES member
+    # arrives; a native session without it is valid and the copier filters
+    # absent names.
+    (directory / "harness-import.json").write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "source": "synthetic",
+                "source_id": "seed",
+                "status": "complete",
+                "capture_memory": False,
+            }
+        ),
+        encoding="utf-8",
+    )
     (directory / "created_at.json").write_text("1758230400.5", encoding="utf-8")
     (directory / "scratchpad").mkdir(exist_ok=True)
     (directory / "scratchpad" / "notes.md").write_text("the operator's notes", encoding="utf-8")
@@ -294,6 +310,10 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # move must carry it even when mesh memory replication is off, or the moved
         # session loses every fact it stored (sync.COPY_SET_NAMES has the argument).
         SESSION_EXPORT_NAME,
+        # Harness-import provenance/idempotency and the capture-memory opt-out:
+        # losing it would re-enable auto-capture on a moved imported session and
+        # make the next import look native (sync.COPY_SET_NAMES has the argument).
+        "harness-import.json",
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping

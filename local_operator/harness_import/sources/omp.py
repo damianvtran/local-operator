@@ -190,7 +190,7 @@ class OmpAdapter(SourceAdapter):
                         source_id=f"unreadable:{path.name}",
                         path=path,
                         availability="unsupported",
-                        warnings=[f"source unreadable: {type(exc).__name__}"],
+                        warnings=[f"source unreadable: {exc}"],
                     )
                 )
                 continue

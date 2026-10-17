@@ -51,6 +51,10 @@ from local_operator.session.transcript import ENTRY_COMPACTION, Transcript
 BATCH_ROWS = 200
 BATCH_BYTES = 4 * 1024 * 1024
 TITLE_MAX = 120
+#: Source discovery parses every listing once; the Settings page polls it. A
+#: short cache keeps a repeat call cheap without making an import decision on
+#: stale counts for long.
+SOURCE_CACHE_SECONDS = 30.0
 
 
 class _ImportCancelled(RuntimeError):
@@ -80,12 +84,21 @@ class HarnessImportService:
         self.adapters: dict[str, SourceAdapter] = build_adapters(self.config)
         self._cancel = threading.Event()
         self._lock = store.ImportLock(self.config)
+        self._sources_cache: tuple[float, list[SourceInfo]] | None = None
 
     # -- discovery ----------------------------------------------------------
 
     async def sources(self) -> list[SourceInfo]:
         def detect() -> list[SourceInfo]:
-            return [adapter.detect() for adapter in self.adapters.values()]
+            now = time.monotonic()
+            if (
+                self._sources_cache is not None
+                and now - self._sources_cache[0] < SOURCE_CACHE_SECONDS
+            ):
+                return list(self._sources_cache[1])
+            rows = [adapter.detect() for adapter in self.adapters.values()]
+            self._sources_cache = (now, rows)
+            return list(rows)
 
         return await asyncio.to_thread(detect)
 
@@ -159,12 +172,26 @@ class HarnessImportService:
                         )
                     )
             row["message_count"] = messages
+            row["message_count_estimated"] = True
+            preview.message_counts_estimated = True
             row["compaction_count"] = compactions
             row["warnings"] = warnings
             preview.total_messages += messages
             preview.total_compactions += compactions
             preview.total_sessions += 1
             preview.sessions.append(row)
+        if preview.total_sessions:
+            preview.warnings.append(
+                ImportWarning(
+                    source="",
+                    session_id="",
+                    code="preview_counts_estimated",
+                    message=(
+                        "Message counts are estimates from source metadata; the "
+                        "import may emit fewer after branch/segment selection."
+                    ),
+                )
+            )
         if request.include_memory:
             for source, sessions in self._sessions_by_source(selected).items():
                 adapter = self.adapters[source]
@@ -332,40 +359,60 @@ class HarnessImportService:
                     "target_prefix_sha256"
                 )
                 same_source = latest.get("source_fingerprint") == fingerprint
+                committed = {entry.id for entry in Transcript(directory).entries()}
                 if latest.get("status") == "partial":
                     # A crash left the rows we managed to write. Re-enter the
-                    # SAME directory; _create appends only missing ids.
-                    return self._create(adapter, session, directory, fingerprint, outcome, latest)
+                    # SAME directory when the source is still a superset of
+                    # those rows; a rewritten source needs a fresh copy.
+                    mapped = self._map(adapter, session)
+                    if committed - {row.id for row in mapped.rows}:
+                        return self._create(
+                            adapter,
+                            session,
+                            self._allocate_directory(
+                                adapter.source, session.source_id, force_new=True
+                            ),
+                            fingerprint,
+                            outcome,
+                            latest,
+                            mapped,
+                        )
+                    return self._create(
+                        adapter,
+                        session,
+                        directory,
+                        fingerprint,
+                        outcome,
+                        self._carried_predecessor(latest),
+                        mapped,
+                    )
                 if prefix_ok and same_source:
                     outcome.outcome = "skipped_already_imported"
                     outcome.target_session_id = str(latest.get("target_session_id") or "")
                     return outcome
                 if prefix_ok and self._source_grew(latest, session):
                     mapped = self._map(adapter, session)
-                    old_leaf = str(latest.get("active_leaf_source_id") or "")
-                    # A linear append keeps the old leaf on the new active
-                    # branch. A rewritten branch does not, even though the
-                    # deterministic row ids would let a naive resume splice the
-                    # two branches into one history.
-                    same_branch = (
-                        adapter.source != "omp"
-                        or not old_leaf
-                        or old_leaf in mapped.active_branch_source_ids
-                    )
-                    if same_branch:
-                        return self._resume(
-                            adapter, session, latest, directory, fingerprint, outcome, mapped
+                    # SOURCE-GENERIC rewrite check: a linear append keeps every
+                    # already-committed row id in the new mapping. A Claude
+                    # /rewind branch or a Codex thread_rolled_back drops rows
+                    # from the active path, so those ids disappear. Never
+                    # splice a rewritten source into the existing transcript:
+                    # allocate a new deterministic target and record the old
+                    # one as predecessor.
+                    if committed - {row.id for row in mapped.rows}:
+                        return self._create(
+                            adapter,
+                            session,
+                            self._allocate_directory(
+                                adapter.source, session.source_id, force_new=True
+                            ),
+                            fingerprint,
+                            outcome,
+                            latest,
+                            mapped,
                         )
-                    # A different active branch is a new conversation shape;
-                    # never splice both branches into one transcript.
-                    return self._create(
-                        adapter,
-                        session,
-                        self._allocate_directory(adapter.source, session.source_id, force_new=True),
-                        fingerprint,
-                        outcome,
-                        latest,
-                        mapped,
+                    return self._resume(
+                        adapter, session, latest, directory, fingerprint, outcome, mapped
                     )
                 # Rotated source or user-edited target: a fresh deterministic
                 # copy, never an append to bytes we do not own.
@@ -505,7 +552,7 @@ class HarnessImportService:
                     mapped=mapped,
                     status="complete",
                     counts=self._counts(mapped),
-                    predecessor=existing,
+                    predecessor=self._carried_predecessor(existing),
                 ),
             )
             self._apply_stats(outcome, mapped)
@@ -524,7 +571,7 @@ class HarnessImportService:
                 mapped=mapped,
                 status="complete",
                 counts=self._counts(mapped),
-                predecessor=existing,
+                predecessor=self._carried_predecessor(existing),
             ),
         )
         self._update_index(adapter.source, session, target_id, fingerprint, outcome)
@@ -555,6 +602,12 @@ class HarnessImportService:
                 # A directory we did not create is not ours to resume.
                 continue
         raise RuntimeError("could not allocate a target session directory")
+
+    @staticmethod
+    def _carried_predecessor(existing: dict[str, Any]) -> dict[str, Any] | None:
+        """The predecessor to carry on an in-place update, never self."""
+        prior = existing.get("predecessor_target_session_id")
+        return {"target_session_id": str(prior)} if prior else None
 
     def _existing_manifests(self, session: SourceSession, source: str) -> list[dict[str, Any]]:
         """Every target this source session owns, NEWEST first.

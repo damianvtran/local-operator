@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 import pytest
 
@@ -234,3 +235,187 @@ async def test_branch_change_gets_a_new_target_and_predecessor(omp_store):
     third = await service.import_sessions(_request())
     assert third.sessions[0].outcome == "skipped_already_imported"
     assert third.sessions[0].target_session_id == copy
+
+
+def _claude_records() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "custom-title",
+            "customTitle": "Synthetic rewind",
+            "sessionId": "sess-claude",
+        },
+        {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "sessionId": "sess-claude",
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "message": {"role": "user", "content": "first question"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "parentUuid": "u1",
+            "sessionId": "sess-claude",
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-synthetic",
+                "content": [{"type": "text", "text": "first answer"}],
+            },
+        },
+        {
+            "type": "user",
+            "uuid": "u2",
+            "parentUuid": "a1",
+            "sessionId": "sess-claude",
+            "timestamp": "2026-01-01T00:00:03.000Z",
+            "message": {"role": "user", "content": "second question"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "a2",
+            "parentUuid": "u2",
+            "sessionId": "sess-claude",
+            "timestamp": "2026-01-01T00:00:04.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-synthetic",
+                "content": [{"type": "text", "text": "second answer"}],
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_rewind_creates_a_new_target(claude_store):
+    home, config = claude_store
+    path = home / ".claude" / "projects" / "encoded" / "sess-claude.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in _claude_records()) + "\n")
+    service = HarnessImportService(config)
+    request = ImportRequest(sources=["claude"], session_ids={"claude": ["sess-claude"]})
+    first = await service.import_sessions(request)
+    original = first.sessions[0].target_session_id
+
+    with path.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "uuid": "u3",
+                    "parentUuid": "u1",
+                    "sessionId": "sess-claude",
+                    "timestamp": "2026-01-02T00:00:01.000Z",
+                    "message": {"role": "user", "content": "REWRITTEN QUESTION"},
+                }
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "a3",
+                    "parentUuid": "u3",
+                    "sessionId": "sess-claude",
+                    "timestamp": "2026-01-02T00:00:02.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-synthetic",
+                        "content": [{"type": "text", "text": "REWRITTEN ANSWER"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    second = await service.import_sessions(request)
+    copy = second.sessions[0].target_session_id
+    assert second.sessions[0].outcome == "imported"
+    assert copy == f"{original}-2"
+    old_raw = (config / "sessions" / original / "transcript.jsonl").read_text()
+    new_raw = (config / "sessions" / copy / "transcript.jsonl").read_text()
+    assert "second question" in old_raw and "second answer" in old_raw
+    assert "REWRITTEN QUESTION" not in old_raw
+    assert "REWRITTEN QUESTION" in new_raw
+    assert "second question" not in new_raw
+    copied = read_manifest(config / "sessions" / copy)
+    assert copied is not None
+    assert copied["predecessor_target_session_id"] == original
+    third = await service.import_sessions(request)
+    assert third.sessions[0].outcome == "skipped_already_imported"
+    assert third.sessions[0].target_session_id == copy
+
+
+@pytest.mark.asyncio
+async def test_codex_rollback_creates_a_new_target(codex_store):
+    home, config = codex_store
+    path = home / ".codex" / "sessions" / "2026" / "01" / "01" / "rollout-rollback.jsonl"
+    service = HarnessImportService(config)
+    request = ImportRequest(sources=["codex"], session_ids={"codex": ["codex-rollback"]})
+    first = await service.import_sessions(request)
+    original = first.sessions[0].target_session_id
+
+    with path.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-01-02T00:00:09.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "thread_rolled_back", "num_turns": 1},
+                }
+            )
+            + "\n"
+        )
+    second = await service.import_sessions(request)
+    copy = second.sessions[0].target_session_id
+    assert second.sessions[0].outcome == "imported"
+    assert copy == f"{original}-2"
+    old_raw = (config / "sessions" / original / "transcript.jsonl").read_text()
+    new_raw = (config / "sessions" / copy / "transcript.jsonl").read_text()
+    assert "after rollback question" in old_raw
+    assert "after rollback question" not in new_raw
+    assert "after rollback answer" not in new_raw
+    copied = read_manifest(config / "sessions" / copy)
+    assert copied is not None
+    assert copied["predecessor_target_session_id"] == original
+    entries = Transcript(config / "sessions" / copy).entries()
+    message_rows = [
+        entry
+        for entry in entries
+        if entry.type == "message" and entry.payload.get("role") in ("user", "assistant")
+    ]
+    assert copied["counts"]["messages"] == len(message_rows)
+    third = await service.import_sessions(request)
+    assert third.sessions[0].outcome == "skipped_already_imported"
+    assert third.sessions[0].target_session_id == copy
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_name_itself_as_predecessor(omp_store):
+    home, config = omp_store
+    path = home / ".omp" / "agent" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    service = HarnessImportService(config)
+    first = await service.import_sessions(_request())
+    target = first.sessions[0].target_session_id
+    with path.open("a") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "message",
+                    "id": "linear-extra",
+                    "parentId": "meta1",
+                    "timestamp": "2026-01-04T00:00:00.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "linear extra"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    second = await service.import_sessions(_request())
+    assert second.sessions[0].outcome == "resumed"
+    assert second.sessions[0].target_session_id == target
+    manifest = read_manifest(config / "sessions" / target)
+    assert manifest is not None
+    assert manifest["predecessor_target_session_id"] is None

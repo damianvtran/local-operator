@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from local_operator.harness.types import CustomMessage
+from local_operator.harness_import import store
 from local_operator.harness_import.service import HarnessImportService
 from local_operator.harness_import.sources.codex import CodexAdapter
 from local_operator.harness_import.types import ImportRequest
@@ -110,3 +111,20 @@ def test_codex_unreadable_thread_index_is_surfaced(isolated, monkeypatch):
     assert adapter.list_sessions() == []
     info = adapter.detect()
     assert "thread index unreadable" in info.detail
+
+
+def test_zst_size_is_checked_before_decompression(isolated, monkeypatch):
+    home, config = isolated
+    root = home / ".codex"
+    root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(root))
+    sessions = root / "sessions" / "2026" / "01" / "01"
+    sessions.mkdir(parents=True)
+    body = sessions / "rollout-large.jsonl.zst"
+    with body.open("wb") as handle:
+        handle.truncate(store.MAX_SOURCE_BYTES + 1)
+    adapter = CodexAdapter(config)
+    rows = adapter.list_sessions()
+    assert len(rows) == 1
+    assert rows[0].availability == "unsupported"
+    assert "import cap" in rows[0].warnings[0]

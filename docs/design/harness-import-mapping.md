@@ -636,10 +636,13 @@ service; the TUI and UI never shell out to it.
 - **Read-only source access.** JSONL opened `r`; no `chmod`, lock files or temp files in
   foreign roots. SQLite is opened through a private snapshot: copy the database and its
   `-wal`/`-shm` files (when present) under `<config>/imports/snapshots/<hash>/`, open the
-  copy with `immutable=1`, and delete the snapshot after listing. A plain `mode=ro`
-  connection can create a `-shm` side file in a WAL database, which would violate the
-  read-only contract. Symlinks are resolved and confined to the detected root; a link
-  escaping the root is skipped.
+  private COPY with a normal read-only connection (`mode=ro`) so the copied `-wal` is
+  replayed, and delete the snapshot after listing. `immutable=1` is unsafe here: it
+  declares the database unchanging, so SQLite skips the copied WAL and a live Codex
+  store lists zero threads (or fails with "no such table"). Opening the FOREIGN file
+  read-only can create a `-shm` side file; opening only our private copy cannot reach
+  it. Symlinks are resolved and confined to the detected root; a link escaping the
+  root is skipped.
 - **No secrets.** Never read `auth.json`, `auth.db`, `settings.json`, `.env`, credential
   or plugin stores. Skip `credential_pin`, encrypted compaction content and auth-like
   records. Redact credential shapes in text/tool arguments/tool results before writing;
@@ -858,12 +861,13 @@ for root, _dirs, files in os.walk(os.path.expanduser('~/.claude')):
             print('body', path, os.path.getsize(path))
 PY
 
-# Codex: snapshot the SQLite files first; mode=ro can create -shm in a WAL store
+# Codex: snapshot the SQLite files first, then read the private copy with mode=ro
+# (immutable=1 would skip a copied -wal and hide live threads).
 SNAP=$(mktemp -d "${TMPDIR:-/tmp}/loh14.XXXXXX")
 cp ~/.codex/state_5.sqlite* ~/.codex/memories_1.sqlite* "$SNAP"/ 2>/dev/null || true
-sqlite3 "file:$SNAP/state_5.sqlite?immutable=1" \
+sqlite3 "file:$SNAP/state_5.sqlite?mode=ro" \
   "select history_mode,count(*) from threads group by history_mode;"
-sqlite3 "file:$SNAP/memories_1.sqlite?immutable=1" \
+sqlite3 "file:$SNAP/memories_1.sqlite?mode=ro" \
   "select count(*) from stage1_outputs;"
 rm -rf "$SNAP"
 
@@ -881,7 +885,7 @@ PY
 
 # lop target: transcript count and memory schema
 find ~/.local-operator/sessions -name transcript.jsonl | wc -l
-sqlite3 "file:$HOME/.local-operator/memory/memory.db?immutable=1" ".tables"
+sqlite3 "file:$HOME/.local-operator/memory/memory.db?mode=ro" ".tables"
 ```
 
 ## Appendix B — Source field cross-check
