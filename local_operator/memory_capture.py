@@ -556,7 +556,14 @@ async def _session_tail(session: Any) -> str:
                 line = suggest_line(item)
                 if count_text_tokens(suggestion_block(admitted + line)) <= SUGGESTION_TOKENS:
                     admitted += line
-            suggestions = suggestion_block(admitted)
+            # Guard the empty case: ``suggestion_block("")`` still renders the
+            # ~19-token wrapper, and a header-only section is strictly worse
+            # than shipping nothing. The ``if items`` above and this guard are
+            # two rulers over the same admission decision — if they ever
+            # diverge (an item filtered to no line), the divergence must
+            # degrade to no block, which is the regression this file exists
+            # to prevent.
+            suggestions = suggestion_block(admitted) if admitted else ""
     return "\n\n".join(x for x in (suggestions, memory_hint) if x)
 
 
