@@ -39,13 +39,19 @@ def _assert_value_free_refusal(caught, value):
     assert did_not_echo, "sensitive-memory refusal echoed its input"
 
 
-def test_public_origin_raw_constructor_is_refused_before_any_put(tmp_path):
-    """Characterize raw-string refusal, NOT acceptance of the availability bug.
+def test_public_origin_free_text_guards_still_refuse_before_any_put(tmp_path):
+    """The free-text refusals survive the merged structural-id repairs.
 
-    A public derivation is not a host trust proof. A future approved host-bound
-    repair needs separate positive factory/protocol evidence; it must not grant
-    this arbitrary naked string or an identical untrusted fact an exemption.
-    No peer/identity mint/socket fixture is requested by these controls.
+    This case originally characterized raw-string refusal as the fail-closed
+    state of every surface. The merged repairs deliberately accept a minted
+    ``d_``+hex device id on the write/sync path (#2492) and exempt a minted
+    reference from the recall-query guard (#2511); both are pinned by their own
+    regression suites. This control keeps what those repairs did NOT move:
+    guard() and a free-text safe_segment() still refuse the raw value, and
+    constructing with it (no put) writes no storage artifact; a future
+    host-bound change must arrive through a separately reviewed path, never
+    this arbitrary naked string. No peer/identity mint/socket fixture is
+    requested by these controls.
     """
     value = _public_origin_hazard()
     root = tmp_path / "refused-origin"
@@ -55,22 +61,20 @@ def test_public_origin_raw_constructor_is_refused_before_any_put(tmp_path):
     with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
         safe_segment(value)
     _assert_value_free_refusal(rejected, value)
-    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
-        MemoryStore(
-            root / "config",
-            MemoryIdentity("synthetic-session"),
-            root / "session",
-            origin=value,
-        )
-    _assert_value_free_refusal(rejected, value)
-    # No put was called. An absent whole synthetic tree also excludes a DB,
-    # FTS index, operation journal/WAL or portable session export under it.
-    assert not root.exists(), "raw origin refusal left a storage artifact"
+    # Structural acceptance itself belongs to #2492's regression suite; the
+    # only claim here is that construction alone touches no storage (no put).
+    MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin=value,
+    )
+    assert not root.exists(), "constructing with a structural origin left a storage artifact"
 
 
-@pytest.mark.parametrize(
-    "carrier", ["body", "title", "tags", "source-uri", "url", "query", "owner"]
-)
+# A minted-reference recall query is now an admitted read (#2511), pinned by
+# that repair's own tests; these carriers are the surfaces that still refuse.
+@pytest.mark.parametrize("carrier", ["body", "title", "tags", "source-uri", "url", "owner"])
 def test_public_origin_bytes_remain_untrusted_in_other_fields(tmp_path, carrier):
     value = _public_origin_hazard()
     root = tmp_path / "refused-carrier"
@@ -101,8 +105,6 @@ def test_public_origin_bytes_remain_untrusted_in_other_fields(tmp_path, carrier)
             # A valid memory URL/entity reaches the actual safe-segment guard;
             # unknown scope/syntax errors are not a sensitive-value refusal.
             parse_url("memory://session/" + value)
-        elif carrier == "query":
-            store.search(value, scope="session")
         else:
             MemoryIdentity(session_id=value)
     _assert_value_free_refusal(rejected, value)
