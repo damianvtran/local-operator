@@ -496,7 +496,8 @@ def _encode_len(text: str) -> int:
 #: permanent for the model, which is the same
 #: silent-degradation-from-a-transient-failure class this module exists to
 #: remove. The cache is cleared by :func:`reset_tokenizer_state` along with the
-#: rest of the tokenizer state.
+#: rest of the tokenizer state, and a resolution that was in flight across a
+#: reset is not republished into the cleared cache (epoch-guarded below).
 _MODEL_ENCODINGS: dict[str, object] = {}
 
 
@@ -510,11 +511,29 @@ def _get_model_encoding(model: str) -> object | None:
     tokenizer cooldown this call returns the fallback for the current count,
     and the next call after recovery resolves and caches the model's real
     encoder instead of inheriting the cooldown forever.
+
+    A COOLDOWN GATES THIS PATH TOO. Model resolution does not go through
+    :func:`_get_encoding`'s load claim — it calls tiktoken directly — so
+    without an explicit latch check every ``count_text_tokens(...
+    model=...)`` during a cooldown pays its own synchronous fetches, TWICE per
+    call: a failed ``encoding_for_model`` falls through to
+    ``get_encoding("cl100k_base")``. Measured with a 0.4 s fake fetch: 7
+    attempts over 3 calls. The call site is per message, per HTTP request
+    (``server/routes/chat.py``), and an offline fetch is 75.7 s to time out, so
+    that is minutes per request for as long as the process is offline — the
+    unbounded-fetch behaviour the cooldown exists to prevent. Cached encoders
+    are still served first: they cost no fetch and outlive a cooldown, the
+    same order :func:`_get_encoding` uses (encoding, then latch).
     """
     with _STATE_LOCK:
         cached = _MODEL_ENCODINGS.get(model)
-    if cached is not None:
-        return cached
+        if cached is not None:
+            return cached
+        if _ENCODING_FAILED and time.monotonic() < _ENCODING_RETRY_AT:
+            return None
+        # Snapshot for the publish guard below: a reset that lands while this
+        # resolution is fetching invalidates the result (see the store).
+        epoch = _ENCODING_EPOCH
     encoding: object | None = None
     try:
         import tiktoken
@@ -528,8 +547,17 @@ def _get_model_encoding(model: str) -> object | None:
         # answer, not a property of the model, so it is not cached.
         encoding = _get_encoding()
     if encoding is not None:
+        # Epoch-guarded like every other publication of tokenizer state, so
+        # :func:`reset_tokenizer_state`'s promise holds for THIS cache too: an
+        # encoder resolved from the pre-reset tiktoken state must not be
+        # republished after the reset cleared the cache (a reset landing
+        # mid-fetch otherwise leaves a stale encoder reported as current — no
+        # latch re-arm and no wrong count, but a test-isolation hole). The
+        # caller still counts with the object it resolved; only the cache
+        # write is discarded.
         with _STATE_LOCK:
-            _MODEL_ENCODINGS[model] = encoding
+            if epoch == _ENCODING_EPOCH:
+                _MODEL_ENCODINGS[model] = encoding
     return encoding
 
 
