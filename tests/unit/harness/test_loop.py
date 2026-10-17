@@ -3493,7 +3493,7 @@ async def test_empty_length_truncation_retries_at_lower_effort():
     assert stream.requests[0].model.reasoning_effort == "high"
     assert stream.requests[1].model.reasoning_effort == "medium"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and not end.aborted
     # The empty assistant message must not survive into the context: it is an
@@ -3543,13 +3543,12 @@ async def test_the_empty_truncation_retreat_is_bounded_and_leaves_the_session_ef
 
     assert [r.model.reasoning_effort for r in stream.requests] == ["high", "medium", "high"]
     assert executed == ["echo"]
-    assert host_model.reasoning_effort == "high", (
-        "the retreat must not rewrite the session's configured effort"
-    )
+    assert (
+        host_model.reasoning_effort == "high"
+    ), "the retreat must not rewrite the session's configured effort"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
     assert any(
-        "retrying at effort medium for this turn (your session setting is unchanged)"
-        in n.text
+        "retrying once at effort medium (your reasoning effort is unchanged)" in n.text
         for n in notices
     )
 
@@ -3586,7 +3585,7 @@ async def test_a_whitespace_only_length_stop_takes_the_silent_path_too():
     assert len(stream.requests) == 2
     assert stream.requests[1].model.reasoning_effort == "medium"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     # And the whitespace turn does not ride into the retry's history, for the
     # same reason the empty one does not.
     assert all(
@@ -3759,7 +3758,7 @@ async def test_a_silent_length_turn_with_a_lower_rung_still_takes_the_retreat():
     assert len(stream.requests) == 2
     assert [r.model.reasoning_effort for r in stream.requests] == ["high", "medium"]
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     assert not any("re-asking it to continue the work" in n.text for n in notices)
     # And the re-ask prompt for the no-rung arm is not what was appended.
     assert not any(

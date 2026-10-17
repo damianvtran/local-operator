@@ -5146,7 +5146,11 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
-        elif current is not None and current.reasoning_effort:
+        elif (
+            current is not None
+            and current.reasoning_effort
+            and current.reasoning_effort != current.reasoning_default_effort
+        ):
             # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
             #
             # ``build_model_spec`` seeds the model's OWN default, and
@@ -5159,15 +5163,21 @@ class ServingSessionHandle(SessionHandle):
             # not change, so nothing on screen explained the revert, and every
             # later turn ran (and the selection journal stored) the seed.
             #
-            # The user's explicit level therefore OUTRANKS the derived seed,
-            # here and on a genuine model change alike (the terminal's
-            # ``_spec_with_chosen_effort`` has always done this: "a user who
-            # dropped to low for cost did not mean 'until I switch models'").
+            # What carries is a CHOICE, not the current value: the level must
+            # differ from the model's own default, which is the same
+            # discriminator the terminal uses (``_spec_with_chosen_effort``).
+            # Carrying an unchanged seed would promote it to a decision -- on a
+            # switch it would be journalled as one, and the birth path (which
+            # sends pair-only exactly when its resolved level is empty, see
+            # ``attached._consume_model_override``) would store a level nobody
+            # picked, against the documented "a seed, not a choice: it is never
+            # STORED". A seed-level session therefore keeps this method's
+            # historical behaviour.
+            #
             # The level is carried through ``resolve_effort_in`` so a new
             # model that cannot express it lands on its nearest rung instead
             # of one it rejects -- the same stale-level clamp the ``if effort``
-            # arm above applies. A session with NO level (``auto``) carries
-            # nothing and keeps this method's historical seed behaviour.
+            # arm above applies.
             carried = resolve_effort_in(
                 spec.reasoning_efforts,
                 spec.reasoning_default_effort,

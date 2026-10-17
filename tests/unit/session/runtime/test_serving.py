@@ -2092,10 +2092,11 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
     assigns the spec BEFORE its same-pair early return -- so the composer's
     model chip, which sends the pair and no level, erased the chosen depth
     whenever its row was picked (including the row already in force). The
-    explicit level outranks the derived seed: it is carried across the switch,
-    clamped to the target's ladder exactly as the ``effort`` arm clamps a stale
-    stored level. A session with NO level keeps the historical seed behaviour,
-    asserted as the control at the end.
+    explicit level outranks the derived seed, but only a level that IS a
+    choice: a value equal to the model's own default is a seed and is not
+    promoted to a decision (that is the terminal's discriminator too). A
+    session with NO level keeps the historical seed behaviour as well, asserted
+    as the last control.
     """
     from local_operator.model.configure import build_model_spec
 
@@ -2121,13 +2122,83 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
     await handle.set_model_effort("deepseek", "deepseek-v4-pro", None)
     assert applied[-1].reasoning_effort == "max"
 
-    # Control: with no level of its own the session still gets the target's
-    # seed, which is the behaviour every pre-existing caller relies on.
+    # A SEED IS NOT A CHOICE (review round 1, MAJOR-1): deepseek-flash's seed is
+    # ``high`` and that is also its default, so a session that never chose a
+    # level must not have that seed promoted -- it would be journalled as a
+    # selection on a switch, and the birth path would store a level nobody
+    # picked. The target's own seed (none here) is what the base produced.
+    session.model = build_model_spec("deepseek", "deepseek-flash")
+    await handle.set_model_effort("openai", "gpt-5.4", None)
+    assert applied[-1].reasoning_effort == build_model_spec("openai", "gpt-5.4").reasoning_effort
+
+    # Control: with no level of its own a same-pair switch also still gets the
+    # target's seed, which is the behaviour every pre-existing caller relies on.
     session.model = build_model_spec("deepseek", "deepseek-flash")
     await handle.set_model_effort("deepseek", "deepseek-flash", None)
-    assert applied[-1].reasoning_effort == build_model_spec(
-        "deepseek", "deepseek-flash"
-    ).reasoning_effort
+    assert (
+        applied[-1].reasoning_effort
+        == build_model_spec("deepseek", "deepseek-flash").reasoning_effort
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_pair_only_re_pick_stores_the_chosen_level_in_the_journal(tmp_path) -> None:
+    """The persisted half, through a REAL Session (review round 1, NIT).
+
+    The test above stubs ``Session.set_model``, which is exactly the method
+    whose assign-before-early-return order made the bug possible; a stub cannot
+    regress it. This one runs the real session and reads the ``selected_model``
+    journal row the next resume consumes, so the fix is pinned where the report
+    was observed: Max chosen, the model row re-picked, the stored selection
+    still Max.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    class _Stream:
+        def set_route_handler(self, handler: Any) -> None:  # noqa: ANN401 — test double
+            pass
+
+        def set_notice_handler(self, handler: Any) -> None:  # noqa: ANN401 — test double
+            pass
+
+        def on_model_changed(self, model: Any) -> None:  # noqa: ANN401 — test double
+            pass
+
+        def withdraw_fallback(self) -> None:
+            pass
+
+    boot = build_model_spec("anthropic", "claude-sonnet-5-5").model_copy(
+        update={"reasoning_effort": "high"}
+    )
+    session = Session(
+        model=boot,
+        stream_fn=_Stream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    session.set_model(
+        build_model_spec("deepseek", "deepseek-flash").model_copy(
+            update={"reasoning_effort": "max"}
+        ),
+        explicit=True,
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+
+    assert session.model.reasoning_effort == "max"
+    await session._persist_selected_model()
+    rows = [
+        entry.payload["details"]
+        for entry in session._transcript.entries()
+        if entry.payload.get("custom_type") == "selected_model"
+    ]
+    assert rows, "the selection journal must carry a row for the switch"
+    assert rows[-1]["selector"] == "deepseek/deepseek-flash"
+    assert rows[-1]["effort"] == "max"
 
 
 @pytest.mark.asyncio
