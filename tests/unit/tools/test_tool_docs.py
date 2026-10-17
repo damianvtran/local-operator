@@ -301,6 +301,10 @@ MEASURED_TOKENS: dict[str, int] = {
     "generate_video": 790,
     "glob": 87,
     "grep": 333,
+    # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
+    # actions plus the preview-first/confirm/selection contract. Measured with
+    # this test's canonical isolated renderer; no existing entry moved.
+    "harness_import": 297,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
     # rewritten to say that pause/cancel RECORD it as the stop reason. The new
     # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
