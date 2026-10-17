@@ -2,7 +2,7 @@
 
 **The defect this closes.** `#2511` (merged) taught the agent READ path that a ``q``
 VALUE which IS a minted structural reference is a lookup rather than prose, and `#2524`
-(open) taught the ``memory`` tool's ``recall`` the same for ``text``. Both exemptions
+(merged) taught the ``memory`` tool's ``recall`` the same for ``text``. Both exemptions
 live at the TOOL layer. ``AgentLoop._plan_call`` asks
 ``memory_privacy.retained_arguments`` whether a call carries a recognised sensitive
 memory value BEFORE validation and BEFORE the tool is dispatched, and refuses the whole
@@ -100,10 +100,11 @@ PROSE_FACT = {"title": "Host", "body": "staging host is stage-2"}
 #: refusal differently, and that difference is exactly how a seam refusal is told apart
 #: from a tool that ran.
 PLAN_GATE_REFUSAL = "Sensitive value refused. Use lop secret; memory may hold its NAME only."
-#: The ``memory`` tool's OWN refusal, verbatim and MEASURED at this head — the second
-#: wording a recall can come back with, and the one `#2524` removes. Pinned so the recall
-#: test can tell "refused by the tool" from both "refused by the seam" (the constant
-#: above) and "answered" (the bank's JSON); see that test for the merge-order note.
+#: The ``memory`` tool's OWN refusal, verbatim, kept as an assertion of ABSENCE: it is
+#: the wording a recall came back with before `#2524` exempted the ``text`` position, and
+#: the recall test asserts it no longer appears (a tool refusal there is now the
+#: regression direction). Pinned so that test still tells "refused by the tool" from both
+#: "refused by the seam" (the constant above) and "answered" (the bank's JSON).
 TOOL_RECALL_REFUSAL = (
     "Store it with lop secret and keep only its NAME here (e.g. 'uses secret GITHUB_TOKEN'); "
     "never the value."
@@ -312,16 +313,22 @@ async def test_a_colliding_reference_recall_reaches_the_executor(tmp_path, monke
 
     ``#2524``'s tool change is the other half of THIS path (the tool guards its own
     argument dict before it validates), so what the plan gate owes here is the dispatch
-    itself: the call must reach the tool instead of a synthetic refusal.
+    itself: the call must reach the tool instead of a synthetic refusal. Both halves of
+    that chain are now merged — ``#2524`` (the tool's ``recall`` exemption) and ``#2530``
+    (this file's seam) — so the path runs end to end and the OUTCOME below is the merged
+    truth rather than a half-open expectation.
 
     NIT-5: "one start, not synthetic" is asserted together with the OUTCOME, so this test
     tells the three possible endings apart rather than only "the seam did not refuse it".
     The seam's own sentence means the refusal never left the plan gate; the TOOL's own
     sentence (`TOOL_RECALL_REFUSAL`) means the call reached the tool and the tool refused
-    it; the bank's JSON means the tool answered. MEASURED at this head (no `#2524`): the
-    middle branch — the tool's wording, which the PR body records verbatim — so the
-    `#2524` dependency is visible in the suite and not only in prose. When `#2524` lands
-    the third branch is the live one; the last assertion is then the one to flip.
+    it; the bank's JSON means the tool answered. MEASURED at this head (both merges in):
+    the third branch, the bank's JSON. This test was written at a head where only the
+    seam's half had merged, where the middle branch was live, and it recorded its flip as
+    owing to ``#2524``; that has happened, so the last assertion now pins the THIRD branch
+    and the middle branch is henceforth the REGRESSION direction — a dispatched recall
+    refused by the tool would mean ``#2524``'s exemption stopped applying — which is why
+    the constant above is kept as an assertion of ABSENCE rather than deleted.
     """
     run = await _run_one_call(tmp_path, monkeypatch, "memory", {"op": "recall", "text": DEVICE_ID})
     assert len(run.starts) == 1, run.result_text
@@ -330,9 +337,10 @@ async def test_a_colliding_reference_recall_reaches_the_executor(tmp_path, monke
     answered = run.result_text.lstrip().startswith("{")
     refused_at_the_tool = TOOL_RECALL_REFUSAL in run.result_text
     assert answered or refused_at_the_tool, run.result_text
-    assert refused_at_the_tool and not answered, (
-        "#2524 is still open: the recall reaches the TOOL and the tool's own refusal, "
-        "not the seam's, is what comes back (flip this once #2524 merges)",
+    assert answered and not refused_at_the_tool, (
+        "the chain is complete (#2524's tool exemption, dispatched past the seam by "
+        "#2530): the recall is ANSWERED with the bank's JSON, and a TOOL refusal here "
+        "means the exemption stopped applying to a dispatched recall",
         run.result_text,
     )
 
