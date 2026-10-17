@@ -195,9 +195,9 @@ def test_zstd_rollout_opens_text_mode(tmp_path):
 
 
 def test_private_use_glyphs_are_stripped_from_titles():
-    from local_operator.harness_import.service import _normalise_title
+    from local_operator.harness_import.service import normalise_title
 
-    assert _normalise_title("\U000f0016 Synthetic title") == "Synthetic title"
+    assert normalise_title("\U000f0016 Synthetic title") == "Synthetic title"
 
 
 def test_image_cap_compares_decoded_bytes(monkeypatch):

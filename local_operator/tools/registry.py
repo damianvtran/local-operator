@@ -22,6 +22,7 @@ from local_operator.team_bridge.tool import build_bridge_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
+from local_operator.tools.harness_import_tool import build_harness_import_tool
 from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
@@ -96,6 +97,9 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # provider-visible array prefix, which is what the prompt cache keys on.
     "project": lambda context: build_project_tool(context),
     "project_delete": lambda context: build_project_delete_tool(context),
+    # Agent-usable import surface over the same core service. Read-only
+    # discovery needs no store; import itself is write-tier and preview-gated.
+    "harness_import": lambda context: build_harness_import_tool(context),
     # createIf: returns None without a monitor scheduler, so a session that
     # cannot arm a monitor pays no schema for it (footprint rung 3, like
     # `wake`). Appended at the end of both tables for the same cache-prefix
@@ -207,6 +211,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "network",
     "project",
     "project_delete",
+    "harness_import",
     "monitor",
     "sessions",
     "ask_withdraw",

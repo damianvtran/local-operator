@@ -2280,3 +2280,13 @@ def test_the_notice_sentences_pinned_verbatim() -> None:
         "moved (1.0.0 -> 1.4.0). Your copy was left alone. "
         "Run `lop agents sync --name aida` to see your options."
     )
+
+
+def test_aida_first_contact_offers_a_previewed_harness_import() -> None:
+    """First-run is the agent path: she may offer migration, but never imports
+    without an explicit preview and selection."""
+    flat = " ".join(seed("aida").instructions.split())
+    assert load_seed_version("aida") == "1.5.4"
+    assert "harness_import" in flat
+    assert "list, preview, require explicit selection" in flat
+    assert "read-only on the other harness" in flat

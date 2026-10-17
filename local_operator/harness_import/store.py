@@ -244,9 +244,12 @@ class ImportLock:
     """One import job per process root; stale after 30 minutes or dead pid."""
 
     def __init__(self, config: Path):
-        self.path = imports_root(config) / ".lock"
+        # Do not create <config>/imports here: constructing a service for a
+        # read-only sources/preview call must not write. acquire() creates it.
+        self.path = Path(config) / "imports" / ".lock"
 
     def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = json.dumps({"pid": os.getpid(), "at": time.time()})
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)

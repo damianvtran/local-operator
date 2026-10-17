@@ -37,6 +37,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "delivery",
         "extensions",
         "failover",
+        "harness-import",
         "highlights",
         "i18n",
         "image-generation",
@@ -913,3 +914,15 @@ def test_a_looping_guide_base_dir_does_not_escape_the_resolver(tmp_path: Path) -
     child = resolver("guide://demo/references")
     assert child is not None and "not found" in child
     assert resolver("guide://demo") is not None
+
+
+def test_harness_import_guide_states_the_safe_preview_first_flow() -> None:
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://harness-import")
+    assert body is not None
+    assert "preview_token" in body
+    assert "confirm=true" in body
+    assert "no default-all" in body.lower()
+    assert "read-only on the other harness" in body
+    assert "Re-run is safe" in body
+    assert "No filesystem path is accepted" in body
