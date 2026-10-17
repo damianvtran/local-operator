@@ -61,7 +61,10 @@ class FakeSession:
         self.session_id = "sess-1"
         self.model_label = "test/model"
         self.effective_model_label = "test/model"
-        self.model = None
+        #: The current spec, or ``None`` before a model is resolved. The type is
+        #: stated because the pair-only-switch regression assigns a real spec
+        #: here to stand in for a session the user is already on (#2471).
+        self.model: ModelSpec | None = None
         self.conversation_name = ""
         self.is_streaming = False
         self._handlers: list[Any] = []
@@ -2076,6 +2079,55 @@ async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
         True,
         True,
     ], "a switch is a deliberate choice, so a pinned fallback must be withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported "I set Max and it went back to High" (#2471), at the seam
+    every level-less switch uses.
+
+    ``build_model_spec`` seeds the model's own default, and ``Session.set_model``
+    assigns the spec BEFORE its same-pair early return -- so the composer's
+    model chip, which sends the pair and no level, erased the chosen depth
+    whenever its row was picked (including the row already in force). The
+    explicit level outranks the derived seed: it is carried across the switch,
+    clamped to the target's ladder exactly as the ``effort`` arm clamps a stale
+    stored level. A session with NO level keeps the historical seed behaviour,
+    asserted as the control at the end.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    chosen = build_model_spec("deepseek", "deepseek-flash").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session.model = chosen
+
+    # THE REPRODUCTION: picking the row already in force (the desktop's
+    # ``/model deepseek/deepseek-flash`` on a session already on it).
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert applied[-1].reasoning_effort == "max"
+
+    # A genuine model change carries the choice too: "I dropped to max for this
+    # work" did not mean "until I switch models".
+    await handle.set_model_effort("deepseek", "deepseek-v4-pro", None)
+    assert applied[-1].reasoning_effort == "max"
+
+    # Control: with no level of its own the session still gets the target's
+    # seed, which is the behaviour every pre-existing caller relies on.
+    session.model = build_model_spec("deepseek", "deepseek-flash")
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert applied[-1].reasoning_effort == build_model_spec(
+        "deepseek", "deepseek-flash"
+    ).reasoning_effort
 
 
 @pytest.mark.asyncio
