@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -140,6 +141,13 @@ from local_operator.evaluation.runner.secrets import (
 # session is the one resource the parent always knows exists before the adapter
 # has described anything, which is what makes the provisional plan expressible.
 _PROVISIONAL_CLEANUP_ACTION = "close-session"
+
+#: How many rescue workers ONE episode may launch in total (the first
+#: attempt plus one retry). Refusing a third launch is deliberate: every
+#: launch is a fresh worker process with its own handshake, and both the
+#: close-out and evidence-failure paths can ask for a rescue, so an
+#: unbounded retry loop would turn a stuck teardown into a runaway.
+_RESCUE_LAUNCH_BUDGET = 2
 
 # Infra values whose EFFECT a caller discloses in the sealed manifest, and which
 # an adapter that does not understand them would silently ignore.
@@ -530,25 +538,42 @@ def _canary_values_outside_own_roots(
     sealed INFRA refs join that same channel (``run_episode.py``:
     ``secret_refs = ref_names + infra_ref store names``), so
     ``OSWORLD_INFRA_OSWORLD_INPUTS_ROOT`` -- the benchmark's own inputs
-    DIRECTORY, a plain path -- became a canary. The scoring-details capture
-    carries the evaluator's log lines, and those name the run's cache path
-    UNDER that directory; the scoring receipt's publication scan then refused
-    the artifact wholesale ("secret canary survived evidence redaction") and
-    every episode that reached scoring died with ``evidencefailure`` -- five
-    paid episodes and probes in one day (see the OSWorld campaign logs).
+    directory, measured value ``/Users/damian/worktrees/osworld/osworld-21``
+    -- became a canary. The scoring-details capture carries the evaluator's
+    log lines, and those name the run's cache path UNDER that directory; the
+    scoring receipt's publication scan then refused the artifact wholesale
+    ("evidence redaction rejected content") and every episode that reached
+    scoring died with ``evidencefailure`` -- five paid episodes and probes on
+    2026-10-17.
 
-    A credential can never be a substring of the episode's own roots, and
-    neither can a root be one of a credential: a value in that relationship
-    is a location, and every path the harness writes into its own evidence
-    contains it BY CONSTRUCTION, so it cannot distinguish leakage from
-    ordinary operation. Such values are dropped from the canary set; every
-    other resolved value still widens the set exactly as before.
+    THE RULE, SCOPED. A value is dropped ONLY when it is absolute-path-shaped
+    AND a location of the episode itself: equal to one of the episode's own
+    roots, an ancestor of one, or itself inside one. Every path the harness
+    writes into its own evidence contains such a value by construction, so it
+    cannot distinguish leakage from ordinary operation -- while an
+    identifier- or key-shaped value that merely collides with a path
+    component (say ``osworld-21``, or any bare substring of a root) STAYS a
+    canary, because dropping one on a containment test alone is exactly the
+    class of miss a redaction scan must never make. Every other resolved
+    value still widens the set exactly as before.
     """
 
-    own = tuple(str(root) for root in roots)
-    return tuple(
-        value for value in values if not any(value in root or root in value for root in own)
-    )
+    own = tuple(str(root).rstrip(os.sep) or os.sep for root in roots)
+    if not own:
+        return tuple(values)
+
+    def _is_own_location(value: str) -> bool:
+        candidate = value.rstrip(os.sep) or os.sep
+        if not os.path.isabs(candidate):
+            return False
+        return any(
+            candidate == root
+            or root.startswith(candidate + os.sep)
+            or candidate.startswith(root + os.sep)
+            for root in own
+        )
+
+    return tuple(value for value in values if not _is_own_location(value))
 
 
 class EpisodeRunner:
@@ -599,6 +624,9 @@ class EpisodeRunner:
         self._synthetic_model = synthetic_model
         self._launch = launch
         self._rescue = rescue
+        # Episode-level rescue launch budget (see ``_attempt_rescue``);
+        # a per-call bound could quadruple it across the two call sites.
+        self._rescue_launches = 0
 
         self._writer: EvidenceWriter | None = None
         self._session: VerifiedAdapterSession | None = None
@@ -2216,22 +2244,32 @@ class EpisodeRunner:
         if descriptor is None:
             return False
         complete = False
-        # BOUNDED RETRY, deliberately here rather than at the call sites: the
-        # measured leak (2026-10-17, ep-4386740c6af0) failed once, fast and
-        # silently, and left its instance running for hours while the
-        # descriptor sat in the rescue inbox. A replay of the same descriptor
-        # on the same build completed on the first attempt (launch, handshake,
-        # all three cleanup actions, close), so one immediate retry covers the
-        # transient class; the rescue sweep stays the unbounded net for
-        # everything else, and the descriptor is retired only on a complete
-        # aggregate either way.
-        for _ in range(2):
+        # BOUNDED, EPISODE-LEVEL retry. The measured leak (2026-10-17,
+        # ep-4386740c6af0) failed once, fast and silently, and left its
+        # instance running for hours while the descriptor sat in the rescue
+        # inbox; a replay of the same descriptor on the same build completed
+        # on the first attempt (launch, handshake, all three cleanup actions,
+        # close), so one immediate retry covers the transient class. The
+        # budget is per EPISODE, not per call: this method is reachable from
+        # both the close-out and evidence-failure paths, and a per-call bound
+        # let one episode launch up to four workers and grow its teardown
+        # tail to ~15 minutes. The sweep stays the unbounded net for anything
+        # this bound refuses, and the descriptor is retired only on a complete
+        # aggregate.
+        while self._rescue_launches < _RESCUE_LAUNCH_BUDGET:
+            self._rescue_launches += 1
             try:
                 # The rescue worker is a fresh process with nothing but the
                 # descriptor; it needs the credentials again to tear down.
                 # These are the values resolved at launch, so an in-process
                 # rescue never re-reads the store mid-failure.
                 aggregate = await self._rescue(descriptor, secrets=self._resolved_secrets)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # Cancellation and an operator interrupt outrank the retry: a
+                # swallowed CancelledError would launch a second worker after
+                # the run was told to stop, and the episode's own shutdown
+                # composition owns what happens next.
+                raise
             except BaseException:
                 continue
             complete = bool(aggregate.complete)

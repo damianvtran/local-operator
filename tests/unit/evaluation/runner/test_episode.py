@@ -9,7 +9,9 @@ will take is indistinguishable from one that writes none.
 
 from __future__ import annotations
 
+import asyncio
 import errno
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +19,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue, SecretRef
+from local_operator.evaluation.adapters.api import (
+    Requirement,
+    ScopedInfraValue,
+    SecretRef,
+)
 from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
@@ -26,6 +32,7 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     EnvironmentStepPayload,
     ErrorPayload,
+    EvidenceArtifactRef,
     ModelResponsePayload,
     ObservationPayload,
     ReconciliationPayload,
@@ -40,6 +47,7 @@ from local_operator.evaluation.runner.episode import (
     MAX_STDERR_TAIL_CHARS,
     EpisodeConfig,
     EpisodeRunner,
+    _canary_values_outside_own_roots,
 )
 from local_operator.evaluation.runner.model import EpisodeModelClient
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
@@ -574,6 +582,12 @@ async def test_failed_rescue_gets_one_immediate_retry(tmp_path: Path, episode_id
     assert len(broken_attempts) == 2  # bounded: exactly one retry
     # Still broken: the descriptor stays for the sweep to pick up.
     assert load_pending_rescue(build_config(second).rescue_root) is not None
+
+    # Episode-level budget: the bound is per episode, not per call site
+    # (both the close-out and evidence-failure paths can ask), so a third
+    # launch is refused outright and the sweep is left the descriptor.
+    assert await runner2._attempt_rescue() is False
+    assert len(broken_attempts) == 2
 
 
 @pytest.mark.asyncio
@@ -3021,6 +3035,144 @@ async def test_the_episodes_own_path_is_not_a_canary(tmp_path: Path, episode_id:
     text2 = _fatal_detail_text(outcome2.bundle_root)
     assert secret not in text2 and "carrying" not in text2
     assert WITHHELD in text2
+
+
+def test_canary_drop_requires_path_shape(tmp_path: Path) -> None:
+    """The drop is scoped to path-shaped locations, not bare containment.
+
+    Round-1 hardening: an identifier-shaped value that merely collides with a
+    path component (``osworld-21``) must STAY a canary -- dropping it on a
+    containment test alone would let text like "credential osworld-21
+    accepted" publish untouched, which is exactly the class of miss a
+    redaction scan must never make.
+    """
+
+    roots = (tmp_path / "a", tmp_path / "b")
+    values = (
+        str(tmp_path),
+        str(tmp_path / "a"),
+        str(tmp_path / "a" / "x"),
+        "osworld-21",
+        "not-a-path-but-text",
+    )
+    kept = _canary_values_outside_own_roots(values, roots)
+    # The three path-shaped locations are dropped (ancestor, equal, inside);
+    # the two values that only collide textually are kept, in order.
+    assert kept == ("osworld-21", "not-a-path-but-text")
+
+
+@pytest.mark.asyncio
+async def test_scoring_details_publish_own_path_but_refuse_real_secret(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The exit criterion, pinned at the ACTUAL failing path.
+
+    Two scenarios through the real scoring publication: (a) details bytes that
+    name the episode's own tree -- the shape that killed every 2026-10-17
+    episode -- must publish and the run must seal scored; (b) the same shape
+    with a real key-shaped secret resolved must be refused at publication, and
+    the bundle must take the ambiguity path rather than seal.
+    """
+
+    own_path = str(tmp_path)
+    secret = "sk-canary-9f2c7a41"
+
+    async def _run_with_details(text: str, suffix: str) -> Any:
+        # The supervision layer's reference check enforces the declared media
+        # type, so the capture is canonical JSON with the payload text inside
+        # -- the same envelope the real evaluator diagnostics use.
+        payload = json.dumps(
+            {"evaluator_diagnostics": {"stderr": {"text": text}}},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        sha = hashlib.sha256(payload).hexdigest()
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir(exist_ok=True)
+        (artifacts / sha).write_bytes(payload)
+        details = EvidenceArtifactRef(
+            sha256=sha, media_type="application/json", byte_count=len(payload)
+        )
+        case_id = f"{episode_id}-{suffix}"
+        adapter = FakeAdapter(
+            tmp_path, case_id, score=ScoreArtifact(status="scored", binary=0, details=details)
+        )
+        return await _runner(
+            tmp_path,
+            case_id,
+            adapter=adapter,
+            model=ScriptedModel(["step", "finish"]),
+            spec=replace(
+                build_spec(case_id),
+                secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+            ),
+            secrets=StaticSecretResolver({"OWN_PATH_ROW": own_path, "AWS_ACCESS_KEY_ID": secret}),
+        ).run()
+
+    # (a) The measured case: own-path text publishes, episode seals scored.
+    sealed = await _run_with_details(f"fetching {own_path}/cache/file.ics", "own")
+    assert sealed.status == "completed", sealed.diagnostic
+    assert sealed.score is not None and sealed.score.status == "scored"
+    assert sealed.bundle_root is not None and verify_bundle(sealed.bundle_root).valid
+    published = sealed.bundle_root / "artifacts"
+    assert any(
+        f"fetching {own_path}/cache/file.ics".encode() in path.read_bytes()
+        for path in published.iterdir()
+        if path.is_file()
+    )
+
+    # (b) The same shape carrying a real key-shaped secret: publication
+    # refuses, and the bundle takes the ambiguity path rather than sealing.
+    refused = await _run_with_details(f"carrying {own_path} under {secret}", "secret")
+    assert refused.status == "abandoned", refused.diagnostic
+    assert refused.score is None
+    assert refused.bundle_root is not None
+    report = verify_bundle(refused.bundle_root)
+    assert report.abandonment is not None
+    # The recorded terminal says the run died on evidence, which is this
+    # case's whole point: the resolved secret made the receipt unpublishable.
+    assert report.abandonment.diagnostic_code == "evidencefailure"
+    assert report.abandonment.reason == "ambiguous_finalization"
+    assert not any(
+        secret.encode() in path.read_bytes()
+        for path in (refused.bundle_root / "artifacts").iterdir()
+        if path.is_file()
+    )
+
+
+@pytest.mark.asyncio
+async def test_rescue_cancellation_propagates_without_retry(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A CancelledError during rescue must not launch a second worker.
+
+    Round-1 hardening: the broad retry handler used to swallow cancellation
+    and start another rescue after the run was told to stop; the fix raises
+    before it, so exactly one launch happened and the cancellation reaches the
+    caller.
+    """
+
+    launches: list[int] = []
+
+    async def _cancelling(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        launches.append(1)
+        raise asyncio.CancelledError()
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+
+    class _StubDescriptor:
+        descriptor_id = "d" * 64
+
+    runner._descriptor = _StubDescriptor()  # pyright: ignore[reportAttributeAccessIssue]
+    runner._rescue = _cancelling  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._attempt_rescue()
+
+    assert len(launches) == 1
+    assert runner._rescue_launches == 1
 
 
 @pytest.mark.asyncio

@@ -1077,6 +1077,82 @@ def test_abandonment_of_terminal_step_without_lifecycle_succeeds(tmp_path: Path)
     } == {("terminal_output_unresolved", "events.jsonl")}
 
 
+def test_abandonment_refuses_one_unrelated_error(tmp_path: Path) -> None:
+    """The tolerance is scoped; one unrelated error still blocks.
+
+    Same journal as the succeeding abandonment above, plus a single artifact that
+    nothing references. ``artifact_unreferenced`` is not the truncated-rollout
+    cutpoint, so the abandonment must raise rather than seal a bundle with an
+    unexplained finding.
+    """
+
+    root = tmp_path / "bundle"
+    writer = EvidenceWriter.create(root, manifest(), RedactionSet.from_resolved_values(()))
+    try:
+        clock = 0
+        _append_provenance(writer, monotonic_ns=clock, wall_time_ms=clock)
+        clock += 2
+        action_artifact = writer.publish_artifact(b"safe", media_type="text/plain")
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="observation-0", sequence=0),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "action_batch",
+            ActionBatchPayload(
+                action_batch_id="batch-0",
+                observation_id="observation-0",
+                action_count=1,
+                action_artifact=action_artifact,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        writer.append(
+            "environment_step",
+            EnvironmentStepPayload(
+                step_id="step-0",
+                action_batch_id="batch-0",
+                receipt_id=DIGEST,
+                input_observation_id="observation-0",
+                output_observation_id="observation-1",
+                terminated=False,
+                truncated=True,
+            ),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        # The scoring intent, as the runner writes it before calling score():
+        # finalization_start + scoring_start, then the death.
+        writer.publish_artifact(b"orphan bytes, referenced by nothing", media_type="text/plain")
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=clock,
+            wall_time_ms=clock,
+        )
+        clock += 1
+        before = verify_bundle(root)
+        assert ("terminal_output_unresolved", "events.jsonl") in {
+            (issue.code, issue.location) for issue in before.issues
+        }
+        with pytest.raises(EvidenceBundleInvalid):
+            writer.abandon("ambiguous_finalization", "evidencefailure")
+    finally:
+        writer.close()
+    report = verify_bundle(root)
+    assert report.abandonment is None
+    codes = {(issue.code, issue.location) for issue in report.issues if issue.severity == "error"}
+    assert ("terminal_output_unresolved", "events.jsonl") in codes
+    assert any(code == "artifact_unreferenced" for code, _ in codes)
+
+
 def test_crash_bundle_missing_terminal_event_still_refuses(tmp_path: Path) -> None:
     """Do not over-correct: a genuinely incomplete bundle must stay unsealed.
 

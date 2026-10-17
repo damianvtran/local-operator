@@ -1595,9 +1595,7 @@ class EvidenceWriter:
                 # location so every integrity, confinement and binding
                 # finding still blocks; an outcome/abandonment already on
                 # disk was rejected above.
-                allowed_errors = allowed_errors | {
-                    ("terminal_output_unresolved", "events.jsonl")
-                }
+                allowed_errors = allowed_errors | {("terminal_output_unresolved", "events.jsonl")}
             if report.manifest is None or any(
                 issue.severity == "error" and (issue.code, issue.location) not in allowed_errors
                 for issue in report.issues
