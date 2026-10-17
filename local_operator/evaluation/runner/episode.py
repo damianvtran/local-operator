@@ -28,6 +28,7 @@ Run-level budget aggregation across episodes is deliberately out of scope.
 from __future__ import annotations
 
 import asyncio
+import errno
 import math
 import os
 import time
@@ -61,6 +62,7 @@ from local_operator.evaluation.adapters.rpc import WITHHELD, RpcRemoteError
 from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
     HostVerifier,
+    SupervisionError,
     VerifiedAdapterSession,
     discard_rescue,
     persist_rescue,
@@ -522,10 +524,23 @@ class _EvidenceFailure(Exception):
     terminates in ``EpisodeOutcome.diagnostic``, an in-process return value
     that is never sealed.
 
-    If that ever changes -- if this message becomes something the bundle
-    records -- it needs the episode's redaction set, for the reason spelled out
-    on ``_diagnostic``.
+    ``operation`` names WHICH durable write failed (``append:observation``,
+    ``publish``, ``receipt:scoring_result``, ``seal`` and so on). It is carried
+    on the exception rather than baked into the message so the failure
+    diagnostic can attribute the failure without parsing rendered prose -- the
+    measured gap was an abandonment reading only ``evidence-write-failed``,
+    which cannot say whether the journal, an artifact or the seal was the one
+    that broke.
+
+    If the message ever becomes something the bundle records -- the failure
+    diagnostic does publish a bounded rendering, via
+    ``_publish_failure_diagnostic`` -- it needs the episode's redaction set,
+    for the reason spelled out on ``_diagnostic``.
     """
+
+    def __init__(self, message: str, *, operation: str | None = None) -> None:
+        super().__init__(message)
+        self.operation = operation
 
 
 def _canary_values_outside_own_roots(
@@ -633,6 +648,12 @@ class EpisodeRunner:
         self._rescue_launches = 0
 
         self._writer: EvidenceWriter | None = None
+        # Whether ``begin_finalization`` has RETURNED. It decides which
+        # abandonment reason is legal for a failure outside the handled paths:
+        # a scored intent that already committed ``finalization_start`` can
+        # only abandon as ``ambiguous_finalization``, and the model refuses
+        # finalization authority on any other reason.
+        self._finalization_begun = False
         self._session: VerifiedAdapterSession | None = None
         self._supervisor: Any = None
         self._descriptor: RescueDescriptor | None = None
@@ -672,7 +693,7 @@ class EpisodeRunner:
         try:
             handshake = await self._launch_and_prepare()
         except _EvidenceFailure as error:
-            return await self._abandon_for_evidence(str(error))
+            return await self._abandon_for_evidence(str(error), error)
         except BaseException as error:
             # No manifest is possible yet: it must carry the cleanup plan ID
             # that ``prepare`` returns. There is nothing to write evidence to,
@@ -854,7 +875,18 @@ class EpisodeRunner:
             # bundle on disk stayed open forever.
             return await self._execute(handshake)
         except _EvidenceFailure as error:
-            return await self._abandon_for_evidence(str(error))
+            return await self._abandon_for_evidence(str(error), error)
+        except BaseException as error:
+            # EVERY remaining escape. The handled paths above are inside
+            # ``_execute``, so an exception that reaches here was raised BY one
+            # of them -- measured (2026-10-17) on two OSWorld episodes that
+            # exited rc=1 after a successful preflight with three events, no
+            # error record and ``state: open``: a raw ``OSError`` escaping
+            # ``_finalize_failure``'s own ``_append`` did exactly this, because
+            # this method caught only ``_EvidenceFailure``. The writer is
+            # still open at this point, which makes this the last place a
+            # durable record of the failure can be written.
+            return await self._abandon_after_unexpected_failure(error)
         finally:
             # Still correct for FD hygiene; only its ordering against abandon()
             # was wrong. close() after a recorded terminal is a no-op for the
@@ -947,7 +979,7 @@ class EpisodeRunner:
             # A writer error is never an episode failure: the journal itself is
             # unusable, so finalizing would write into a poisoned bundle. Route
             # it to the abandonment path like any other evidence failure.
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(_diagnostic(error, None), operation="execute") from error
         except BaseException as error:
             return await self._finalize_failure(error)
         return await self._finalize_scored(handshake)
@@ -2365,7 +2397,7 @@ class EpisodeRunner:
         try:
             writer.append(kind, payload)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(_diagnostic(error, None), operation=f"append:{kind}") from error
 
     def _append_receipt(
         self, kind: str, payload: Any, *, details_source: bytes | None = None
@@ -2379,7 +2411,7 @@ class EpisodeRunner:
             else:
                 writer.record_scoring_result(payload, details_source=details_source)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(_diagnostic(error, None), operation=f"receipt:{kind}") from error
 
     def _publish(self, data: bytes, *, media_type: str, expected_sha256: str | None = None) -> Any:
         writer = self._require_writer()
@@ -2388,14 +2420,17 @@ class EpisodeRunner:
                 data, media_type=media_type, expected_sha256=expected_sha256
             )
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(_diagnostic(error, None), operation="publish") from error
 
     def _begin_finalization(self, intent: FinalizationIntent, operation: str | None) -> None:
         writer = self._require_writer()
         try:
             writer.begin_finalization(self._finalization_id, operation, intent)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(
+                _diagnostic(error, None), operation="begin_finalization"
+            ) from error
+        self._finalization_begun = True
 
     def _append_lifecycle(self, lifecycle: EpisodeLifecycle, *, state: str) -> None:
         # This is the journal's FIRST lifecycle link, so it must declare no
@@ -2450,7 +2485,7 @@ class EpisodeRunner:
         try:
             writer.record_final_lifecycle(payload)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(_diagnostic(error, None), operation="lifecycle") from error
 
     def _seal(
         self,
@@ -2478,12 +2513,105 @@ class EpisodeRunner:
         try:
             return writer.seal(draft)
         except EvidenceError as error:
-            raise _EvidenceFailure(_diagnostic(error, None)) from error
+            raise _EvidenceFailure(_diagnostic(error, None), operation="seal") from error
+
+    def _publish_failure_diagnostic(
+        self,
+        error: BaseException,
+        *,
+        layer: Literal["evidence", "adapter", "internal"],
+        phase: str,
+        operation: str | None,
+        category: Literal["scorer", "infrastructure"],
+    ) -> None:
+        """Best-effort: leave a bounded, redacted diagnosis in the bundle.
+
+        WHY IT EXISTS. Measured on the OSWorld campaign (2026-10-17), two of
+        five scoring attempts abandoned with the single string
+        ``evidencefailure`` and nothing else: ``_abandon_after_scoring_failure``
+        recorded only ``_diagnostic_code(error)``, so the exception TYPE and
+        TEXT were discarded and a canary refusal, a judge outage and a
+        serialization bug were indistinguishable after the fact. A third
+        episode died as ``evidence-write-failed`` with the raising OSError
+        nowhere on disk. This publishes what those paths throw away: layer,
+        phase, the failing operation, the exception class, a bounded message,
+        and -- for a failed write -- the errno symbol, its strerror and the
+        bundle path element, never any content.
+
+        FAIL-OPEN BOUNDARY -- this is the whole contract, stated once here and
+        relied on by both callers: NOTHING this method does may change the
+        outcome of the abandonment that follows. Every step swallows its own
+        failure, so an unpublished artifact, a writer that is already poisoned
+        or a journal that refuses the event leaves the bundle byte-for-byte as
+        it would have been without this call, and the caller records the same
+        status and diagnostic string it records today. The artifact is
+        published BEFORE the event that references it, and on this path the
+        only way that event can fail without poisoning the writer is a
+        deterministic content refusal of a payload made of identifiers and a
+        digest; an I/O failure poisons the writer, where today's ``abandon()``
+        already fails closed as ``abandonment_failed``. So the orphan case the
+        verifier would reject cannot arise on any path where today's
+        abandonment succeeds.
+
+        Both writes go through the writer's existing scanned, bounded,
+        fsynced artifact machinery (``publish_failure_diagnostic`` /
+        ``record_failure_diagnostic``); there is deliberately no second
+        evidence path.
+        """
+
+        writer = self._writer
+        if writer is None:
+            return
+        try:
+            text = _failure_diagnostic_text(
+                error,
+                redactions=self._redactions,
+                layer=layer,
+                phase=phase,
+                operation=operation,
+            )
+        except BaseException:
+            # Rendering is pure, but this path must not be able to raise for
+            # any reason at all -- including a future edit here.
+            return
+        detail = None
+        try:
+            detail = writer.publish_failure_diagnostic(text.encode("utf-8"))
+        except BaseException:
+            # Includes the redaction scanner refusing the bytes: a diagnostic
+            # that cannot be cleared is DROPPED rather than published in part.
+            # The class and layer still reach the event below.
+            detail = None
+        code = f"{layer}-{_diagnostic_code(error)}"[:64].rstrip("-")
+        try:
+            writer.record_failure_diagnostic(
+                ErrorPayload(
+                    error_id=f"err-{uuid.uuid4().hex[:12]}",
+                    category=category,
+                    diagnostic_code=code,
+                    detail_artifact=detail,
+                    retryable=False,
+                )
+            )
+        except BaseException:
+            # See the fail-open paragraph above: on any writer where this
+            # raises, the abandonment that follows reports the disk truth
+            # exactly as it did before this diagnostic existed.
+            return
 
     async def _abandon_after_scoring_failure(self, error: BaseException) -> EpisodeOutcome:
         writer = self._require_writer()
         rescue_complete = await self._attempt_rescue()
         await self._emergency_teardown()
+        # Diagnosis BEFORE the terminal: the abandonment is the last durable
+        # write a scored intent can make, so anything recorded after it is lost.
+        self._publish_failure_diagnostic(
+            error,
+            layer=_failure_layer(error),
+            phase="scoring",
+            operation=self._scoring_operation_id,
+            category="scorer",
+        )
         status: EpisodeStatus = "abandoned"
         detail = _diagnostic_code(error)
         try:
@@ -2506,17 +2634,42 @@ class EpisodeRunner:
             diagnostic=detail,
         )
 
-    async def _abandon_for_evidence(self, detail: str) -> EpisodeOutcome:
+    async def _abandon_for_evidence(
+        self, detail: str, error: BaseException | None = None
+    ) -> EpisodeOutcome:
         """The writer is unusable; rescue first because cloud safety needs no writer."""
 
         rescue_complete = await self._attempt_rescue()
         await self._emergency_teardown()
+        # Same ordering rule as the scoring path: diagnose before the terminal.
+        # ``error`` is optional because this method's contract is a rendered
+        # string; the two call sites pass the object so the class, the failing
+        # write, its errno and its path element are recorded rather than only
+        # the prose in ``detail``.
+        if error is not None:
+            self._publish_failure_diagnostic(
+                error,
+                layer="evidence",
+                phase="evidence",
+                operation=getattr(error, "operation", None),
+                category="infrastructure",
+            )
         writer = self._writer
         root = Path(writer.root) if writer is not None else None
         status: EpisodeStatus = "abandoned"
         if writer is not None:
+            self._discard_orphaned_artifacts(writer)
+            # The reason is phase-dependent for the same reason as the
+            # last-resort path: once ``finalization_start`` is durable the
+            # record refuses finalization authority on anything but
+            # ``ambiguous_finalization``, and a ValueError from that model
+            # would escape this method and strand the bundle with no terminal
+            # at all.
+            reason = (
+                "ambiguous_finalization" if self._finalization_begun else "infrastructure_failure"
+            )
             try:
-                writer.abandon("infrastructure_failure", "evidence-write-failed")
+                writer.abandon(reason, "evidence-write-failed")
             except EvidenceError as error:
                 # NEVER swallow this. `abandon()` independently re-verifies the
                 # bundle and refuses on any error-severity issue, so a terminal
@@ -2539,6 +2692,119 @@ class EpisodeRunner:
             rescue_complete=rescue_complete,
             diagnostic=detail,
         )
+
+    async def _abandon_after_unexpected_failure(self, error: BaseException) -> EpisodeOutcome:
+        """Record a failure that escaped the handled paths, then abandon.
+
+        WHY THIS EXISTS. The two measured episodes (2026-10-17, task_015 and
+        task_021) exited rc=1 after a PASSED preflight, each bundle holding
+        only preflight, the budget commitment and the running lifecycle: no
+        error event, no outcome, no abandonment, ``state: open``. Nothing in
+        the bundle said whether the run died on an allocation failure, a setup
+        exception or a kill, and every tally had to infer the deaths from a
+        MISSING record. The shape is possible because the handlers inside
+        ``_execute`` can themselves raise (a raw ``OSError`` from a write on
+        the failure path is the measured one), and ``_run_with_bundle`` only
+        caught ``_EvidenceFailure`` -- so the writer closed and the bundle was
+        stranded open.
+
+        FAIL-OPEN, same boundary as the diagnostic itself: this handler writes
+        what it can and returns an outcome; it never re-raises the original
+        failure and never lets its own writes change the terminal. If the
+        writer cannot take either write, the outcome reports what is actually
+        on disk (``abandonment_failed``), exactly as the other abandon paths
+        do.
+
+        CANCELLATION is recorded synchronously and without the rescue/teardown
+        awaits: a cancelled task re-raises at the next ``await``, so awaiting
+        here would lose the record and defeat the point. The writer's methods
+        are synchronous, which is what makes a terminal possible on this path
+        at all.
+        """
+
+        cancelled = isinstance(error, asyncio.CancelledError)
+        writer = self._writer
+        self._publish_failure_diagnostic(
+            error,
+            layer=_failure_layer(error),
+            phase="run",
+            operation="execute",
+            category="infrastructure",
+        )
+        if writer is None:
+            return EpisodeOutcome(
+                status="failed",
+                episode_id=self._spec.episode_id,
+                bundle_root=None,
+                rescue_required=self._rescue_required,
+                diagnostic=_diagnostic(error, self._redactions),
+            )
+        rescue_complete: bool | None = None
+        if cancelled:
+            # No awaits: they would re-raise the cancellation.
+            self._emergency_teardown_sync()
+        else:
+            rescue_complete = await self._attempt_rescue()
+            await self._emergency_teardown()
+        status: EpisodeStatus = "abandoned"
+        detail = _diagnostic_code(error)
+        # ``ambiguous_finalization`` is the only reason the record accepts once
+        # ``finalization_start`` is durable; before that, an ordinary
+        # infrastructure abandonment is the truthful one.
+        reason = "ambiguous_finalization" if self._finalization_begun else "infrastructure_failure"
+        self._discard_orphaned_artifacts(writer)
+        try:
+            record = writer.abandon(reason, detail)
+            detail = record.diagnostic_code
+        except (EvidenceError, OSError) as abandonment_error:
+            status = "abandonment_failed"
+            detail = (
+                f"{detail}; abandonment refused: {_diagnostic(abandonment_error, self._redactions)}"
+            )
+        return EpisodeOutcome(
+            status=status,
+            episode_id=self._spec.episode_id,
+            bundle_root=Path(writer.root),
+            rescue_required=True,
+            rescue_complete=rescue_complete,
+            diagnostic=detail,
+        )
+
+    def _discard_orphaned_artifacts(self, writer: EvidenceWriter) -> None:
+        """Best-effort: drop artifact bytes no record names, so a terminal is recordable.
+
+        Every abandonment path re-verifies the bundle first, and a single
+        ``artifact_unreferenced`` orphan -- an artifact published by a failure
+        path whose own event never landed -- makes it refuse. The sweep itself
+        is explained on ``EvidenceWriter.discard_unreferenced_artifacts``; here
+        it is deliberately swallowed, because it must never change what the
+        abandonment reports: if the sweep cannot run, the caller proceeds to
+        ``abandon()`` and reports exactly what the disk says, as before.
+        """
+
+        try:
+            writer.discard_unreferenced_artifacts()
+        except BaseException:
+            return
+
+    def _emergency_teardown_sync(self) -> None:
+        """Best-effort synchronous reap for a cancelled task.
+
+        ``_emergency_teardown`` is the normal path; this one exists only so a
+        cancellation can still record its terminal without awaiting. A
+        supervisor whose ``terminate`` is a coroutine is left to the rescue
+        sweep -- the descriptor is already durable -- rather than being driven
+        from a cancelled context.
+        """
+
+        supervisor = self._supervisor
+        terminate = getattr(supervisor, "terminate", None)
+        if terminate is None or asyncio.iscoroutinefunction(terminate):
+            return
+        try:
+            terminate()
+        except BaseException:
+            pass
 
     async def _close_session(self) -> None:
         session = self._session
@@ -2801,6 +3067,15 @@ def _failure_detail(
 #: lines are the ones that name the failure, and an artifact that is mostly
 #: library chatter costs a reader more than it tells them.
 MAX_STDERR_TAIL_CHARS = 4096
+
+#: How much of an exception's rendered message a failure diagnostic carries.
+#:
+#: The artifact exists to be READ by whoever triages a failed benchmark run, and
+#: the operator's budget for it is a few KB: the useful part of a judge or
+#: syscall message is its head, and an unbounded Pydantic rendering can be
+#: megabytes. Applied AFTER the redaction scan, never before -- see
+#: ``_diagnostic_value`` for why the order is the security property.
+MAX_FAILURE_DIAGNOSTIC_CHARS = 2000
 
 
 def _adapter_stderr_section(adapter_stderr: bytes, redactions: RedactionSet | None) -> str:
@@ -3085,6 +3360,124 @@ def _rebindable_failure(error: BaseException) -> bool:
     """
 
     return _observation_phase_failure(error) or _refused_before_dispatch(error)
+
+
+def _failure_layer(error: BaseException) -> Literal["evidence", "adapter", "internal"]:
+    """Which layer a scoring failure came from, for the failure diagnostic.
+
+    The three buckets are the ones a reader has to tell apart before knowing
+    what to fix, and they were indistinguishable when only
+    ``_diagnostic_code(error)`` reached the abandonment:
+
+    * ``evidence`` -- the bundle could not take the score (the redaction canary
+      refusing the details capture, an unpublishable receipt, a write).
+    * ``adapter`` -- the scorer itself failed to answer: a worker death, an
+      RPC refusal, a deadline. The provider/judge side broke, not the harness.
+    * ``internal`` -- anything else. Deliberately its own bucket rather than
+      being filed either way: an unexpected exception is a harness bug, and
+      calling it an adapter failure would point the reader at the wrong code.
+    """
+
+    if isinstance(error, (_EvidenceFailure, EvidenceError, OSError)):
+        return "evidence"
+    if isinstance(error, (RpcRemoteError, SupervisionError, TimeoutError, asyncio.TimeoutError)):
+        return "adapter"
+    return "internal"
+
+
+def _first_os_error(error: BaseException) -> OSError | None:
+    """The nearest ``OSError`` in an exception's cause chain, if any.
+
+    The evidence layer wraps and re-wraps: ``_EvidenceFailure`` carries the
+    rendered text, its ``__cause__`` is usually an ``EvidenceError``, and the
+    actual failing syscall's ``OSError`` can sit one or two links below that.
+    The chain is walked rather than assumed to be one link deep, and both
+    ``__cause__`` and ``__context__`` are followed because a re-raise inside a
+    handler leaves the latter set. Bounded so a cycle (a cause chain is not
+    required to be acyclic) cannot turn a failure path into a hang.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            return None
+        seen.add(id(current))
+        if isinstance(current, OSError):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _diagnostic_value(value: str, redactions: RedactionSet | None, *, limit: int) -> str:
+    """Scan BEFORE bounding, then truncate -- the order is the security property.
+
+    The same inversion ``_diagnostic`` documents applies here: a canary that is
+    cut by the bound no longer matches, and the surviving prefix would be
+    published. So the FULL value is scanned whole and replaced by ``WITHHELD``
+    when it cannot be cleared, exactly as the adapter's own renderings are.
+
+    A single value is withheld rather than the whole artifact: the class name
+    and the failing operation are identifiers, not content, and losing them
+    would undo the point of this artifact. The caller still publishes the rest.
+    """
+
+    if redactions is not None:
+        try:
+            redactions.assert_clear(value)
+        except ValueError:
+            return WITHHELD
+    return value[:limit]
+
+
+def _failure_diagnostic_text(
+    error: BaseException,
+    *,
+    redactions: RedactionSet | None,
+    layer: str,
+    phase: str,
+    operation: str | None,
+) -> str:
+    """The failure diagnostic's one-line-per-fact text body, a few KB at most.
+
+    Fields, in this order, all bounded and individually redaction-scanned:
+
+    * ``layer`` -- evidence / adapter / internal (see
+      ``_failure_layer``) and ``phase`` -- ``scoring`` or ``evidence``.
+    * ``operation`` -- the scoring operation ID on the scoring path, or the
+      failing durable write on the evidence path (``append:observation``,
+      ``publish``, ``receipt:scoring_result``, ``seal``...).
+    * ``exception`` -- the class name, which is what makes failures countable
+      without a message parser.
+    * ``message`` -- ``str(error)`` bounded to ``MAX_FAILURE_DIAGNOSTIC_CHARS``.
+    * ``errno`` / ``strerror`` / ``path`` -- only when an ``OSError`` is in the
+      chain: the symbol (``ENOSPC``), the libc text, and the BASENAME of the
+      path being written. A basename can name the file (``events.jsonl``, a
+      temp artifact) and never carries evidence content; directories are
+      dropped because the bundle root is already known from the record.
+
+    The exception TYPE and TEXT are the two things the abandonment threw away;
+    everything else here is what turns a bare code into a diagnosis.
+    """
+
+    lines = [
+        f"layer: {_diagnostic_value(layer, redactions, limit=32)}",
+        f"phase: {_diagnostic_value(phase, redactions, limit=64)}",
+        f"operation: {_diagnostic_value(operation or 'unknown', redactions, limit=128)}",
+        f"exception: {_diagnostic_value(type(error).__name__, redactions, limit=128)}",
+        f"message: {_diagnostic_value(str(error), redactions, limit=MAX_FAILURE_DIAGNOSTIC_CHARS)}",
+    ]
+    cause = _first_os_error(error)
+    if cause is not None:
+        symbol = errno.errorcode.get(cause.errno) if cause.errno is not None else None
+        lines.append(f"errno: {_diagnostic_value(symbol or 'unknown', redactions, limit=32)}")
+        lines.append(
+            f"strerror: {_diagnostic_value(cause.strerror or str(cause), redactions, limit=256)}"
+        )
+        if cause.filename is not None:
+            element = os.path.basename(str(cause.filename)) or "?"
+            lines.append(f"path: {_diagnostic_value(element, redactions, limit=256)}")
+    return "\n".join(lines) + "\n"
 
 
 def _diagnostic_code(error: BaseException) -> str:

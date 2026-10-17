@@ -34,6 +34,7 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     ContextCompactionPayload,
     EnvironmentStepPayload,
+    ErrorPayload,
     EventKind,
     EventPayload,
     EventRecord,
@@ -67,6 +68,7 @@ _STATE = "state.json"
 _OUTCOME = "outcome.json"
 _ABANDONMENT = "abandonment.json"
 _DIGEST_CHARS = frozenset("0123456789abcdef")
+_DIGEST_LENGTH = 64
 # Only these exact semantic issues are expected when the finalizing marker
 # reaches disk before (or at) scoring_start and the process then dies
 # mid-finalization. Integrity and confinement findings always block. The
@@ -1067,6 +1069,131 @@ class EvidenceWriter:
             expected_byte_count=expected_byte_count,
         )
 
+    def publish_failure_diagnostic(
+        self,
+        data: bytes,
+        *,
+        media_type: str = "text/plain",
+    ) -> EvidenceArtifactRef:
+        """Publish the bounded, scanned text that explains a terminal failure.
+
+        Allowed while the bundle is OPEN **and** while it is FINALIZING, and
+        that second state is the whole reason this exists: a scoring failure is
+        discovered only after ``begin_finalization`` (``scoring_start`` is
+        already durable), and its diagnosis has to be durable BEFORE
+        ``abandon()`` -- the only terminal a scored intent can take. The
+        ordinary artifact path refuses finalizing by design, so without this
+        seam the failure is reduced to a single column-less code and nobody can
+        tell a redaction refusal from a judge outage.
+
+        This does NOT weaken the phase rules for anything else: the caller must
+        name its own narrow state set, and ``scoring_details`` keeps its
+        single-phase finalizing path. The published bytes still pass the same
+        redaction scanner, byte bound, confinement and fsync path as every
+        other artifact -- so an uncleared diagnostic is refused here rather
+        than written, which is the drop side of the fail-open boundary.
+        """
+
+        return self._publish_artifact(
+            data,
+            media_type=media_type,
+            allowed_states=("open", "finalizing"),
+        )
+
+    def record_failure_diagnostic(
+        self,
+        payload: ErrorPayload,
+        *,
+        monotonic_ns: int | None = None,
+        wall_time_ms: int | None = None,
+    ) -> EventRecord:
+        """Append the ``error`` event that carries a failure's diagnosis.
+
+        The verifier already admits ``error`` after execution closes (see
+        ``verify.allowed_after_finalizing``), so the same event works for both
+        failure classes this exists for: an evidence write that failed mid-run
+        (state OPEN) and a scoring failure (state FINALIZING). The writer's
+        ordinary ``append`` and ``_record_finalization_receipt`` are each
+        single-phase; this is the one joint rule, kept explicit rather than
+        relaxed on either of them.
+
+        Referencing the published diagnostic from this event is what keeps the
+        bundle verifiable: artifacts are discovered through the journal, so an
+        unreferenced diagnostic would be an ``artifact_unreferenced`` error and
+        ``abandon()`` refuses to verify a bundle that has one.
+        """
+
+        with self._thread_lock:
+            self._ensure_open()
+            if self._recovery_only:
+                raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
+            marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            if marker.state not in ("open", "finalizing"):
+                raise EvidenceTerminal("failure diagnostic is closed in this phase")
+            return self._append_locked(
+                "error",
+                payload,
+                monotonic_ns=monotonic_ns,
+                wall_time_ms=wall_time_ms,
+            )
+
+    def discard_unreferenced_artifacts(self) -> int:
+        """Remove artifact bytes that no journal record or the manifest names.
+
+        WHY THIS EXISTS. A failure between publishing an artifact and appending
+        the event that names it leaves an orphan, and ``abandon()`` refuses a
+        bundle whose verification reports ``artifact_unreferenced``. Measured
+        (2026-10-17): two OSWorld episodes stranded at ``state: open`` for
+        exactly this -- the failure detail was published, its error event never
+        landed, and the only possible terminal was refused. The stranding is
+        the defect; the orphan is its mechanism.
+
+        WHY THIS IS NOT A WEAKENING. The verifier's own rule is that the
+        manifest and the journal are the only authorities for which bytes
+        belong to a bundle. A file neither names is therefore NOT evidence --
+        removing it restores the invariant the gate checks rather than
+        bypassing it, and nothing a record names is ever touched. The check is
+        a conservative substring test against the durable journal and manifest,
+        so a digest that appears anywhere is kept.
+
+        Phase-gated and recovery-safe: it refuses once the bundle has a
+        terminal (nothing may change after one) and refuses on a poisoned
+        writer (``_ensure_open``), which is exactly the case where the state on
+        disk must not be touched. Returns the number of files removed.
+        """
+
+        with self._thread_lock:
+            self._ensure_open()
+            if self._recovery_only:
+                raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
+            marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            if marker.state not in ("open", "finalizing"):
+                raise EvidenceTerminal("artifacts are closed in this phase")
+            try:
+                named = self._read_regular(self._root_fd, _EVENTS) + self._read_regular(
+                    self._root_fd, _MANIFEST
+                )
+            except OSError:
+                return 0
+            removed = 0
+            for name in sorted(os.listdir(self._artifacts_fd)):
+                if len(name) != _DIGEST_LENGTH or any(
+                    character not in _DIGEST_CHARS for character in name
+                ):
+                    # Temp files are the writer's own; anything else is not an
+                    # artifact this sweep may reason about.
+                    continue
+                if name.encode("ascii") in named:
+                    continue
+                try:
+                    os.unlink(name, dir_fd=self._artifacts_fd)
+                except FileNotFoundError:
+                    continue
+                removed += 1
+            if removed:
+                os.fsync(self._artifacts_fd)
+            return removed
+
     def _publish_artifact(
         self,
         source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes],
@@ -1075,14 +1202,19 @@ class EvidenceWriter:
         expected_sha256: str | None = None,
         expected_byte_count: int | None = None,
         scoring_details: bool = False,
+        allowed_states: tuple[str, ...] | None = None,
     ) -> EvidenceArtifactRef:
         with self._thread_lock:
             self._ensure_open()
             if self._recovery_only:
                 raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
             marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
-            expected_state = "finalizing" if scoring_details else "open"
-            if marker.state != expected_state:
+            expected_states = (
+                allowed_states
+                if allowed_states is not None
+                else (("finalizing" if scoring_details else "open"),)
+            )
+            if marker.state not in expected_states:
                 raise EvidenceTerminal("artifact publication is closed in this phase")
             stream: Iterable[bytes]
             if isinstance(source, (bytes, bytearray, memoryview)):
