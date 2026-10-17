@@ -8,6 +8,7 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 from __future__ import annotations
 
 from . import (
+    cli_browser,
     cli_exec_help,
     cli_exec_runtime,
     cli_exec_worker_help,
@@ -49,6 +50,7 @@ from . import (
 )
 
 __all__ = [
+    "cli_browser",
     "cli_exec_help",
     "cli_exec_runtime",
     "cli_exec_worker_help",

@@ -288,7 +288,12 @@ def test_extracted_sites_ratchet_without_activating_legacy_cli(i18n_check):
     # `+` and the ternary in argument position: the legacy CLI's own literal
     # count is unchanged, but the improved scanner now SEES more of it. The
     # pin moves with the detector, which is the point of pinning it here.
-    assert baseline["files"]["local_operator/cli.py"] == 807
+    #
+    # 807 -> 746 in the CLI tranche 1 (#2552): the `browser_command` region's
+    # findings were extracted (55 sites) or pragma'd with a reason (6), so the
+    # ceiling moved by exactly the count the tranche cleared. The pin moves
+    # with the extraction too -- same discipline, opposite direction.
+    assert baseline["files"]["local_operator/cli.py"] == 746
     assert baseline["files"]["local_operator/exec_startup.py"] == 0
 
 

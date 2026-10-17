@@ -59,6 +59,7 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
@@ -133,6 +134,7 @@ CLI_DESCRIPTION = """
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
+_bt = tr("cli.browser")
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -3325,10 +3327,10 @@ def browser_command(args: argparse.Namespace) -> int:
         sessions = config_dir() / "sessions"
         if command == "cleanup":
             if not args.yes:
-                print("No changes. Repeat with --yes to approve this exact session and generation.")
+                print(_bt(_b.no_changes()))
                 return 1
             if Path(args.session_id).name != args.session_id or args.session_id in (".", ".."):
-                print("Invalid session id; no action taken.")
+                print(_bt(_b.invalid_session()))
                 return 1
             try:
                 # THE CONFIG ROOT TRAVELS WITH THE CALL (review round 3, NIT 1): the
@@ -3348,22 +3350,22 @@ def browser_command(args: argparse.Namespace) -> int:
                 # class name instead threw that away and read as a truncated
                 # message. Keep the class name only for genuinely unexpected types.
                 detail = str(exc) or type(exc).__name__
-                print(f"Cleanup blocked: {detail} Nothing was closed.")
+                print(_bt(_b.cleanup_blocked(detail=detail)))
                 return 1
             if result.state == "closed":
-                message = "Browser cleanup: closed. The tab was closed and its record settled."
+                message = _bt(_b.cleanup_closed())
             elif result.state == "retained":
-                message = f"Browser cleanup: retained — {result.detail or 'the tab is held open'}."
+                message = _bt(
+                    _b.cleanup_retained(
+                        detail=str(result.detail or _bt(_b.cleanup_tab_held_open()))
+                    )
+                )
             elif result.state == "pending":
                 # The generation is deliberately NOT rotated by a failed attempt
                 # any more, so the value they already copied stays correct.
-                message = (
-                    f"Browser cleanup: pending — nothing was closed ({result.detail}). "
-                    "Retry the same command once the bridge answers; "
-                    "the generation you copied is still current."
-                )
+                message = _bt(_b.cleanup_pending(detail=str(result.detail)))
             else:
-                message = f"Browser cleanup: no action taken — {result.detail}."
+                message = _bt(_b.cleanup_no_action(detail=str(result.detail)))
             print(textwrap.fill(message, width=78, subsequent_indent="  "))
             return 0 if result.state in ("closed", "retained") else 1
         rows = read_inventory(sessions)
@@ -3419,14 +3421,9 @@ def browser_command(args: argparse.Namespace) -> int:
             return 0
         if not rows and not live_tabs:
             print(
-                "No browser tabs and no ownership records."
+                _bt(_b.no_tabs_known())
                 if live_known
-                else textwrap.fill(
-                    "No ownership records. The bridge did not answer, so open "
-                    "tabs are unknown — run 'lop browser status' to check the "
-                    "daemon.",
-                    width=78,
-                )
+                else textwrap.fill(_bt(_b.no_tabs_unknown()), width=78)
             )
             return 0
         if rows:
@@ -3441,7 +3438,9 @@ def browser_command(args: argparse.Namespace) -> int:
                 mark = "  <- cleanup candidate" if row.get("cleanup_candidate") else ""
                 # rstrip so an unmarked row carries no trailing padding.
                 print(f"{row['session_id']}  {str(row.get('state', '')):<{width}}{mark}".rstrip())
-                print(f"  generation={row.get('generation', '')}")
+                print(
+                    f"  generation={row.get('generation', '')}"
+                )  # i18n: ignore token line: `generation=` names the --generation flag; data
                 # Wrapped on the same discipline as the reason below it: a
                 # retention reason is free text (it can quote a whole approval
                 # URL), so an unwrapped line here ran to 141 columns beside
@@ -3494,13 +3493,10 @@ def browser_command(args: argparse.Namespace) -> int:
                         width=78,
                     )
                 )
-            print(f"\nlive tabs ({len(unowned)}, not selectable for cleanup):")
+            print(_bt(_b.live_tabs(count=str(len(unowned)))))
             for tab in unowned:
                 print(f"  - {tab.get('url', '')}")
-            print(
-                "  Handles are redacted, so these cannot be attributed to a record above."
-                "\n  Close an unwanted tab by hand; provenance is unproven."
-            )
+            print(_bt(_b.handles_redacted()))
         elif not live_known and rows:
             # The records rendered above are only half the answer, and silence
             # here would read as "the browser is empty" beside them.
@@ -3513,9 +3509,9 @@ def browser_command(args: argparse.Namespace) -> int:
                     width=78,
                 )
             )
-        print("\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.")
+        print(_bt(_b.read_only()))
         if any(row.get("cleanup_candidate") for row in rows):
-            print("Exact cleanup: lop browser cleanup SESSION --generation GENERATION --yes")
+            print(_bt(_b.exact_cleanup()))
         return 0
     if command == "serve":
         from local_operator.browser_bridge.daemon import main as serve_main
@@ -3536,10 +3532,12 @@ def browser_command(args: argparse.Namespace) -> int:
         for step in steps:
             print(f"  {step}")
         if not result.get("ok"):
-            print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
+            print(
+                f"\n\033[1;31m{result.get('error', _bt(_b.install_failed()))}\033[0m"
+            )  # i18n: ignore ANSI-styled wrapper; install-layer error text; fallback extracted
             return 1
-        print("\nbrowser bridge installed and healthy.")
-        print("  load the Local Operator extension, then run `lop browser pair`.")
+        print(_bt(_b.bridge_installed()))
+        print(_bt(_b.load_extension()))
         return 0
     if command == "status":
         if getattr(args, "repair", False):
@@ -3547,15 +3545,29 @@ def browser_command(args: argparse.Namespace) -> int:
             for line in repair["steps"]:
                 print(f"  {line}")
             if not repair["ok"]:
-                print(f"\n\033[1;31m{repair['error']}\033[0m")
+                print(
+                    f"\n\033[1;31m{repair['error']}\033[0m"
+                )  # i18n: ignore ANSI-styled passthrough; bridge/install text; escapes formatting
                 return 1
-            print("\nbrowser bridge state reconciled.")
+            print(_bt(_b.bridge_reconciled()))
             return 0
         result = browser_install.status()
         health = result.get("health") or {}
         assert isinstance(health, dict)
-        print(f"installed:           {'yes' if result['installed'] else 'no'}")
-        print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
+        print(
+            _bt(
+                _b.installed_line(
+                    value=_bt(_b.status_yes()) if result["installed"] else _bt(_b.status_no())
+                )
+            )
+        )
+        print(
+            _bt(
+                _b.daemon_healthy(
+                    value=_bt(_b.status_yes()) if result["healthy"] else _bt(_b.status_no())
+                )
+            )
+        )
         # A daemon that predates capability advertisement cannot be told apart
         # from an extension that advertised nothing by its own record, so the
         # harness refuses the new actions with "restart the bridge" — and this is
@@ -3565,13 +3577,16 @@ def browser_command(args: argparse.Namespace) -> int:
         # than the field it is being asked about, whatever its heartbeat says.
         record = result.get("state")
         if isinstance(record, dict) and not record.get("capabilities_known"):
-            print(
-                "bridge:              predates the file-transfer actions — "
-                "run 'lop browser restart'"
-            )
+            print(_bt(_b.bridge_predates()))
         connected = bool(health.get("extension_connected"))
         unresponsive = bool(health.get("extension_unresponsive"))
-        print(f"extension connected: {'yes' if connected else 'no'}")
+        print(
+            _bt(
+                _b.extension_connected(
+                    value=_bt(_b.status_yes()) if connected else _bt(_b.status_no())
+                )
+            )
+        )
         # The extension-update advisory, immediately under the line it is about.
         # Deliberately a NOTE and not a fault: nothing is refused for an older
         # extension any more (see MIN_SUPPORTED_PROTO), and the extension line
@@ -3588,8 +3603,14 @@ def browser_command(args: argparse.Namespace) -> int:
                 str(health.get("extension_version", "")),
                 str(health.get("extension_expected_version") or EXPECTED_EXTENSION_VERSION),
             )
-            print(f"                     {note} (fixes and security patches)")
-        print(f"paired:              {'yes' if result['paired'] else 'no'}")
+            print(_bt(_b.extension_update_note(note=note)))
+        print(
+            _bt(
+                _b.paired_line(
+                    value=_bt(_b.status_yes()) if result["paired"] else _bt(_b.status_no())
+                )
+            )
+        )
         # A paired-but-not-connected browser is the normal closed/backgrounded
         # state, not a fault; say so rather than leaving a user to guess (N2).
         # `extension_unresponsive` is the OTHER way to be paired-but-not-
@@ -3650,15 +3671,15 @@ def browser_command(args: argparse.Namespace) -> int:
             if isinstance(driven_tabs, list):
                 if driven_tabs:
                     label = f"{len(driven_tabs)} tab{'s' if len(driven_tabs) != 1 else ''}"
-                    print(f"driving:             {label}")
+                    print(_bt(_b.driving_tabs(label=label)))
                     for entry in driven_tabs:
                         if isinstance(entry, dict):
                             print(f"                     - {entry.get('url', '')}")
                 else:
-                    print("driving:             no tabs driven")
+                    print(_bt(_b.driving_none()))
             elif health.get("current_url"):
                 # Older daemon still running under a newer CLI.
-                print(f"driving:             {health.get('current_url')}")
+                print(_bt(_b.driving_url(url=str(health.get("current_url")))))
         # A stale heartbeat is THE thing to surface here. status reads the live
         # /health socket while every session reads the discovery file, so when
         # the two disagree status looks authoritative and sessions silently
@@ -3666,17 +3687,11 @@ def browser_command(args: argparse.Namespace) -> int:
         # and names the fix instead of leaving both parties to guess.
         stale_age = browser_install.stale_heartbeat_age()
         if stale_age is not None:
-            print(
-                f"\n\033[1;33mheartbeat:           STALE by {stale_age:.0f}s "
-                "(discovery file is not being refreshed)\033[0m"
-            )
-            print(
-                "                     sessions will fall back to cmux despite the daemon "
-                "being healthy."
-            )
-            print("                     run 'lop browser status --repair' to reconcile.")
-        print(f"port:                {result['port']}")
-        print(f"log:                 {result['log']}")
+            print(_bt(_b.heartbeat_stale(age=f"{stale_age:.0f}")))
+            print(_bt(_b.heartbeat_fallback()))
+            print(_bt(_b.heartbeat_repair()))
+        print(_bt(_b.port_line(port=str(result["port"]))))
+        print(_bt(_b.log_line(log=str(result["log"]))))
         # Where `download` puts files, and how much is already there. Computed
         # HERE rather than read from /health: the user asking "where did my
         # download go" needs the real path and the real size, and both cost a
@@ -3684,41 +3699,37 @@ def browser_command(args: argparse.Namespace) -> int:
         from local_operator import browser_files
 
         downloads = browser_files.downloads_root()
-        print(f"downloads:           {downloads}")
+        print(_bt(_b.downloads_line(path=str(downloads))))
         if downloads.is_dir():
             size = browser_files.dir_size(downloads)
-            print(
-                f"                     {size} bytes, one audit row per decision in "
-                f"{browser_files.AUDIT_FILENAME}"
-            )
+            print(_bt(_b.downloads_detail(size=str(size), audit=browser_files.AUDIT_FILENAME)))
         # Only when this is NOT the default install: the common case should not
         # grow a line, but an isolated run (a redirected HOME or
         # LOCAL_OPERATOR_CONFIG_DIR) is otherwise indistinguishable from the
         # real one in this output.
         supervisor = result.get("supervisor")
         if supervisor not in (browser_install.LABEL, browser_install.SYSTEMD_UNIT):
-            print(f"supervisor:          {supervisor}")
-            print(f"config root:         {result.get('config_root')}")
+            print(_bt(_b.supervisor_line(name=str(supervisor))))
+            print(_bt(_b.config_root_line(path=str(result.get("config_root")))))
         # An inherited registration explains a daemon running under a name this
         # build would not otherwise mention, so name the file to act on.
         legacy = result.get("legacy_registration")
         if legacy:
-            print(f"legacy install:      {legacy}")
-            print("                     (written by an older build under the shared name;")
-            print("                      'lop browser uninstall' removes it)")
+            print(_bt(_b.legacy_install(path=str(legacy))))
+            print(_bt(_b.legacy_note()))
         # A registration this root found but may not manage. Named explicitly,
         # because otherwise a user sees "installed: no" beside a daemon that is
         # plainly running and has nothing to act on.
         ambiguous = result.get("legacy_ambiguity")
         if ambiguous:
-            print(f"\n\033[1;33munclaimed registration:\033[0m {ambiguous}")
+            print(_bt(_b.unclaimed_registration(detail=str(ambiguous))))
         return 0 if result["healthy"] else 1
     if command == "pair":
         if getattr(args, "list", False):
             result = browser_install.status()
             pairing = pairing_status()
             if not pairing.get("identities"):
-                print("no browser extension is paired. Run 'lop browser pair' to pair one.")
+                print(_bt(_b.pair_no_extension()))
                 return 0
             live_health = result.get("health")
             # /health is a plain dict when the daemon answered and None when it
@@ -3733,7 +3744,7 @@ def browser_command(args: argparse.Namespace) -> int:
                 # under the identity rows the waiting codes read as part of the
                 # `note:` above them, which is a different subject.
                 print("")
-                print("waiting:             these installs have asked to pair")
+                print(_bt(_b.waiting_header()))
                 for item in pending:
                     print(f"                     {item.get('code')}  {_waiting_label(item)}")
             return 0
@@ -3742,16 +3753,14 @@ def browser_command(args: argparse.Namespace) -> int:
             identities = pairing.get("identities") or []
             target = _resolve_pairing_target(args.revoke, identities)
             if target is None:
-                print(
-                    f"\033[1;31mno single authorised extension matches " f"'{args.revoke}'.\033[0m"
-                )
+                print(_bt(_b.revoke_no_match(target=args.revoke)))
                 for entry in identities:
                     print(
                         f"  {_short_extension_id(str(entry.get('extension_id', '')))}"
                         f"  {entry.get('label', '') or 'unnamed install'}"
                     )
                 if not identities:
-                    print("  (nothing is paired)")
+                    print(_bt(_b.nothing_paired()))
                 return 1
             # File-level, exactly like --reset: the daemon's revocation watcher
             # then severs THIS identity's live socket within a few seconds and
@@ -3768,7 +3777,7 @@ def browser_command(args: argparse.Namespace) -> int:
             label = str(target.get("label", "")) or _short_extension_id(
                 str(target.get("extension_id", ""))
             )
-            print(f"revoked {label}; any live connection for it is dropped within a few seconds.")
+            print(_bt(_b.revoked(label=label)))
             return 0
         if args.reset:
             # File unlink here; the running daemon's revocation watcher (and
@@ -3776,18 +3785,16 @@ def browser_command(args: argparse.Namespace) -> int:
             # few seconds, so a revoked browser loses drive authority now, not
             # only at its next reconnect (findings A5/U1).
             reset_pairing()
-            print(
-                "revoked the paired browser; any live connection is dropped within a few seconds."
-            )
+            print(_bt(_b.revoked_browser()))
             # A successful revoke must not report failure to a wrapping script
             # even when no extension is currently waiting to pair (UX-N1).
             pair = pairing_status()
             code = pair.get("pending_code")
             if code:
-                print(f"pairing code: {code}")
-                print("enter this 6-digit code in the Local Operator extension popup.")
+                print(_bt(_b.pairing_code(code=code)))
+                print(_bt(_b.enter_code()))
             else:
-                print("open the extension popup to pair a browser again.")
+                print(_bt(_b.open_popup()))
             return 0
         pair = pairing_status()
         pending = pair.get("pending") or []
@@ -3800,13 +3807,15 @@ def browser_command(args: argparse.Namespace) -> int:
             # (copy review C6), which is precisely when "the matching popup" has
             # no referent and the id prefix is the only token that resolves.
             for item in pending:
-                print(f"pairing code: {item.get('code')}   {_waiting_label(item)}")
-            print("enter each code in the matching Local Operator extension popup.")
+                print(
+                    _bt(_b.pairing_code_labeled(code=item.get("code"), label=_waiting_label(item)))
+                )
+            print(_bt(_b.enter_each_code()))
             return 0
         code = pair.get("pending_code")
         if code:
-            print(f"pairing code: {code}")
-            print("enter this 6-digit code in the Local Operator extension popup.")
+            print(_bt(_b.pairing_code(code=code)))
+            print(_bt(_b.enter_code()))
             return 0
         if pair.get("paired"):
             # Names BOTH routes, because the old wording offered only `--reset`
@@ -3816,14 +3825,9 @@ def browser_command(args: argparse.Namespace) -> int:
             # code for that install appears here once it connects, so the honest
             # line points at its popup first. "Connects" rather than "its worker
             # dials" (copy review C9): a compliance analyst has no worker.
-            print(
-                "a browser is already paired. To pair another, open ITS popup and enter the"
-                " code that appears here (the code appears once that install's extension"
-                " connects). 'lop browser pair --list' lists every authorised install;"
-                " '--reset' revokes them all."
-            )
+            print(_bt(_b.already_paired()))
             return 0
-        print("no extension is waiting to pair. Open the extension popup, then retry.")
+        print(_bt(_b.no_extension_waiting()))
         return 1
     if command == "drive":
         result = browser_install.pin_driver(args.target)
@@ -3834,17 +3838,19 @@ def browser_command(args: argparse.Namespace) -> int:
             # "matches" and two unrelated installs under it. `matches` is absent
             # on a daemon predating this field, and the old sentence stands.
             matches = result.get("matches")
-            message = str(result.get("error", "could not pin the driver"))
+            message = str(result.get("error", _bt(_b.could_not_pin_driver())))
             if isinstance(matches, int):
                 # Echo the target AS TYPED, not the normalised form (review round 5,
                 # NIT 5): `drive 'ohcmfhja…'` used to answer "…matches 'ohcmfhja'.",
                 # editing the very token the user is looking at.
                 message = (
-                    f"no connected extension matches '{args.target}'."
+                    _bt(_b.drive_no_connected(target=args.target))
                     if matches == 0
-                    else f"no single connected extension matches '{args.target}'."
+                    else _bt(_b.drive_no_single(target=args.target))
                 )
-            print(f"\033[1;31m{message}\033[0m")
+            print(
+                f"\033[1;31m{message}\033[0m"
+            )  # i18n: ignore ANSI-styled wrapper; message text assembled above and extracted
             # Candidates arrive as ids; the LABEL is what makes a list of ids
             # actionable when two installs share one (copy review C1), and it is
             # the string `status` itself printed a moment earlier. Read from the
@@ -3854,7 +3860,7 @@ def browser_command(args: argparse.Namespace) -> int:
                 # A lead-in that is true whether or not anything matched, because
                 # these rows are the AUTHORISED set rather than the matches (copy
                 # review C8).
-                print("authorised installs:")
+                print(_bt(_b.authorised_installs()))
             labels = {
                 str(entry.get("extension_id", "")): str(entry.get("label", ""))
                 for entry in (pairing_status().get("identities") or [])
@@ -3864,14 +3870,18 @@ def browser_command(args: argparse.Namespace) -> int:
                 suffix = f"  {label}" if label else ""
                 print(f"  {_short_extension_id(str(extension_id))}{suffix}")
             return 1
-        print("now driving: " f"{_short_extension_id(str(result.get('driver_extension_id', '')))}")
+        print(
+            _bt(_b.now_driving(id=_short_extension_id(str(result.get("driver_extension_id", "")))))
+        )
         return 0
     if command in ("start", "stop", "restart"):
         result = browser_install.service_action(command)
         if not result["ok"]:
-            print(f"\033[1;31m{result['error']}\033[0m")
+            print(
+                f"\033[1;31m{result['error']}\033[0m"
+            )  # i18n: ignore ANSI-styled passthrough of service-layer text; escapes formatting
             return 1
-        print(f"browser bridge {command} ok")
+        print(_bt(_b.service_ok(command=command)))
         return 0
     if command == "logs":
         import subprocess
@@ -3890,20 +3900,13 @@ def browser_command(args: argparse.Namespace) -> int:
         # journal instead, and the Windows arm's command is PowerShell's
         # Get-Content, not a tail.
         if browser_install.logs_read_the_log_file() and not browser_install.log_path().exists():
-            print(
-                f"no daemon log at {browser_install.log_path()}.\n"
-                "The bridge has not run under a service supervisor on this machine. "
-                "Run `lop browser install`, or `lop browser serve` to run it in the "
-                "foreground."
-            )
+            print(_bt(_b.logs_missing(path=str(browser_install.log_path()))))
             return 1
         try:
             return subprocess.call(command_line)
         except FileNotFoundError:
             print(
-                f"\033[1;31mcannot run `{command_line[0]}`: not installed on this "
-                f"system.\033[0m\nThe daemon's output is at "
-                f"{browser_install.log_location()}."
+                _bt(_b.cannot_run(command=command_line[0], location=browser_install.log_location()))
             )
             return 1
     if command == "uninstall":
@@ -3917,16 +3920,16 @@ def browser_command(args: argparse.Namespace) -> int:
         # the user got a bare non-zero exit with no explanation.
         error = result.get("error")
         if not result.get("ok") and error:
-            print(f"\033[1;31m{error}\033[0m")
+            print(
+                f"\033[1;31m{error}\033[0m"
+            )  # i18n: ignore ANSI-styled passthrough of uninstall-layer text; escapes formatting
         # What was found and deliberately left behind, so "uninstalled" never
         # silently means "and something of yours is still registered".
         warning = result.get("warning")
         if warning:
-            print(f"\033[1;33mnote:\033[0m {warning}")
+            print(_bt(_b.note_prefix(warning=str(warning))))
         return 0 if result.get("ok") else 1
-    print(
-        "usage: lop browser " "{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
-    )
+    print(_bt(_b.usage()))
     return 1
 
 
