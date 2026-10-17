@@ -47,6 +47,9 @@ async def test_preview_does_not_build_mapped_sessions(omp_store, monkeypatch):
     preview = await service.preview(_request())
     assert preview.total_sessions == 1
     assert preview.total_messages == 8
+    assert preview.message_counts_estimated is True
+    assert preview.sessions[0]["message_count_estimated"] is True
+    assert any(warning.code == "preview_counts_estimated" for warning in preview.warnings)
 
 
 @pytest.mark.asyncio
@@ -60,7 +63,9 @@ async def test_oversized_source_is_localized_not_fatal(omp_store):
     sessions = await service.list_sessions(SOURCE)
     by_id = {row.source_id: row for row in sessions}
     assert by_id[SESSION_ID].availability == "full"
-    assert any(row.availability == "unsupported" for row in sessions)
+    oversized_rows = [row for row in sessions if row.availability == "unsupported"]
+    assert oversized_rows
+    assert any("source exceeds" in warning for warning in oversized_rows[0].warnings)
     result = await service.import_sessions(_request(all_sessions=True))
     assert result.state == "done"
     assert any(row.outcome == "imported" for row in result.sessions)

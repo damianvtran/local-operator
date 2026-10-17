@@ -156,10 +156,17 @@ def _records_uncapped(path: Path, stats: dict[str, int] | None = None) -> list[d
             if len(out) >= MAX_RECORDS:
                 break
         return out
+    decompressed = 0
     with _text_handle(path) as handle:
         for line in handle:
             if len(out) >= MAX_RECORDS:
                 break
+            decompressed += len(line.encode("utf-8"))
+            if decompressed > store.MAX_SOURCE_BYTES:
+                raise UnsupportedBody(
+                    f"zstd rollout exceeds the {store.MAX_SOURCE_BYTES} byte "
+                    "decompressed import cap"
+                )
             if len(line) > store.MAX_LINE_BYTES:
                 if stats is not None:
                     stats["skipped_lines"] = stats.get("skipped_lines", 0) + 1
@@ -341,15 +348,18 @@ class CodexAdapter(SourceAdapter):
             if body is None:
                 availability = "metadata_only"
                 warning = "rollout body unavailable; index metadata only"
+            elif body.stat().st_size > store.MAX_SOURCE_BYTES:
+                # Compressed size is enough for the guard: a .zst over the cap
+                # is refused BEFORE decompression (the decompressed stream is
+                # bounded again while reading).
+                availability = "unsupported"
+                warning = f"rollout exceeds the {store.MAX_SOURCE_BYTES} byte import cap"
             elif body.suffix == ".zst":
                 try:
                     from compression import zstd  # type: ignore  # noqa: F401
                 except (ImportError, AttributeError):
                     availability = "unsupported"
                     warning = "zstd rollout requires Python 3.14 compression.zstd"
-            elif body.stat().st_size > store.MAX_SOURCE_BYTES:
-                availability = "unsupported"
-                warning = "rollout exceeds the import size cap"
             rows[source_id] = SourceSession(
                 source="codex",
                 source_id=source_id,
@@ -369,6 +379,16 @@ class CodexAdapter(SourceAdapter):
         if sessions_root.is_dir():
             for path in sorted(sessions_root.rglob("rollout-*.jsonl*")):
                 if not store.is_confined(sessions_root, path):
+                    continue
+                if path.stat().st_size > store.MAX_SOURCE_BYTES:
+                    key = f"unreadable:{path.name}"
+                    rows[key] = SourceSession(
+                        source="codex",
+                        source_id=key,
+                        path=path,
+                        availability="unsupported",
+                        warnings=[f"rollout exceeds the {store.MAX_SOURCE_BYTES} byte import cap"],
+                    )
                     continue
                 try:
                     source_id = _source_id_from_body(path)

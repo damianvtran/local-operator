@@ -209,6 +209,9 @@ class ImportPreview:
     sources: list[dict[str, Any]] = field(default_factory=list)
     total_sessions: int = 0
     total_messages: int = 0
+    #: Source metadata cannot know which branch the importer will select, so
+    #: preview counts are estimates unless a future adapter proves otherwise.
+    message_counts_estimated: bool = False
     total_compactions: int = 0
     total_memory_records: int = 0
     projected_memory_tokens: int = 0
@@ -222,6 +225,7 @@ class ImportPreview:
             "sources": self.sources,
             "total_sessions": self.total_sessions,
             "total_messages": self.total_messages,
+            "message_counts_estimated": self.message_counts_estimated,
             "total_compactions": self.total_compactions,
             "total_memory_records": self.total_memory_records,
             "projected_memory_tokens": self.projected_memory_tokens,
