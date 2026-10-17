@@ -573,5 +573,35 @@
     "role": "count",
     "tone": "dim",
     "note": "Same shape for the entries count, joined to the projects count with a separator in code."
+  },
+  "tui.small.session_sidebar.opened_by": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Names who opened the session; role is a normalised role word and stays a parameter."
+  },
+  "tui.small.session_sidebar.lead_return": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The lead key when the list has the keyboard: the keycap is display vocabulary, the verb translates."
+  },
+  "tui.small.session_sidebar.lead_focus": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The same lead when the list does not have focus; the way in rather than out."
+  },
+  "tui.small.session_sidebar.pin_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Pin affordance glued after the lead; the leading separator is layout and the keycap stays."
+  },
+  "tui.small.session_sidebar.asks_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Ask-door teacher (U13): the chord is display vocabulary, 'asks' is the word."
+  },
+  "tui.small.session_sidebar.hide_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "The sidebar toggle affordance; the keycap is display vocabulary, 'hide' is the word."
   }
 }

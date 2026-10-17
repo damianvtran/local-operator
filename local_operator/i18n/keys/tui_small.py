@@ -290,6 +290,30 @@ def session_picker_type_to_filter() -> Msg:
     return Msg("tui.small.session_picker.type_to_filter", {})
 
 
+def session_sidebar_asks_suffix() -> Msg:
+    return Msg("tui.small.session_sidebar.asks_suffix", {})
+
+
+def session_sidebar_hide_suffix() -> Msg:
+    return Msg("tui.small.session_sidebar.hide_suffix", {})
+
+
+def session_sidebar_lead_focus() -> Msg:
+    return Msg("tui.small.session_sidebar.lead_focus", {})
+
+
+def session_sidebar_lead_return() -> Msg:
+    return Msg("tui.small.session_sidebar.lead_return", {})
+
+
+def session_sidebar_opened_by(*, role: str) -> Msg:
+    return Msg("tui.small.session_sidebar.opened_by", {"role": role})
+
+
+def session_sidebar_pin_suffix() -> Msg:
+    return Msg("tui.small.session_sidebar.pin_suffix", {})
+
+
 def settings_view_bool_off() -> Msg:
     return Msg("tui.small.settings_view.bool_off", {})
 
