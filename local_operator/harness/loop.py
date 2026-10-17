@@ -3039,8 +3039,8 @@ class AgentLoop:
                                     text=(
                                         f"model spent its whole output budget "
                                         f"thinking and produced nothing — "
-                                        f"retrying at effort {lower} for this "
-                                        f"turn (your session setting is unchanged)"
+                                        f"retrying once at effort {lower} "
+                                        f"(your reasoning effort is unchanged)"
                                     ),
                                     kind="warning",
                                 )
