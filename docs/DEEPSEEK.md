@@ -88,18 +88,94 @@ Cache persistence takes seconds and is best-effort, not a 100% hit guarantee.
 ## Official harness comparison
 
 Audit reference: [`deepseek-ai/deepseek-harness` at
-`c291e7961a515f6d7af9304e7fd1d257929aef26`](https://github.com/deepseek-ai/deepseek-harness/tree/c291e7961a515f6d7af9304e7fd1d257929aef26).
+`477b4f420553e8a52c2fbccc464d7561b239c443`](https://github.com/deepseek-ai/deepseek-harness/tree/477b4f420553e8a52c2fbccc464d7561b239c443)
+(dsh `0.1.7-rc.2`). The previous audit pinned
+`c291e7961a515f6d7af9304e7fd1d257929aef26`; the rows below were re-checked and
+extended against the newer reference.
 
 | Surface | Official reference | Local Operator |
 | --- | --- | --- |
 | Discovery | Configured static `listModels` | Native live inventory, cached with documented fallback |
-| Reasoning replay | Retains previous `reasoning_content` | Retains all provenance-valid native reasoning; raw arguments preserved |
+| Wire | Anthropic-compatible Messages at `/anthropic/v1/messages` (`PUBLIC_BASE_URL` in `llm-deepseek/src/config.ts`) | Native OpenAI-compatible `/v1/chat/completions`; parity measured, see below |
+| Reasoning replay | Retains previous `reasoning_content` on every reasoned turn | Retains all provenance-valid native reasoning; raw arguments preserved |
+| Reasoned-turn echo | `serialize.ts` emits `reasoning_content` even without tool calls, because a re-encoding gateway hashes the chain of thought to recover its signature | Same: every assistant turn carrying reasoning replays it |
 | Tool screenshots | `serialize.ts`: user-only image projection after tool groups | Same role constraint and stable grouping |
 | Stream completion | `sse.ts`: requires `[DONE]`; `translate.ts`: malformed JSON fails | Native route requires `[DONE]` plus recognized finish; malformed/truncated streams use retryable provider errors |
 | Resource exhaustion | Explicit failure | `insufficient_system_resource` becomes retryable provider failure, never success |
-| Cache reuse | Preserves serialized conversation prefix | No direct explicit cache controls; append-only projected messages; measured native hit counters |
+| Cache reuse | Preserves serialized conversation prefix; rewrites the leading prompt only on routes without `systemPromptUpdate: 'in-history'` | No direct explicit cache controls; append-only projected messages; measured native hit counters |
+| Cache-stable prompt changes | Appends a changed prompt as an in-history `system` message for `deepseek-flash`, so the prefix survives | Persists the initial four system blocks and journals later changes as host-state records at the history tail; a genuine head change starts a new prefix epoch |
+| Auxiliary calls | Forces reasoning effort `off` for `purpose: 'session-title'` | Errands clamp to the lowest real rung of the model's ladder, which is `none` — thinking disabled — for this model |
+| Oversized tool output | Head + "middle pruned" marker + bounded tail once compaction pressure qualifies; full original stays in the session log | `compaction/pruning.py`, with supersede-key and range semantics |
+| Empty terminal response | A `stop` with no content blocks becomes retryable `EMPTY_RESPONSE` | Empty-`length` truncation retry budget plus an effort-ceiling retreat (`harness/loop.py`) |
+| Session telemetry | `dsh_session_log` and `dsh_plugin_packages` body extensions plus `x-deepseek-harness-*` headers | Not adopted: they ship the session transcript, system prompts, tool output and package inventory to the model endpoint on every request |
 
 Optional Files API uploads, Responses migration, a server-generated `user_id`
 policy and the official tokenizer are not introduced here. They are not needed
 to fix the native discovery, metadata, replay and cache-continuity defects, and
 this change makes no universal “same or better” claim about those features.
+
+## Measured parity against the official harness
+
+Measured 2026-10-17 against dsh `0.1.7-rc.2`, whose own DeepSeek models run on
+the Messages wire. The findings below decide whether that wire is worth
+migrating to.
+
+**Both endpoints serve the same tokens.** `scripts/bench_deepseek_wire_parity.py`
+runs one verifiable tool task (read a spec, compute totals from a CSV, write
+`result.json`) over each wire with the same three tool schemas, the same
+executor and the same workspace. Eight runs per arm: both arms were correct on
+all 8, made the same 25 tool calls, and produced 0 malformed and 0
+schema-invalid calls. Turns had the same median (3) and near-identical means
+(3.1 Chat, 3.3 Messages). The two small differences point in opposite
+directions: Messages used 1.8% fewer prompt tokens (median 2087 vs 2048) and
+Chat was 7% faster (median 3.39 s vs 3.66 s). Both are inside run-to-run noise,
+and an earlier independent 5+5 replication showed the same parity, down to
+byte-identical per-turn cached tokens (256 / 512 / 640) on both wires.
+
+Prompt tokens are only comparable once the accounting convention is normalised:
+`usage.input_tokens` includes cached tokens on the Chat shape and excludes them
+on the Messages shape, so the two are the same figure only as
+`input + cache_read`.
+
+Four separate `system` messages cost 2 prompt tokens over one joined string for
+an otherwise identical conversation (67 vs 65, twice) — the per-message framing
+and nothing else.
+
+The Messages endpoint does accept what dsh relies on: `thinking`,
+`output_config.effort`, `cache_control` markers (accepted, and inert — the cache
+is automatic), a mid-conversation `system` message that becomes the effective
+prompt, and the `mid-conversation-tool-changes-2026-07-01` beta (advertised; its
+block schema is not publicly documented and was not reproduced here).
+
+**The two wires disagree on multiple system messages, which is a reason not to
+migrate blind.** On Chat, four leading `system` messages concatenate: an
+instruction in block 0 survived three later neutral blocks. On Messages, a later
+`system` message is the *effective* prompt, so the same four-block shape would
+silently drop blocks 0-2. Any Messages route must join the blocks into one
+`system` string first.
+
+**Cache headroom is already spent.** Over the 14 days to 2026-10-17, `deepseek`
+`purpose='turn'` calls read 81,619,038,707 cached of 82,864,969,705 prompt
+tokens — **98.5%** across 433,360 calls, and the same 98.5% over the 3,787
+sessions that made 5 or more calls. The residual 1.5% is the hard ceiling on any cache work, and it
+includes unavoidable first calls and native cache expiry. For contrast, the
+lowest provider in the same ledger is `meta-muse` at 91.1%; the mechanism dsh
+uses to keep a prefix warm is already present here and is visibly working on
+this provider.
+
+**Tool-call validity has little room either.** Over the same window, 0.56% of
+560,706 model-origin `deepseek` tool calls carried a model fault (0.55%
+`invalid_arguments`, 0.009% `unknown_tool`, 0 `duplicate_id`); the remaining
+2.3% of non-empty `fault` values are execution, denial and abort classes that
+are not the model's.
+
+Reproduce:
+
+```sh
+.venv/bin/python scripts/bench_deepseek_wire_parity.py --live --repeat 5
+```
+
+The conclusion this record supports: no runtime change was made, because no
+dsh-specific behaviour measurably improved this provider. Whatever advantage
+remains is model-side tuning against that harness, which these measurements
+could not attribute to anything a caller can send.
