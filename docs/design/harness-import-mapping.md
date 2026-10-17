@@ -147,8 +147,9 @@ in `history.jsonl` but has no body anywhere, list it `metadata_only` with a reas
 import refuses it rather than inventing a conversation from prompts. Records with a
 missing or non-matching `sessionId` are skipped and counted (a job copy can contain
 records from more than one session). **Boundary/summary rows are exempt from the
-sessionId filter:** they are kept with a synthetic id even when `parentUuid` is null or
-`sessionId` is absent, because a compaction boundary is a continuation, not a branch.
+sessionId filter:** they are kept with their uuid when present (synthetic only when the
+uuid is absent) even when `parentUuid` is null or `sessionId` is absent, because a
+compaction boundary is a continuation, not a branch.
 Other no-`sessionId` records are kept only when they are on the selected branch via
 their `parentUuid` chain; otherwise they are skipped.
 
@@ -173,15 +174,17 @@ segment's first message, reverse, and emit that path. **Parallel tool results ar
 branches:** once an assistant message is on the emitted path, keep every `tool_result`
 row answering its calls in source order, even when those results are siblings rather than
 ancestors of the chosen leaf. Only alternate assistant/user turns are inactive branches.
-Dedupe tool results by source event id: emit one result per call and count duplicate
-result rows as skipped. Emit **every** segment in source order: earlier segments are
-archive rows before their compaction markers, never dropped. If a later segment links to
-an earlier one via `logicalParentUuid`, use that ancestor to choose the earlier segment's
-leaf; otherwise choose the newest message leaf in that segment. Inactive branches are
-recorded as IDs only. A boundary/summary row with no uuid or `sessionId` gets a synthetic
-source id (path + ordinal) and is never dropped for the missing field. Never use a single
-global `parentUuid` walk: the real Claude job body has two boundaries with
-`parentUuid: null`, and one walk loses most of the conversation.
+Dedupe tool results by `tool_use_id`: keep one result per call and collapse identical
+source rows by `uuid`; a distinct second result event for the same call is a source
+anomaly — record it as skipped with a warning, never merge it silently. Emit **every**
+segment in source order: earlier segments are archive rows before their compaction
+markers, never dropped. If a later segment links to an earlier one via
+`logicalParentUuid`, use that ancestor to choose the earlier segment's leaf; otherwise
+choose the newest message leaf in that segment. Inactive branches are recorded as IDs
+only. A boundary/summary row keeps its uuid when present; synthesize a source id only
+when the uuid is absent, even if `sessionId` is absent, and never drop it for the missing
+field. Never use a single global `parentUuid` walk: the real Claude job body has two
+boundaries with `parentUuid: null`, and one walk loses most of the conversation.
 
 Compaction: a `system/compact_boundary` record carries `compactMetadata`; the adjacent
 `isCompactSummary` row (in source order) carries the summary string, so pair the two
@@ -389,13 +392,14 @@ Manifest is durable, not LLM-visible:
   "status": "complete|partial|metadata_only",
   "active_leaf_source_id": "...",
   "last_source_offset": 33803325,
-  "imported_entries": 3217,
-  "counts": {"messages": 3217, "tool_calls": 913, "tool_results": 973,
-             "compactions": 2, "skipped": 136, "redactions": 0},
+  "imported_entries": "<n>",
+  "counts": {"messages": "<n>", "tool_calls": "<n>", "tool_results": "<n>",
+             "duplicate_results_skipped": "<n>", "compactions": "<n>",
+             "skipped": "<n>", "redactions": 0},
   "compaction_anchors": {"source-compaction-id": "target-entry-id"},
   "cwd": "<source-cwd>",
   "parent_source_session_id": null,
-  "model_history": [{"ts": 1760..., "model": "..."}],
+  "model_history": [{"ts": "<source-ts>", "model": "..."}],
   "warnings": [],
   "capture_memory": false,
   "target_prefix_sha256": "..."
@@ -723,8 +727,9 @@ Unit/integration tests (isolated `HOME`/`LOCAL_OPERATOR_CONFIG_DIR`, copied fixt
   replay result equals expected "summary + kept window"; pre-cut rows remain on disk;
   `compact_file` does not delete them.
 - Tool structure: call/result pairing, multiple calls, parallel results retained, duplicate
-  result rows collapsed by source id, orphan call, error result, interleaved user text;
-  no dangling call in the pre-boundary archive.
+  result rows collapsed by `uuid` under a `tool_use_id`, distinct second result counted
+  as an anomaly, orphan call, error result, interleaved user text; no dangling call in
+  the pre-boundary archive.
 - Timestamps/order: exact source times, monotonic fill, session created_at; no import
   time in any row.
 - Idempotency/resume: twice = one session; append = only new rows; rotated source = new
