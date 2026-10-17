@@ -30,7 +30,12 @@ from local_operator.memory import (
     validate_fact,
 )
 from local_operator.memory_cli import render_human, run
-from local_operator.memory_inspect import ENTRY_GATES, PREVIEW_CHARS, SCHEMA, inspect_entries
+from local_operator.memory_inspect import (
+    ENTRY_GATES,
+    PREVIEW_CHARS,
+    SCHEMA,
+    inspect_entries,
+)
 
 SENSITIVE_TITLE = "Card number 4111 1111 1111 1111"
 SENSITIVE_BODY = "Backup credentials: SSN 123-45-6789"
