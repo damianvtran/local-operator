@@ -213,6 +213,69 @@ def test_the_emphasis_canonicalisation_never_admits_a_fabrication() -> None:
     assert "'Invented v9'" in joined and "77.1" in joined
 
 
+def test_asterisks_between_digits_are_data_not_emphasis() -> None:
+    """R1 (reviewer) / Q-1 (QA): the first cut of ``_strip_emphasis`` removed EVERY asterisk
+    run, so a cell ``5*12`` canonicalised to ``512`` and a component claiming 512 passed
+    provenance (BASE rejects, HEAD accepted before this tightening). A glyph run flanked by
+    word characters on both sides is data -- arithmetic, an identifier -- and stays verbatim;
+    wrappers around a token still strip.
+    """
+    from local_operator.supplements.validate import _strip_emphasis
+
+    assert _strip_emphasis("5*12") == "5*12"
+    assert _strip_emphasis("8*8") == "8*8"
+    assert _strip_emphasis("foo__bar") == "foo__bar"
+    assert _strip_emphasis("snake_case") == "snake_case"
+    assert _strip_emphasis("**42.3**") == "42.3"
+    assert _strip_emphasis("**5*12**") == "5*12"  # wrapper strips; the inner datum keeps
+
+    marked = (
+        Dataset(
+            title="Sizes",
+            source="notes.md",
+            columns=("item", "size"),
+            rows=(("board", "5*12"), ("tile", "**8*8**")),
+            n_rows=2,
+            numeric_columns=(),
+        ),
+    )
+    # The concatenation a looser strip would have fused is NOT admissible...
+    lying = component(
+        json.dumps(
+            {
+                "sizes": {
+                    "title": "Sizes",
+                    "columns": ["item", "size"],
+                    "rows": [["board", 512], ["tile", 64]],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.table(document.getElementById("c"),"sizes")</script>',
+        title="Sizes",
+        source="notes.md",
+    )
+    result = validate_output(lying, marked)
+    assert not result.components, "5*12 must never canonicalise to the number 512"
+    joined = " ".join(error for block in result.rejected for error in block.errors)
+    assert "512" in joined and "64" in joined
+    # ...while the verbatim data cells remain admissible identifiers.
+    verbatim = component(
+        json.dumps(
+            {
+                "sizes": {
+                    "title": "Sizes",
+                    "columns": ["item", "size"],
+                    "rows": [["board", "5*12"], ["tile", "8*8"]],
+                }
+            }
+        ),
+        '<div id="c"></div><script>LO.table(document.getElementById("c"),"sizes")</script>',
+        title="Sizes",
+        source="notes.md",
+    )
+    assert validate_output(verbatim, marked).components, "the verbatim cells must be admitted"
+
+
 def test_an_extrapolated_trend_is_refused() -> None:
     """MUTATION: a forecast point. The evidence measured four regions, not a fifth quarter."""
     extrapolated = component(

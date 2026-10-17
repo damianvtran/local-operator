@@ -233,6 +233,61 @@ async def test_a_provider_terminal_failure_lands_the_typed_cause_on_the_row(
         await handle.dispose()
 
 
+async def test_a_done_row_never_carries_the_provider_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (reviewer): the runner clears ``error`` when components were kept; the typed
+    ``cause`` must clear WITH it -- a done row has no terminal failure to describe.
+
+    Sequence: quota fails the primary; the alternate answers with one accepted + one rejected
+    block; the repair attempt fails provider-side (no alternate left). Outcome: components=1,
+    error=``generator:ProviderError``, cause=``provider_quota`` -- which the row must then
+    clear, because the failure no longer decided the row (round-1 review R2 probe (d)).
+    """
+    session = _make_session(tmp_path / "sessions" / "done-cause", tmp_path)
+    handle = await _handle(session, tmp_path)
+    runner = handle._supplements
+    calls: list[int] = []
+
+    def resolve(settings: Any) -> generator.DesignModel:
+        return generator.DesignModel(
+            MODEL,
+            "session",
+            "test/m",
+            alternate=generator.DesignModel(MODEL, "session", "test/alt"),
+        )
+
+    async def complete(request: Any) -> tuple[str, Any]:
+        calls.append(1)
+        if len(calls) == 1:
+            raise generator.CompletionFailure(
+                ProviderError(None, "quota exhausted", kind="quota"), _Usage()
+            )
+        if len(calls) == 2:
+            return BLOCK + "\n" + BLOCK.replace("98.5", "7000"), _Usage()
+        raise generator.CompletionFailure(
+            ProviderError(None, "quota exhausted", kind="quota"), _Usage()
+        )
+
+    monkeypatch.setattr(runner, "_resolve_model", resolve)
+    monkeypatch.setattr(runner, "_complete", complete)
+    # A priced turn, or the between-turns affordability check stops before the repair and
+    # the probe never reaches the provider-terminal shape it exists to pin.
+    monkeypatch.setattr(runner, "_price", lambda usage, resolved: 0.0)
+    try:
+        runner._render("anchor-done-cause", _decision(), DATASETS, "u", "a", _settings())
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        assert len(calls) == 3, calls
+        assert [row["state"] for row in rows] == ["decided", "done"], rows
+        done = rows[-1]
+        assert done["components"], "the accepted block is kept"
+        assert "cause" not in done, "a done row has no terminal failure to describe"
+        assert "error" not in done
+    finally:
+        await handle.dispose()
+
+
 async def test_a_second_version_replaces_the_first_rather_than_duplicating(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
