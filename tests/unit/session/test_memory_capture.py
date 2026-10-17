@@ -467,6 +467,173 @@ def test_suggestion_guard_suppresses_generic_one_word_and_filters_scope(store):
     assert not foreign.search("Mercury deployment", suggest=True)
 
 
+def test_suggestion_slot_is_one_per_fact_and_budget_is_the_rendered_line(store):
+    """Two rows carrying one body cost one slot, and 180 tokens means the WIRE.
+
+    Both halves were measured defects: capture writes the same body under
+    several titles ("... corrected", "... again"), so a literal per-row cap
+    spent two of three slots on one fact and crowded out a distinct matching
+    fact. And the budget counted ``_dump(item)`` (~87-90 tokens per candidate)
+    while the rendered line costs 32-35, so ``tokens=180, limit=3`` was really a
+    two-entry cap in every fixture. Both are pinned here so a future ruler
+    change cannot silently restore either.
+    """
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.memory import (
+        SUGGESTION_TOKENS,
+        _dump,
+        suggest_line,
+        suggestion_block,
+    )
+
+    for suffix in ("", " corrected", " again"):
+        store.put(
+            "session",
+            {
+                "title": f"Mercury deployment{suffix}",
+                "body": "Mercury deployment proof docs/proof.md",
+                "tags": ["mercury", "deployment", "proof"],
+            },
+        )
+    store.put(
+        "session",
+        {
+            "title": "Mercury rollout owner",
+            "body": "Mercury deployment owner is the platform team",
+            "tags": ["mercury", "deployment"],
+        },
+    )
+    for n in range(4):  # distinct facts that all match the same two terms
+        store.put(
+            "session",
+            {
+                "title": f"Mercury release note {n}",
+                "body": f"Mercury deployment detail number {n} docs/note{n}.md",
+                "tags": ["mercury", "deployment", f"note{n}"],
+            },
+        )
+
+    items = store.search("Mercury deployment proof", tokens=180, limit=3, suggest=True)
+    titles = [str(item["title"]) for item in items]
+    assert len(items) == 3, titles
+    # The three duplicate-body rows occupy ONE slot...
+    assert sum(1 for title in titles if title.startswith("Mercury deployment")) == 1, titles
+    # ...which is what lets two DISTINCT facts through, the ones the per-row
+    # budget/cap could not reach (whichever two the ranking puts next).
+    assert sum(1 for title in titles if not title.startswith("Mercury deployment")) == 2, titles
+    # The BLOCK the tail emits, wrapper included — the same accounting the tail
+    # applies. A lines-only sum here would pass a set the tail then truncates,
+    # which is exactly the long-title defect the fixture below pins.
+    rendered = suggestion_block("".join(suggest_line(item) for item in items))
+    assert count_text_tokens(rendered) <= SUGGESTION_TOKENS
+    # The old ruler would have refused three entries on its own: ~87-90
+    # tokens per dumped record against a 180 budget.
+    assert sum(count_text_tokens(_dump(item)) for item in items) > 180
+
+    # Explicit search still returns every revision: collapsing is a suggestion
+    # convenience, not a fact-visibility rule.
+    explicit = store.search("Mercury deployment proof", tokens=2000, limit=20)
+    assert len([i for i in explicit if i["body"] == "Mercury deployment proof docs/proof.md"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_long_titles_admit_only_the_block_the_tail_renders(tmp_path):
+    """The suggestion budget is the emitted BLOCK; the wrapper is not free.
+
+    The admission ruler and the renderer's ruler sat 19 tokens apart (header 14
+    + closing 5) because ``search`` charged ``suggest_line`` alone. Ordinary
+    titles never reached that gap; long ones do: three ~150-character titles
+    cost 165-175 as LINES and 184-194 as the block the tail emits, so
+    ``search(tokens=180, limit=3)`` admitted 3 and the wire rendered 2 — the
+    documented ``limit=3`` yielding 2 again, confined to long titles. The
+    assertion that binds the two rulers is the block the tail actually emits,
+    never a lines-only sum (review round 1, MINOR 1), and the control shows a
+    lines-only ruler really would admit all three on this fixture.
+    """
+    import local_operator.memory_capture as capture
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
+    from local_operator.memory import (
+        RECALL_HARD_TOKENS,
+        SUGGESTION_TOKENS,
+        suggest_line,
+        suggestion_block,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    titles = [
+        "Mercury deployment proof runbook for the platform team covering rollback, canary "
+        "checks and the on call escalation path used during a release",
+        "Mercury deployment proof checklist for db migration v14 with backfills, index builds "
+        "and the verification queries the operator runs before traffic shifts",
+        "Mercury deployment proof note on the rollback window decision 2026-10-09, rejected "
+        "shorter variant included, and the incident review follow ups",
+    ]
+    assert all(140 <= len(title) <= 160 for title in titles)
+
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "config.yml").write_text(
+        '{"values":{"memory":{"enabled":true,"capture":false,"suggest":true}}}'
+    )
+    transcript = Transcript(root / "sessions" / "long-titles")
+
+    def stream(request, signal):
+        async def events():
+            yield StreamTextDelta(delta="ok")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="d", context_window=100000),
+        stream_fn=stream,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable"],
+        session_id="long-titles",
+    )
+    session._config_dir = root
+    store = MemoryStore(root, MemoryIdentity("long-titles", "", "main"), transcript.directory)
+    for n, title in enumerate(titles):
+        store.put(
+            "session",
+            {
+                "title": title,
+                "body": f"Mercury deployment proof detail {n}",
+                "tags": ["mercury", "deployment", "proof"],
+            },
+        )
+    try:
+        await session.prompt("Mercury deployment proof")
+        items = store.search(
+            "Mercury deployment proof", tokens=SUGGESTION_TOKENS, limit=3, suggest=True
+        )
+        lines = "".join(suggest_line(item) for item in items)
+        # The ruler the tail applies: what search admitted must fit the block.
+        assert count_text_tokens(suggestion_block(lines)) <= SUGGESTION_TOKENS
+        assert len(items) == 2, [item["title"] for item in items]
+
+        # Reachability control: all three facts match, and a LINES-ONLY ruler —
+        # the defect — admits all three at this budget, so the tail would have
+        # had to drop one and the wire would contradict the return value.
+        unbounded = store.search(
+            "Mercury deployment proof", tokens=RECALL_HARD_TOKENS, limit=3, suggest=True
+        )
+        all_lines = "".join(suggest_line(item) for item in unbounded)
+        assert len(unbounded) == 3
+        assert count_text_tokens(all_lines) <= SUGGESTION_TOKENS
+        assert count_text_tokens(suggestion_block(all_lines)) > SUGGESTION_TOKENS
+
+        tail = await capture.session_tail(session)
+        assert tail.count("- memory://") == len(items) == 2, tail
+        for item in items:
+            assert f"memory://{item['scope']}/{item['id']}" in tail
+    finally:
+        await session.dispose()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "strategy,images",
