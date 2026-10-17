@@ -392,13 +392,7 @@ so the relay forwards it (the entry-times declaration once shipped inert for wan
 exactly this line). A viewer that does not declare receives no event and no projected
 row and paints no unknown kind; the row is journaled either way.
 
-The phone renders none of this yet, and that is the revision's honest state: the
-projection's `supplement` arm and `mobile/web`'s frame belong to the relay lane. Both
-relay routes are live today (`GET /api/sessions/{id}/supplements/{digest}/document` and
-`GET /api/sessions/{id}/supplements/{job}/file?i=<n>`): `gate()` authenticates the
-caller first, the document's digest is reference-checked against the session's journal,
-and a 404 means only a missing supplement or file -- what a phone still lacks is the
-renderer, so it paints nothing until `mobile/web`'s supplement frame lands (PR #2222).
+The phone renders it, under the same gate: `mobile/web`'s supplement frame (`supplement-block.tsx` + `supplement-frame.tsx`) paints the block — the file callouts, the `N more files` disclosure, the state line and its controls, and components in a sandboxed frame — and the projection's `supplement` arm and `durable.py`'s journal collection feed it the rows. Both relay routes are live: `gate()` authenticates the caller first, the document's digest is reference-checked against the session's journal, and a 404 means only a missing supplement or file. The one lane still pending is the phone app's own WebView frame (below), not the web surface.
 
 Row and event shapes (newest version per anchor; the stale-row rule; the live-only
 `running`/`cancelling` states): `docs/DESKTOP_API.md`, §"Turn supplements". Not in this

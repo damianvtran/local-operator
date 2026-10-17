@@ -27,7 +27,7 @@ import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Literal, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -6677,6 +6677,15 @@ class AttachedSession:
     def _track(self, event: AgentEvent[Any]) -> None:
         """Record painted identity separately from complete source display data."""
         self._remember_live(event)
+        if isinstance(event, HistoryDeltaEvent):
+            # An owner-emitted delta (a queued aside adopt landing at the turn
+            # boundary) paints settled rows; claim them as painted so a later
+            # reconnect's gap replay does not draw the same rows a second time.
+            self._message_events.update(
+                str(getattr(row, "id", "") or "")
+                for row in event.messages
+                if getattr(row, "id", None)
+            )
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
         if message_id and (
@@ -9587,26 +9596,28 @@ class AttachedSession:
         """
         return {"session": self._session_id, "patience_cancelled": [], "cadence_dropped": False}
 
-    async def adopt_aside(self, messages: list[Message]) -> None:
+    async def adopt_aside(self, messages: list[Message]) -> Literal["queued", "applied"]:
         """Promote the aside exchange into the conversation through the owner.
 
         The Ctrl+F fork is advertised on the standard aside card, so it must
         work on a follower too. The owner appends the pair to its live context
-        and transcript (the same idle-turn guard and durable-first order as a
-        local :meth:`Session.adopt_aside`), then the canonical frontend update
-        carries the new rows to every terminal — the follower does not splice
-        anything itself.
+        and transcript (the same queue-while-busy rule and durable-first order
+        as a local :meth:`Session.adopt_aside`), then the canonical frontend
+        update — or, for a pair queued mid-turn, the owner's history delta when
+        it lands — carries the new rows to every terminal; the follower does
+        not splice anything itself. Returns the owner's ``adopt_state``.
         """
         client = self._client
         if client is None:
             raise ConnectionError(self._unavailable_reason())
-        await client.adopt_aside(
+        state = await client.adopt_aside(
             [
                 message.model_dump(mode="json")
                 for message in messages
                 if hasattr(message, "model_dump")
             ]
         )
+        return "queued" if state == "queued" else "applied"
 
     async def route_shared_slash(
         self,

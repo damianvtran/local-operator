@@ -19249,7 +19249,18 @@ class BrowserParams(BaseModel):
         "target, the read scope (default: body), the scroll element, or the "
         "download/upload control.",
     )
-    text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
+    text: str = Field(
+        default="",
+        description="Text to enter for 'type'; the reason for 'retain'. NEVER a credential: "
+        "use 'secret_ref' so the value stays out of the transcript.",
+    )
+    secret_ref: str = Field(
+        default="",
+        description="'type': the NAME of a secret to enter instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'); resolved session-first (the `ask` answer, /credential), then "
+        "the encrypted store; never shown in results, traces or logs, and registered "
+        "for redaction.",
+    )
     # One new field for the whole feature (the tool-surface ladder's rung 1):
     # `download` needs no destination (the harness chooses it), so a comma-split
     # of the existing `path` was the alternative — rejected because a filename may
@@ -19738,6 +19749,14 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     backend = _validate_browser_backend(action, params)
     if backend:
         return backend
+    if action != "type" and params.secret_ref.strip():
+        # Refused rather than silently ignored, the same house rule `tab` and
+        # `backend` follow: a caller that passed a ref to an action which never
+        # enters a value would otherwise believe the secret had been used.
+        return (
+            f"'secret_ref' is only valid for 'type' (got it on '{action}'): it names "
+            "the stored secret 'type' should enter into the field"
+        )
     if action == "open" and params.tab.strip():
         # Adoption legitimately carries NO url: taking over a tab the user handed
         # you does not have to navigate it, and the host's `open` adopts without
@@ -19753,6 +19772,14 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
         problem = _validate_selector(params.selector, action)
         if problem or action == "click":
             return problem
+        if params.secret_ref.strip():
+            if params.text:
+                return "'type' takes 'text' or 'secret_ref', not both."
+            # The dash-shaped guard deliberately does NOT inspect a value we
+            # cannot see: a resolved secret may legitimately begin with a dash,
+            # and it is the session's value, never model-authored text. The
+            # read-back comparison in the lane still catches a failed fill.
+            return ""
         return _validate_typed_text(params.text)
     if action == "snapshot" and params.selector.strip():
         # Optional here — an absent selector snapshots the whole document —
@@ -20262,8 +20289,15 @@ async def _browser_click(tool_call_id: str, surface: str, raw_selector: str) -> 
 
 
 async def _browser_type(
-    tool_call_id: str, surface: str, raw_selector: str, value: str
+    tool_call_id: str, surface: str, raw_selector: str, value: str, secret_ref: str = ""
 ) -> ToolResult:
+    """`secret_ref` (when set) makes the sentences name the REF, not the value.
+
+    The fill command itself must carry the value — that is how it reaches the
+    field — but the result the model reads must not quote it back, including in
+    the read-back confirmation, which would otherwise defeat the ref in the
+    first place.
+    """
     selector = raw_selector.strip()
     # cmux `fill` REPLACES the field; cmux `type` APPENDS keystrokes to
     # whatever is already there (verified: typing "XY" into a box holding "not
@@ -20283,6 +20317,16 @@ async def _browser_type(
         # an unreadable read-back is not evidence either way and the fill's own
         # exit code stands. Said out loud, because "Typed into X." with no
         # confirmation is otherwise indistinguishable from a verified fill.
+        if secret_ref:
+            return _text(
+                tool_call_id,
+                "browser",
+                f"Typed the secret stored as {secret_ref!r} into {selector} (cmux could "
+                "not read the value back, so this is unverified). The value is not "
+                "shown here and is registered for redaction for the rest of this "
+                "session.",
+                details={"surface_id": surface, "selector": selector},
+            )
         return _text(
             tool_call_id,
             "browser",
@@ -20300,12 +20344,32 @@ async def _browser_type(
     # comparing them would flag every such fill as a failure.
     got = read_out.strip()
     if got != value.strip():
+        if secret_ref:
+            # The field-contents diagnostic (`got`) stays — it is what makes the
+            # failure actionable — while the EXPECTED side names the ref: the
+            # value must not ride into the error text either.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"fill of {selector} did not take: the field holds {got!r}, not "
+                f"the value stored as {secret_ref!r}. Check the selector names an "
+                "editable field ('snapshot' shows what is there).",
+            )
         return _error(
             tool_call_id,
             "browser",
             f"fill of {selector} did not take: the field holds {got!r}, not "
             f"{value!r}. Check the selector names an editable field ('snapshot' "
             "shows what is there).",
+        )
+    if secret_ref:
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Typed the secret stored as {secret_ref!r} into {selector}. The value is "
+            "not shown here and is registered for redaction for the rest of this "
+            "session.",
+            details={"surface_id": surface, "selector": selector},
         )
     return _text(
         tool_call_id,
@@ -23316,14 +23380,29 @@ async def _bridge_action(
             details=details,
         )
     if action == "type":
+        ref = params.secret_ref.strip()
         got = str(result.get("value", "")).strip()
         if got != params.text.strip():
+            # The ref-aware form names the ref on the EXPECTED side while the
+            # field-contents diagnostic (`got`) stays: it is what makes the
+            # failure actionable. With no ref this keeps the original copy
+            # byte-for-byte (existing tests pin it).
+            expected = f"the value stored as {ref!r}" if ref else repr(params.text)
             return _error(
                 tool_call_id,
                 "browser",
                 f"fill of {params.selector.strip()} did not take: the field holds "
-                f"{got!r}, not {params.text!r}. Check the selector names an editable "
+                f"{got!r}, not {expected}. Check the selector names an editable "
                 "field ('snapshot' shows what is there).",
+            )
+        if ref:
+            return _text(
+                tool_call_id,
+                "browser",
+                f"Typed the secret stored as {ref!r} into {params.selector.strip()}. "
+                "The value is not shown here and is registered for redaction for the "
+                "rest of this session.",
+                details={**details, "selector": params.selector.strip()},
             )
         return _text(
             tool_call_id,
@@ -23749,6 +23828,113 @@ async def execute_browser(
                 resource.recovered = False
 
 
+def _browser_secret_ref(
+    tool_call_id: str,
+    params: BrowserParams,
+    context: ToolContext | None,
+) -> ToolResult | None:
+    """Resolve a `secret_ref` into ``params.text``, or explain why it could not be.
+
+    The value is resolved HERE, in the session, and replaces ``params.text``
+    for this one call — that is how it reaches the field. The disclosure is
+    stated rather than glossed: the value DOES travel on the cmux CLI argv /
+    the host wire for this one call, because a keystroke has to come from
+    somewhere. What the ref buys is that the model's argument — and therefore
+    the tool call in the transcript, a trace rendering of it, and every other
+    model-visible surface — says ``secret_ref: "SUDO_PASSWORD"`` and nothing
+    else; and that the value is registered with the session's redaction sink
+    (:meth:`VariableStore.register_redaction`) BEFORE the call, so a page that
+    echoes its input back comes home as ``[redacted]`` instead of plaintext.
+
+    **Two sources, and the SESSION store is checked FIRST — the same pinned
+    precedence as the console tool's resolver.** (1) The session credential
+    store: the value the user typed into an `ask` `secret: true` question (or
+    handed over with `/credential`). It wins because it is what the user just
+    handed over, for this task, and it never touches disk. (2) The encrypted
+    long-term store (:func:`local_operator.secrets.access.retrieve_secret`,
+    the same store the `secret` tool writes): the fallback, for a value the
+    user chose to persist.
+
+    Returns ``None`` when ``params.text`` is ready, and the error result to
+    hand back when it is not. The error path names the ref and the failure,
+    never a byte of the value.
+
+    **A store that cannot register is a REFUSAL, not a downgrade** — the same
+    fail-closed rule as the console resolver: the registration is what contains
+    the value after this call, and a page that echoes it back would otherwise
+    put plaintext where the model reads. ``register_redaction`` is read with
+    ``getattr`` because ``ToolContext.variables`` is typed as the narrow
+    :class:`~local_operator.harness.types.VariableStoreProtocol`, which does not
+    declare it; every store this repo constructs is a real
+    :class:`~local_operator.variables.VariableStore`, which has it.
+    """
+    ref = params.secret_ref.strip()
+    store = getattr(context, "variables", None) if context is not None else None
+    register = getattr(store, "register_redaction", None)
+    if not callable(register):
+        return _error(
+            tool_call_id,
+            "browser",
+            "this session has no redaction sink, so a value sent through secret_ref "
+            "could not be contained after the call — and the page may echo it back as "
+            "readable text. Ask the user to type the secret into the page themselves "
+            "(the browser drives their real session, so their typing never crosses "
+            "this transcript), or store it with the `secret` tool — do not put the "
+            "value itself in `text`.",
+        )
+    credential_env = cast(
+        Callable[[], dict[str, str]] | None,
+        getattr(store, "credential_env", None),
+    )
+    session_values: dict[str, str] | None = None
+    if callable(credential_env):
+        try:
+            fetched = credential_env()
+        except Exception:  # noqa: BLE001 - a misbehaving store, not a wiring fault
+            logger.warning("browser: session credential store could not be read", exc_info=True)
+            fetched = None
+        if isinstance(fetched, dict):
+            session_values = fetched
+    value: str | None = None
+    if session_values is not None:
+        value = session_values.get(ref)
+        if value is None:
+            from local_operator.variables import normalize_credential_key
+
+            # The read applies the same normalize-on-write the store applied, so
+            # `sudo-password` finds `SUDO_PASSWORD` — `secret_ref` is model-
+            # authored text, not a key the user typed verbatim.
+            normalized = normalize_credential_key(ref)
+            if normalized is not None:
+                value = session_values.get(normalized)
+    if value is None:
+        try:
+            from local_operator.secrets.access import retrieve_secret
+
+            value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
+        except Exception as exc:  # noqa: BLE001 - every failure is reportable, none fatal
+            # Normalise the store's own sentence to exactly one closing period:
+            # `SecretNotFound` already ends in one and the refusal template
+            # appends its own, which printed `...in this store..` (console QA
+            # round 1, Q2 — same fix, same rationale).
+            detail = str(exc).strip().rstrip(".") or "no reason was reported"
+            return _error(
+                tool_call_id,
+                "browser",
+                f"could not resolve secret_ref {ref!r}: {detail}. Get the value from the "
+                "user with an `ask` secret question (their entry into it is the "
+                "approval), store it with the `secret` tool, or have the user sign in "
+                "or type it into the page themselves, then retry — do not put the "
+                "value itself in `text`.",
+            )
+    # Registered BEFORE the call, not after: the registration is what contains a
+    # value the page may echo back, and an echo can arrive in the very same
+    # tool result this call produces.
+    register(value)
+    params.text = value
+    return None
+
+
 async def _execute_browser(
     tool_call_id: str,
     args: dict[str, Any],
@@ -23813,6 +23999,15 @@ async def _execute_browser(
     problem = _validate_browser_args(action, params)
     if problem:
         return _error(tool_call_id, "browser", problem)
+    if action == "type" and params.secret_ref.strip():
+        # Resolve the ref into `params.text` BEFORE any lane sees the call, so
+        # both dispatch lanes (the bridge wire and cmux) carry the value in the
+        # one place they already read a type payload from — and neither lane,
+        # nor anything between, ever prints it: the ref-aware result sentences
+        # in `_bridge_action` / `_browser_type` name the ref instead.
+        refusal = _browser_secret_ref(tool_call_id, params, context)
+        if refusal is not None:
+            return refusal
     state = _browser_state(context)
 
     if action in OWNERSHIP_BROWSER_ACTIONS:
@@ -24098,7 +24293,9 @@ async def _execute_browser(
     if action == "click":
         return await _browser_click(tool_call_id, surface, params.selector)
     if action == "type":
-        return await _browser_type(tool_call_id, surface, params.selector, params.text)
+        return await _browser_type(
+            tool_call_id, surface, params.selector, params.text, params.secret_ref.strip()
+        )
     return await _browser_screenshot(tool_call_id, surface, params.path, context)
 
 

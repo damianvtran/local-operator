@@ -133,6 +133,14 @@ announced last resort; an operator who prefers the old refusal sets
 - `Session._on_route_settled` keeps the reason and
   `_persist_active_route` writes it as an **additive** `reason` key in the
   `active_model_route` row — older rows lack it, older readers ignore it.
+- The **level** travels with it. A hop keeps the requested reasoning effort only
+  where the target's ladder accepts it, so the same descent can also shallow a
+  child launched at `xhigh`. The registration stamp
+  (`AsyncJob.requested_effort`) and the edge's own effort
+  (`AsyncJob.model_fallback_effort`, cleared with the marker on recovery) let
+  the notice and the completion record append
+  `, effort <requested> → <actual or "model default">` — only when the two
+  differ, so a level that survived the hop is not re-reported as news.
 
 ## What is deliberately NOT changed
 
@@ -165,5 +173,6 @@ settle reason, negative control), `tests/unit/model/test_configure.py`
 (preflight ordering + announce-don't-cross), `tests/unit/session/
 test_active_route.py` (the persisted reason), and
 `tests/unit/session/test_pinned_subagent_model.py` (fresh read; unreadable
-registry refuses). Each was demonstrated red against the mechanism it names
-before landing.
+registry refuses), and `tests/unit/harness/test_subagent_pinned_fallback.py`
+(the notice, the row, and the effort clause both of them render). Each was
+demonstrated red against the mechanism it names before landing.

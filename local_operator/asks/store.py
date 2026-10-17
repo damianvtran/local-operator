@@ -389,6 +389,12 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     as ``timed_out`` first, and its answer then arrived as a second reconcile's
     response row — the lead on that response is what tells the model the window had
     closed.
+
+    ``dismissed`` is the ONE settled status that can still require a row, and only
+    when the fold says so (``notice_owed``, fork A §14): a dismissal is a view
+    action, so an ask put away before its deadline notice was delivered still owes
+    that notice. Every other dismissed/withdrawn/expired record needs nothing —
+    those are the statuses whose meaning IS "nothing more to deliver".
     """
     ask_id = str(record.get("ask_id") or "")
     status = record.get("status")
@@ -397,6 +403,8 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     if status in (STATUS_ANSWERED, STATUS_DECLINED, STATUS_LATE):
         return [response_row_id(ask_id)]
     if status == STATUS_TIMED_OUT:
+        return [timeout_row_id(ask_id)]
+    if status == STATUS_DISMISSED and record.get("notice_owed"):
         return [timeout_row_id(ask_id)]
     return []
 
@@ -533,6 +541,7 @@ def fold(
         expires_at = int(queued.get("expires_at") or 0)
         created_at = int(queued.get("at") or 0)
         answered_at = int(answered.get("at") or 0) if answered else 0
+        dismissed_at = int(dismissed.get("at") or 0) if dismissed else 0
         window_end = expires_at + LATE_WINDOW_S * _MILLIS
 
         # A BRIDGE carriage (any question carrying a ``question_id``) is a
@@ -591,6 +600,36 @@ def fold(
             "status": status,
             "delivered": delivered_hint(ask_id, present_ids, status),
         }
+        if dismissed is not None:
+            # A DISMISSAL DOES NOT CANCEL A NOTICE THE MODEL NEVER GOT (fork A,
+            # §14). The dismissal is the USER's act on a settled row; the notice is
+            # the AGENT's fact ("you have no answer — proceed"), so an ask put away
+            # after its deadline, whose deadline row was never written, still owes
+            # it. The window is the notice's own: past 7 d the row is as stale as an
+            # unanswered deadline's, so a dismissal there owes nothing.
+            #
+            # ``dismissed_at >= expires_at`` is the rule that makes removing the
+            # deadline WAKE row safe (``asks/dismiss.py``): a dismissal is only ever
+            # accepted on a lapsed ask, so this can only fail for a hand-written
+            # log — and then the dismissal really did arrive before anything was
+            # owed, and inventing a notice would be the lie.
+            #
+            # AND THE FIELD SAYS "A ROW IS STILL OWED", so a notice already durable
+            # in the transcript clears it (agent review round 1, MINOR-2): read off
+            # the dates alone, ``notice_owed`` stayed True the moment the row landed,
+            # while ``expected_row_ids``, the queue's reconcile and every future
+            # reader take the field at its word. ``delivered`` is the any-row form
+            # (``delivered_hint``): a settled row a dismissal arrived AFTER is the
+            # answer the model already has, which the notice's own N8 rule lets
+            # stand.
+            record["dismissed_at"] = dismissed_at
+            record["notice_owed"] = bool(
+                dismissed_at
+                and expires_at
+                and dismissed_at >= expires_at
+                and now <= window_end
+                and not record["delivered"]
+            )
         if answered is not None:
             answers = answered.get("answers")
             record["answers"] = {

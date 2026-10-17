@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -608,13 +609,16 @@ async def _page_ids(client, limit: int) -> list[str]:
 async def test_a_scoped_answer_carries_no_off_page_pin(pins_api) -> None:
     """A scoped page speaks for its GROUP; only the head speaks for the pins.
 
-    ``pinned_off_page`` exists so a client holding one page can still draw a pin
-    made on an older conversation, and that argument is about the listing as a
-    whole -- which is the one thing a scoped request does not ask about. The
-    client gates its pin facts on the head answer for the same reason
+    The PIN population of ``off_page`` exists so a client holding one page can
+    still draw a pin made on an older conversation, and that argument is about the
+    listing as a whole -- which is the one thing a scoped request does not ask
+    about. The client gates its pin facts on the head answer for the same reason
     (``pinFacts`` settled by a scope answer would erase a pin made outside that
-    scope), so an extra here would be a row belonging to another team arriving
-    under this team's name.
+    scope), so a pinned extra here would be a row belonging to another team
+    arriving under this team's name. The RUNNING population is the opposite case
+    and does ride a scoped first page: those rows are in the scope by
+    construction, and leaving them out is the bug
+    ``test_a_scoped_answer_carries_its_own_running_rows`` pins.
     """
     from local_operator.resume import write_session_attachment
 
@@ -661,7 +665,7 @@ async def test_a_scoped_answer_carries_no_off_page_pin(pins_api) -> None:
 async def test_the_extras_ride_one_page_of_a_walk(pins_api) -> None:
     """A pinned row is an EXTRA once, on the first page -- not on every page.
 
-    ``pinned_off_page`` is a promise about the page the client paints first: the
+    ``off_page`` is a promise about the page the client paints first: the
     whole pinned set rides the answer the Pinned section is drawn from. Built from
     ``ranked[limit:]``, that list was appended on EVERY page of a walk that still
     had the pin below it -- so one pinned row came back as a surplus row page after
@@ -702,6 +706,126 @@ async def test_the_extras_ride_one_page_of_a_walk(pins_api) -> None:
     assert surpluses == [[older], [], [], []], surpluses
     # Once as the extra, once at its own rank -- and no third time.
     assert seen.count(older) == 2, seen
+
+
+def _unread(root: Path, session_id: str) -> None:
+    """An unread completion, through the real attention store.
+
+    The tier-1 population that fills a page above a running row -- and, being a
+    completion, deliberately NOT one of the rows that rides: the pair of
+    assertions below is what separates "active" from "running".
+    """
+    from local_operator.session.attention import AttentionStore
+
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", str(uuid.uuid4()), "done", "complete"
+    )
+
+
+def _busy_record(root: Path, session_id: str, pid: int) -> None:
+    """A discovery record for a session whose turn is running.
+
+    Through the real writer and with a REAL live pid, because the row's ``busy``
+    code is ``live_state_from_flags`` reading this record rather than a field a
+    test set: the route's half of the guarantee is worthless if the fixtures make
+    rows the product could not.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    registry.publish(
+        SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id=session_id,
+            conversation_name="a conversation",
+            cwd=str(root),
+            model_label="mock",
+            control_port=1,
+            control_key="0" * 64,
+            busy=True,
+        ),
+        root,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_running_row_rides_the_page_wherever_the_ranking_puts_it(pins_api) -> None:
+    """The ANSWER carries the running rows, beyond ``limit``, in both scopes.
+
+    The catalogue half is pinned in ``test_catalog_scope.py``; this is the half
+    that matters to the app, because the answer is what the client replaces its
+    rows with. Three claims, in one fixture:
+
+    * a running row the ranking put below the cut is APPENDED after the page (the
+      reported case: a live turn behind the app's "Show N more chats");
+    * a pinned row still rides only the head answer, so a scoped page does not
+      start attributing another team's rows to the team that asked -- and a
+      running row does, because it is in that scope;
+    * ``truncated``, ``next_cursor`` and ``counts`` keep describing the PAGE and
+      the LISTING, unmoved by the extras.
+    """
+    from local_operator.resume import write_session_attachment
+    from tests.unit.server.test_desktop_feed import _extra_live_pid
+
+    client, root = pins_api
+    for index in range(3):
+        session_id = f"lop{index:07d}"
+        _session(root, session_id)
+        write_session_attachment(root / "sessions" / session_id, team="lopdev", agent="", goal="")
+    # One running row in the group that asked, one in another group, so the
+    # scoped answer can be asserted in BOTH directions.
+    mine, theirs = "lopbusy00001", "othbusy00001"
+    for session_id, team in ((mine, "lopdev"), (theirs, "otherteam")):
+        _session(root, session_id)
+        write_session_attachment(root / "sessions" / session_id, team=team, agent="", goal="")
+    # A pin ranked below everything, so it can only arrive through the extras.
+    older = "oldpin000001"
+    _session(root, older)
+    write_session_attachment(root / "sessions" / older, team="lopdev", agent="", goal="")
+    assert toggle_pin(root, older) is True
+    for session_id in ("lop0000000", "lop0000001", "lop0000002"):
+        _unread(root, session_id)
+
+    params: dict[str, Any] = {"limit": 2, "with_counts": True, "include_archived": True}
+    with _extra_live_pid() as first, _extra_live_pid() as second:
+        _busy_record(root, mine, first)
+        _busy_record(root, theirs, second)
+        head = (await _json(client.get("/v1/desktop/sessions", params=params)))["result"]
+        scoped = (
+            await _json(
+                client.get(
+                    "/v1/desktop/sessions",
+                    params={**params, "scope_kind": "team", "scope_name": "lopdev"},
+                )
+            )
+        )["result"]
+
+    head_ids = [row["id"] for row in head["sessions"]]
+    # The page first, then the extras, in the catalogue's own rank order: the two
+    # busy rows (tier 4, id breaking the tie) above the pinned cold row.
+    assert head_ids[:2] == ["lop0000000", "lop0000001"], head_ids
+    assert head_ids[2:] == [mine, theirs, older], head_ids
+    # The third unread completion ranks below the cut AND does not ride: a
+    # completion is ACTIVE, not RUNNING, and tier membership is not the rule.
+    assert "lop0000002" not in head_ids
+
+    # The scoped page speaks for its group: its own running row rides it, the
+    # other team's running row and the head's pin do not.
+    scoped_ids = [row["id"] for row in scoped["sessions"]]
+    assert scoped_ids == ["lop0000000", "lop0000001", mine], scoped_ids
+    assert scoped["scope"] == {"kind": "team", "name": "lopdev"}
+
+    # The page's own facts are about the PAGE: an answer longer than ``limit``
+    # still says "this scope held more" and resumes from where the page ended.
+    for answer in (head, scoped):
+        assert len(answer["sessions"]) > answer["limit"]
+        assert answer["truncated"] is True
+        assert answer["next_cursor"] is not None
+        # The census describes the LISTING (six visible sessions here), so it is
+        # neither counted from the answer nor moved by the extras -- the same
+        # number on both scopes, which is what the client draws badges from.
+        assert answer["counts"]["total"] == 6, answer["counts"]
 
 
 @pytest.mark.asyncio

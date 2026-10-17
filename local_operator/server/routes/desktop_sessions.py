@@ -1981,6 +1981,7 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         ) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
+            AsideAdoptRefused,
             AsideUnanswered,
             AttachmentUnavailable,
             AudioInputUnsupported,
@@ -2037,6 +2038,20 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # ``cold_reason``/``attaching`` on the snapshot), and it is present
             # (empty when the owner named no cause this build knows) so the body's
             # keys never vary.
+            raise HTTPException(
+                409,
+                _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                | {"reason": error.reason},
+            ) from None
+        if isinstance(error, AsideAdoptRefused):
+            # The aside adopt's typed refusal (decision D3), in ``ForkRefused``'s
+            # exact body shape and for its reason: the owner answered promptly
+            # that it would not write the pair (the conversation closed, or its
+            # live list ends in an open tool batch), so a 503
+            # ``runtime_unreachable`` would say something false about the
+            # transport. Above the ``RuntimeError`` arm by construction: this is
+            # a ``ValueError``. ``reason`` is the closed-set token; the adopt
+            # route reads ``code`` to release its ``adopted`` latch.
             raise HTTPException(
                 409,
                 _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
@@ -2469,7 +2484,7 @@ async def list_sessions(
         # disagree about, so ordering the extras by it would put a second
         # ordering authority inside one section and make the app's Pinned list
         # read as catalogue order followed by pin order.
-        sessions = page.rows + page.pinned_off_page + page.remote
+        sessions = page.rows + page.off_page + page.remote
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the

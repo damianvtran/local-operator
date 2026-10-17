@@ -776,6 +776,20 @@ def test_scratchpad_guide_names_the_exported_path_and_the_pad_local_mktemp() -> 
     assert "unset in the user's terminal" in body
 
 
+def test_browser_guide_routes_a_typed_credential_through_secret_ref() -> None:
+    """A literal credential in `type`'s `text` is the incident shape (KOHO
+    analytics QA, 2026-10-16): the guide must name the ref before a model
+    reaches for `text`, and name the manual fallback."""
+    guides = {guide.name: guide for guide in discover_guides()}
+    resolver = make_guide_resolver(guides)
+
+    browser = resolver("guide://browser")
+    assert browser is not None
+    assert "secret_ref" in browser
+    assert "never `text`" in browser
+    assert "sign in by hand" in browser
+
+
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
     guides = {guide.name: guide for guide in discover_guides()}
     resolver = make_guide_resolver(guides)

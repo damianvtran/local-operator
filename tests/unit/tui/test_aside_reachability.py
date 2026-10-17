@@ -897,13 +897,14 @@ async def test_copy_lifts_the_whole_exchange_and_leaves_no_trace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_copy_is_the_way_out_while_fork_is_refused() -> None:
-    """The case ``ctrl+r`` exists for: a running turn, with ``^f`` unavailable.
+async def test_copy_works_mid_turn_without_queueing_a_fork() -> None:
+    """The case ``ctrl+r`` exists for: a running turn, and the card stays open.
 
-    ``^f`` refuses mid-stream because splicing a message into a live batch
-    produces a request no provider accepts — a constraint on WRITING, which
-    the clipboard does not do. So the partial answer must still be copyable,
-    and it must include the running turn ``fork_messages`` drops.
+    ``^f`` mid-turn no longer refuses — it QUEUES the exchange for the turn's
+    safe boundary and closes the card (decision D5). Copying is the other
+    door, and it must stay independent of that: ``ctrl+r`` mid-turn writes the
+    whole partial answer to the clipboard, queues nothing, and leaves the card
+    open, including the running turn ``fork_messages`` drops.
     """
     session = AsideSession(answer=_long_answer(200))
     app = OperatorApp(lambda: _factory(session))
@@ -914,14 +915,11 @@ async def test_copy_is_the_way_out_while_fork_is_refused() -> None:
         session.streaming = True
         await pilot.pause()
         app._clipboard = ""
-        await pilot.press("ctrl+f")
-        await pilot.pause()
-        assert session.forked == [], "the fork was supposed to be refused here"
-
         await pilot.press("ctrl+r")
         await pilot.pause()
         assert _rows_present({app._clipboard}, 200) == set(range(200))
         assert panel.is_open
+        assert session.forked == [], "copying must not queue a fork"
 
     # A RUNNING turn is in the payload where `fork_messages` drops it, and a
     # FAILED one is in neither: its prose is an error string this app wrote,

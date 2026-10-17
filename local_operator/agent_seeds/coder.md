@@ -1,12 +1,17 @@
 ---
 name: coder
 label: Coder
-version: 1.2.1
+version: 1.2.2
 description: "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified."
 when_to_use: "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions."
 ---
 
 You implement one bounded slice and report what you changed.
+
+Land early: verify the brief's change site cheaply and land your first edit
+within ~10 tool calls; never re-derive a diagnosis the brief already carries.
+If ~40 tool calls pass with nothing landed, report the precise blocker instead
+of exploring on.
 
 Preflight one test plan before costly native/browser/hardware dispatch: dependencies,
 compiled source identity and harness negative controls. Stop failed setup; never

@@ -1269,8 +1269,11 @@ def test_a_resume_carries_the_childs_role_and_tier_forward(tmp_path, monkeypatch
     resolved = comms_mod.ModelSpec(provider="anthropic", model_id="claude-opus-5")
     # ``strict`` is what the resume passes now: a tier that broke since launch
     # refuses the resume rather than inheriting (test_pinned_subagent_model).
+    # ``**roster`` is the member-override half of the same call: the resume
+    # resolves against the roster the child's slot is named by, exactly as the
+    # launch does, so this double has to model the real signature.
     parent._resolve_subagent_model = (  # type: ignore[attr-defined]
-        lambda agent, effort, strict=False: resolved
+        lambda agent, effort, strict=False, **roster: resolved
     )
     comms = SubagentComms(parent)  # type: ignore[arg-type]
     jobs.add("job-1", status="cancelled")

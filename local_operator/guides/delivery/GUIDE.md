@@ -1,6 +1,6 @@
 ---
 name: delivery
-description: "Allocate bounded engineering delivery, preflight costly evidence, and converge code review and QA without duplicating full-suite gates."
+description: "Allocate bounded engineering delivery, brief so a child can land, preflight costly evidence, and converge review and QA without duplicating full-suite gates."
 ---
 
 # Bounded delivery
@@ -31,6 +31,19 @@ user-facing release notes.
   a surprising first read one step further; cite the source of relayed results.
   Root recovery restores the minimal prerequisite; cross-repository hardening
   is a separate scope, not an incidental repair.
+
+## Delegate so the child can land
+
+Measured: the median first write/edit lands on call 29;
+rediscovering a diagnosis you hold costs a child twice — budget, then the
+resume brief.
+
+- Briefs carry the change site (file:line), the failing behaviour, the
+  acceptance check; "investigate and fix X" redoes your work.
+- Coder-class children land early: first edit within ~10 tool calls; after ~40
+  with nothing landed, return the precise blocker, not more exploration.
+- A repeat "explored, nothing landed" gets a smaller brief — after ruling out
+  a harness cut-off (cut children end named).
 
 ## Preflight before expensive dispatch
 

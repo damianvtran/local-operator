@@ -90,6 +90,7 @@ from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentSt
 from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
+    RUNNING_STATUS_CODES,
     CatalogueScope,
     ScopeCensus,
     catalogue_page,
@@ -6821,26 +6822,39 @@ class SessionPage:
     TWO LISTS, NOT ONE, and the route concatenates them for the wire. They are
     kept apart here because they answer different questions and only the caller
     knows how it wants them framed: ``rows`` is the page a ``limit`` describes,
-    ``pinned_off_page`` is everything below it that the user pinned. The wire
-    answer is their concatenation, which is also RANK ORDER — every extra ranks
-    below every page row by construction — so a client that renders the two as
-    one list needs no sort and no marker field.
+    ``off_page`` is the rows the catalogue appended below it because a client
+    holding one page must not have to ask twice for them. The wire answer is
+    their concatenation, which is also RANK ORDER — every extra ranks below
+    every page row by construction — so a client that renders the two as one
+    list needs no sort and no marker field.
+
+    THE NAME IS NOT ``pinned_off_page`` ANY MORE, and that is the honest
+    consequence of two populations riding one list: the catalogue appends every
+    RUNNING row below the window (``session.catalog.RUNNING_STATUS_CODES``) on
+    any scope's first page, and the pinned rows the HEAD page does not carry
+    (head only — a scoped answer cannot speak for the pinned set) — so a name
+    that mentioned only pins would be a comment that has stopped being true. No
+    wire field carries the name: it is internal, and the route concatenates the
+    two lists into one ``sessions`` array.
 
     ``truncated`` keeps its original meaning — the ranking held more rows than
     the page — and deliberately says nothing about the extras: a client uses it
-    to know whether more history exists, and an appended pin is a row it may
+    to know whether more history exists, and an appended row is a row it may
     already be holding rather than history it has not seen.
     """
 
     rows: list[dict[str, Any]]
-    pinned_off_page: list[dict[str, Any]]
+    #: Rows the catalogue appended AFTER the page: every RUNNING row below the
+    #: window, plus (head answer only) the pinned rows the page does not carry.
+    #: Rank order, below every page row — the route's concatenation relies on it.
+    off_page: list[dict[str, Any]]
     truncated: bool
     #: The sessions OTHER devices hold, present only for a listing that asked for
     #: them (``include_peers``). A SEPARATE FIELD rather than concatenated here, and
     #: the route concatenates: ``rows`` is the page a ``limit`` describes and
     #: ``truncated`` is a verdict about it, so folding a population that no ``limit``
     #: governs into the same list would make the count mean two things — the trap
-    #: ``pinned_off_page`` already documents one level up. ``truncated`` says nothing
+    #: ``off_page`` already documents one level up. ``truncated`` says nothing
     #: about these rows, deliberately: a peer's catalogue is not this device's history.
     remote: list[dict[str, Any]] = field(default_factory=list)
     #: The position to resume this page from, or ``None`` at the end of the scope.
@@ -6952,24 +6966,12 @@ class DraftAlreadyMaterialised(ValueError):
         super().__init__(message)
 
 
-#: The status codes whose rows the desktop UI files under RUNNING, and the
-#: ONLY rows this listing computes ``last_user_at`` for.
-#:
-#: THE SAME FIVE THE RENDERER USES (local-operator-ui's ``RUNNING_CODES``:
-#: busy, delegating, approval, answer, wedged), spelled here rather than
-#: derived from the wire because the projection decides what to PAY for: the
-#: tracker's cold scan is a real read, and a row the section will not order
-#: must not buy one. ``live_state or pending`` (the shape the design memo
-#: weighed) is a strict SUPERSET — every running code implies a non-empty
-#: live_state or a pending gate, including ``delegating``, whose counts come
-#: from a live record — and is rejected here for exactly that reason: it also
-#: covers ``attached`` and ``idle`` rows, which the UI files under Today, so
-#: it would pay a scan per resident session for a value no reader consumes.
-#: Both halves — the coverage of ``delegating`` and the exclusion of ``idle``
-#: — are pinned in tests/unit/server/test_desktop_sessions.py.
-RUNNING_STATUS_CODES: frozenset[str] = frozenset(
-    {"busy", "delegating", "approval", "answer", "wedged"}
-)
+#: ``RUNNING_STATUS_CODES`` — the five status codes the desktop UI files under
+#: RUNNING — lives in ``session.catalog`` and is imported above, because the
+#: catalogue is the layer that decides a first page's membership with no client
+#: present (see ``RUNNING_STATUS_CODES``'s own note there). This module reads the
+#: same set for a second, narrower reason: which rows buy a ``last_user_at``
+#: scan, stated at that read below.
 
 
 class DesktopSessions:
@@ -8242,7 +8244,7 @@ class DesktopSessions:
         because the two are one question: the caller used to ask for
         ``limit + 1`` rows and slice them itself to learn whether the store held
         more, and that trick cannot survive rows that are deliberately appended
-        BEYOND the page (see ``SessionPage.pinned_off_page``) — the count would
+        BEYOND the page (see ``SessionPage.off_page``) — the count would
         no longer mean what it is read to mean.
 
         The catalogue itself refuses rather than lying when the store cannot be
@@ -8282,13 +8284,16 @@ class DesktopSessions:
         returned before: the head page, the whole visible ranking, the append-
         below-the-page pins, and no cursor and no counts.
 
-        THE PINS ARE APPENDED ON THE HEAD ANSWER ONLY. ``pinned_off_page`` exists
-        because a client that holds one page cannot otherwise render a pin made on
-        an older conversation, and that argument is about the listing as a whole —
-        which only the head request speaks for. A scoped answer carrying them
-        would be handing the client rows belonging to other teams under this
-        team, and the client gates its pin facts on the head answer for exactly
-        this reason.
+        THE PINS ARE APPENDED ON THE HEAD ANSWER ONLY, and the running rows are
+        not — the two populations the catalogue appends have different scopes.
+        A pin exists because a client that holds one page cannot otherwise render
+        a pin made on an older conversation, and that argument is about the
+        listing as a whole — which only the head request speaks for. A scoped
+        answer carrying them would be handing the client rows belonging to other
+        teams under this team, and the client gates its pin facts on the head
+        answer for exactly this reason. A RUNNING row is the opposite case: it is
+        in the scope the caller asked about, and leaving it out is the very bug
+        this change removes — so it rides the first page of every scope.
         """
 
         # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2). The exclusion
@@ -8354,15 +8359,7 @@ class DesktopSessions:
             )
             entries = page.entries
             page_entries = entries[:limit]
-            # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
-            # rather than on the projected row's flag so it runs before the
-            # projection. Everything from the page bound onwards is a candidate:
-            # the probe row belongs here when it is itself pinned, because the
-            # page does not carry it either. A pinned id that resolved to no
-            # entry at all — a deleted directory, or a hidden delegated run the
-            # catalogue never builds — is simply not among them, which is the
-            # outcome `load_catalog` documents and the one a listing wants.
-            extra_entries = [entry for entry in entries[limit:] if entry.id in pins]
+            extra_entries = entries[limit:]
             attention: dict[str, dict[str, Any]] = {}
             # NOT ``contextlib.suppress``: the suppression was silent, so this
             # route answered ``degraded: []`` -- "everything about this page was
@@ -8391,7 +8388,9 @@ class DesktopSessions:
             # attention object, the same status stamps, the same binding and
             # preview -- because the client renders them side by side in one
             # list and a second projector would be a second place for them to
-            # disagree.
+            # disagree. The extras are whichever rows the catalogue appended
+            # after the page (``entries[limit:]``): it decides them, so a filter
+            # here must not re-decide them.
             projected: dict[str, dict[str, Any]] = {}
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
@@ -8422,6 +8421,16 @@ class DesktopSessions:
                         # point: `mtime` advances on every append, so activity
                         # re-sorted the section under the cursor (9 of 47
                         # transitions on the operator's store over 235 s).
+                        #
+                        # EXACTLY THAT FIVE-CODE SET, not ``live_state or
+                        # pending``: the latter is a strict SUPERSET (every
+                        # running code implies a non-empty ``live_state`` or a
+                        # pending gate, ``delegating`` through its live record)
+                        # and it also covers ``attached``/``idle``, which the UI
+                        # files under Today — so it would pay a scan per
+                        # resident session for a value no reader consumes. Both
+                        # halves (``delegating`` covered, ``idle`` excluded) are
+                        # pinned in tests/unit/server/test_desktop_sessions.py.
                         #
                         # This runs in the SAME worker thread as the preview
                         # read beside it (``asyncio.to_thread`` at the bottom of
@@ -8496,7 +8505,7 @@ class DesktopSessions:
                 projected[entry.id] = row
             return SessionPage(
                 rows=[projected[entry.id] for entry in page_entries],
-                pinned_off_page=[projected[entry.id] for entry in extra_entries],
+                off_page=[projected[entry.id] for entry in extra_entries],
                 # MORE ROWS THAN THE PAGE, which is the original question and is
                 # still the right one -- and it IS ``next_cursor``: the catalogue
                 # answers "is there more" once, as the position that more can be

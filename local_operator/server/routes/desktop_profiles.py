@@ -32,6 +32,7 @@ from local_operator.server.utils.desktop_profiles import (
     profile_catalogue,
     profile_detail,
     team_catalogue,
+    team_effective,
 )
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -373,6 +374,29 @@ async def team(name: str, request: Request):
             "team", str(found.id), found.model_dump(mode="json")
         )
         return data
+
+    async with errors(request):
+        return reply(await asyncio.to_thread(read))
+
+
+@router.get("/v1/desktop/teams/{name}/effective", response_model=CRUDResponse)
+async def team_effective_report(name: str, request: Request):
+    """What each member of ``name`` would launch on, and which layer chose it.
+
+    Placed BESIDE the team routes, not under the team GET: it is a different
+    question (what the launch would resolve, not what the operator authored),
+    and a client probes for it by NAME to decide whether this runtime can render
+    the override editor at all — a 404 means an older server whose ``TeamMember``
+    silently ignores the member keys.
+
+    Runs on a worker thread because building a spec reads the model catalogue,
+    which can touch the network once on a cold cache (see
+    ``utils.desktop_profiles.team_effective``).
+    """
+
+    def read() -> dict[str, Any]:
+        agents, teams = registries(request)
+        return team_effective(agents, teams, name)
 
     async with errors(request):
         return reply(await asyncio.to_thread(read))

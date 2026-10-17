@@ -1586,6 +1586,42 @@ def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str
     return "\n".join(lines)
 
 
+def format_unlanded_records_message(adoption_ids: Sequence[str], receipt_ids: Sequence[str]) -> str:
+    """Render the row for queued records a closing runtime could not write.
+
+    The durable twin of the dispose ``NoticeEvent`` (aside queue D7, review R6):
+    the live notice reaches only a frontend still connected during teardown, and
+    a desktop that reconnects later reads the journal, so the fact is recorded
+    here as well. Authored in this file for the reason
+    :func:`format_held_delivery_message` gives — the incident head and the
+    ``suggested action:`` slot are what mark it as a system record.
+
+    No turn failed, so no "This is why the previous turn ended" tail: the
+    runtime closed while an aside it had queued (held back by an open tool
+    batch) or a bang-command receipt (whose write failed) was still waiting.
+    """
+    parts: list[str] = []
+    if adoption_ids:
+        parts.append(f"{len(adoption_ids)} aside exchange(s) the user added")
+    if receipt_ids:
+        parts.append(f"{len(receipt_ids)} shell command receipt(s)")
+    lines = [
+        "[session incident] unsaved records: "
+        + " and ".join(parts or ["queued records"])
+        + " were still queued when this session's runtime closed, and were not written "
+        "into this conversation."
+    ]
+    if adoption_ids:
+        lines.append(f"Asides (last message id): {', '.join(adoption_ids)}")
+    if receipt_ids:
+        lines.append(f"Shell receipts (call id): {', '.join(receipt_ids)}")
+    lines.append(
+        "suggested action: an aside is still in its panel while the desktop keeps it "
+        "(about an hour) and can be added again; a shell command can be run again."
+    )
+    return "\n".join(lines)
+
+
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     """Render the MCP-recovery text injected into the model's context.
 
