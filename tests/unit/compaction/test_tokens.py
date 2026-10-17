@@ -119,10 +119,16 @@ def test_invalidation_notifies_subscribers_and_unsubscribe():
 
 
 def test_fallback_estimator_on_tiktoken_failure(monkeypatch):
-    """When tiktoken cannot load, degrade to len(text)//4 — never raise."""
+    """When tiktoken cannot load, degrade to len(text)//4 — never raise.
+
+    The failed attempt's backoff deadline is pushed out of reach so the
+    assertion measures the fallback itself; with the deadline elapsed,
+    ``_get_encoding`` is allowed to retry and would restore the real ruler.
+    """
     clear_estimate_cache()
     monkeypatch.setattr(tokens_mod, "_ENCODING", None)
     monkeypatch.setattr(tokens_mod, "_ENCODING_FAILED", True)
+    monkeypatch.setattr(tokens_mod, "_ENCODING_RETRY_AT", float("inf"))
     message = Message.user("x" * 400)
     assert estimate_tokens(message) == 100
 
@@ -639,3 +645,125 @@ def test_background_warm_loads_on_a_thread(monkeypatch):
     thread.join(60)
     assert not thread.is_alive()
     assert tokens_mod._ENCODING is not None or tokens_mod._ENCODING_FAILED
+
+
+# --- the failure latch must not be permanent ---------------------------------
+
+
+def _require_real_encoding() -> None:
+    """Skip when this process cannot load cl100k_base at all.
+
+    The recovery assertions below observe the REAL ruler returning; with no
+    ruler available (an offline box with a cold BPE cache) they would pass or
+    fail by identity, which measures nothing.
+    """
+    pytest.importorskip("tiktoken")
+    tokens_mod.reset_tokenizer_state()
+    if tokens_mod._get_encoding() is None:
+        pytest.skip("cl100k_base unavailable — the recovery cannot be observed")
+
+
+def test_a_failed_load_is_retried_once_its_backoff_elapses():
+    """The latch is a cooldown, not a verdict for the life of the process.
+
+    Repro of the measured defect: a first-use fetch that fails once used to
+    make every later count ``len(text) // 4`` — in CI that turned the
+    calibration-margin test's pair from (97502, 90002) into (106876, 97501)
+    and made a 100k window refuse a request it could serve. A latch whose
+    deadline has passed must recover the real encoder.
+    """
+    _require_real_encoding()
+    try:
+        tokens_mod._ENCODING = None
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_FAILURES = 1
+        tokens_mod._ENCODING_RETRY_AT = 0.0  # the backoff has elapsed
+        assert tokens_mod._get_encoding() is not None
+        assert tokens_mod._ENCODING_FAILED is False
+        assert tokens_mod._ENCODING_FAILURES == 0
+    finally:
+        tokens_mod.reset_tokenizer_state()
+
+
+def test_a_failed_load_is_not_retried_inside_its_backoff():
+    """The retry is gated, because an offline load costs 75.7 s to time out.
+
+    Retrying on every estimate would put that stall on the turn path; the
+    cooldown is what makes recovery safe to attempt at all.
+    """
+    try:
+        tokens_mod.reset_tokenizer_state()
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_RETRY_AT = time.monotonic() + 60.0
+        assert tokens_mod._get_encoding() is None
+    finally:
+        tokens_mod.reset_tokenizer_state()
+
+
+def test_reset_tokenizer_state_clears_the_latch_and_reloads():
+    """The test-visible reset returns a poisoned process to a cold state."""
+    _require_real_encoding()
+    try:
+        tokens_mod._ENCODING = None
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_FAILURES = 3
+        tokens_mod._ENCODING_RETRY_AT = time.monotonic() + 300.0
+
+        tokens_mod.reset_tokenizer_state()
+
+        assert tokens_mod._ENCODING_FAILED is False
+        assert tokens_mod._ENCODING_FAILURES == 0
+        assert tokens_mod._ENCODING_RETRY_AT == 0.0
+        assert tokens_mod._get_encoding() is not None
+    finally:
+        tokens_mod.reset_tokenizer_state()
+
+
+def test_a_warm_thread_finishing_after_a_reset_cannot_poison_counts(monkeypatch):
+    """A late daemon warm must not publish its failure into the reset state.
+
+    This is the CI mechanism: a warm thread completed after its test had torn
+    down, set the process-wide latch, and every count in that shard ran on the
+    chars/4 ruler. The reset's epoch bump discards an in-flight attempt's
+    outcome, so the thread that started before it can no longer re-arm it.
+    """
+    import sys
+    import threading
+    import types
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    fake_tiktoken = types.ModuleType("tiktoken")
+
+    def slow_failure(_name: str):
+        entered.set()
+        release.wait(10)
+        raise RuntimeError("cold BPE fetch failed")
+
+    fake_tiktoken.get_encoding = slow_failure  # type: ignore[attr-defined]
+    original = sys.modules.get("tiktoken")
+
+    tokens_mod.reset_tokenizer_state()
+    sys.modules["tiktoken"] = fake_tiktoken
+    try:
+        worker = threading.Thread(target=tokens_mod._get_encoding, daemon=True)
+        worker.start()
+        try:
+            assert entered.wait(5), "the worker never started its load"
+            # The owning test tears down (and thus resets) while the load runs.
+            tokens_mod.reset_tokenizer_state()
+            release.set()
+            worker.join(10)
+        finally:
+            release.set()
+    finally:
+        if original is not None:
+            sys.modules["tiktoken"] = original
+        else:
+            sys.modules.pop("tiktoken", None)
+
+    assert not worker.is_alive()
+    assert tokens_mod._ENCODING_FAILED is False, "a late warm re-armed the failure latch"
+    _require_real_encoding()
+    tokens_mod.reset_tokenizer_state()

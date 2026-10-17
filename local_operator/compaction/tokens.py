@@ -99,6 +99,7 @@ import itertools
 import json
 import logging
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
@@ -133,7 +134,35 @@ _CHARS_PER_TOKEN_FALLBACK = 4
 # ---------------------------------------------------------------------------
 
 _ENCODING: object | None = None
+
+#: ``True`` while the most recent load attempt failed. NOT a permanent verdict:
+#: it suppresses attempts only until :data:`_ENCODING_RETRY_AT`, then one call
+#: retries. A sticky version of this flag was a measured defect — a transient
+#: first-use failure (a cold BPE fetch that times out, a tiktoken import that
+#: races a test's ``sys.modules`` patch) silently switched EVERY later token
+#: count in the process to ``len(text) // 4``, for the life of the process.
+#: Compaction budgets decide what gets summarised, so that degradation is a
+#: correctness bug, not a rounding difference.
 _ENCODING_FAILED = False
+
+#: Consecutive failed load attempts, for the retry backoff.
+_ENCODING_FAILURES = 0
+
+#: ``time.monotonic()`` deadline before which a failed load is not retried.
+#: The backoff exists because the failure can be EXPENSIVE, not just wrong to
+#: repeat: with tiktoken installed and the BPE table uncached, a load is a
+#: network fetch that measured 75.7 s to time out on an unreachable network.
+#: Retrying on every estimate would put that stall on the turn path repeatedly;
+#: retrying a handful of times a process recovers a transient failure without it.
+_ENCODING_RETRY_AT = 0.0
+_ENCODING_RETRY_BASE_SECONDS = 30.0
+_ENCODING_RETRY_MAX_SECONDS = 300.0
+
+#: Bumped by :func:`reset_tokenizer_state`. A load attempt snapshots it and
+#: discards its outcome if the epoch moved while it ran, so a background warm
+#: that finishes after a reset cannot publish its stale result — the exact way
+#: a daemon thread used to poison the next test's counts.
+_ENCODING_EPOCH = 0
 
 
 def _get_encoding() -> object | None:
@@ -144,31 +173,95 @@ def _get_encoding() -> object | None:
     first use). The warning fires once per process, so it names the extra
     without turning into per-turn noise.
 
+    A FAILURE IS RETRIED, WITH BACKOFF. The old code latched failure for the
+    whole process, so one transient failure — a network fetch that timed out
+    on the first turn, a ``sys.modules`` patch a test installed while a warm
+    thread was loading — silently made every later count an approximation.
+    Retrying keeps the runaway cost the latch was protecting against out of
+    the hot path: the first retry waits 30 s, then the delay doubles to a
+    5-minute cap, so an offline process pays a bounded number of fetch
+    timeouts rather than one per estimate, while a transient failure heals.
+
     Locked because the estimators now run under ``asyncio.to_thread``: two
     workers reaching a cold singleton together would otherwise both pay the
     ~60 ms table load and both log the failure warning. The lock is
     uncontended after the first call (the fast path returns before taking it).
     """
-    global _ENCODING, _ENCODING_FAILED
-    if _ENCODING is not None or _ENCODING_FAILED:
+    global _ENCODING, _ENCODING_FAILED, _ENCODING_FAILURES, _ENCODING_RETRY_AT
+    if _ENCODING is not None:
         return _ENCODING
+    if _ENCODING_FAILED and time.monotonic() < _ENCODING_RETRY_AT:
+        return None
     with _CACHE_LOCK:
         # Re-check under the lock: another worker may have loaded it while
         # this one waited.
-        if _ENCODING is not None or _ENCODING_FAILED:
+        if _ENCODING is not None:
             return _ENCODING
+        if _ENCODING_FAILED and time.monotonic() < _ENCODING_RETRY_AT:
+            return None
+        epoch = _ENCODING_EPOCH
         try:
             import tiktoken
 
-            _ENCODING = tiktoken.get_encoding("cl100k_base")
+            encoding = tiktoken.get_encoding("cl100k_base")
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
-            _ENCODING_FAILED = True
-            logger.warning(
-                "%s; falling back to the chars/4 token estimate (%s)",
-                missing_extra_error("tokenizer", "Exact token counting"),
-                exc,
-            )
+            # A reset during the load means this outcome describes a state the
+            # caller no longer wants; publishing the failure here would re-arm
+            # the latch the reset just cleared.
+            if epoch == _ENCODING_EPOCH:
+                _ENCODING_FAILED = True
+                _ENCODING_FAILURES += 1
+                delay = min(
+                    _ENCODING_RETRY_BASE_SECONDS * 2 ** (_ENCODING_FAILURES - 1),
+                    _ENCODING_RETRY_MAX_SECONDS,
+                )
+                _ENCODING_RETRY_AT = time.monotonic() + delay
+                if _ENCODING_FAILURES == 1:
+                    logger.warning(
+                        "%s; falling back to the chars/4 token estimate, "
+                        "retrying after %.0fs (%s)",
+                        missing_extra_error("tokenizer", "Exact token counting"),
+                        delay,
+                        exc,
+                    )
+                else:
+                    logger.debug(
+                        "tokenizer load failed again (attempt %d); next retry in %.0fs: %s",
+                        _ENCODING_FAILURES,
+                        delay,
+                        exc,
+                    )
+            return _ENCODING
+        if epoch == _ENCODING_EPOCH:
+            _ENCODING = encoding
+            _ENCODING_FAILED = False
+            _ENCODING_FAILURES = 0
+            _ENCODING_RETRY_AT = 0.0
         return _ENCODING
+
+
+def reset_tokenizer_state() -> None:
+    """Drop the encoding singleton, its failure latch and its retry backoff.
+
+    For tests and diagnostics: a process that has already failed a load can be
+    returned to a cold, retry-immediately state. Production code never needs
+    it — the backoff in :func:`_get_encoding` retries on its own.
+
+    DELIBERATELY UNLOCKED. A load may be in flight (a test's warm thread);
+    waiting for :data:`_CACHE_LOCK` here would block teardown behind a fetch
+    that can take 75 s. The epoch bump is what makes that safe: the in-flight
+    attempt snapshotted the old epoch and discards its outcome on publication,
+    so neither a stale success nor a stale failure can leak into the fresh
+    state.
+    """
+    global _ENCODING, _ENCODING_FAILED, _ENCODING_FAILURES, _ENCODING_RETRY_AT
+    global _ENCODING_EPOCH
+    _ENCODING = None
+    _ENCODING_FAILED = False
+    _ENCODING_FAILURES = 0
+    _ENCODING_RETRY_AT = 0.0
+    _ENCODING_EPOCH += 1
+    _MODEL_ENCODINGS.clear()
 
 
 def warm_tokenizer() -> None:
@@ -222,6 +315,11 @@ def warm_tokenizer_in_background() -> threading.Thread | None:
 
     Returns the thread so a caller — or a test — can join it; ``None`` means
     there is nothing to wait for.
+
+    A previously FAILED load returns ``None`` too: both callers run this once
+    per boot, so spawning a thread per boot to re-attempt a load the estimator
+    already retries on its own schedule would only add threads to a process
+    that most likely cannot load the table at all.
     """
     try:
         return _warm_tokenizer_in_background()
