@@ -2541,14 +2541,13 @@ class EpisodeRunner:
         FAIL-OPEN BOUNDARY -- this is the whole contract, stated once here and
         relied on by both callers: NOTHING this method does may change the
         outcome of the abandonment that follows. Every step swallows its own
-        failure, so an unpublished artifact, a writer that is already poisoned
-        or a journal that refuses the event leaves the bundle byte-for-byte as
-        it would have been without this call, and the caller records the same
-        status and diagnostic string it records today.
+        failure, so whichever of the ways below breaks, the abandonment that
+        follows records the SAME status and the SAME diagnostic string it
+        records with no diagnostic at all. That is the acceptance criterion, and
+        it is pinned by same-code control tests (diagnostic monkeypatched to a
+        no-op, compared on status and string) for each way.
 
-        Two measured corrections to an earlier claim here, both now pinned by
-        same-code control tests (diagnostic monkeypatched to a no-op, compared
-        on status and string):
+        Three measured corrections to an earlier, falsified claim here:
 
         * A failed diagnostic publish used to POISON the writer, because
           ``_publish_artifact`` poisons on any ``OSError``. Review measured an
@@ -2563,6 +2562,15 @@ class EpisodeRunner:
           terminal, which removes bytes no journal record names. That is what
           keeps the orphan case from arising where today's abandonment
           succeeds.
+        * The event append itself can fail at the JOURNAL (an ENOSPC on its
+          bytes), and the writer's ordinary policy for that is to poison -- a
+          permanent state in which even ``abandon()`` is refused. Review
+          measured exactly that: control ``abandoned``, subject
+          ``abandonment_failed``. ``record_failure_diagnostic`` therefore
+          appends with a rollback: on failure the journal is truncated back to
+          its pre-append length and fsynced, and the writer stays open. If the
+          rollback cannot be proven, the writer still poisons -- an unknown
+          journal tail is not something to keep writing into.
 
         Both writes go through the writer's existing scanned, bounded,
         fsynced artifact machinery (``publish_failure_diagnostic`` /
@@ -3472,6 +3480,21 @@ def _diagnostic_value(value: str, redactions: RedactionSet | None, *, limit: int
     return value[:limit]
 
 
+def _failure_message(error: BaseException) -> str:
+    """The artifact's ``message:`` line, with an OSError's filename removed.
+
+    ``str(OSError(EIO, "Input/output error", "/abs/path/events.jsonl"))``
+    embeds the FULL path, which would re-leak on the message line what the
+    dedicated ``path:`` field reduces to a basename one line below it. The
+    errno and strerror are not lost -- they are the two fields above. Every
+    other exception keeps ``_render_error``'s validation-safe rendering.
+    """
+
+    if isinstance(error, OSError):
+        return f"{type(error).__name__}: [Errno {error.errno}] {error.strerror or ''}".strip()
+    return _render_error(error)
+
+
 def _failure_diagnostic_text(
     error: BaseException,
     *,
@@ -3506,7 +3529,7 @@ def _failure_diagnostic_text(
     # default rendering embeds ``input_value=``, which can quote the secret
     # that failed validation. This artifact is durable evidence.
     message = _diagnostic_value(
-        _render_error(error), redactions, limit=MAX_FAILURE_DIAGNOSTIC_CHARS
+        _failure_message(error), redactions, limit=MAX_FAILURE_DIAGNOSTIC_CHARS
     )
     lines = [
         f"layer: {_diagnostic_value(layer, redactions, limit=32)}",

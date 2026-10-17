@@ -995,17 +995,43 @@ class EvidenceWriter:
         self._validate_event_phase(event)
         return event
 
-    def _persist_prevalidated_event(self, event: EventRecord) -> EventRecord:
-        """Commit one already-validated record while the caller still holds the RLock."""
+    def _persist_prevalidated_event(
+        self, event: EventRecord, *, best_effort: bool = False
+    ) -> EventRecord:
+        """Commit one already-validated record while the caller still holds the RLock.
+
+        ``best_effort`` is for the failure diagnostic ONLY, and it changes what
+        happens to the MEDIUM, never to the verdict: a failed write of a
+        disposable record is rolled back to the exact byte length the journal
+        had before the attempt instead of poisoning the writer. Poison is
+        permanent (``_ensure_open`` refuses everything, including
+        ``abandon()``), so poisoning on a diagnostic whose whole purpose is to
+        preserve the terminal loses the bundle -- measured by review with an
+        ENOSPC injected on the bytes of the diagnostic event: control
+        ``abandoned``, subject ``abandonment_failed`` with the journal's own
+        head unchanged.
+
+        A rollback that cannot be proven -- truncate failed, fsync failed, or
+        the size did not return to the pre-write value -- still poisons, because
+        an unverifiable journal must not accept another append. No memory state
+        (sequence, head, phase) has advanced at that point either way.
+        """
 
         encoded = event.to_canonical_json() + b"\n"
+        start: int | None = None
         try:
+            if best_effort:
+                # The length BEFORE the append. O_APPEND means any partial
+                # write lands at the tail, so truncating back to this offset
+                # restores the journal byte-for-byte.
+                start = os.fstat(self._events_fd).st_size
             _write_all(self._events_fd, encoded, self._calls)
             # The memory head advances only after the durable journal commit. A
             # failing fsync leaves memory pointing at the last known durable record.
             self._calls.fsync(self._events_fd)
         except (OSError, EvidenceError):
-            self._poison()
+            if not (best_effort and self._rollback_journal(start)):
+                self._poison()
             raise
         self._sequence += 1
         self._head = event.event_id
@@ -1021,6 +1047,7 @@ class EvidenceWriter:
         *,
         monotonic_ns: int | None = None,
         wall_time_ms: int | None = None,
+        best_effort: bool = False,
     ) -> EventRecord:
         event = self._build_event(
             kind,
@@ -1028,7 +1055,25 @@ class EvidenceWriter:
             monotonic_ns=monotonic_ns,
             wall_time_ms=wall_time_ms,
         )
-        return self._persist_prevalidated_event(event)
+        return self._persist_prevalidated_event(event, best_effort=best_effort)
+
+    def _rollback_journal(self, start: int | None) -> bool:
+        """Truncate a failed best-effort append back to its pre-write length.
+
+        Returns True only when the journal is PROVABLY back at ``start``: the
+        truncate and its fsync both succeeded and the size reads back. A caller
+        that gets False must poison -- an append whose tail is unknown is not a
+        journal anything may be written to again.
+        """
+
+        if start is None:
+            return False
+        try:
+            os.ftruncate(self._events_fd, start)
+            self._calls.fsync(self._events_fd)
+            return os.fstat(self._events_fd).st_size == start
+        except BaseException:
+            return False
 
     def _cleanup_artifact_temp(self, fd: int, temp: str) -> BaseException | None:
         """Attempt every temp cleanup step and return only the first failure.
@@ -1140,6 +1185,10 @@ class EvidenceWriter:
                 payload,
                 monotonic_ns=monotonic_ns,
                 wall_time_ms=wall_time_ms,
+                # Rolled back, not poisoned: the diagnostic is the record whose
+                # job is to preserve the terminal (see
+                # ``_persist_prevalidated_event``).
+                best_effort=True,
             )
 
     def discard_unreferenced_artifacts(self) -> int:
@@ -1182,11 +1231,23 @@ class EvidenceWriter:
                 return 0
             removed = 0
             for name in sorted(os.listdir(self._artifacts_fd)):
+                if name.startswith(".artifact.") and name.endswith(".tmp"):
+                    # A best-effort publish whose temp cleanup itself failed
+                    # (EIO on unlink) leaves its staging file behind. It is
+                    # writer-owned and no record can ever name it, and the
+                    # verifier rejects the NAME (``artifact_name_invalid``), so
+                    # removing it is the same restoration as the digest sweep.
+                    try:
+                        os.unlink(name, dir_fd=self._artifacts_fd)
+                    except FileNotFoundError:
+                        continue
+                    removed += 1
+                    continue
                 if len(name) != _DIGEST_LENGTH or any(
                     character not in _DIGEST_CHARS for character in name
                 ):
-                    # Temp files are the writer's own; anything else is not an
-                    # artifact this sweep may reason about.
+                    # Anything else is not an artifact this sweep may reason
+                    # about.
                     continue
                 if name.encode("ascii") in named:
                     continue

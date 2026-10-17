@@ -13,6 +13,7 @@ import asyncio
 import errno
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeConfig,
     EpisodeRunner,
     _canary_values_outside_own_roots,
+    _failure_diagnostic_text,
     _failure_layer,
 )
 from local_operator.evaluation.runner.model import EpisodeModelClient
@@ -1053,6 +1055,127 @@ async def test_the_evidence_path_diagnostic_never_changes_the_terminal(
     assert subject.diagnostic == control.diagnostic, (way, subject.diagnostic)
     assert subject.bundle_root is not None
     assert verify_bundle(subject.bundle_root).valid
+
+
+@pytest.mark.asyncio
+async def test_a_journal_failure_on_the_diagnostic_event_keeps_the_terminal(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR (round 2): the diagnostic's own journal write must not poison.
+
+    ``_persist_prevalidated_event`` poisons on any OSError, and poison refuses
+    even ``abandon()``. Review measured an ENOSPC on the diagnostic EVENT's
+    bytes: control ``abandoned``, subject ``abandonment_failed`` with the
+    journal head untouched. The rollback (truncate back to the pre-append
+    length) keeps the writer open and the journal byte-identical.
+    """
+
+    from local_operator.evaluation.evidence import store as store_module
+
+    original = store_module._write_all
+
+    def failing_write_all(fd: int, data: bytes, calls: Any) -> None:
+        if b'"kind":"error"' in data:
+            raise OSError(errno.ENOSPC, "No space left on device", "events.jsonl")
+        original(fd, data, calls)
+
+    async def scenario(root: Path, ident: str, *, control: bool) -> Any:
+        with monkeypatch.context() as faults:
+            faults.setattr(store_module, "_write_all", failing_write_all)
+            if control:
+                faults.setattr(EpisodeRunner, "_publish_failure_diagnostic", lambda *a, **k: None)
+            adapter = FakeAdapter(
+                root,
+                ident,
+                failures={"score": SupervisionError("judge backend returned 502")},
+            )
+            return await _runner(root, ident, adapter=adapter, model=ScriptedModel()).run()
+
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    control = await scenario(control_root, f"{episode_id}-control", control=True)
+    subject_root = tmp_path / "subject"
+    subject_root.mkdir()
+    subject = await scenario(subject_root, f"{episode_id}-subject", control=False)
+
+    assert control.status == "abandoned", control.diagnostic
+    assert subject.status == control.status, (subject.diagnostic, control.diagnostic)
+    assert subject.diagnostic == control.diagnostic
+    root = subject.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    # The journal is back to exactly the pre-append bytes: no half event.
+    assert report.events[-1].kind == "scoring_start"
+    assert not any(
+        b"layer: " in path.read_bytes() for path in (root / "artifacts").iterdir() if path.is_file()
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_temp_unlink_leaves_no_residue(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR (round 2): the sweep also removes writer-owned ``.artifact.*.tmp``.
+
+    When the publish's own temp unlink fails, the staging file survives and the
+    verifier rejects its NAME; the digest sweep deliberately ignores it, so the
+    abandonment was refused. Two faults are needed to reach it, hence minor.
+    """
+
+    original_publish = EvidenceWriter.publish_failure_diagnostic
+
+    def publish_and_leak(self: Any, data: bytes, **kwargs: Any) -> Any:
+        ref = original_publish(self, data, **kwargs)
+        # Exactly the residue a failed temp unlink leaves: a staging file the
+        # diagnostic's own publish could not remove.
+        fd = os.open(
+            ".artifact.deadbeef.tmp",
+            os.O_CREAT | os.O_WRONLY,
+            0o600,
+            dir_fd=self._artifacts_fd,
+        )
+        os.close(fd)
+        return ref
+
+    monkeypatch.setattr(EvidenceWriter, "publish_failure_diagnostic", publish_and_leak)
+    adapter = FakeAdapter(
+        tmp_path, episode_id, failures={"score": SupervisionError("judge backend returned 502")}
+    )
+    outcome = await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert not [path for path in (root / "artifacts").iterdir() if path.name.endswith(".tmp")]
+
+
+def test_an_oserror_message_does_not_carry_its_path() -> None:
+    """NIT (round 2): the message line must not undo the basename reduction."""
+
+    text = _failure_diagnostic_text(
+        OSError(errno.EIO, "Input/output error", "/abs/bundle/events.jsonl"),
+        redactions=None,
+        layer="evidence",
+        phase="evidence",
+        operation="append:observation",
+    )
+    assert "/abs/bundle" not in text
+    assert "path: events.jsonl" in text
+    assert "message: OSError: [Errno 5] Input/output error" in text
+
+    silent = _failure_diagnostic_text(
+        OSError(errno.EIO, None, "/abs/bundle/events.jsonl"),
+        redactions=None,
+        layer="evidence",
+        phase="evidence",
+        operation="append:observation",
+    )
+    assert "/abs/bundle" not in silent
+    assert "message: OSError: [Errno 5]" in silent
 
 
 @pytest.mark.asyncio
