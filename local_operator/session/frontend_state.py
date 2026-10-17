@@ -7092,6 +7092,23 @@ class FrontendStateStore:
         )
         if payload is not None:
             state = state.model_copy(update={"spend_channels": payload})
+        # OCCUPANCY IS RECONCILED HERE FOR THE SAME REASON THE MONEY ABOVE IS.
+        # The checkpoint is written at a turn end, and a headless host between
+        # turns is exactly the case it lags: the runtime keeps serving (and the
+        # pane keeps painting) receipts that the journal has not yet taken, so
+        # restoring the row's ``context_tokens`` verbatim starts the runtime on a
+        # reading the conversation has already passed. The desktop host's adopt
+        # edge re-materializes the pair before it serves a frame
+        # (``runtime/serving.py``), but every other headless host constructs the
+        # store HERE, and the first frame it publishes must not disagree with
+        # the journal's own newest receipt. ``_replayed_context_change`` is the
+        # one rule both replay sites already share: an equal or absent receipt
+        # moves nothing (a settled post-compaction estimate stands), a different
+        # one is a newer call and wins.
+        restore = getattr(session, "restored_usage", None)
+        usage = restore() if callable(restore) else None
+        if isinstance(usage, Usage):
+            state = state.model_copy(update=_replayed_context_change(state, usage.context_tokens))
         return cls(state)
 
     @staticmethod
