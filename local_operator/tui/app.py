@@ -475,9 +475,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
-from local_operator.tui.widgets.status_line import (
-    AGENT_PROFILE_CELLS,
-)
+from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
