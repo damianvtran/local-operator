@@ -109,13 +109,17 @@ _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 _ACTION_SETTLE_POLICY = "OSWORLD_ACTION_SETTLE_POLICY"
 _SETTLE_POLICIES = frozenset({"throughput", "paper"})
 #: The guest-side deadline one ``probe`` gives the control server's readiness
-#: endpoint. The harness's own probe deadline (``AMBIGUOUS_PROBE_TIMEOUT_S`` =
-#: 10 s, plus the RPC layer's 1 s cancel grace) is the OUTER bound; this inner
-#: one fires first, so the worker still has time to ANSWER ``reachable: false``
-#: instead of being cancelled mid-probe. Mirrors the 5 s the allocation
-#: readiness loop gives the same endpoint (``providers.aws._READY_PATH``), so
-#: "reachable" means the same thing here as at admission.
-_PROBE_TIMEOUT_S = 5.0
+#: endpoint. ``requests`` applies a SCALAR timeout to the connect phase and
+#: the read phase SEPARATELY, so the adapter's own worst case is roughly
+#: twice this value; 4.0 is chosen so that worst case (~8 s) stays inside
+#: the harness's probe deadline (``AMBIGUOUS_PROBE_TIMEOUT_S`` = 10 s, plus
+#: the RPC layer's 1 s cancel grace) with margin -- a dead guest should be
+#: ANSWERED ``reachable: false``, not cancelled mid-probe. The allocation
+#: readiness loop hands the same endpoint 5 s per probe
+#: (``providers.aws._READY_PATH``); this sits just inside it for that
+#: arithmetic, not as a fidelity claim about the loop. (agent review round
+#: 1: the earlier comment ignored requests' per-phase application.)
+_PROBE_TIMEOUT_S = 4.0
 
 
 class AdapterStateError(RuntimeError):

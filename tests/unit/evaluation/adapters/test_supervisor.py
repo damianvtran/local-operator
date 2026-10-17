@@ -1064,7 +1064,10 @@ def test_a_predispatch_refusal_on_a_non_execute_method_still_poisons(
 
 
 def _ambiguous_delivery_error(
-    *, method: str = "execute", delivery: str = "ambiguous"
+    *,
+    method: str = "execute",
+    delivery: str = "ambiguous",
+    message: str | None = None,
 ) -> RpcRemoteError:
     """The delivered shape of a guest-side transport failure on ``execute``.
 
@@ -1074,14 +1077,17 @@ def _ambiguous_delivery_error(
     the message text travels (the ``delivery=`` token in it)".
     """
 
+    text = (
+        message
+        if message is not None
+        else (f"guest action 1 outcome is unknown; batch not retried; delivery={delivery}")
+    )
     return RpcRemoteError(
         "adapter_error",
         "adapter operation failed",
         RpcErrorDetail(
             exception_type="GuestExecutionError",
-            message=(
-                f"guest action 1 outcome is unknown; batch not retried; delivery={delivery}"
-            ),
+            message=text,
             method=method,  # pyright: ignore[reportArgumentType]
             operation_id="exec-330-b14d1b7bcfdd",
         ),
@@ -1112,21 +1118,37 @@ class _RecordingAmbiguousSupervisor(RawSupervisor):
         # must not match by prefix (the closed vocabulary has no such value;
         # the anchor keeps a future one from riding in).
         (_ambiguous_delivery_error(delivery="ambiguous_suffix"), False),
+        # Prose that merely MENTIONS the words, and a value with no left
+        # boundary at all: the declared shape is a '; '-separated clause of
+        # its own, and neither of these is it (agent review round 1).
+        (_ambiguous_delivery_error(message="the earlier delivery=ambiguous batch was fine"), False),
+        (_ambiguous_delivery_error(message="xdelivery=ambiguous"), False),
+        # The declared token in non-final position still matches: anchored
+        # to its own clause, not to end-of-string.
+        (
+            _ambiguous_delivery_error(
+                message="guest action 1 outcome is unknown; delivery=ambiguous; more"
+            ),
+            True,
+        ),
         # Scoped to ``execute`` at the DETAIL's own method...
         (_ambiguous_delivery_error(method="observe"), False),
         # ...and the structured phase is trusted over the message prose: a
         # declared committed failure keeps its own (stricter) route.
-        (RpcRemoteError(
-            "adapter_error",
-            "adapter operation failed",
-            RpcErrorDetail(
-                exception_type="GuestExecutionError",
-                message="delivery=ambiguous",
-                method="execute",
-                operation_id="exec-1",
-                phase="observation",
+        (
+            RpcRemoteError(
+                "adapter_error",
+                "adapter operation failed",
+                RpcErrorDetail(
+                    exception_type="GuestExecutionError",
+                    message="delivery=ambiguous",
+                    method="execute",
+                    operation_id="exec-1",
+                    phase="observation",
+                ),
             ),
-        ), False),
+            False,
+        ),
         (_adapter_error("observation"), False),
         (_adapter_error("unknown"), False),
         (_invalid_state_error(), False),
@@ -1145,7 +1167,9 @@ def test_only_the_declared_ambiguous_delivery_shape_is_admitted(
     default phase stays on the pre-existing poison path.
     """
 
-    from local_operator.evaluation.adapters.supervisor import _ambiguous_delivery_failure
+    from local_operator.evaluation.adapters.supervisor import (
+        _ambiguous_delivery_failure,
+    )
 
     assert _ambiguous_delivery_failure(error) is expected
 
@@ -1351,6 +1375,41 @@ def test_the_probe_carries_the_short_deadline(tmp_path: Path) -> None:
     assert raw.calls == ["execute", "probe"]
     assert raw.kwargs[1]["timeout"] == AMBIGUOUS_PROBE_TIMEOUT_S
     assert AMBIGUOUS_PROBE_TIMEOUT_S == 10.0
+
+
+def test_a_cancelled_probe_still_poisons_before_propagating(tmp_path: Path) -> None:
+    """The probe must not become a hole in the poison guarantee.
+
+    Today's code poisons every non-cleared ending, including a cancellation
+    that arrives on the call itself (the ``except BaseException`` block
+    poisons and re-raises). A cancellation delivered while the probe is in
+    flight is inside the SAME call, so it must end the same way: session
+    poisoned, rescue demanded, CancelledError propagating. (agent review
+    round 1.)
+    """
+
+    import asyncio
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_ambiguous_delivery_error(), asyncio.CancelledError()])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+
+    async def run() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        with pytest.raises(SupervisionError, match="poisoned"):
+            session._ensure_usable()
+
+    asyncio.run(run())
+    assert raw.calls == ["execute", "probe"]
+    assert raw.terminated and rescue_required == [True]
 
 
 @pytest.mark.parametrize("phase", ["unknown", "observation"])

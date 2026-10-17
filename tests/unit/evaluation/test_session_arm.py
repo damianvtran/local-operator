@@ -319,9 +319,7 @@ def _ambiguous_delivery_error() -> RpcRemoteError:
         "adapter operation failed",
         RpcErrorDetail(
             exception_type="GuestExecutionError",
-            message=(
-                "guest action 1 outcome is unknown; batch not retried; delivery=ambiguous"
-            ),
+            message=("guest action 1 outcome is unknown; batch not retried; delivery=ambiguous"),
             method="execute",
             operation_id="exec-330-b14d1b7bcfdd",
         ),
@@ -2083,7 +2081,9 @@ class TestAmbiguousDeliveryRebind:
         self, tmp_path: Path
     ) -> None:
         from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
-        from local_operator.evaluation.session_arm import RECOVERY_AFTER_AMBIGUOUS_DELIVERY
+        from local_operator.evaluation.session_arm import (
+            RECOVERY_AFTER_AMBIGUOUS_DELIVERY,
+        )
 
         obs0 = _observation()
         obs1 = _observation(sequence=1, text="screen B")
@@ -2093,9 +2093,7 @@ class TestAmbiguousDeliveryRebind:
         async def execute(batch: Any) -> ExecuteResult:
             executed.append(batch)
             if len(executed) == 1:
-                raise AmbiguousRebindCleared(
-                    _ambiguous_delivery_error(), attempt=1, attempts=2
-                )
+                raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
             return _result(input_observation=obs0, output_observation=obs1)
 
         async def recover() -> Observation:
@@ -2142,7 +2140,9 @@ class TestAmbiguousDeliveryRebind:
         self, tmp_path: Path
     ) -> None:
         from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
-        from local_operator.evaluation.session_arm import RECOVERY_AFTER_AMBIGUOUS_DELIVERY
+        from local_operator.evaluation.session_arm import (
+            RECOVERY_AFTER_AMBIGUOUS_DELIVERY,
+        )
 
         obs0 = _observation()
 
@@ -2759,9 +2759,7 @@ class TestAmbiguousDeliveryOutcome:
         events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
         assert "action_ambiguous_rebind" in events
         row = next(
-            json.loads(line)
-            for line in events.splitlines()
-            if "action_ambiguous_rebind" in line
+            json.loads(line) for line in events.splitlines() if "action_ambiguous_rebind" in line
         )
         assert row["kind"] == "action_ambiguous_rebind"
         assert row["attempt"] == 1

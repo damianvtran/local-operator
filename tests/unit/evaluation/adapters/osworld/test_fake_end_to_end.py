@@ -1028,3 +1028,23 @@ async def test_a_reset_without_instruction_text_fails_before_the_model_runs(
     assert detail is not None
     text = (root / "artifacts" / detail.sha256).read_bytes().decode()
     assert "InstructionUnavailable" in text
+
+
+def test_the_adapter_probe_deadline_stays_inside_the_harness_deadline() -> None:
+    """The inner guest deadline must remain strictly inside the outer one.
+
+    ``requests`` applies a scalar timeout to the connect and read phases
+    separately, so the adapter's own worst case is ~2x its
+    ``_PROBE_TIMEOUT_S``; the harness cancels the probe RPC at
+    ``AMBIGUOUS_PROBE_TIMEOUT_S`` + the 1 s cancel grace. The constants
+    live in different packages and nothing imports one from the other --
+    this assertion is the only tie, so a later tune of either cannot
+    silently turn "answered reachable: false" into a cancelled probe.
+    (agent review round 1, cross-package nit.)
+    """
+
+    from lop_osworld_v2_adapter.adapter import _PROBE_TIMEOUT_S
+
+    from local_operator.evaluation.adapters.supervisor import AMBIGUOUS_PROBE_TIMEOUT_S
+
+    assert _PROBE_TIMEOUT_S * 2 < AMBIGUOUS_PROBE_TIMEOUT_S

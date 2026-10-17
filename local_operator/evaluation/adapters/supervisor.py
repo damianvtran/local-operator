@@ -224,9 +224,12 @@ def _refused_before_dispatch(error: BaseException) -> bool:
 #: match can buy is that probe plus an UNKNOWN-outcome warning to the model
 #: (never a replay, never a "committed" claim). Its failure mode is a probe
 #: that fails closed, and producer and consumer ship in the same repository.
-#: ANCHORED at the token's end, so a longer value a future adapter spells
-#: cannot match by prefix; the message ends at the token today.
-_AMBIGUOUS_DELIVERY_RE = re.compile(r"delivery=ambiguous(?:[;\s]|$)")
+#: ANCHORED ON BOTH SIDES to the token's own clause: the declared shape
+#: puts it after '; ', so a longer value cannot match by prefix, and
+#: neither can prose that merely mentions the words (known negatives in
+#: the predicate tests). Agent review round 1: the right-only anchor
+#: admitted both.
+_AMBIGUOUS_DELIVERY_RE = re.compile(r"(?:^|;\s)delivery=ambiguous(?:[;\s]|$)")
 
 
 def _ambiguous_delivery_failure(error: BaseException) -> TypeGuard[RpcRemoteError]:
@@ -846,9 +849,7 @@ class VerifiedAdapterSession:
             or not isinstance(ambiguous_rebind_budget, int)
             or ambiguous_rebind_budget < 0
         ):
-            raise SupervisionError(
-                "ambiguous_rebind_budget must be a non-negative integer"
-            )
+            raise SupervisionError("ambiguous_rebind_budget must be a non-negative integer")
         self._answer_owner = answer_owner
         self._supervisor = supervisor
         self._execution_overhead_seconds_per_action = execution_overhead_seconds_per_action
@@ -966,14 +967,26 @@ class VerifiedAdapterSession:
                 method == "execute"
                 and _ambiguous_delivery_failure(error)
                 and self._ambiguous_rebinds < self._ambiguous_rebind_budget
-                and await self._probe_control_server()
             ):
-                self._ambiguous_rebinds += 1
-                raise AmbiguousRebindCleared(
-                    error,
-                    attempt=self._ambiguous_rebinds,
-                    attempts=self._ambiguous_rebind_budget,
-                ) from error
+                # A cancellation (or anything else the probe raises --
+                # ``_probe_control_server`` already collapses ordinary
+                # failures to False) must not skip the poison every other
+                # non-cleared ending performs: today's code poisons on the
+                # way out of a cancelled call, and the probe is inside the
+                # same call. Then the exception propagates exactly as it
+                # would have without the probe. (agent review round 1.)
+                try:
+                    answered = await self._probe_control_server()
+                except BaseException:
+                    await self._poison_after_ambiguous_mutation()
+                    raise
+                if answered:
+                    self._ambiguous_rebinds += 1
+                    raise AmbiguousRebindCleared(
+                        error,
+                        attempt=self._ambiguous_rebinds,
+                        attempts=self._ambiguous_rebind_budget,
+                    ) from error
             await self._poison_after_ambiguous_mutation()
             raise
 

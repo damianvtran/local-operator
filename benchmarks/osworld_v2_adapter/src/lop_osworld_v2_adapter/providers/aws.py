@@ -1566,10 +1566,13 @@ class AwsProvider:
         with an UNKNOWN-outcome warning and ending it exactly as before. Read-
         only by construction: a GET, no statement, no observation build.
 
-        Bounded on both ends: ``requests`` gets ``timeout`` so the socket
-        cannot outlive the harness's probe deadline, and the call runs on a
-        worker thread so a hung connect cannot block the worker's event loop
-        (and with it the cancel path).
+        Bounded on both ends: ``requests`` gets ``timeout`` (applied to the
+        connect and read phases separately, so this call's own worst case
+        is roughly twice it), and the RPC layer's outer deadline cancels
+        whatever remains -- see ``_PROBE_TIMEOUT_S`` in ``adapter.py`` for
+        the chosen arithmetic -- while the call runs on a worker thread so
+        a hung connect cannot block the worker's event loop (and with it
+        the cancel path).
 
         Deliberately boolean: refused, timed out, a DNS failure and a non-200
         status all collapse into False because the caller's decision is fail
