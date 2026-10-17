@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from local_operator.memory import (
+    FACT_STATUSES,
     MemoryError,
     MemoryIdentity,
     MemoryStore,
@@ -66,8 +67,13 @@ MAX_LIMIT = 50
 
 #: The page's ordering key: the fact's own timestamp, read from its JSON.
 #: ``json_valid`` guards the expression so ONE corrupt imported row sorts last
-#: instead of failing the whole listing with a SQLite "malformed JSON" error
-#: (the row parser then refuses that row on its own terms).
+#: instead of failing the whole listing with a SQLite "malformed JSON" error.
+#: It does NOT make the row skippable: ``json.loads`` in :func:`_entry` raises
+#: on that row, and ``run``/``main`` catch at PAGE scope, so a corrupt row
+#: refuses its whole page (fail-closed, leaks nothing). That partial-page
+#: semantics is a known, accepted deferral (PR #2561, QA Q7) — an earlier
+#: version of this comment claimed the parser skipped the row, which it never
+#: did.
 _CREATED_AT = (
     "CASE WHEN json_valid(fact) THEN "
     "COALESCE(CAST(json_extract(fact,'$.created_at') AS REAL),0) ELSE 0 END"
@@ -135,8 +141,12 @@ def _exportable(text: Any, *, opaque: bool = True) -> bool:
 def _provenance(fact: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Safe provenance fields; refused values are dropped, never echoed.
 
-    Session IDs are structural and always pass. URIs and entry locators can
-    contain sensitive paths, so each one goes through the same guard.
+    Every string here goes through the same plain guard the write path applied
+    to the fact. That is one rule for all six fields, because each one reaches
+    the human page and ``--json``: ``author`` and ``tool`` are free text,
+    ``session`` is validated as a safe segment, and ``uri``/``entry`` can carry
+    sensitive paths. A field that happens to be legitimate passes; nothing is
+    exempted by name.
     """
     source = fact.get("source")
     if not isinstance(source, dict):
@@ -149,10 +159,14 @@ def _provenance(fact: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             continue
         # ``opaque=False`` matches the write path exactly: ``validate_fact``
         # runs its opaque title/body pass over free-text fields only, and
-        # guards ``source`` through the plain recursive ``guard(dict)``. A
-        # stricter test here would withhold locators the store accepted, which
-        # is a different (and wrong) answer than "what would the write refuse?".
-        if key in ("kind", "author", "session") or _exportable(value, opaque=False):
+        # guards the WHOLE fact — ``source`` included — through the plain
+        # recursive ``guard(dict)``. Every provenance string therefore gets
+        # that same plain pass, with no field exempt: an earlier version
+        # trusted ``author`` (free text) and echoed a card number from an
+        # imported row. ``kind`` is a closed vocabulary and ``session`` is
+        # ``safe_segment``'d + guarded at write, so both pass unchanged — that
+        # is verified in the tests, not assumed.
+        if _exportable(value, opaque=False):
             kept[key] = value
         else:
             redacted = True
@@ -249,11 +263,20 @@ def _entry(row: sqlite3.Row, now: float, team_id: str) -> dict[str, Any]:
             haystack += "\n" + "\n".join(str(item) for item in value)
     markers = work_progress_markers(haystack)
     created_at = fact.get("created_at")
+    # ``status`` is echoed raw into the row bracket (and ``origin`` is derived
+    # from it), so it is gated by the same closed vocabulary ``validate_fact``
+    # enforces rather than repeated as found: an imported row can carry any
+    # string here, and this listing shows exactly what a write would accept.
+    # "unknown" is the existing fallback for a missing status and states the
+    # truth for a value we refuse to repeat.
+    status = fact.get("status")
+    if not isinstance(status, str) or status not in FACT_STATUSES:
+        status = "unknown"
     return {
         "id": row["entity_id"],
         "reference": f"{scope}/{row['entity_id']}",
         "scope": scope,
-        "status": fact.get("status") or "unknown",
+        "status": status,
         "origin": origin_label(fact),
         "created_at": created_at if isinstance(created_at, (int, float)) else None,
         "age_seconds": (
@@ -320,6 +343,10 @@ def inspect_entries(
         "entries": [],
         "has_more": False,
         "next_cursor": None,
+        #: True when the supplied cursor no longer names an authorized row (the
+        #: entry was forgotten or re-scoped since it was printed). The page is
+        #: then empty BY THE CURSOR, not by the store, so counts stay real.
+        "cursor_stale": False,
         "help": HELP,
     }
     if not store.path.exists():
@@ -337,6 +364,7 @@ def inspect_entries(
                 return report
             page_where = where
             page_values: list[Any] = list(values)
+            cursor_stale = False
             if cursor:
                 # The cursor's ordering key is read under the same predicate as
                 # the page: a cursor naming another owner's row yields an empty
@@ -346,18 +374,28 @@ def inspect_entries(
                     [*values, cursor],
                 ).fetchone()
                 if anchor is None:
-                    return report
-                page_where = f"{where} AND ({_CREATED_AT},entity_id)<(?,?)"
-                page_values = [*values, float(anchor[0]), cursor]
-            rows = db.execute(
-                "SELECT entity_id,scope,op_id,fact,"
-                "(SELECT count(*) FROM ops o WHERE o.entity_id=current.entity_id) "
-                f"AS revisions FROM current WHERE {page_where} "
-                f"ORDER BY {_CREATED_AT} DESC,entity_id DESC LIMIT ?",
-                # One extra row answers "is there more?" truthfully instead of
-                # treating a full page as proof of a next one.
-                [*page_values, limit + 1],
-            ).fetchall()
+                    # Do NOT return here: the totals query below is
+                    # cursor-independent, so returning early left ``counts`` at
+                    # zero and the page claimed "Nothing retained in these
+                    # scopes" while the store held entries. An auditing tool
+                    # must never say that because a cursor aged out.
+                    cursor_stale = True
+                else:
+                    page_where = f"{where} AND ({_CREATED_AT},entity_id)<(?,?)"
+                    page_values = [*values, float(anchor[0]), cursor]
+            rows = (
+                []
+                if cursor_stale
+                else db.execute(
+                    "SELECT entity_id,scope,op_id,fact,"
+                    "(SELECT count(*) FROM ops o WHERE o.entity_id=current.entity_id) "
+                    f"AS revisions FROM current WHERE {page_where} "
+                    f"ORDER BY {_CREATED_AT} DESC,entity_id DESC LIMIT ?",
+                    # One extra row answers "is there more?" truthfully instead of
+                    # treating a full page as proof of a next one.
+                    [*page_values, limit + 1],
+                ).fetchall()
+            )
             totals = db.execute(
                 f"SELECT scope,count(*) FROM current WHERE {where} GROUP BY scope", values
             ).fetchall()
@@ -369,6 +407,7 @@ def inspect_entries(
         ) from exc
     has_more = len(rows) > limit
     page = rows[:limit]
+    report["cursor_stale"] = cursor_stale
     by_scope = {str(row[0]): int(row[1]) for row in totals}
     report["counts"]["by_scope"] = by_scope
     report["counts"]["total"] = sum(by_scope.values())
