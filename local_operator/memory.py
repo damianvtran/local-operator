@@ -23,6 +23,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -484,6 +485,37 @@ def origin_label(fact: dict[str, Any]) -> str:
 
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def suggest_line(item: Mapping[str, Any]) -> str:
+    """The single rendered line a suggestion actually costs on the wire.
+
+    ONE authority for this string, for two readers that must agree: the
+    prompt tail (``memory_capture._session_tail``) renders it, and the
+    suggestion budget in :meth:`MemoryStore.search` measures it. Before this
+    existed the budget measured ``_dump(item)`` — the whole candidate record,
+    ~87-90 tokens against the 32-35 the rendered line costs — so the
+    documented ``tokens=180, limit=3`` admitted only TWO candidates and
+    silently crowded out the third relevant fact in every measured fixture.
+    """
+    captured = " (captured)" if item["status"] == "candidate" else ""
+    return f"- memory://{item['scope']}/{item['id']}: {json.dumps(item['title'])}{captured}\n"
+
+
+def _suggestion_key(fact: Mapping[str, Any]) -> str:
+    """Identity of a suggestion by its FACT, not its record.
+
+    Distinct rows often carry one fact: capture writes the same body under
+    slightly different titles ("Mercury deployment", "... corrected", "...
+    again"). Collapsing on the normalized body makes them cost one slot; the
+    title is only the fallback for a body-less row. Normalization is
+    whitespace/case only — a fuzzy match would merge genuinely distinct facts,
+    which is worse than showing two. Explicit ``search`` does NOT collapse
+    (a reader may legitimately want every revision), so this key is only
+    consulted on the suggestion path.
+    """
+    text = str(fact.get("body") or fact.get("title") or "")
+    return " ".join(text.lower().split())
 
 
 def _id() -> str:
@@ -1607,6 +1639,11 @@ class MemoryStore:
             ).fetchall()
             result: list[dict[str, Any]] = []
             used = 0
+            # One slot per distinct FACT on the suggestion path, keyed by body.
+            # Two rows carrying the same body are one fact and must charge the
+            # budget once, or they crowd out a distinct matching fact (measured:
+            # 2 entries / 1 fact, the third relevant fact never rendered).
+            seen: set[str] = set()
             # Document frequency is indexed, not an O(bank) Python pass. Ask FTS
             # itself for per-term matches so porter stemming cannot disagree.
             authorized_count = db.execute(
@@ -1638,6 +1675,10 @@ class MemoryStore:
                     coverage = len(hits) / len(terms)
                     if not ((len(hits) >= 2 and coverage >= 0.4) or (specific and coverage >= 0.5)):
                         continue
+                    key = _suggestion_key(fact)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                 item = {
                     "id": row[0],
                     "scope": row[1],
@@ -1654,7 +1695,13 @@ class MemoryStore:
                         verified_at=fact["verified_at"],
                         expires_at=fact["expires_at"],
                     )
-                cost = count_text_tokens(_dump(item))
+                # The suggestion budget is a WIRE budget: charge what the tail
+                # actually renders (one line), not the full candidate record.
+                # ``_dump(item)`` is ~3x the rendered line, which silently made
+                # ``tokens=180, limit=3`` a 2-entry cap on every fixture. An
+                # explicit search keeps the record-shaped charge, since that is
+                # what a caller receives there.
+                cost = count_text_tokens(suggest_line(item) if suggest else _dump(item))
                 if used + cost <= tokens:
                     result.append(item)
                     used += cost

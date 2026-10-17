@@ -238,6 +238,7 @@ from local_operator.projects import (
     stale_projects_for_session,
 )
 from local_operator.prompts_api import (
+    ADVISORY_TAIL_SECTIONS,
     STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
     assemble_system_block_sections,
@@ -5914,6 +5915,21 @@ class Session:
         A section's value is the exact piece text; ``""`` says the
         section is gone (the goal gated off, the team brief cleared) and must
         still be shipped, or the model keeps reading the old snapshot.
+
+        ADVISORY sections (:data:`ADVISORY_TAIL_SECTIONS` — memory suggestions
+        and the compaction hint) additionally skip a change whose EXACT new
+        text the model can still read in the frozen prefix or in a surviving
+        ``[session-state]`` record. Without that, the baseline is the previous
+        turn's DESIRED state, so a recall set that was frozen into the prefix,
+        dropped when the next message did not match, and then re-produced
+        verbatim on a later turn is appended again every time: measured on the
+        real wire as 4 verbatim copies / 352 tokens / 9.68% of the request by
+        turn 8, for ONE distinct fact. Skipping is safe only because these
+        sections are untrusted, best-effort hints — their content is already
+        in front of the model, and the removal record still ships when the
+        section genuinely goes away. Prefix stability is untouched: this only
+        suppresses an APPEND, never a rewrite, so the frozen prefix and every
+        committed message stay byte-identical.
         """
         previous = self._last_system_blocks or self._frozen_system_blocks or desired
         # Compaction may replace the record that carried the latest state.
@@ -5936,6 +5952,7 @@ class Session:
             # the tool inventory and the interactivity block re-sent unchanged.
             previous = self._visible_state_blocks()
         changes: dict[str, dict[str, str]] = {}
+        visible: dict[tuple[int, str], set[str]] | None = None
         for index, block in enumerate(desired):
             if index == 0:
                 continue
@@ -5946,6 +5963,21 @@ class Session:
             section_changes = {
                 name: text for name, text in sections.items() if prior.get(name) != text
             }
+            if any(
+                name in ADVISORY_TAIL_SECTIONS and text for name, text in section_changes.items()
+            ):
+                # The walk over context is only paid on the turns that could
+                # act on it; an unchanged memory section costs nothing.
+                if visible is None:
+                    visible = self._visible_advisory_texts()
+                for name in [
+                    name
+                    for name, text in section_changes.items()
+                    if name in ADVISORY_TAIL_SECTIONS
+                    and text
+                    and text in visible.get((index, name), set())
+                ]:
+                    del section_changes[name]
             section_changes.update(
                 {name: "" for name, text in prior.items() if name not in sections and text}
             )
@@ -5969,6 +6001,40 @@ class Session:
             if isinstance(message, CustomMessage) and message.custom_type == "session_state":
                 _fold_state_record(blocks, message.details.get("blocks", {}) or {})
         return blocks
+
+    def _visible_advisory_texts(self) -> dict[tuple[int, str], set[str]]:
+        """Exact advisory-section texts the model can still READ, by (index, section).
+
+        Two sources and only these: the frozen prefix (which every request
+        carries) and the ``[session-state]`` records still in
+        ``_context.messages`` — a record a compaction cut away is NOT visible,
+        so a text only it carried ships again. Unlike
+        :meth:`_visible_state_blocks`, this keeps the HISTORICAL texts rather
+        than folding to each section's latest value. The question here is
+        membership — "has this exact piece of advice already been put in front
+        of the model" — and a section's LATEST value being ``""`` (the recall
+        set came back empty) does not make the identical older copy higher up
+        unreadable. Re-shipping it then is the duplication this prevents.
+        """
+        texts: dict[tuple[int, str], set[str]] = {}
+
+        def collect(index: int, sections: Mapping[str, Any]) -> None:
+            for name, text in sections.items():
+                if text and name in ADVISORY_TAIL_SECTIONS:
+                    texts.setdefault((index, name), set()).add(str(text))
+
+        for index, block in enumerate(self._frozen_system_blocks or []):
+            collect(index, split_system_block_sections(index, block))
+        for message in self._context.messages:
+            if not (isinstance(message, CustomMessage) and message.custom_type == "session_state"):
+                continue
+            for key, value in (message.details.get("blocks", {}) or {}).items():
+                index = int(key)
+                if isinstance(value, Mapping):
+                    collect(index, {str(name): text for name, text in value.items() if text})
+                else:
+                    collect(index, split_system_block_sections(index, str(value)))
+        return texts
 
     @staticmethod
     def _system_state_message(changes: dict[str, Any]) -> CustomMessage:

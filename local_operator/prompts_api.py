@@ -1286,6 +1286,24 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("memory_hint", "<memory_hint"),
 )
 
+#: Tail sections that are ADVISORY, not authoritative state: memory suggestions
+#: and the compaction hint are untrusted, best-effort recall pointers. Two
+#: consequences the delta machinery below relies on. (1) A section that is no
+#: longer produced may be shipped as "" (the removal stays authoritative).
+#: (2) A section whose EXACT text is already visible to the model — in the
+#: frozen prefix or in a ``[session-state]`` record still in context — need not
+#: be shipped again: re-sending it buys nothing the model cannot already read.
+#: That second rule is what stops the measured duplication: a suggestion set
+#: frozen into the prefix, then dropped and re-produced verbatim on a later
+#: turn, used to be re-appended every time because the delta was compared
+#: against the previous turn's DESIRED state rather than against what the model
+#: can see (measured 4 verbatim copies, 352 tokens, 9.68% of the request by
+#: turn 8 for one distinct fact). Nothing outside this set may use the rule:
+#: for authoritative sections (goal, team, tools, credentials) the latest value
+#: must reach the model even when an older identical copy is still in context,
+#: because the intervening record may have said something else.
+ADVISORY_TAIL_SECTIONS: frozenset[str] = frozenset({"memory_suggestions", "memory_hint"})
+
 #: The order a block's sections are APPENDED in — the order ``assemble``
 #: restores and the order a delta lists changed sections in.
 _BLOCK_SECTION_ORDER: dict[int, tuple[str, ...]] = {
