@@ -1,0 +1,7 @@
+{
+  "radient_available": true,
+  "tool_available": true,
+  "base_url": "https://api.radienthq.com/v1",
+  "persisted_login_seed": true,
+  "harness_head": "4dbbc476941f0d20fa843adf25e4f7b088df8723"
+}

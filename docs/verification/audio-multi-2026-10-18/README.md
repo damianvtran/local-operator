@@ -48,11 +48,11 @@ The name/prompt/duration list in `provenance/multi10-args.json` is copied verbat
 - [Per-row playback measurements](provenance/playback10.json): each of the 10 rows was pressed independently and decoded from a local blob with distinct owner identity, positive input RMS, output RMS 0 and gain 0. The browser decoder observes 0.48 s for these MP3s; the provider/container attachment duration is 0.52244898 s. Neither is replaced with the requested 0.5 s.
 - [Generated MP3 files](audio/): these are the actual fresh attachments, named for review, never replacement/synthetic samples.
 
-## Partial-failure status (pending corrected-head capture)
+## Partial-failure status — corrected-head capture complete
 
 The first live 4-item call on harness `30fbee16` produced **3 attached successes + 1 failed item**, `is_error:false`, known billed total `$0.006`, `cost_complete:false`. The failed glass-shatter request has `http_status:400`, `error_type:audio_rejected`, null request ID/digest/cost. It did not discard siblings or invent a charge.
 
-A discriminating assertion found that this pinned harness drops the server's actionable `details.reason`, retaining only the generic error `This audio request could not be accepted.` This is a real limitation, not relabelled as a pass. The manager is landing a narrowly scoped fix; the partial render is intentionally **held** until a fresh live 4-item call on the corrected merged harness head. No detailed reason is synthesized into the original ToolResult.
+A discriminating assertion found that the original pinned harness dropped the server's actionable `details.reason`, retaining only the generic error `This audio request could not be accepted.` That original result was not relabelled as a pass or given a synthesized reason. The manager subsequently merged the narrow propagation fix (PR #2603), and the [fresh corrected-head partial capture](PARTIAL.md) now verifies three playable successes plus the real failed row and actionable reason on merged harness **`4dbbc476941f0d20fa843adf25e4f7b088df8723`**. The UI stays pinned to **`5ffa8dfcb19790e2e3ecb2879ed1e4f7b95c7592`**; ten-item provenance retains its original harness pin.
 
 [Fresh raw HTTP 400 response](provenance/fresh-raw400.json), independently repeated against production with the same persisted identity and invalid duration (no audio/no charge):
 
@@ -87,4 +87,4 @@ Actual preflight: history HTTP 200; production reducer preserves all 10 attachme
 
 One failed rig attempt omitted the production `provider_payload.details` carrier; it was corrected and the reducer preflight strengthened before the successful dispatch. A later image preflight caught the Mac glass default's nonopaque alpha; those frames are not published, and the final capture uses the app's ordinary explicit opaque preference. No paid regeneration was needed for either rig correction.
 
-No fabricated loading/pending frame is supplied: the visible captures replay actual completed fresh results. Actual generation progress updates are retained with elapsed timestamps; they are not portrayed as a continuously live UI stream. No new code review, full suite, merge or release is claimed by this evidence task. Partial-failure final capture and operator review remain outstanding gates.
+No fabricated loading/pending frame is supplied: the visible captures replay actual completed fresh results. Actual generation progress updates are retained with elapsed timestamps; they are not portrayed as a continuously live UI stream. No new code review, full suite, merge or release is claimed by this evidence task. The [partial-failure final capture](PARTIAL.md) is now supplied on the corrected merged harness; operator review and release authorization remain outstanding gates.

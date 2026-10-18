@@ -1,0 +1,244 @@
+
+> local-operator-ui@0.35.1 prebuild /Users/damian/local-operator-ui/.worktrees/multi-capture-626a
+> node ./bin/ensure-electron.js
+
+
+> local-operator-ui@0.35.1 build /Users/damian/local-operator-ui/.worktrees/multi-capture-626a
+> electron-vite build
+
+vite v6.2.6 building SSR bundle for production...
+transforming...
+✓ 393 modules transformed.
+[BABEL] Note: The code generator has deoptimised the styling of undefined as it exceeds the max of 500KB.
+rendering chunks...
+out/main/bytecode-loader.cjs      2.31 kB
+out/main/index.js             2,627.28 kB
+✓ built in 1.68s
+✓ 1 bundles compiled into bytecode.
+out/main/index.jsc   2787.69 kB
+vite v6.2.6 building SSR bundle for production...
+transforming...
+✓ 16 modules transformed.
+rendering chunks...
+out/preload/index.js  187.75 kB
+✓ built in 106ms
+vite v6.2.6 building for production...
+transforming...
+Found 4 warnings while optimizing generated CSS:
+
+Issue #1:
+[2m│     background-color: var(--color-ink-disabled);[22m
+[2m│   }[22m
+[2m│[22m   .\[\&\:\:highlight\(current-find-highlight\)\]\:bg-accent::highlight(current-find-highlight) {
+[2m┆[22m                                                                        [33m[2m^--[22m 'highlight' is not recognized as a valid pseudo-element. Did you mean ':highlight' (pseudo-class) or is this a typo?[39m
+[2m┆[22m
+[2m│     background-color: var(--color-accent);[22m
+[2m│   }[22m
+
+Issue #2:
+[2m│     background-color: var(--color-accent);[22m
+[2m│   }[22m
+[2m│[22m   .\[\&\:\:highlight\(current-find-highlight\)\]\:text-on-accent::highlight(current-find-highlight) {
+[2m┆[22m                                                                             [33m[2m^--[22m 'highlight' is not recognized as a valid pseudo-element. Did you mean ':highlight' (pseudo-class) or is this a typo?[39m
+[2m┆[22m
+[2m│     color: var(--color-on-accent);[22m
+[2m│   }[22m
+
+Issue #3:
+[2m│     color: var(--color-on-accent);[22m
+[2m│   }[22m
+[2m│[22m   .\[\&\:\:highlight\(find-highlight\)\]\:bg-accent-wash::highlight(find-highlight) {
+[2m┆[22m                                                                     [33m[2m^--[22m 'highlight' is not recognized as a valid pseudo-element. Did you mean ':highlight' (pseudo-class) or is this a typo?[39m
+[2m┆[22m
+[2m│     background-color: var(--color-accent-wash);[22m
+[2m│   }[22m
+
+Issue #4:
+[2m│     background-color: var(--color-accent-wash);[22m
+[2m│   }[22m
+[2m│[22m   .\[\&\:\:highlight\(find-highlight\)\]\:text-ink::highlight(find-highlight) {
+[2m┆[22m                                                               [33m[2m^--[22m 'highlight' is not recognized as a valid pseudo-element. Did you mean ':highlight' (pseudo-class) or is this a typo?[39m
+[2m┆[22m
+[2m│     color: var(--color-ink);[22m
+[2m│   }[22m
+
+✓ 6808 modules transformed.
+rendering chunks...
+../../out/renderer/console-capture.html                                   0.84 kB
+../../out/renderer/installer.html                                         0.93 kB
+../../out/renderer/mini.html                                              1.02 kB
+../../out/renderer/index.html                                             3.95 kB
+../../out/renderer/assets/KaTeX_Size3-Regular-CTq5MqoE.woff               4.42 kB
+../../out/renderer/assets/KaTeX_Size4-Regular-Dl5lxZxV.woff2              4.93 kB
+../../out/renderer/assets/KaTeX_Size2-Regular-Dy4dx90m.woff2              5.21 kB
+../../out/renderer/assets/KaTeX_Size1-Regular-mCD8mA8B.woff2              5.47 kB
+../../out/renderer/assets/KaTeX_Size4-Regular-BF-4gkZK.woff               5.98 kB
+../../out/renderer/assets/KaTeX_Size2-Regular-oD1tc_U0.woff               6.19 kB
+../../out/renderer/assets/KaTeX_Size1-Regular-C195tn64.woff               6.50 kB
+../../out/renderer/assets/KaTeX_Caligraphic-Regular-Di6jR-x-.woff2        6.91 kB
+../../out/renderer/assets/KaTeX_Caligraphic-Bold-Dq_IR9rO.woff2           6.91 kB
+../../out/renderer/assets/brand-mark-Bv0Hu-Cz.png                         6.95 kB
+../../out/renderer/assets/KaTeX_Size3-Regular-DgpXs0kz.ttf                7.59 kB
+../../out/renderer/assets/KaTeX_Caligraphic-Regular-CTRA-rTL.woff         7.66 kB
+../../out/renderer/assets/KaTeX_Caligraphic-Bold-BEiXGLvX.woff            7.72 kB
+../../out/renderer/assets/KaTeX_Script-Regular-D3wIWfF6.woff2             9.64 kB
+../../out/renderer/assets/KaTeX_SansSerif-Regular-DDBCnlJ7.woff2         10.34 kB
+../../out/renderer/assets/KaTeX_Size4-Regular-DWFBv043.ttf               10.36 kB
+../../out/renderer/assets/KaTeX_Script-Regular-D5yQViql.woff             10.59 kB
+../../out/renderer/assets/KaTeX_Fraktur-Regular-CTYiF6lA.woff2           11.32 kB
+../../out/renderer/assets/KaTeX_Fraktur-Bold-CL6g_b3V.woff2              11.35 kB
+../../out/renderer/assets/KaTeX_Size2-Regular-B7gKUWhC.ttf               11.51 kB
+../../out/renderer/assets/KaTeX_SansSerif-Italic-C3H0VqGB.woff2          12.03 kB
+../../out/renderer/assets/KaTeX_SansSerif-Bold-D1sUS0GD.woff2            12.22 kB
+../../out/renderer/assets/KaTeX_Size1-Regular-Dbsnue_I.ttf               12.23 kB
+../../out/renderer/assets/KaTeX_SansSerif-Regular-CS6fqUqJ.woff          12.32 kB
+../../out/renderer/assets/KaTeX_Caligraphic-Regular-wX97UBjC.ttf         12.34 kB
+../../out/renderer/assets/KaTeX_Caligraphic-Bold-ATXxdsX0.ttf            12.37 kB
+../../out/renderer/assets/KaTeX_Fraktur-Regular-Dxdc4cR9.woff            13.21 kB
+../../out/renderer/assets/KaTeX_Fraktur-Bold-BsDP51OF.woff               13.30 kB
+../../out/renderer/assets/KaTeX_Typewriter-Regular-CO6r4hn1.woff2        13.57 kB
+../../out/renderer/assets/KaTeX_SansSerif-Italic-DN2j7dab.woff           14.11 kB
+../../out/renderer/assets/KaTeX_SansSerif-Bold-DbIhKOiC.woff             14.41 kB
+../../out/renderer/assets/KaTeX_Typewriter-Regular-C0xS9mPB.woff         16.03 kB
+../../out/renderer/assets/KaTeX_Math-BoldItalic-CZnvNsCZ.woff2           16.40 kB
+../../out/renderer/assets/KaTeX_Math-Italic-t53AETM-.woff2               16.44 kB
+../../out/renderer/assets/KaTeX_Script-Regular-C5JkGWo-.ttf              16.65 kB
+../../out/renderer/assets/KaTeX_Main-BoldItalic-DxDJ3AOS.woff2           16.78 kB
+../../out/renderer/assets/KaTeX_Main-Italic-NWA7e6Wa.woff2               16.99 kB
+../../out/renderer/assets/KaTeX_Math-BoldItalic-iY-2wyZ7.woff            18.67 kB
+../../out/renderer/assets/KaTeX_Math-Italic-DA0__PXp.woff                18.75 kB
+../../out/renderer/assets/KaTeX_Main-BoldItalic-SpSLRI95.woff            19.41 kB
+../../out/renderer/assets/KaTeX_SansSerif-Regular-BNo7hRIc.ttf           19.44 kB
+../../out/renderer/assets/KaTeX_Fraktur-Regular-CB_wures.ttf             19.57 kB
+../../out/renderer/assets/KaTeX_Fraktur-Bold-BdnERNNW.ttf                19.58 kB
+../../out/renderer/assets/KaTeX_Main-Italic-BMLOBm91.woff                19.68 kB
+../../out/renderer/assets/KaTeX_SansSerif-Italic-YYjJ1zSn.ttf            22.36 kB
+../../out/renderer/assets/KaTeX_SansSerif-Bold-CFMepnvq.ttf              24.50 kB
+../../out/renderer/assets/KaTeX_Main-Bold-Cx986IdX.woff2                 25.32 kB
+../../out/renderer/assets/KaTeX_Main-Regular-B22Nviop.woff2              26.27 kB
+../../out/renderer/assets/KaTeX_Typewriter-Regular-D3Ib7_Hf.ttf          27.56 kB
+../../out/renderer/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2               28.08 kB
+../../out/renderer/assets/KaTeX_Main-Bold-Jm3AIy58.woff                  29.91 kB
+../../out/renderer/assets/KaTeX_Main-Regular-Dr94JaBh.woff               30.77 kB
+../../out/renderer/assets/KaTeX_Math-BoldItalic-B3XSjfu4.ttf             31.20 kB
+../../out/renderer/assets/KaTeX_Math-Italic-flOr_0UB.ttf                 31.31 kB
+../../out/renderer/assets/KaTeX_Main-BoldItalic-DzxPMmG6.ttf             32.97 kB
+../../out/renderer/assets/KaTeX_AMS-Regular-DMm9YOAa.woff                33.52 kB
+../../out/renderer/assets/KaTeX_Main-Italic-3WenGoN9.ttf                 33.58 kB
+../../out/renderer/assets/KaTeX_Main-Bold-waoOVXN0.ttf                   51.34 kB
+../../out/renderer/assets/radient-icon-1024x1024-D_JJedvo.png            53.27 kB
+../../out/renderer/assets/KaTeX_Main-Regular-ypZvNtVU.ttf                53.58 kB
+../../out/renderer/assets/KaTeX_AMS-Regular-DRggAlZN.ttf                 63.63 kB
+../../out/renderer/assets/RobotoMono-Regular-BCiLwUa1.ttf                78.99 kB
+../../out/renderer/assets/RobotoMono-Bold-CA4NrfZm.ttf                   79.16 kB
+../../out/renderer/assets/chat-input-CU-CA7Se.png                        92.88 kB
+../../out/renderer/assets/inline-edit-canvas-O9conTkE.png               143.94 kB
+../../out/renderer/assets/canvas-variables-view-DrA20zqs.png            172.33 kB
+../../out/renderer/assets/canvas-code-inline-edit-DLji9b0m.png          239.14 kB
+../../out/renderer/assets/chat-attachments-_3cRrONU.png                 286.76 kB
+../../out/renderer/assets/agentic-sequence-CExfswgi.png                 433.83 kB
+../../out/renderer/assets/canvas-overview-CruGEIRC.png                  565.74 kB
+../../out/renderer/assets/icon-tV2fhamD.png                           1,109.49 kB
+../../out/renderer/assets/chat-full-view-e-eJPzrw.png                 1,292.44 kB
+../../out/renderer/assets/GeistMonoNerdFontMono-Regular-CWdDX7GJ.otf  2,244.66 kB
+../../out/renderer/assets/GeistMonoNerdFontMono-Bold-B9bGosAz.otf     2,251.54 kB
+../../out/renderer/assets/conversation-input-sync-CAX4_ErH.css            3.34 kB
+../../out/renderer/assets/console-mirror-DOrYoP_4.css                     5.18 kB
+../../out/renderer/assets/index-DHKnfVbX.css                              6.07 kB
+../../out/renderer/assets/katex-BCx1q_2Y.css                             28.46 kB
+../../out/renderer/assets/index-DstdCAdq.css                            198.11 kB
+../../out/renderer/assets/clone-DcfMgKKm.js                               0.10 kB
+../../out/renderer/assets/channel-C9VGAz56.js                             0.11 kB
+../../out/renderer/assets/chunk-XZIHB7SX-CYmnCs5L.js                      0.20 kB
+../../out/renderer/assets/chunk-4BMEZGHF-SHqFws04.js                      0.23 kB
+../../out/renderer/assets/org-surface-gate-CBNLhWv_.js                    0.27 kB
+../../out/renderer/assets/browser-page-CuDDHK2q.js                        0.43 kB
+../../out/renderer/assets/book-open-C65LfbfB.js                           0.46 kB
+../../out/renderer/assets/stateDiagram-v2-YXO3MK2T-X3Ns-hVC.js            0.48 kB
+../../out/renderer/assets/classDiagram-GIVACNV2-BMBINPWe.js               0.48 kB
+../../out/renderer/assets/classDiagram-v2-COTLJTTW-BMBINPWe.js            0.48 kB
+../../out/renderer/assets/page-header-Ch4j7oI6.js                         0.55 kB
+../../out/renderer/assets/use-session-snapshot-uer-SmeL.js                0.63 kB
+../../out/renderer/assets/notebook-pen-D8RjZqVC.js                        0.66 kB
+../../out/renderer/assets/chunk-RZ5BOZE2-D6abR4S0.js                      0.68 kB
+../../out/renderer/assets/infoDiagram-PH2N3AL5-CzcbcpbM.js                0.81 kB
+../../out/renderer/assets/consoleCapture-DN8X9Ugb.js                      1.29 kB
+../../out/renderer/assets/radient-auth-buttons-CKdVfLoP.js                1.41 kB
+../../out/renderer/assets/chunk-D6G4REZN-Be8lSRMe.js                      1.44 kB
+../../out/renderer/assets/rpm-CTu-6PCP.js                                 1.62 kB
+../../out/renderer/assets/_basePickBy-BtJ7K11T.js                         2.59 kB
+../../out/renderer/assets/parseISO-BHJWTxrA.js                            2.76 kB
+../../out/renderer/assets/use-memberships-query-m2Qukvbd.js               2.97 kB
+../../out/renderer/assets/arc-BPgaTnYV.js                                 3.44 kB
+../../out/renderer/assets/org-access-NmR49NNI.js                          3.72 kB
+../../out/renderer/assets/diagram-VNBRO52H-D9D5-z_O.js                    3.86 kB
+../../out/renderer/assets/asn1-EdZsLKOL.js                                3.98 kB
+../../out/renderer/assets/ttcn-cfg-B9xdYoR4.js                            4.05 kB
+../../out/renderer/assets/mllike-CXdrOF99.js                              4.79 kB
+../../out/renderer/assets/pieDiagram-IB7DONF6-BROQiWix.js                 5.01 kB
+../../out/renderer/assets/graph-aI-0x5lx.js                               5.92 kB
+../../out/renderer/assets/diagram-SSKATNLV-DSa7rZax.js                    6.03 kB
+../../out/renderer/assets/browser-webauthn-prompt-BeA3yqtp.js             6.06 kB
+../../out/renderer/assets/python-BuPzkPfP.js                              6.48 kB
+../../out/renderer/assets/pug-DukmZTjD.js                                 6.67 kB
+../../out/renderer/assets/en-US-CHJkXXr4.js                               7.71 kB
+../../out/renderer/assets/installer-DArqAYep.js                           9.08 kB
+../../out/renderer/assets/stateDiagram-DGXRK772-Adwflt_-.js              10.78 kB
+../../out/renderer/assets/clojure-BMjYHr_A.js                            10.82 kB
+../../out/renderer/assets/dagre-OKDRZEBW-4U-JD7bX.js                     11.13 kB
+../../out/renderer/assets/publication-validation-98mgWTHQ.js             11.47 kB
+../../out/renderer/assets/_baseUniq-D3rUdYgR.js                          11.89 kB
+../../out/renderer/assets/format-esAOn2VS.js                             12.47 kB
+../../out/renderer/assets/index-D8WPrIxN.js                              12.79 kB
+../../out/renderer/assets/use-download-agent-mutation-CCOFM7xN.js        13.01 kB
+../../out/renderer/assets/mini-DZuHIT1v.js                               13.04 kB
+../../out/renderer/assets/agent-details-page-DLiSNjQd.js                 14.55 kB
+../../out/renderer/assets/javascript-qCveANmP.js                         17.08 kB
+../../out/renderer/assets/kanban-definition-NDS4AKOZ-DRlDk4vQ.js         20.26 kB
+../../out/renderer/assets/sankeyDiagram-QLVOVGJD-CCFv9GxG.js             22.13 kB
+../../out/renderer/assets/journeyDiagram-U35MCT3I-DxM2kzYW.js            22.82 kB
+../../out/renderer/assets/timeline-definition-BDJGKUSR-D7RaSA81.js       23.66 kB
+../../out/renderer/assets/gitGraphDiagram-7IBYFJ6S-B7wuERXA.js           24.19 kB
+../../out/renderer/assets/erDiagram-Q7BY3M3F-BuvKraOU.js                 25.32 kB
+../../out/renderer/assets/css-BnMrqG3P.js                                27.13 kB
+../../out/renderer/assets/layout-kLQDbUn5.js                             27.21 kB
+../../out/renderer/assets/requirementDiagram-KVF5MWMF-B8kAGiEQ.js        30.16 kB
+../../out/renderer/assets/index-BPWeReZ9.js                              30.88 kB
+../../out/renderer/assets/quadrantDiagram-7GDLP6J5-n-Y8kJTy.js           33.87 kB
+../../out/renderer/assets/chunk-AEK57VVT-DTNu1_so.js                     34.50 kB
+../../out/renderer/assets/sql-D0XecflT.js                                37.05 kB
+../../out/renderer/assets/xychartDiagram-VJFVF3MP-DOFgf0RO.js            37.46 kB
+../../out/renderer/assets/chunk-A2AXSNBT-VjLsN7EF.js                     45.03 kB
+../../out/renderer/assets/ganttDiagram-APWFNJXF-e_FqGGAX.js              47.31 kB
+../../out/renderer/assets/mesh-page-Bs2vcWUS.js                          51.14 kB
+../../out/renderer/assets/agent-hub-page-BZmg_1qZ.js                     55.09 kB
+../../out/renderer/assets/legacy-agents-page-CREQSNL2.js                 55.75 kB
+../../out/renderer/assets/flowDiagram-4HSFHLVR-3UW7DrTj.js               60.31 kB
+../../out/renderer/assets/c4Diagram-VJAJSXHY-DABmYTZb.js                 70.25 kB
+../../out/renderer/assets/blockDiagram-JOT3LUYC-BTwfs7Z6.js              71.63 kB
+../../out/renderer/assets/sequenceDiagram-X6HHIX6F-BIj0ndDh.js           88.56 kB
+../../out/renderer/assets/agents-page-M1lq_o3A.js                       100.86 kB
+../../out/renderer/assets/mindmap-definition-ALO5MXBD-78TgrZk1.js       101.05 kB
+../../out/renderer/assets/architectureDiagram-IEHRJDOE-CeDd4lGJ.js      148.28 kB
+../../out/renderer/assets/projects-page-BhT8jidc.js                     154.33 kB
+../../out/renderer/assets/ui-preferences-store-wu8ubztI.js              164.29 kB
+../../out/renderer/assets/settings-page-CwVxIt8V.js                     172.79 kB
+../../out/renderer/assets/error-boundary-Ba0RLAEb.js                    192.75 kB
+../../out/renderer/assets/radar-MK3ICKWK-BpMJVkn0.js                    314.65 kB
+../../out/renderer/assets/console-mirror-M7tcIGks.js                    359.83 kB
+../../out/renderer/assets/schedules-page-DafdfUIU.js                    424.40 kB
+../../out/renderer/assets/cytoscape.esm-DHvQc-Lm.js                     438.64 kB
+../../out/renderer/assets/mermaid.core-0q5zKsX3.js                      459.89 kB
+../../out/renderer/assets/index-BadTTC0t.js                             740.00 kB
+../../out/renderer/assets/index-eSTW5IzI.js                           2,837.84 kB
+../../out/renderer/assets/conversation-input-sync-CWTKze6t.js         3,919.49 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 11.16s
+
+> local-operator-ui@0.35.1 postbuild /Users/damian/local-operator-ui/.worktrees/multi-capture-626a
+> chmod +x ./bin/local-operator-ui.js
+
