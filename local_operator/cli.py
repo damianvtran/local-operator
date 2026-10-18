@@ -62,6 +62,7 @@ from local_operator.env import get_env_config
 from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
+from local_operator.i18n.keys import cli_browser_help as _bh
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
@@ -72,8 +73,10 @@ from local_operator.i18n.keys import cli_logout_help as _lo
 from local_operator.i18n.keys import cli_mcp_help as _mh
 from local_operator.i18n.keys import cli_memory_help as _me
 from local_operator.i18n.keys import cli_mobile_help as _mb
+from local_operator.i18n.keys import cli_model_help as _mo
 from local_operator.i18n.keys import cli_qwencloud_help as _qc
 from local_operator.i18n.keys import cli_resume_click_help as _rc
+from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_teams_help as _th
@@ -925,65 +928,79 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
-        "browser", help="Connect the browser tool to a Chromium extension", parents=[parent_parser]
+        "browser", help=_bh.browser().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     browser_subparsers = browser_parser.add_subparsers(dest="browser_command")
-    install_browser = browser_subparsers.add_parser("install", help="Install the bridge daemon")
+    install_browser = browser_subparsers.add_parser(
+        "install", help=_bh.install().envelope(locale=help_locale)["text"]
+    )
     install_browser.add_argument("--port", type=int, default=4099)
     status_browser = browser_subparsers.add_parser(
-        "status", help="Show daemon, extension and pairing status"
+        "status", help=_bh.status().envelope(locale=help_locale)["text"]
     )
     status_browser.add_argument(
         "--repair",
         action="store_true",
-        help="Reconcile advertised state against reality: drop tabs that no longer "
-        "exist and republish a fresh heartbeat. Safe while sessions are live.",
+        help=_bh.status_repair().envelope(locale=help_locale)["text"],
     )
     for action, blurb in (
-        ("tabs", "List durable ownership records and live tabs (read-only)"),
-        ("reconcile", "Alias for 'tabs': inspect ownership without closing anything"),
+        ("tabs", _bh.tabs().envelope(locale=help_locale)["text"]),
+        ("reconcile", _bh.reconcile().envelope(locale=help_locale)["text"]),
     ):
         inventory_browser = browser_subparsers.add_parser(action, help=blurb)
         inventory_browser.add_argument(
-            "--json", action="store_true", help="machine-readable output"
+            "--json", action="store_true", help=_bh.json().envelope(locale=help_locale)["text"]
         )
     cleanup_browser = browser_subparsers.add_parser(
-        "cleanup", help="Close one proven-terminal browser owner after revalidation"
+        "cleanup", help=_bh.cleanup().envelope(locale=help_locale)["text"]
     )
     cleanup_browser.add_argument("session_id")
     cleanup_browser.add_argument("--generation", required=True)
-    cleanup_browser.add_argument("--yes", action="store_true", help="Approve this exact cleanup")
+    cleanup_browser.add_argument(
+        "--yes", action="store_true", help=_bh.cleanup_yes().envelope(locale=help_locale)["text"]
+    )
     for action in ("start", "stop", "restart"):
-        browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
-    pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
+        browser_subparsers.add_parser(
+            action, help=_bh.daemon_action(action=action).envelope(locale=help_locale)["text"]
+        )
+    pair_browser = browser_subparsers.add_parser(
+        "pair", help=_bh.pair().envelope(locale=help_locale)["text"]
+    )
     pair_browser.add_argument(
-        "--reset", action="store_true", help="Revoke the paired browser first"
+        "--reset", action="store_true", help=_bh.pair_reset().envelope(locale=help_locale)["text"]
     )
     pair_browser.add_argument(
         "--list",
         action="store_true",
-        help="List the authorised browser extensions, and which one is driving",
+        help=_bh.pair_list().envelope(locale=help_locale)["text"],
     )
     pair_browser.add_argument(
         "--revoke",
         metavar="ID-OR-LABEL",
         default=None,
-        help="Revoke ONE authorised extension (its id, an unambiguous id prefix, "
-        "or part of its label), leaving every other one paired",
+        help=_bh.pair_revoke().envelope(locale=help_locale)["text"],
     )
     drive_browser = browser_subparsers.add_parser(
-        "drive", help="Choose which authorised extension drives the browser"
+        "drive", help=_bh.drive().envelope(locale=help_locale)["text"]
     )
     drive_browser.add_argument(
-        "target", help="Extension id (or an unambiguous prefix), or part of its label"
+        "target", help=_bh.drive_target().envelope(locale=help_locale)["text"]
     )
-    logs_browser = browser_subparsers.add_parser("logs", help="Tail the daemon log")
+    logs_browser = browser_subparsers.add_parser(
+        "logs", help=_bh.logs().envelope(locale=help_locale)["text"]
+    )
     logs_browser.add_argument("--lines", type=int, default=100)
     logs_browser.add_argument("--follow", "-f", action="store_true")
-    uninstall_browser = browser_subparsers.add_parser("uninstall", help="Remove the bridge daemon")
-    uninstall_browser.add_argument("--purge", action="store_true", help="Also delete pairing state")
+    uninstall_browser = browser_subparsers.add_parser(
+        "uninstall", help=_bh.uninstall().envelope(locale=help_locale)["text"]
+    )
+    uninstall_browser.add_argument(
+        "--purge",
+        action="store_true",
+        help=_bh.uninstall_purge().envelope(locale=help_locale)["text"],
+    )
     serve_browser = browser_subparsers.add_parser(
-        "serve", help="Run the bridge daemon (foreground)"
+        "serve", help=_bh.serve().envelope(locale=help_locale)["text"]
     )
     serve_browser.add_argument("--port", type=int, default=4099)
 
@@ -993,7 +1010,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # trust boundary). See guides/peer-messaging.
     send_parser = subparsers.add_parser(
         "send",
-        help="Send a message to another local lop session (no cmux needed)",
+        help=_se.send().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
         # The exit codes ARE the contract now that one call settles four honest
         # ways (send/wake delivery design A.1, A.4), so they are stated where a
@@ -1011,38 +1028,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
     send_parser.add_argument(
         "target",
         nargs="?",
-        help=(
-            "conversation-name / session-id / cwd substring (case-insensitive). "
-            "Omit when addressing with --pid/--session; passing both is refused."
-        ),
+        help=(_se.target().envelope(locale=help_locale)["text"]),
     )
     send_parser.add_argument(
         "message",
         nargs="?",
-        help=(
-            "message text; omit to read the body from stdin. With --pid/--session "
-            "a single positional IS the message, and typing one while also piping "
-            "a body is refused."
-        ),
+        help=(_se.message().envelope(locale=help_locale)["text"]),
     )
     # Mutually exclusive because they name DIFFERENT recipients: argparse rejects
     # the pair natively ("argument --session: not allowed with argument --pid"),
     # which is a better error than anything hand-written here, and it removes a
     # whole branch from _bind_send_positionals below.
     send_selector = send_parser.add_mutually_exclusive_group()
-    send_selector.add_argument("--pid", type=int, help="target by exact pid")
-    send_selector.add_argument("--session", dest="session", help="target by exact session id")
+    send_selector.add_argument(
+        "--pid", type=int, help=_se.pid().envelope(locale=help_locale)["text"]
+    )
+    send_selector.add_argument(
+        "--session", dest="session", help=_se.session().envelope(locale=help_locale)["text"]
+    )
     send_parser.add_argument(
         "--now",
         "--steer",
         dest="steer",
         action="store_true",
-        help="inject mid-turn (steer) instead of the default mailbox",
+        help=_se.steer().envelope(locale=help_locale)["text"],
     )
     send_parser.add_argument(
         "--wake",
         action="store_true",
-        help="if the target is idle, drive a turn now (mailbox mode only)",
+        help=_se.wake().envelope(locale=help_locale)["text"],
     )
 
     # `lop model`: switch ANOTHER live session's model (design D4). Its own
@@ -1051,26 +1065,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # one of its rules. Same selector flags and the same resolver as `lop send`.
     model_parser = subparsers.add_parser(
         "model",
-        help="Switch another running lop session's model (like /model there)",
+        help=_mo.model().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     model_parser.add_argument(
         "target",
         nargs="?",
-        help=(
-            "conversation-name / session-id / cwd substring (case-insensitive). "
-            "Omit when addressing with --pid/--session."
-        ),
+        help=(_mo.target().envelope(locale=help_locale)["text"]),
     )
     model_parser.add_argument(
         "selector",
         nargs="?",
         metavar="provider/model",
-        help="the model to switch to, e.g. deepseek/deepseek-flash",
+        help=_mo.selector().envelope(locale=help_locale)["text"],
     )
     model_selector = model_parser.add_mutually_exclusive_group()
-    model_selector.add_argument("--pid", type=int, help="target by exact pid")
-    model_selector.add_argument("--session", dest="session", help="target by exact session id")
+    model_selector.add_argument(
+        "--pid", type=int, help=_mo.pid().envelope(locale=help_locale)["text"]
+    )
+    model_selector.add_argument(
+        "--session", dest="session", help=_mo.session().envelope(locale=help_locale)["text"]
+    )
 
     sessions_parser = subparsers.add_parser(
         "sessions",

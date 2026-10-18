@@ -1,0 +1,9 @@
+{
+  "cli.send_help.send": "Send a message to another local lop session (no cmux needed)",
+  "cli.send_help.target": "conversation-name / session-id / cwd substring (case-insensitive). Omit when addressing with --pid/--session; passing both is refused.",
+  "cli.send_help.message": "message text; omit to read the body from stdin. With --pid/--session a single positional IS the message, and typing one while also piping a body is refused.",
+  "cli.send_help.pid": "target by exact pid",
+  "cli.send_help.session": "target by exact session id",
+  "cli.send_help.steer": "inject mid-turn (steer) instead of the default mailbox",
+  "cli.send_help.wake": "if the target is idle, drive a turn now (mailbox mode only)"
+}
