@@ -94,6 +94,16 @@ def _prompt(view: Any) -> MilestonePrompt:
     return prompt
 
 
+def _hint_text(view: Any) -> str:
+    """The painted hint row, whitespace-normalised (key and label sit 2 cells apart)."""
+    painted = " ".join(
+        hint.rendered()
+        for hint in view._hints.children
+        if isinstance(hint, HintButton) and hint.display
+    )
+    return " ".join(painted.split())
+
+
 def _dump(tmp_path: Path, name: str = "parity-spec") -> dict[str, Any]:
     project = _store(tmp_path).get_project_by_name(name)
     assert project is not None
@@ -650,6 +660,65 @@ async def test_a_create_opened_after_an_edit_is_still_a_fresh_create(
         assert page._description.text.startswith("## Summary")
         assert any("follows the title" in row for row in view.rendered_rows())
         assert any("projects · new project" in row for row in view.rendered_rows())
+
+
+# ---------------------------------------------------------------------------
+# Discoverability: the page's own keys at the standard terminal sizes
+# ---------------------------------------------------------------------------
+
+
+async def test_the_detail_footer_advertises_edit_add_and_remove_at_100_columns(
+    tmp_path: Path,
+) -> None:
+    """LOH-19 P2's keys must be DISCOVERABLE, not merely work.
+
+    At 100x30 the page measures 96 cells, so the footer has 94. The row
+    measured for a milestone selection is
+    `↑↓ move · pgup/pgdn page · ↵ toggle groundwork · e edit · a add ·
+    x remove · esc back` = 91 cells; `r refresh` would make it 104 and is the
+    first of the canvas-era extras to shed.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        row = _hint_text(view)
+        assert "e edit" in row, row
+        assert "a add" in row, row
+        assert "x remove" in row, row
+        assert "toggle groundwork" in row, row
+        assert "r refresh" not in row, row
+
+
+async def test_the_detail_footer_keeps_edit_and_add_at_the_60_column_floor(
+    tmp_path: Path,
+) -> None:
+    """At 60x24 the named context sheds first, never the keys.
+
+    The page measures 56 cells, so the footer has 54. With the named context
+    the row needs 61; the bare verb brings it to
+    `↑↓ move · ↵ toggle · e edit · a add · esc back` = 50. `x remove` needs 12
+    more cells and genuinely does not fit there — it is unadvertised and
+    still works.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        row = _hint_text(view)
+        assert "e edit" in row, row
+        assert "a add" in row, row
+        assert "↵ toggle" in row, row
+        assert "toggle groundwork" not in row, row
+        assert "x remove" not in row, row
 
 
 # ---------------------------------------------------------------------------

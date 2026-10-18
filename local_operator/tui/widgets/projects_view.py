@@ -1779,14 +1779,20 @@ class ProjectsView(Vertical):
     def _detail_hint_rungs(
         self,
     ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
-        """The detail page's ladder — P2's subset of the spec's §3.3 row.
+        """The detail page's ladder — §3.3's row, shed by measured priority.
 
-        ``↑↓ move · pgup/pgdn page · ↵ <context> · r refresh · esc back``:
-        only what WORKS on this slice (`m`/`s`/`e` land with P4–P6; a hinted
-        key that does nothing is the failure the page's own rules name), and
-        the `↵` label is the selected row's VERB — ``open`` on a session,
-        ``toggle`` on a milestone — inside the shipped slot (spec §3.2/10.3).
-        ``esc`` pops one level here, so its label is ``back`` at every rung.
+        The page's OWN keys lead at the standard sizes: at 100x30 the row is
+        ``↑↓ move · pgup/pgdn page · ↵ <context> · e edit · a add · x remove ·
+        esc back`` (91 cells against the 94 the footer offers), and at 60x24
+        the context sheds its NAME so ``e edit · a add`` still fit
+        (``↑↓ move · ↵ toggle · e edit · a add · esc back`` = 50 against 54).
+        The canvas-era extras (``m message``, ``s start``, ``r refresh``) then
+        ride only the widths where they still fit: they are additions to the
+        detail page, not its reason. Only keys that WORK are hinted (a hinted
+        key that does nothing is the failure the page's own rules name), the
+        ``↵`` label is the selected row's verb — ``open`` on a session,
+        ``toggle`` on a milestone — and ``esc`` pops one level, so its label is
+        ``back`` wherever the row can hold it.
         """
 
         def rung(
@@ -1847,18 +1853,37 @@ class ProjectsView(Vertical):
                     True,
                 )
             )
-        # `e edit` / `a add milestone` / `x remove` (LOH-19 P2). Additive-only
-        # rungs, on the `s start` variant rule: each rung that carries them is
-        # the SHIPPED rung plus these, so a new key can never displace a
-        # shipped label at any budget. `x` is armed only on a milestone row —
-        # it removes what the cursor names; `e`/`a` act on the page itself.
-        actions: list[tuple[HintButton, str, bool]] = [
-            (self._edit_hint, f" {_te(copy_edit.hint_edit())}", True),
-            (self._add_hint, f" {_te(copy_edit.hint_add_milestone())}", True),
-        ]
+        # `e edit` / `a add` / `x remove` (LOH-19 P2) are this page's OWN
+        # keys, so they outrank the canvas-era extras (`m message`, `s start`,
+        # `r refresh`) rather than riding a rung only a ~140-column terminal
+        # reaches. MEASURED, against the footer's own budget (`size.width - 2`;
+        # the page measures 96 at a 100-column terminal and 56 at 60):
+        #   * 100 columns, 94 available: `↑↓ move · pgup/pgdn page ·
+        #     ↵ toggle groundwork · e edit · a add · x remove · esc back` = 91
+        #     cells, so it fits; the same row with `m message` is 104 and must
+        #     shed it, and the long `add milestone` label is 101 on its own.
+        #     The SHORT `add` word is load-bearing at this width.
+        #   * 60 columns, 54 available: the named context (23 cells) cannot
+        #     coexist with both keys, so it sheds to the bare verb and the row
+        #     reads `↑↓ move · ↵ toggle · e edit · a add · esc back` = 50.
+        #     `x remove` (12 more) genuinely does not fit there and stays
+        #     unadvertised; it still WORKS, and it is advertised from ~62 up.
+        # `x` is carried only while a milestone row is selected — it removes
+        # what the cursor names; `e`/`a` act on the page itself. The wider
+        # rungs keep the long `add milestone` word so the key's fuller name is
+        # still stated where there is room for it.
+        edit = (self._edit_hint, f" {_te(copy_edit.hint_edit())}", True)
+        add = (self._add_hint, f" {_te(copy_edit.hint_add())}", True)
+        add_long = (self._add_hint, f" {_te(copy_edit.hint_add_milestone())}", True)
+        remove = (self._remove_hint, f" {_te(copy_edit.hint_remove_milestone())}", True)
+        actions: list[tuple[HintButton, str, bool]] = [edit, add]
+        wide_actions: list[tuple[HintButton, str, bool]] = [edit, add_long]
         if self._detail_page.selected_milestone() is not None:
-            actions.append((self._remove_hint, f" {_te(copy_edit.hint_remove_milestone())}", True))
-        head = [move, page] if named is None else [move, page, open_hint]
+            actions.append(remove)
+            wide_actions.append(remove)
+        head: list[tuple[HintButton, str, bool]] = (
+            [move, page] if named is None else [move, page, open_hint]
+        )
         # Shedding among the extras goes WIDEST LABEL FIRST, so a narrower
         # terminal keeps the cheaper key: the reader reaches `↵ open · y copy`
         # — the pair spec §3.3 names — before `space preview` (17 cells to
@@ -1867,35 +1892,78 @@ class ProjectsView(Vertical):
         variants: list[list[tuple[HintButton, str, bool]]] = [extras]
         if len(extras) > 1:
             variants.append(extras[:1])
-        if named is None:
-            return [
-                # The ONE rung carrying the new keys is a strict superset of
-                # the shipped widest rung: a key can only ADD at a wide
-                # terminal, and every narrower budget paints the shipped rows
-                # byte-for-byte (no row-scoped key returns as the terminal
-                # narrows — the ladder's monotonicity rule).
-                rung([*head, *variants[0], *actions, msg, start, refresh], "back"),
-                *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
-                rung([move, page, msg, start, refresh], "back"),
-                rung([move, page, msg, refresh], "back"),
-                rung([move, page, msg], "back"),
-                rung([move, page], "back"),
-                rung([move], ""),
-                rung([], ""),
+        # The ladder, widest first. Each rung sheds from the previous along
+        # this priority order — extras, `s start`, `r refresh`, `m message`,
+        # `pgup/pgdn page`, `x remove`, the long `add milestone` word, `a`,
+        # `e`, the context's NAME, the context key, `↑↓ move`, `esc`'s label —
+        # so a key never returns as the terminal narrows and every rung is a
+        # superset of the one after it.
+        has_remove = self._detail_page.selected_milestone() is not None
+        short: list[tuple[HintButton, str, bool]] = [edit, add]
+        wide: list[tuple[HintButton, str, bool]] = [edit, add_long]
+        if has_remove:
+            short.append(remove)
+            wide.append(remove)
+
+        def rungs_for(
+            head_row: list[tuple[HintButton, str, bool]],
+        ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+            rows = [
+                rung([*head_row, *variants[0], *wide, msg, start, refresh], "back"),
+                *(
+                    rung([*head_row, *chosen, *wide, msg, start, refresh], "back")
+                    for chosen in variants[1:]
+                ),
+                rung([*head_row, *wide, msg, start, refresh], "back"),
+                rung([*head_row, *wide, msg, refresh], "back"),
+                rung([*head_row, *short, msg, refresh], "back"),
+                rung([*head_row, *short, msg], "back"),
+                rung([*head_row, *short], "back"),
+                # Keep the CONTEXT key when the page key sheds: `↵` is the
+                # row's own action, and the page's keys shed around it.
+                rung([move, *([open_hint] if named is not None else []), *short], "back"),
             ]
-        return [
-            rung([*head, *variants[0], *actions, msg, start, refresh], "back"),
-            *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
-            rung([move, page, open_hint, msg, start, refresh], "back"),
-            rung([move, page, open_hint, msg, refresh], "back"),
-            rung([move, page, open_hint, msg], "back"),
-            rung([move, page, open_hint], "back"),
-            rung([move, open_hint], "back"),
-            rung([move, open_hint], ""),
-            rung([move, open_bare], ""),
-            rung([move], ""),
-            rung([], ""),
-        ]
+            if named is not None:
+                if has_remove:
+                    # The bare verb is what buys the 12 cells `x remove` needs
+                    # at the 60-column floor; below that the page's own keys
+                    # shed newest-last (`a`, then `e`), never the context key
+                    # first.
+                    rows.extend(
+                        [
+                            rung([move, open_hint, edit, add], "back"),
+                            rung([move, open_bare, edit, add], "back"),
+                            rung([move, open_bare, edit], ""),
+                            rung([move, open_bare], ""),
+                            rung([move], ""),
+                            rung([], ""),
+                        ]
+                    )
+                else:
+                    # A non-milestone verb is short (`open`) and both keys fit
+                    # beside it at the floor, so the name is kept until the row
+                    # can no longer hold `a`.
+                    rows.extend(
+                        [
+                            rung([move, open_hint, edit, add], "back"),
+                            rung([move, open_hint, edit], ""),
+                            rung([move, open_hint], ""),
+                            rung([move], ""),
+                            rung([], ""),
+                        ]
+                    )
+            else:
+                rows.extend(
+                    [
+                        rung([move, edit, add], "back"),
+                        rung([move, edit], ""),
+                        rung([move], ""),
+                        rung([], ""),
+                    ]
+                )
+            return rows
+
+        return rungs_for(head)
 
     def _sync_detail_hints(self) -> None:
         """Arm the detail hints against what they would act on just now.

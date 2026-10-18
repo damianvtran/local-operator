@@ -1451,9 +1451,10 @@ async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
             if size == (60, 20):
                 assert not view._open_hint.display
                 assert not view._refresh_hint.display
-    # The detail ladder itself: all P2 hints at 100; `pgup/pgdn` still shown
-    # at 60 (measured rung widths: 60-full / 47 without refresh / 29 without
-    # page / 24 without the esc label / 14 move only / esc alone).
+    # The detail ladder itself at 100x30: the page's OWN keys outrank the
+    # canvas-era extras, so `e edit · a add · x remove` are advertised and
+    # `r refresh` (which would make the row 104 cells against 94 available)
+    # is not. LOH-19 P2's discoverability fix.
     session2 = _ProjectSession()
     session2.project_registry = _rich_registry(tmp_path / "second")
     app = OperatorApp(lambda: _factory(session2))
@@ -1463,7 +1464,10 @@ async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
         await pilot.press("d")
         await pilot.pause()
         assert view._move_hint.display and view._page_hint.display
-        assert view._refresh_hint.display and view._open_hint.display
+        assert view._open_hint.display
+        assert view._edit_hint.display and view._add_hint.display
+        assert view._remove_hint.display  # a milestone row has the cursor
+        assert not view._refresh_hint.display
 
 
 async def test_d_opens_with_no_actions_and_enter_is_inert(tmp_path: Path) -> None:
