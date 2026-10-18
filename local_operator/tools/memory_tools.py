@@ -1,7 +1,8 @@
 """One scoped engine behind the tiny memory tool and memory:// read/write/edit.
 
 File edit hunks are not a safe optimistic memory protocol. For this scheme only,
-old_text is the revision token and new_text is a JSON replacement/forget command.
+old_text is the revision token and new_text is a JSON replacement/forget/move
+command (``{"move":"session"}`` moves the fact to that scope).
 Routing precedes the filesystem resolver, so a typo cannot create memory:/ files.
 """
 
@@ -377,7 +378,7 @@ def build_memory_tool():
         description=(
             "Store/recall durable personal facts across sessions: user/colleague names, "
             "locations, contacts. Temporary work: read/write/edit memory://session "
-            "(or team/agent). "
+            '(or team/agent); move with edit new_text={"move":"scope"}. '
             "Secrets/IDs: use secret; NAMEs only here."
         ),
         parameters={

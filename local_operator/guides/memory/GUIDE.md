@@ -95,8 +95,12 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
   old_text="REV", new_text='{"move":"session"}')`). The move is atomic, refuses when
   the destination would exceed its cap, keeps the fact's text, provenance and
   timestamps, and records the source as `moved_from` in the destination's history.
-  Moving to the scope it is already in is refused. Moved facts replicate to trusted
-  peers exactly like any other mutation.
+  Moving to the scope it is already in is refused. The source entity then ends
+  exactly like a forget: its own revisions are closed, not kept. A source with
+  unmerged concurrent revisions is refused, and a trusted peer holding a
+  correction the moving device never saw refuses the replication rather than
+  erase it — resolve the conflict first. Moved facts replicate to trusted peers
+  exactly like any other mutation.
 - Replace a separate old fact with `replaces:"OLD_ID"` on an explicit new store.
   Without that intent both facts stay visible, even near-duplicates. Superseded
   facts remain inspectable. Exact same-body/source repeats are idempotent;
@@ -145,7 +149,7 @@ No live-peer interoperability claim follows from isolated loopback tests.
 Settings: `memory.enabled`, `.capture`, `.suggest`, `network.memory.enabled`,
 `.scopes` and `.exclude_devices`. Inspect `lop memory status` or `/memory status`
 for policy, quotas and peer exclusions. Human inspection/correction uses
-`lop memory` / `/memory`: list, show, search, edit, forget and status. Rows print
+`lop memory` / `/memory`: list, show, search, move, edit, forget and status. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
 (automatic, unreviewed) or `stated` (deliberate). `edit ID --revision REV --body …`

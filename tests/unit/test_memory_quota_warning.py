@@ -112,6 +112,57 @@ def test_forgetting_drops_the_state_so_a_recrossing_warns_again(store, monkeypat
     assert sum(1 for result in results if result.get("warning")) == 1
 
 
+def test_guidance_is_scope_aware(store, monkeypatch):
+    monkeypatch.setattr(memory, "OWNER_TOKENS", 400)
+    warnings = _fill(store, "session", 400, 86)
+    assert warnings, "the session crossing should warn"
+    session_warning = warnings[-1]["warning"]
+    # A session->session move is refused, so session advice must not recommend it.
+    assert "move work-state facts to session" not in session_warning
+    assert "forget" in session_warning
+    # A global crossing recommends the move to session, which IS available there.
+    monkeypatch.setattr(memory, "GLOBAL_TOKENS", 400)
+    global_warnings = _fill(store, "global", 400, 86)
+    assert global_warnings, "the global crossing should warn"
+    assert "--to session" in global_warnings[-1]["warning"]
+
+
+def test_cli_edit_and_forget_receipts_carry_quota(store, monkeypatch):
+    from local_operator.memory_cli import _quota_receipt, render_human, run
+
+    item = store.put("session", fact())
+    text, failed = run(
+        f"edit session/{item['id']} --revision {item['version']} --body 'Corrected body text'",
+        config=store.root.parent,
+        identity=MemoryIdentity("session-a", "team-a", "agent-a"),
+        session_dir=store.session_dir,
+    )
+    assert not failed, text
+    assert "Quota:" in render_human(text, failed)
+    current = store.show("session", item["id"])
+    text, failed = run(
+        f"forget session/{item['id']} --revision {current['version']} --yes",
+        config=store.root.parent,
+        identity=MemoryIdentity("session-a", "team-a", "agent-a"),
+        session_dir=store.session_dir,
+    )
+    assert not failed, text
+    assert "Quota:" in render_human(text, failed)
+    # A warning, when the store returns one, is rendered by the same helper.
+    assert any("crossed" in line for line in _quota_receipt({"warning": "crossed 80%"}))
+
+
+def test_status_rejects_the_move_only_to_flag(store):
+    text, failed = run(
+        "status --to session",
+        config=store.root.parent,
+        identity=MemoryIdentity("session-a", "team-a", "agent-a"),
+        session_dir=store.session_dir,
+    )
+    assert failed
+    assert "--to applies" in text
+
+
 def test_inventory_reports_a_quota_row_per_authorized_scope(store):
     store.put("global", fact())
     store.put("session", fact())

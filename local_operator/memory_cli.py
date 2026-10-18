@@ -223,11 +223,12 @@ def execute(
     )
     store = MemoryStore(root, current, directory)
     scope = args.scope
-    if args.operation == "status":
-        return _status(root, store)
     if getattr(args, "to", None) and args.operation != "move":
         # Same rule as --limit: a silently ignored flag reads as if it applied.
+        # Checked BEFORE the status early return, which used to swallow --to.
         raise MemoryError("--to applies to `move` only.")
+    if args.operation == "status":
+        return _status(root, store)
     if args.limit is not None and args.operation != "inspect":
         # A silently ignored flag reads as a filter that was applied.
         raise MemoryError("--limit applies to `inspect` only.")
@@ -283,7 +284,12 @@ def execute(
         if len(words) > 64:
             raise MemoryError("A move accepts at most 64 memories at once.")
         try:
-            value = store.move(list(words), args.to, expected_version=args.revision or None)
+            value = store.move(
+                list(words),
+                args.to,
+                expected_version=args.revision or None,
+                scope=scope,
+            )
         except MemoryError as exc:
             if "not found" in str(exc):
                 raise MemoryError(f"{exc} List what you can see with: {prefix} list") from None
@@ -703,6 +709,25 @@ def _inspect_text(value: dict[str, Any], prefix: str) -> str:
     return "\n".join(lines)
 
 
+def _quota_receipt(value: dict[str, Any]) -> list[str]:
+    """The headroom/warning tail every WRITE receipt carries.
+
+    Centralized because four branches (moved/corrected/forgotten) must agree: the
+    store has always returned ``quota`` and ``warning``, and a receipt that drops
+    them makes the 80/90 warning invisible exactly where a write happened.
+    """
+    lines: list[str] = []
+    quota = value.get("quota") or {}
+    if quota:
+        lines += _shaped(
+            f"Quota: {quota['used_tokens']}/{quota['cap_tokens']} tokens "
+            f"({quota['percent']}%, {quota['headroom_tokens']} left)"
+        )
+    if value.get("warning"):
+        lines += _shaped(value["warning"])
+    return lines
+
+
 def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> str:
     """Readable receipt for CLI and slash command; ``--json`` keeps the raw payload."""
     if failed:
@@ -731,14 +756,7 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
                 f"Next: {prefix} show {rows[0]['to']}{value.get('context', '')} --related "
                 "(the previous scope is shown as moved_from)"
             )
-        if value.get("warning"):
-            lines += _shaped(value["warning"])
-        quota = value.get("quota") or {}
-        if quota:
-            lines.append(
-                f"Quota: {quota['used_tokens']}/{quota['cap_tokens']} tokens "
-                f"({quota['percent']}%, {quota['headroom_tokens']} left)"
-            )
+        lines += _quota_receipt(value)
         return "\n".join(lines)
     if "items" in value:
         items = value["items"]
@@ -768,6 +786,12 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         ctx = value.get("context", "")
         origin = "captured" if value["status"] == "candidate" else "stated"
         lines = [f"{ref}  [{origin} · {value['status']}]", f"Revision: {value['version']}"]
+        if value.get("moved_from"):
+            source = value["moved_from"]
+            lines += _shaped(
+                f"Moved from: {source['scope']}/{source['id']} "
+                "(its previous location; revisions there are closed)"
+            )
         if fact:
             lines += [
                 fact["title"],
@@ -811,17 +835,19 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
     if "policy" in value:
         return _status_text(value)
     if value.get("action") == "forgotten":
-        return (
-            f"Forgotten {value['reference']} — '{value.get('title', '')}'. The body is removed "
-            "here, and the removal propagates to trusted synced peers when memory sync is on. "
-            "It cannot be undone; store a new fact instead."
+        lines = _shaped(
+            f"Forgotten {value['reference']} — '{value.get('title', '')}'. The body is "
+            "removed here, and the removal propagates to trusted synced peers when memory "
+            "sync is on. It cannot be undone; store a new fact instead."
         )
+        return "\n".join(lines + _quota_receipt(value))
     if value.get("action") == "corrected":
-        return (
+        lines = _shaped(
             f"Corrected {value['reference']} — '{value.get('title', '')}'. New revision "
             f"{value['version']}; the previous one stays in history, and trusted synced "
             "peers receive the correction when memory sync is on."
         )
+        return "\n".join(lines + _quota_receipt(value))
     return f"{value.get('scope', '')}/{value.get('id', '')} [{value.get('status', '')}]"
 
 

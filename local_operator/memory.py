@@ -984,17 +984,28 @@ class MemoryStore:
         if reached <= stored:
             return view, None
         db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(reached)))
-        guidance = (
-            "Consolidate stale facts with forget, or move work-state facts to session "
-            "scope (`lop memory move ID --to session`, or edit memory:// with "
-            '{"move":"session"}).'
-        )
-        if reached >= 90:
-            guidance = (
-                "Consolidate now: writes are refused once the cap is reached. Forget "
-                "stale facts or move work-state facts to session scope (`lop memory move ID "
-                '--to session`, or edit memory:// with {"move":"session"}).'
+        # The relief must be actionable WHERE it is offered: a session->session move
+        # is refused, so telling a session owner to "move to session" is noise; for
+        # team/agent only a fact that belongs elsewhere can move.
+        if scope == "global":
+            relief = (
+                "Consolidate stale facts with forget, or move work-state facts to session "
+                "scope (`lop memory move ID --to session`)."
             )
+        elif scope == "session":
+            relief = (
+                "Consolidate this session's stale facts with forget; facts that belong in "
+                "another scope can be moved there (`lop memory move ID --to SCOPE`)."
+            )
+        else:
+            relief = (
+                "Consolidate stale facts with forget; move only facts that belong in "
+                "another scope (`lop memory move ID --to SCOPE`)."
+            )
+        if reached >= 90:
+            guidance = "Consolidate now: writes are refused once the cap is reached. " + relief
+        else:
+            guidance = relief
         shortfall = "" if view["headroom_tokens"] >= 0 else " (OVER CAP)"
         return view, (
             f"Memory quota warning: {scope} crossed {reached}% "
@@ -1217,6 +1228,7 @@ class MemoryStore:
         destination: str,
         *,
         expected_version: str | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
         """Move one or more facts to ``destination`` atomically, preserving the fact.
 
@@ -1231,13 +1243,21 @@ class MemoryStore:
         destination whose first revision PARENTS the source head, and a ``tombstone``
         at the source. The destination fact is byte-identical (text, provenance,
         created_at and every other timestamp), ``show`` reports ``moved_from`` from
-        the cross-entity parent, and the ordinary op stream replicates it. A new op
-        kind was rejected deliberately: a peer running an older release would refuse
-        the whole batch and then sit behind a permanent sequence gap.
+        the cross-entity root parent, and the ordinary op stream replicates it. A new
+        op kind was rejected deliberately: a peer running an older release would
+        refuse the whole batch and then sit behind a permanent sequence gap.
 
-        All-or-nothing: every target is resolved and validated, and the destination
-        quota is checked, before the single ``BEGIN IMMEDIATE`` transaction inserts
-        any op; any failure before commit leaves the store untouched.
+        The source tombstone is destructive exactly like a forget — it ends that
+        entity. A move therefore refuses a source that already has unmerged
+        concurrent revisions, and ``apply_ops`` refuses a move tombstone that would
+        destroy a revision the moving device never saw (the tombstone names the
+        destination op as a second parent, which is how a peer tells it apart from a
+        forget without a protocol change).
+
+        All-or-nothing: every target is resolved and validated, the destination
+        quota and the source's history caps are checked, before the single
+        ``BEGIN IMMEDIATE`` transaction inserts any op; any failure before commit
+        leaves the store untouched.
         """
         if isinstance(targets, str):
             targets = [targets]
@@ -1255,19 +1275,21 @@ class MemoryStore:
         for target in targets:
             if not isinstance(target, str) or not target.strip():
                 raise MemoryError("Every move target must be an explicit memory ID.")
-            scope, entity = self.resolve(target)
-            if (scope, entity) in seen:
-                raise MemoryError(f"{scope}/{entity} is listed twice; a move takes each fact once.")
-            seen.add((scope, entity))
-            if scope == destination:
+            source_scope, entity = self.resolve(target, scope)
+            if (source_scope, entity) in seen:
                 raise MemoryError(
-                    f"{scope}/{entity} is already in {destination}; "
+                    f"{source_scope}/{entity} is listed twice; a move takes each fact once."
+                )
+            seen.add((source_scope, entity))
+            if source_scope == destination:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is already in {destination}; "
                     "moving it there would do nothing."
                 )
-            resolved.append((scope, entity))
+            resolved.append((source_scope, entity))
         if expected_version is not None and len(resolved) != 1:
             raise MemoryError("A revision guards one fact; omit it when moving a batch.")
-        if destination == "session" or any(scope == "session" for scope, _ in resolved):
+        if destination == "session" or any(source == "session" for source, _ in resolved):
             # A moved/opened session's portable log may hold rows the local index
             # has not rebuilt yet; moving against a stale index could miss a
             # conflict or resurrect a forgotten fact on the next import.
@@ -1280,17 +1302,18 @@ class MemoryStore:
             prepared: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
             needed = 0
             batch_facts: set[str] = set()
-            for scope, entity in resolved:
-                source_owner = self.identity.owner(scope)
+            source_counts: dict[tuple[str, str], int] = {}
+            for source_scope, entity in resolved:
+                source_owner = self.identity.owner(source_scope)
                 ops = self._ops(db, entity)
                 if not ops or any(
-                    op["scope"] != scope or op["owner_key"] != source_owner for op in ops
+                    op["scope"] != source_scope or op["owner_key"] != source_owner for op in ops
                 ):
                     raise MemoryError("Memory not found in the authorized scope.")
                 if any(op["kind"] == "tombstone" for op in ops):
                     raise MemoryError(
-                        f"{scope}/{entity} was forgotten; it cannot be moved. Store it again "
-                        "in the destination scope instead."
+                        f"{source_scope}/{entity} was forgotten; it cannot be moved. Store it "
+                        "again in the destination scope instead."
                     )
                 heads = self._heads(ops)
                 if len(heads) > 1:
@@ -1298,8 +1321,8 @@ class MemoryStore:
                     # make. Moving the newest and tombstoning the entity would
                     # silently discard the others, so refuse while it is ambiguous.
                     raise MemoryError(
-                        f"{scope}/{entity} has {len(heads)} concurrent revisions; resolve the "
-                        "conflict (edit with --resolve) before moving it."
+                        f"{source_scope}/{entity} has {len(heads)} concurrent revisions; "
+                        "resolve the conflict (edit with --resolve) before moving it."
                     )
                 head = heads[0]
                 if expected_version is not None and head["op_id"] != expected_version:
@@ -1307,14 +1330,19 @@ class MemoryStore:
                         "Memory changed concurrently. Read its current revision and retry."
                     )
                 fact = dict(head["fact"])
+                # A move must never be a route around the guards ``put`` enforces.
+                # The strongest of them is scope-fit: work/lane/progress content is
+                # refused in the global bank, and moving it there would defeat it.
+                scope_fit(destination, fact)
                 if fact["replaces"]:
                     # ``replaces`` is a same-scope lineage link; carrying it across
                     # scopes is refused by ``put``'s replacement check. Say so plainly
                     # rather than fail mid-transaction.
                     raise MemoryError(
-                        f"{scope}/{entity} supersedes another fact in the same scope, so a "
-                        "cross-scope move would break that link. Resolve the supersession "
-                        "first (forget the superseded fact, or keep this one in place)."
+                        f"{source_scope}/{entity} supersedes another fact in the same "
+                        "scope, so a cross-scope move would break that link. Resolve the "
+                        "supersession first (forget the superseded fact, or keep this "
+                        "one in place)."
                     )
                 duplicate = db.execute(
                     "SELECT entity_id FROM current WHERE scope=? AND owner=? "
@@ -1323,7 +1351,7 @@ class MemoryStore:
                 ).fetchone()
                 if duplicate:
                     raise MemoryError(
-                        f"{scope}/{entity} already has an identical fact at "
+                        f"{source_scope}/{entity} already has an identical fact at "
                         f"{destination}/{duplicate[0]}; a move would silently merge them. "
                         "Resolve one of the two first."
                     )
@@ -1340,7 +1368,10 @@ class MemoryStore:
                         "duplicate it at the destination. Keep one."
                     )
                 batch_facts.add(signature)
-                prepared.append((scope, entity, head, fact))
+                source_counts[(source_scope, source_owner)] = (
+                    source_counts.get((source_scope, source_owner), 0) + 1
+                )
+                prepared.append((source_scope, entity, head, fact))
             cap = self.token_cap(destination)
             current_tokens = db.execute(
                 "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
@@ -1362,6 +1393,24 @@ class MemoryStore:
                     f"Memory move refused: {destination} would exceed its operation history "
                     "cap. Consolidate or export the destination history first."
                 )
+            # The source gains one tombstone per moved fact. Refuse rather than push
+            # a scope past the history caps: the next write there would then be
+            # refused, and tombstones are never collected (review MINOR-5).
+            for (source_scope, source_owner), count in source_counts.items():
+                source_ops = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                source_tombs = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=? AND kind='tombstone'",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                if source_ops + count > MAX_OWNER_OPS or source_tombs + count > MAX_TOMBSTONES:
+                    raise MemoryError(
+                        f"Memory move refused: {source_scope} would exceed its operation/"
+                        "tombstone history cap. Consolidate or export that history first; "
+                        "nothing was changed."
+                    )
             seq = db.execute(
                 "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
             ).fetchone()[0]
@@ -1369,7 +1418,7 @@ class MemoryStore:
             clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
             moved: list[dict[str, Any]] = []
             affected_sessions: set[str] = set()
-            for scope, entity, head, fact in prepared:
+            for source_scope, entity, head, fact in prepared:
                 new_id = _id()
                 operation = {
                     "v": 1,
@@ -1402,7 +1451,7 @@ class MemoryStore:
                 self._reindex(db, new_id)
                 moved.append(
                     {
-                        "from": f"{scope}/{entity}",
+                        "from": f"{source_scope}/{entity}",
                         "to": f"{destination}/{new_id}",
                         "version": operation["op_id"],
                         "title": fact["title"],
@@ -1418,10 +1467,10 @@ class MemoryStore:
                     "origin_device": origin,
                     "seq": seq,
                     "hlc": [clock, 0, origin],
-                    "parents": [head["op_id"]],
+                    "parents": [head["op_id"], operation["op_id"]],
                     "kind": "tombstone",
-                    "scope": scope,
-                    "owner_key": self.identity.owner(scope),
+                    "scope": source_scope,
+                    "owner_key": self.identity.owner(source_scope),
                     "fact": None,
                     "body_sha": head["body_sha"],
                 }
@@ -1433,7 +1482,7 @@ class MemoryStore:
                         entity,
                         origin,
                         seq,
-                        scope,
+                        source_scope,
                         tombstone["owner_key"],
                         "tombstone",
                         _dump(tombstone),
@@ -1442,13 +1491,17 @@ class MemoryStore:
                 self._reindex(db, entity)
                 seq += 1
                 clock += 1
-                if scope == "session":
+                if source_scope == "session":
                     affected_sessions.add(tombstone["owner_key"])
                 if destination == "session":
                     affected_sessions.add(dest_owner)
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
             self._quota(db, destination, dest_owner)
             quota, warning = self._quota_notice(db, destination, dest_owner)
+            # Move-out relief must reset the SOURCE's crossing state exactly like a
+            # forget does, or a later recross into that scope warns nothing.
+            for (source_scope, source_owner), _count in source_counts.items():
+                self._quota_notice(db, source_scope, source_owner)
             # Mirror ``put``/``apply_ops``: a session's portable log is written
             # before the index commit, so a crash is repaired by lazy import.
             for owner in sorted(affected_sessions):
@@ -1666,6 +1719,12 @@ class MemoryStore:
                             "Memory operation identity cannot be reused with different content."
                         )
                     continue
+                if op["kind"] == "tombstone":
+                    # A move's tombstone must not erase a revision the mover never
+                    # saw; a forget's own guarantee is untouched (see the helper).
+                    conflict = self._move_tombstone_conflict(db, op, old_ops)
+                    if conflict:
+                        raise MemoryError(conflict)
                 if contiguous:
                     seq = db.execute(
                         "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?",
@@ -1818,8 +1877,11 @@ class MemoryStore:
                 [*values, len(target), target],
             ).fetchall()
         if len(rows) > 1:
+            # The query is capped, so a full page means "at least this many" — a
+            # bare count would understate an ambiguity the caller must widen.
+            count = "at least 4" if len(rows) == 4 else str(len(rows))
             raise MemoryError(
-                f"'{target}' matches {len(rows)} memories; type more of the ID "
+                f"'{target}' matches {count} memories; type more of the ID "
                 "(or use the full SCOPE/ID shown by list)."
             )
         if not rows:
@@ -1891,28 +1953,94 @@ class MemoryStore:
                     ]
                 ),
                 "revisions": len(ops),
-                "moved_from": None if tombs else self._moved_from(db, entity, heads[0]),
+                "moved_from": None if tombs else self._moved_from(db, entity, ops),
                 "untrusted": True,
             }
 
     def _moved_from(
-        self, db: sqlite3.Connection, entity: str, head: dict[str, Any]
+        self, db: sqlite3.Connection, entity: str, ops: list[dict[str, Any]]
     ) -> dict[str, str] | None:
         """The source of a moved fact, from the cross-entity parent ``move`` writes.
 
-        An ordinary correction never parents another entity (only ``replaces``
-        does, and that is a supersession link, not a move), so this distinguishes
-        a moved fact from a freshly-created one without a schema field: the fact's
-        own history shows where it came from instead of looking like a new row.
+        Derived from the entity's ROOT revision, not its head: an ordinary
+        correction parents only the same entity, so after the first edit the head
+        no longer names the move and the receipt's promise would silently vanish.
+        An ordinary creation has no parents, and a ``replaces`` creation's parent
+        is a supersession link (not a move), so this cannot mislabel either.
         """
-        if not head["parents"] or head["fact"] is None:
+        revisions = [op for op in ops if op["kind"] == "put"]
+        ids = {op["op_id"] for op in revisions}
+        # A root revision has no SAME-ENTITY parent; a correction does.
+        roots = sorted(
+            (op for op in revisions if not any(parent in ids for parent in op["parents"])),
+            key=lambda op: (op["hlc"], op["op_id"]),
+        )
+        if not roots:
             return None
-        replaced = head["fact"].get("replaces") or ""
-        for parent in head["parents"]:
+        root_fact = roots[0]["fact"] or {}
+        replaced = root_fact.get("replaces") or ""
+        for parent in roots[0]["parents"]:
             row = db.execute("SELECT scope,entity_id FROM ops WHERE op_id=?", (parent,)).fetchone()
             if row and row[1] != entity and row[1] != replaced:
                 return {"scope": row[0], "id": row[1]}
         return None
+
+    def _move_tombstone_conflict(
+        self,
+        db: sqlite3.Connection,
+        op: dict[str, Any],
+        old_ops: list[dict[str, Any]],
+    ) -> str | None:
+        """Refuse a MOVE's source tombstone when it would erase an unseen revision.
+
+        ``move`` names its destination ``put`` as a second parent of the source
+        tombstone; a forget tombstone's parents are all same-entity revisions. That
+        is the protocol-safe marker: an old peer still reads the op as an ordinary
+        tombstone, while a peer that holds a concurrent correction can refuse
+        instead of redacting it. A move is advertised as a relocation, so losing an
+        edit the mover never saw is not a documented forget.
+
+        The destination op may be absent here when this peer's ``network.memory.scopes``
+        filters out the destination scope; the second, unresolvable parent still
+        identifies the op as move-shaped, and coverage comes from the same-entity
+        parents the mover DID send — an unseen sibling is exactly a local head that
+        is not among them.
+
+        Deliberately returns a refusal only for that marker: a real forget must
+        still replicate and redact unconditionally (a tombstone is the only way to
+        remove a sensitive body). An entity already tombstoned locally is allowed
+        through — there is no live revision left to protect.
+        """
+        if any(existing["kind"] == "tombstone" for existing in old_ops):
+            return None
+        local = {existing["op_id"] for existing in old_ops}
+        covered = {parent for parent in op["parents"] if parent in local}
+        unresolved = [parent for parent in op["parents"] if parent not in local]
+        if not unresolved:
+            return None  # an ordinary forget: every parent is a local revision
+        move = False
+        for parent in unresolved:
+            row = db.execute("SELECT data FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if not row:
+                continue
+            foreign = json.loads(row[0])
+            if foreign["entity_id"] != op["entity_id"] and foreign["kind"] == "put":
+                move = True
+        if not move and len(op["parents"]) > 1 and covered:
+            # The destination scope was filtered out of this peer's sync config, so
+            # the destination op never arrived. A forget's parents are ALL local by
+            # construction; a second, unresolvable parent is move-shaped.
+            move = True
+        if not move:
+            return None
+        unseen = [head for head in self._heads(old_ops) if head["op_id"] not in covered]
+        if not unseen:
+            return None
+        return (
+            "Memory move refused: a move from another device would replace a revision "
+            "this device holds but the moving device never saw. Read that revision and "
+            "keep anything it adds (or forget the source fact), then sync again."
+        )
 
     def inventory(
         self, scope: str | None = None, *, limit: int = 20, cursor: str | None = None

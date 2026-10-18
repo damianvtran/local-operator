@@ -339,7 +339,10 @@ MEASURED_TOKENS: dict[str, int] = {
     "jobs": 347,
     "list_variables": 54,
     "lsp": 272,
-    "memory": 116,
+    # 116 -> 127 (memory move, round 1): the description now names
+    # ``edit new_text={"move":"scope"}``, which makes the verb discoverable
+    # without a guide lookup. Re-measured deliberately via this test's print.
+    "memory": 127,
     "monitor": 353,
     "network": 870,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
