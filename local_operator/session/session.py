@@ -17235,7 +17235,9 @@ class Session:
                     dropped,
                 )
                 await self._emit(
-                    _notice(_nt.auto_continuation_limit(limit=_MAX_CONTINUATIONS), kind="warning")
+                    _notice(
+                        _nt.auto_continuation_limit(limit=str(_MAX_CONTINUATIONS)), kind="warning"
+                    )
                 )
                 return
             message = self._continuation_queue.pop(0)
@@ -24053,9 +24055,9 @@ class Session:
             )
         lost: list[str] = []
         if adoptions:
-            lost.append(_text(_nt.unsaved_asides(count=len(adoptions))))
+            lost.append(_text(_nt.unsaved_asides(count=str(len(adoptions)))))
         if receipts:
-            lost.append(_text(_nt.unsaved_receipts(count=len(receipts))))
+            lost.append(_text(_nt.unsaved_receipts(count=str(len(receipts)))))
         await self._emit(_notice(_nt.unsaved_records(summary=" and ".join(lost)), kind="error"))
         # DURABLE as well (review R6): the notice reaches only a frontend still
         # connected during teardown. The row is written straight to the

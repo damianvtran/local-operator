@@ -170,6 +170,18 @@ _SAMPLE_PARAMS = {
 }
 
 
+def test_four_digit_counts_keep_plain_digits() -> None:
+    """The legacy f-string rendered ``1000``; ICU's number path renders ``1,000``.
+
+    Counts are therefore passed as strings at the call sites, and this pin makes
+    a future int caller fail loudly instead of silently changing the output.
+    """
+    message = keys.unsaved_asides(count="1000")
+    assert messages.render(message.code, message.params, locale="en") == (
+        "1000 aside(s) you added to the conversation"
+    )
+
+
 def test_an_uncarried_locale_falls_back_to_english() -> None:
     for key in REPLACED_LITERALS:
         message = getattr(keys, key)(**_SAMPLE_PARAMS.get(key, {}))
