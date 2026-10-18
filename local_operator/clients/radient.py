@@ -327,7 +327,11 @@ class RadientTranscriptionResponseData(BaseModel):
     language: Optional[str] = None
     language_code: Optional[str] = None
     language_probability: Optional[float] = None
-    removed: list[dict[str, Any]] = Field(default_factory=list)
+    # Typing generics, not builtins: this class defines a `dict` method below,
+    # and on Python 3.14+ (PEP 649) the annotation is evaluated after the class
+    # body completes, where `dict` resolves to that method. `dict[str, Any]`
+    # then raises "'function' object is not subscriptable" at import time.
+    removed: List[Dict[str, Any]] = Field(default_factory=list)
     model_config = {"extra": "allow"}
 
     def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
