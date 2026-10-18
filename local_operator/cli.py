@@ -66,6 +66,7 @@ from local_operator.i18n.keys import cli_browser_help as _bh
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_global_help as _gh
 from local_operator.i18n.keys import cli_hub_help as _hu
 from local_operator.i18n.keys import cli_hub_shared_help as _hs
 from local_operator.i18n.keys import cli_install_help as _in
@@ -147,17 +148,6 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
-CLI_DESCRIPTION = """
-    Local Operator - An environment for agentic AI models to perform tasks on the local device.
-
-    Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi
-    and Alibaba. Features include interactive chat, safe code execution,
-    context-aware conversation history, and built-in safety checks.
-
-    Configure your preferred model and hosting platform via command line arguments. Your
-    configuration file is located at ~/.local-operator/config.yml and can be edited directly.
-"""
-
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
@@ -188,26 +178,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parent_parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode for verbose output",
+        help=_gh.debug().envelope(locale=help_locale)["text"],
     )
     parent_parser.add_argument(
         "--agent",
         "--agent-name",
         type=str,
-        help="Select a legacy named agent (creates it if missing). Without --train, "
-        "use a separate persisted session; exec --profile attaches a reusable role instead.",
+        help=_gh.agent().envelope(locale=help_locale)["text"],
         dest="agent_name",
     )
     parent_parser.add_argument(
         "--train",
         action="store_true",
-        help="Use the legacy agent history directory (or an autosave agent) instead "
-        "of a separate session. Ordinary sessions are also persisted and resumable; "
-        "--resume takes precedence over this directory selection.",
+        help=_gh.train().envelope(locale=help_locale)["text"],
     )
 
     # Main parser
-    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
+    parser = argparse.ArgumentParser(
+        description=_gh.description().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
 
     parser.add_argument(
         "--resume",
@@ -216,10 +205,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SESSION_ID",
         dest="resume",
-        help="Resume a previous session by id, replaying its transcript. The id is the one"
-        " printed when a session is stopped with Ctrl+C twice, and is the directory name under"
-        " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
-        " session.",
+        help=_gh.resume().envelope(locale=help_locale)["text"],
     )
     # ``installed_version()``, not ``version("local-operator")``: install
     # metadata is written once and never moves when the checkout's
@@ -254,7 +240,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"v{installed_version()}",
-        help="Show program's version number and exit",
+        help=_gh.version().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--hosting",
@@ -282,41 +268,36 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "zai",
             "test",
         ],
-        help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
-        "alibaba, google, mistral, test, openrouter, xai, zai)",
+        help=_gh.hosting().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, "
-        "grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, "
-        "mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, "
-        "the provider's suggested model is used.",
+        help=_gh.model().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--run-in",
         type=str,
-        help="The working directory to run the operator in.  Must be a valid directory.",
+        help=_gh.run_in().envelope(locale=help_locale)["text"],
         dest="run_in",
     )
     # --- Additive root flags (rewrite) ------------------------------------
     parser.add_argument(
         "--yolo",
         action="store_true",
-        help="Auto-approve all tool executions (read/write/exec tiers) without prompting",
+        help=_gh.yolo().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--no-tui",
         action="store_true",
         dest="no_tui",
-        help="Disable the full-screen TUI; use the plain headless REPL instead",
+        help=_gh.no_tui().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--tui",
         action="store_true",
         dest="tui",
-        help="Force the full-screen TUI even when stdout is not a tty "
-        "(errors clearly if the TUI cannot run without a tty)",
+        help=_gh.tui().envelope(locale=help_locale)["text"],
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
@@ -2172,7 +2153,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
     # argparse re-default quirk that already applies to the legacy parent
     # flags must not swallow this one — ``--yolo exec "task"`` is documented).
-    _propagate_global_flags(parser)
+    _propagate_global_flags(parser, help_locale=help_locale)
 
     return parser
 
@@ -2195,7 +2176,9 @@ def _add_global_flag(parser: argparse.ArgumentParser, flag: str, **kwargs: Any) 
     parser.add_argument(flag, **kwargs)
 
 
-def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
+def _propagate_global_flags(
+    parser: argparse.ArgumentParser, *, help_locale: str | None = None
+) -> None:
     """Re-declare the position-independent global options on every subparser.
 
     Not routed through ``parent_parser``: a shared parent action with a SUPPRESS
@@ -2213,6 +2196,13 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
     the clobber: `--resume bogus config list` exited 0 in silence while
     `config list --resume bogus` exited 1 with the recovery listing.
     """
+
+    # A build owns one snapshot, including every recursive child. Direct
+    # standalone callers still resolve freshly; never cache locale globally.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
     for action in parser._actions:
         if not isinstance(action, argparse._SubParsersAction):
             continue
@@ -2233,12 +2223,9 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                     # ``unattended`` (design §2 OQ4 — the target decides), so the
                     # global sentence would promise the flag something the product
                     # makes conditional. The verb marks itself; see ``network.cli``.
-                    "Conditional for this verb's peer create: the session starts "
-                    "unattended only when the target device grants this one the "
-                    "`unattended` capability"
+                    _gh.yolo_conditional().envelope(locale=help_locale)["text"]
                     if getattr(subparser, "yolo_needs_grant", False)
-                    else "Auto-approve all tool executions (read/write/exec tiers)"
-                    " without prompting"
+                    else _gh.yolo().envelope(locale=help_locale)["text"]
                 ),
             )
             _add_global_flag(
@@ -2249,7 +2236,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 default=argparse.SUPPRESS,
                 metavar="SESSION_ID",
                 dest="resume",
-                help="Resume a previous session by id. Pass with no id for the most recent.",
+                help=_gh.propagated_resume().envelope(locale=help_locale)["text"],
             )
             # The run-shaping trio, for the same reason and by the same
             # mechanism. An external supervisor driving `lop exec` composes its
@@ -2266,7 +2253,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="hosting",
-                help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
+                help=_gh.propagated_hosting().envelope(locale=help_locale)["text"],
             )
             _add_global_flag(
                 subparser,
@@ -2274,7 +2261,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="model",
-                help="Model to use for this run",
+                help=_gh.propagated_model().envelope(locale=help_locale)["text"],
             )
             _add_global_flag(
                 subparser,
@@ -2282,9 +2269,9 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="run_in",
-                help="Working directory to run the operator in",
+                help=_gh.propagated_run_in().envelope(locale=help_locale)["text"],
             )
-            _propagate_global_flags(subparser)
+            _propagate_global_flags(subparser, help_locale=help_locale)
 
 
 def _credential_git_helper_command(args: argparse.Namespace) -> int:
