@@ -68,7 +68,7 @@ evidence for both.
 | # | Capability | UI | TUI | Evidence |
 |---|---|---|---|---|
 | 4.1 | List local agents, attach one to the session, switch its class | ✅ | ✅ | UI agents page/options; TUI `/agent`, `/agent class` |
-| 4.2 | Create/edit a reusable agent profile (role/specialist, tools, effort, delegate) | ✅ | ◐ | UI `features/agents/components/agents-page.tsx` profile editor; TUI only lists/attaches — authoring is via the `agent` tool or asking the agent |
+| 4.2 | Create/edit a reusable agent profile (role/specialist, tools, effort, delegate) | ✅ | ✅ | UI `features/agents/components/agents-page.tsx`; TUI `/agent new` and `/agent edit <name>` full-page forms, changed-only/CAS saves, specialist policy refusal, translated copy; real-app 100×30/60×24 create/error/edit/specialist/discard evidence (see [P3a design note](tui-agent-authoring.md); text-clear limitation recorded there) |
 | 4.3 | List teams, draw a team org chart, send a request to a team manager | ✅ | ✅ | UI team detail/chart + chat sidebar; TUI `/team`, `/team chart`, `/team <name> <request>` |
 | 4.4 | Create/edit a team (roster, manager, brief, model/effort overrides) | ✅ | ◐ | UI team editor (`features/agents/components/team-detail.tsx`); TUI delegates to the `team` tool/agent request |
 | 4.5 | Browse/search/sort/filter the public agent hub | ✅ | ✗ | UI `features/agent-hub/agent-hub-page.tsx`; TUI has no marketplace surface (`/hub` is Hub links, a different feature) |

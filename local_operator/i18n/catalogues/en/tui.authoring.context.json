@@ -1,0 +1,197 @@
+{
+  "tui.authoring.create": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.edit": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.name": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.kind": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Role or specialist. Those backend identifiers are not changed by translation."
+  },
+  "tui.authoring.label": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.description": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.instructions": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.tools": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.effort": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Backend model tier, not reasoning effort; tier identifiers remain literal."
+  },
+  "tui.authoring.delegate": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.action_class": {
+    "role": "form field label",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Autonomy class, not a school class. Reactive requires a request; proactive can initiate."
+  },
+  "tui.authoring.role": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.specialist": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.inherit": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.yes": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.no": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.reactive": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.proactive": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.tools_hint": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Empty is unrestricted access, not no tools. Keep that direction explicit."
+  },
+  "tui.authoring.instructions_hint": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.class_hint": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Security-relevant proactive consequence; may initiate without a request."
+  },
+  "tui.authoring.legend": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.discard": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Inline y/n confirmation. Keep literal keyboard y and n and the direction of each answer."
+  },
+  "tui.authoring.invalid_name": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.required_instructions": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.invalid_tools": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.invalid_effort": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.specialist_fields": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.saved": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.no_change": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.revision_changed": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "CAS conflict. No save occurred; reopen before trying again."
+  },
+  "tui.authoring.seed_not_installed": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Packaged starter is not an installed profile. Do not imply the editor installs it."
+  },
+  "tui.authoring.missing": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.usage_edit": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.usage_new": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.registry_missing": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.footer": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Slash commands and <name> are literal grammar; only surrounding prose is translated."
+  },
+  "tui.authoring.save_error": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Agent-profile authoring page; retain literal keyboard chords and command grammar. Fit/wrap at 58 content cells (60-column terminal)."
+  },
+  "tui.authoring.description_clear_unsupported": {
+    "role": "form guidance or receipt",
+    "tone": "brief, direct, keyboard-first",
+    "note": "Refusal for deleting an existing description; draft remains. Not a general edit refusal."
+  }
+}
