@@ -951,6 +951,7 @@ async def test_create_transcription_auto_cleans_radient_text(test_app_client, te
     result = response.json()["result"]
     assert result["text"] == "So I think we should ship."
     assert result["raw_text"] == "Uh, so I think we should ship."
+    assert result["language"] == "eng"
     assert result["cleanup"] == "client.rules.v1"
     assert result["removed"] == [{"start": 0, "end": 2, "kind": "filler", "token": "Uh"}]
 

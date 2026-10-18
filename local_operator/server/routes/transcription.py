@@ -71,7 +71,9 @@ async def create_transcription_endpoint(
     temperature: Optional[float] = Form(0.0),
     language: Optional[str] = Form(None),
     provider: Optional[str] = Form(None),
-    #: The same closed vocabulary as the cascade routes. Absent = ``auto``.
+    #: The same closed vocabulary as the cascade routes. Absent = ``auto``;
+    #: ``auto``/``client`` apply the shared rules, ``off``/``provider`` are
+    #: verbatim. ``edit`` is 422 until its opt-in slice.
     cleanup: Optional[str] = Form(None),
     #: Optional client correlation id (PR-3): additive and tolerant — a caller
     #: that has it sends it, every other form value keeps working unchanged,
