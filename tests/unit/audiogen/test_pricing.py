@@ -73,6 +73,18 @@ def test_sound_effect_units_is_the_shared_ceil_rule():
     ]
 
 
+def test_a_non_finite_duration_is_unpriceable_not_an_exception():
+    """JSON ``1e999`` parses to inf and reaches the consent describer.
+
+    The estimator answers None (the honest "amount not stated") and the shared
+    unit helper answers 0, so an approval summary degrades to its unstated
+    sentence instead of raising and falling back to raw JSON. Round-1 NIT-1.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert pricing.sound_effect_estimate("elevenlabs", None, bad) is None, bad
+        assert pricing.sound_effect_units(bad) == 0, bad
+
+
 def test_an_unpinned_model_prices_on_what_the_rung_would_run():
     # The rung's default resolution and the table's must agree, or the consent
     # card would price one model and the call would run another.
