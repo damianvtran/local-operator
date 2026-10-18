@@ -57,19 +57,27 @@ trailing blank lines (released with the next prose), a line that starts like
 ``name="`` (released at its newline), the first word of each line until the
 character after it shows it is not a parameter-name tail, and the tail after a
 markup line in a turn that turns out to have no calls (released at the end of
-the stream).
+the stream). The first-word hold is usually a few characters, but it is not
+bounded in time: a final line that is one bare word (``Okay``) waits for the
+next text or for the end of the stream, so in a turn that goes straight on to a
+tool call it shows only once the call's arguments have finished streaming --
+minutes behind for a large ``write``. The word is not released when the call
+starts: a bare word is exactly how a residue line like ``i" string="true">``
+begins, and nothing stops a gateway sending more text after the call has
+started. The final text is the same either way; only when the word appears
+changes.
 
 WHAT HOLDING LOSES. Held text is released only by ``feed`` or ``finish``. When
-the provider fails mid-stream the client calls ``finish(has_tool_calls=False)``
-before raising -- no call from a failed turn is acted on, so held text is not
-the residue of one -- and the partial prose, its last unfinished word included,
-still reaches the operator (DSML-led lines are still dropped). When the
-CONSUMER closes the stream or the task is cancelled, there is nobody left to
-receive text, so what was held at that moment is never sent: trailing blank
-lines, the undecided start of a line (its first word, at least) and -- once a
-markup line has been seen -- the whole rest of the turn, including any genuine
-prose after it. There is no evidence for or against structured calls before the
-stream ends, so this cannot be decided earlier.
+the provider fails mid-stream the client calls ``finish`` before raising, with
+the same structured-call evidence as at a normal end, so the partial prose, its
+last unfinished word included, still reaches the operator and residue of a call
+already received is still dropped. When the CONSUMER closes the stream or the
+task is cancelled, there is nobody left to receive text, so what was held at that
+moment is never sent: trailing blank lines, the undecided start of a line (its
+first word, at least) and -- once a markup line has been seen -- the whole rest
+of the turn, including any genuine prose after it. There is no evidence for or
+against structured calls before the stream ends, so this cannot be decided
+earlier.
 """
 
 from __future__ import annotations
@@ -119,8 +127,9 @@ def _prefixes(literal: str) -> str:
 #: Holding precisely these -- no more, no fewer -- is what makes the verdict
 #: independent of how the stream is chunked. It includes a line that is still
 #: only a name tail (``i``, ``keywords"``, ``i" st``), so the first word of every
-#: line is held until the character after it rules that out: a few characters of
-#: live-render delay.
+#: line is held until the character after it rules that out: usually a few
+#: characters of live-render delay, longer for a last line that is a single word
+#: (see WHAT HOLDING COSTS).
 _UNDECIDED = re.compile(
     # Inside the DSML lead-in: once the token is whole the line is markup.
     r"(?:" + _LEAD_IN + _prefixes(_DSML_TOKEN)
@@ -361,7 +370,11 @@ def _drop_dsml_lines(text: str) -> str:
     kept: list[str] = []
     fence: tuple[str, int] | None = None
     for line in _lines(text):
-        if fence is None and _DSML_LEAD.match(line):
+        # Skip indentation with the stream's own whitespace class (``\s``, so
+        # U+3000 and U+00A0 too): ``_DSML_LEAD`` alone allows only spaces and tabs,
+        # and a line the stream classified as markup would then be kept here.
+        start = _SPACE_RUN.match(line).end()  # type: ignore[union-attr]  # ``*`` always matches
+        if fence is None and _DSML_LEAD.match(line, start):
             continue
         fence = _fence_after_line(fence, line)
         kept.append(line)

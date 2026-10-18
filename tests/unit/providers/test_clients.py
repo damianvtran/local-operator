@@ -7434,3 +7434,54 @@ async def test_openai_compat_flushes_held_text_before_a_mid_stream_error(
         async for event in client.stream(request, "sk-test"):
             seen.append(event)
     assert "".join(e.delta for e in seen if isinstance(e, StreamTextDelta)) == expected
+
+
+async def test_openai_compat_error_flush_drops_residue_of_a_call_already_seen() -> None:
+    """Review M1 / QA Q5: once a named call has arrived, a held bare-parameter
+    line is its residue on the error path too -- an interrupted turn's partial
+    text is committed and replayed, so releasing it would put the leak in history."""
+    events: list[dict[str, Any]] = [
+        {"id": "gen-1", "choices": [{"delta": {"content": c}}]}
+        for c in ["Checking.\n", 'name="x" string="true">v1']
+    ]
+    events += [
+        {
+            "id": "gen-1",
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "read_channel", "arguments": "{}"},
+                            }
+                        ]
+                    }
+                }
+            ],
+        },
+        {
+            "id": "gen-1",
+            "error": {"code": 502, "message": "Upstream went away"},
+            "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}],
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(events), headers={"content-type": "text/event-stream"}
+        )
+
+    client = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    request = ChatRequest(
+        model=_spec("radient", "auto"), system_blocks=[], messages=[Message.user("go")]
+    )
+    seen: list[Any] = []
+    with pytest.raises(ProviderError, match="Upstream went away"):
+        async for event in client.stream(request, "sk-test"):
+            seen.append(event)
+    assert "".join(e.delta for e in seen if isinstance(e, StreamTextDelta)) == "Checking."

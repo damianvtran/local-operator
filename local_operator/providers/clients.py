@@ -3605,13 +3605,18 @@ class OpenAICompatClient:
                     if candidate:
                         served_provider = candidate
         except Exception:
-            # A provider error or a dropped connection ends the turn here, and
-            # no tool call can be acted on, so nothing still held is residue
-            # of a parsed call: release it (DSML-led lines still go) before the
-            # error, or the partial prose the operator was reading loses its
-            # last words. A consumer closing the stream (``GeneratorExit``) or
-            # a cancellation is not caught: nobody is left to receive text.
-            held = markup_filter.finish(has_tool_calls=False)
+            # A provider error or a dropped connection ends the turn here:
+            # release what is still held before the error, or the partial prose
+            # the operator was reading loses its last words. The verdict on a
+            # held bare-parameter tail is the same as at a normal end: a named
+            # call already received is the evidence it is residue, and an
+            # interrupted turn's partial text is committed and replayed, so a
+            # leak let through here would reach history all the same. A
+            # consumer closing the stream (``GeneratorExit``) or a cancellation
+            # is not caught: nobody is left to receive text.
+            held = markup_filter.finish(
+                has_tool_calls=any(saved["name"] for saved in replay_calls.values())
+            )
             if held:
                 replay_text.append(held)
                 streamed_text = True
