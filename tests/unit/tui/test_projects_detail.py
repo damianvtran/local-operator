@@ -325,12 +325,12 @@ async def test_the_detail_cursor_walks_selectables_and_the_hint_names_the_verb(
         assert page.selectable_count == 4  # three milestones + the session link
         # The label NAMES the row it would toggle (UX round 1, U3).
         assert page.selected_index == 0 and page.selected_action_label() == "toggle groundwork"
-        assert view._open_hint._label == " toggle groundwork"  # the context slot
+        assert view._open_hint._label == "toggle groundwork"  # bare; _build adds the gap
         for _ in range(3):
             await pilot.press("down")
         await pilot.pause()
         assert page.selected_index == 3 and page.selected_action_label() == "open"
-        assert view._open_hint._label == " open"
+        assert view._open_hint._label == "open"
         for _ in range(4):
             await pilot.press("down")
         await pilot.pause()
@@ -1453,7 +1453,7 @@ async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
                 assert not view._refresh_hint.display
     # The detail ladder itself at 100x30: the page's OWN keys outrank the
     # canvas-era extras, so `e edit · a add · x remove` are advertised and
-    # `r refresh` (which would make the row 104 cells against 94 available)
+    # `r refresh` (which would make the row 97 cells against 94 available)
     # is not. LOH-19 P2's discoverability fix.
     session2 = _ProjectSession()
     session2.project_registry = _rich_registry(tmp_path / "second")
@@ -1869,8 +1869,9 @@ def test_the_row_scoped_keys_displace_no_shipped_hint() -> None:
             else:
                 assert not seen_off, "a row-scoped key returns after a rung without it"
     labels = {label for plan, _esc in rungs for _hint, label, _lead in plan}
-    assert " copy" in labels
-    assert " preview" in labels
+    # Labels are BARE: HintButton._build supplies the one space after the key.
+    assert "copy" in labels
+    assert "preview" in labels
 
 
 @pytest.mark.asyncio

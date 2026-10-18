@@ -1551,7 +1551,7 @@ class ProjectsView(Vertical):
         list_hint = (self._list_hint, " list", True)
         board_hint = (self._board_hint, " board", True)
         timeline_hint = (self._timeline_hint, " timeline", True)
-        refresh = (self._refresh_hint, " refresh", True)
+        refresh = (self._refresh_hint, "refresh", True)
         create_hint = (self._create_hint, " create", True)
         # `m message`: the one affordance a reader cannot guess. The invariant
         # this ladder enforces is measured, not aspirational (agent review
@@ -1783,9 +1783,9 @@ class ProjectsView(Vertical):
 
         The page's OWN keys lead at the standard sizes: at 100x30 the row is
         ``↑↓ move · pgup/pgdn page · ↵ <context> · e edit · a add · x remove ·
-        esc back`` (91 cells against the 94 the footer offers), and at 60x24
+        esc back`` (85 cells against the 94 the footer offers), and at 60x24
         the context sheds its NAME so ``e edit · a add`` still fit
-        (``↑↓ move · ↵ toggle · e edit · a add · esc back`` = 50 against 54).
+        (``↑↓ move · ↵ toggle · e edit · a add · esc back`` = 46 against 54).
         The canvas-era extras (``m message``, ``s start``, ``r refresh``) then
         ride only the widths where they still fit: they are additions to the
         detail page, not its reason. Only keys that WORK are hinted (a hinted
@@ -1804,23 +1804,27 @@ class ProjectsView(Vertical):
 
         context = self._detail_page.selected_action_label()
         verb = self._detail_page.selected_action_verb()
-        move = (self._move_hint, " move", False)
-        page = (self._page_hint, " page", True)
+        # Labels are BARE (no leading space): HintButton._build adds exactly
+        # one space between the key and its label. A label carrying its own
+        # space made every hint two cells wider than it reads, and a row near
+        # its budget then clipped the gap — the frame showed `eedit`, `aadd`.
+        move = (self._move_hint, "move", False)
+        page = (self._page_hint, "page", True)
         # The `↵` hint exists only while the selected row HAS a verb: its old
         # `" open"` fallback was unreachable until design D1 and UX U3 made
         # verb-less rows real (a one-line entry, a missing copy), and a dimmed
         # `↵ open` on a row that cannot act is the same wrong promise in a
         # quieter ink (UX review round 2, U6). No verb, no rung.
         named = context or verb
-        open_hint = (self._open_hint, f" {named}", True)
+        open_hint = (self._open_hint, named or "", True)
         # The bare verb is a LOW rung: a long target name sheds before the key
         # does (UX round 1, U3 — the name informs, the key acts).
-        open_bare = (self._open_hint, f" {verb or context}", True)
-        refresh = (self._refresh_hint, " refresh", True)
+        open_bare = (self._open_hint, (verb or context) or "", True)
+        refresh = (self._refresh_hint, "refresh", True)
         # `m message` (P5a): the detail page is where messaging lives, and it
         # is the first of the new keys to shed (spec §3.3), so it rides only
         # the two widest rungs of each branch.
-        msg = (self._msg_hint, " message", True)
+        msg = (self._msg_hint, "message", True)
         # `s start` (P5b), on the canvas's own rule: the rungs below are the
         # SHIPPED rows and each one that can carry the new key is preceded by a
         # wider variant of itself. The ladder stops at the first rung that fits,
@@ -1830,7 +1834,7 @@ class ProjectsView(Vertical):
         # spliced in it costs 97 against the 94 a 100-column terminal offers, so
         # `s` is advertised from 101 columns up and every shipped row holds.
         # `s` still WORKS wherever it is not advertised.
-        start = (self._start_hint, " start", True)
+        start = (self._start_hint, "start", True)
         # `y copy` / `space preview` (P6, spec §7.4): the two ROW-SCOPED keys,
         # advertised only while an attachment row has the cursor. They follow
         # the `s start` variant rule exactly — each rides a one-extra-wider
@@ -1844,12 +1848,12 @@ class ProjectsView(Vertical):
         # `↵ open · y copy`, stays adjacent at every width that carries both.
         extras: list[tuple[HintButton, str, bool]] = []
         if self._detail_page.selected_can_copy():
-            extras.append((self._copy_hint, " copy", True))
+            extras.append((self._copy_hint, "copy", True))
         if self._detail_page.selected_can_preview():
             extras.append(
                 (
                     self._preview_hint,
-                    " hide" if self._detail_page.selected_preview_open() else " preview",
+                    "hide" if self._detail_page.selected_preview_open() else "preview",
                     True,
                 )
             )
@@ -1859,23 +1863,24 @@ class ProjectsView(Vertical):
         # reaches. MEASURED, against the footer's own budget (`size.width - 2`;
         # the page measures 96 at a 100-column terminal and 56 at 60):
         #   * 100 columns, 94 available: `↑↓ move · pgup/pgdn page ·
-        #     ↵ toggle groundwork · e edit · a add · x remove · esc back` = 91
-        #     cells, so it fits; the same row with `m message` is 104 and must
-        #     shed it, and the long `add milestone` label is 101 on its own.
+        #     ↵ toggle groundwork · e edit · a add · x remove · esc back` = 85
+        #     cells, so it fits; the same row with `m message` is 97 and must
+        #     shed it, and the long `add milestone` word alone brings it to 95.
         #     The SHORT `add` word is load-bearing at this width.
         #   * 60 columns, 54 available: the named context (23 cells) cannot
         #     coexist with both keys, so it sheds to the bare verb and the row
-        #     reads `↑↓ move · ↵ toggle · e edit · a add · esc back` = 50.
-        #     `x remove` (12 more) genuinely does not fit there and stays
-        #     unadvertised; it still WORKS, and it is advertised from ~62 up.
+        #     reads `↑↓ move · ↵ toggle · e edit · a add · esc back` = 46.
+        #     `x remove` (11 more) genuinely does not fit there and stays
+        #     unadvertised; it still WORKS, and the narrowest rung carrying it
+        #     measures 68 cells, so it appears from a 70-column page up.
         # `x` is carried only while a milestone row is selected — it removes
         # what the cursor names; `e`/`a` act on the page itself. The wider
         # rungs keep the long `add milestone` word so the key's fuller name is
         # still stated where there is room for it.
-        edit = (self._edit_hint, f" {_te(copy_edit.hint_edit())}", True)
-        add = (self._add_hint, f" {_te(copy_edit.hint_add())}", True)
-        add_long = (self._add_hint, f" {_te(copy_edit.hint_add_milestone())}", True)
-        remove = (self._remove_hint, f" {_te(copy_edit.hint_remove_milestone())}", True)
+        edit = (self._edit_hint, _te(copy_edit.hint_edit()), True)
+        add = (self._add_hint, _te(copy_edit.hint_add()), True)
+        add_long = (self._add_hint, _te(copy_edit.hint_add_milestone()), True)
+        remove = (self._remove_hint, _te(copy_edit.hint_remove_milestone()), True)
         actions: list[tuple[HintButton, str, bool]] = [edit, add]
         wide_actions: list[tuple[HintButton, str, bool]] = [edit, add_long]
         if self._detail_page.selected_milestone() is not None:

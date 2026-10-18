@@ -95,13 +95,24 @@ def _prompt(view: Any) -> MilestonePrompt:
 
 
 def _hint_text(view: Any) -> str:
-    """The painted hint row, whitespace-normalised (key and label sit 2 cells apart)."""
+    """The painted hint row, whitespace-normalised for containment checks."""
     painted = " ".join(
         hint.rendered()
         for hint in view._hints.children
         if isinstance(hint, HintButton) and hint.display
     )
     return " ".join(painted.split())
+
+
+def _hint_width(view: Any) -> int:
+    """The row's measured cell width — the number the ladder fits against."""
+    from rich.cells import cell_len
+
+    return sum(
+        cell_len(hint.rendered())
+        for hint in view._hints.children
+        if isinstance(hint, HintButton) and hint.display
+    )
 
 
 def _dump(tmp_path: Path, name: str = "parity-spec") -> dict[str, Any]:
@@ -675,8 +686,10 @@ async def test_the_detail_footer_advertises_edit_add_and_remove_at_100_columns(
     At 100x30 the page measures 96 cells, so the footer has 94. The row
     measured for a milestone selection is
     `↑↓ move · pgup/pgdn page · ↵ toggle groundwork · e edit · a add ·
-    x remove · esc back` = 91 cells; `r refresh` would make it 104 and is the
-    first of the canvas-era extras to shed.
+    x remove · esc back` = 85 cells; `r refresh` would make it 97 and is the
+    first of the canvas-era extras to shed. Every hint's key/label gap is ONE
+    space (`HintButton._build` supplies it), not the two a leading-space label
+    used to make — near the budget that rendered as `eedit`.
     """
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path)
@@ -692,6 +705,13 @@ async def test_the_detail_footer_advertises_edit_add_and_remove_at_100_columns(
         assert "x remove" in row, row
         assert "toggle groundwork" in row, row
         assert "r refresh" not in row, row
+        # The exact painted strings: one space between key and label, seam
+        # included. Two spaces here would mean a label carrying its own lead.
+        assert view._move_hint.rendered() == "↑↓ move"
+        assert view._edit_hint.rendered() == " · e edit"
+        assert view._add_hint.rendered() == " · a add"
+        assert view._remove_hint.rendered() == " · x remove"
+        assert _hint_width(view) <= view.size.width - 2, _hint_width(view)
 
 
 async def test_the_detail_footer_keeps_edit_and_add_at_the_60_column_floor(
@@ -700,8 +720,8 @@ async def test_the_detail_footer_keeps_edit_and_add_at_the_60_column_floor(
     """At 60x24 the named context sheds first, never the keys.
 
     The page measures 56 cells, so the footer has 54. With the named context
-    the row needs 61; the bare verb brings it to
-    `↑↓ move · ↵ toggle · e edit · a add · esc back` = 50. `x remove` needs 12
+    the row needs 57; the bare verb brings it to
+    `↑↓ move · ↵ toggle · e edit · a add · esc back` = 46. `x remove` needs 11
     more cells and genuinely does not fit there — it is unadvertised and
     still works.
     """
@@ -719,6 +739,11 @@ async def test_the_detail_footer_keeps_edit_and_add_at_the_60_column_floor(
         assert "↵ toggle" in row, row
         assert "toggle groundwork" not in row, row
         assert "x remove" not in row, row
+        assert view._move_hint.rendered() == "↑↓ move"
+        assert view._edit_hint.rendered() == " · e edit"
+        assert view._add_hint.rendered() == " · a add"
+        assert view._open_hint.rendered() == " · ↵ toggle"
+        assert _hint_width(view) <= view.size.width - 2, _hint_width(view)
 
 
 # ---------------------------------------------------------------------------
