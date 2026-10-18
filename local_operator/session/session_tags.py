@@ -5,6 +5,10 @@ or reordering categories cannot regroup conversations. Writes use same-directory
 replace and are last-writer-wins across processes, like the pin store; there is
 no cross-process lock or registry/assignment transaction. Orphans are therefore
 filtered on every read rather than resurrected when a name is reused.
+Existing assignments retain their original order on a PUT; newly added tags
+append in caller order. Changing primary or reordering a request cannot rewrite
+assignment history. Usage counts include hidden/archived sessions, but not
+assignment files whose session directory has been deleted.
 """
 
 from __future__ import annotations
@@ -78,7 +82,9 @@ def read_categories(root: Path) -> list[dict[str, str]]:
 def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[dict[str, str]]:
     if len(desired) > 32:
         raise ValueError("At most 32 categories are allowed")
-    known = {item["id"] for item in read_categories(root)}
+    existing = read_categories(root)
+    known = {item["id"] for item in existing}
+    by_name = {item["name"].casefold(): item["id"] for item in existing}
     ids: set[str] = set()
     names: set[str] = set()
     categories = []
@@ -92,9 +98,15 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
         if key is not None and (key not in known or key in ids):
             raise ValueError("Unknown or duplicate category id")
         if key is None:
+            # A dropped PUT response may be retried without server-generated
+            # IDs. Match the existing vocabulary rather than orphan assignments.
+            key = by_name.get(folded)
+        if key is None:
             key = uuid4().hex[:10]
             while key in known or key in ids:
                 key = uuid4().hex[:10]
+        if key in ids:
+            raise ValueError("Duplicate category id")
         categories.append({"id": key, "name": name})
         ids.add(key)
         names.add(folded)
@@ -102,8 +114,10 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
     return categories
 
 
-def resolve_category_names(root: Path, names: list[str]) -> list[str]:
-    categories = read_categories(root)
+def resolve_category_names(
+    root: Path, names: list[str], *, categories: list[dict[str, str]] | None = None
+) -> list[str]:
+    categories = read_categories(root) if categories is None else categories
     lookup = {item["name"].casefold(): item["id"] for item in categories}
     if not 1 <= len(names) <= 8 or any(not name.strip() for name in names):
         raise ValueError("Supply 1..8 non-empty category names")
@@ -158,14 +172,18 @@ def set_entity_tags(
     root: Path, entity_type: str, entity_id: str, tag_ids: list[str], primary: str | None
 ) -> EntityTags:
     path = _entity_path(root, entity_type, entity_id)
-    known = {item["id"] for item in read_categories(root)}
+    categories = read_categories(root)
+    known = {item["id"] for item in categories}
     if len(tag_ids) > 8 or len(set(tag_ids)) != len(tag_ids):
         raise ValueError("At most 8 distinct tags are allowed")
     if any(key not in known for key in tag_ids):
         raise ValueError("Unknown category id")
     if primary is not None and primary not in tag_ids:
         raise ValueError("Primary must be one of the assigned tags or null")
-    _write(path, {"version": 1, "primary": primary, "tags": tag_ids})
+    previous = read_entity_tags(root, entity_type, entity_id, categories=categories)["tags"]
+    ordered = [key for key in previous if key in tag_ids]
+    ordered.extend(key for key in tag_ids if key not in ordered)
+    _write(path, {"version": 1, "primary": primary, "tags": ordered})
     return read_entity_tags(root, entity_type, entity_id)
 
 
@@ -177,6 +195,8 @@ def usage_counts(root: Path, entity_type: str = "session") -> dict[str, int]:
         try:
             assignment = read_entity_tags(root, entity_type, path.stem, categories=categories)
         except ValueError:
+            continue
+        if entity_type == "session" and not (Path(root) / "sessions" / path.stem).is_dir():
             continue
         for key in assignment["tags"]:
             counts[key] += 1

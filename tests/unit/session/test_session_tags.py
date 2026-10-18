@@ -20,6 +20,7 @@ SID = "abcdef123456"
 def test_category_lifecycle_and_assignment_identity(tmp_path: Path) -> None:
     a, b = write_categories(tmp_path, [(None, " Review "), (None, "Fix")])
     assert resolve_category_names(tmp_path, ["review", " FIX "]) == [a["id"], b["id"]]
+    (tmp_path / "sessions" / SID).mkdir(parents=True)
     set_entity_tags(tmp_path, "session", SID, [a["id"], b["id"]], a["id"])
     assert usage_counts(tmp_path) == {a["id"]: 1, b["id"]: 1}
     assert write_categories(tmp_path, [(b["id"], "Fixes"), (a["id"], "Review")])[0]["id"] == b["id"]
@@ -136,3 +137,36 @@ def test_malformed_registry_entries_do_not_leak(tmp_path: Path) -> None:
         )
     )
     assert read_categories(tmp_path) == [{"id": "bbbbbbbbbb", "name": "Valid"}]
+
+
+def test_name_only_registry_retries_reuse_casefolded_identity(tmp_path: Path) -> None:
+    original = write_categories(tmp_path, [(None, "Review"), (None, "Fix")])
+    replayed = write_categories(tmp_path, [(None, " review "), (None, "FIX")])
+    assert [tag["id"] for tag in replayed] == [tag["id"] for tag in original]
+    with pytest.raises(ValueError):
+        write_categories(tmp_path, [(original[0]["id"], "Renamed"), (None, "review")])
+
+
+def test_primary_changes_and_put_order_preserve_assignment_history(tmp_path: Path) -> None:
+    a, b = write_categories(tmp_path, [(None, "A"), (None, "B")])
+    set_entity_tags(tmp_path, "session", SID, [a["id"]], a["id"])
+    state = set_entity_tags(tmp_path, "session", SID, [b["id"], a["id"]], b["id"])
+    assert state == {"tags": [a["id"], b["id"]], "primary": b["id"]}
+    state = set_entity_tags(tmp_path, "session", SID, [b["id"], a["id"]], a["id"])
+    assert state["tags"] == [a["id"], b["id"]]
+    set_entity_tags(tmp_path, "session", SID, [b["id"], a["id"]], b["id"])
+    write_categories(tmp_path, [(a["id"], "A")])
+    assert read_entity_tags(tmp_path, "session", SID) == {"tags": [a["id"]], "primary": a["id"]}
+
+
+def test_usage_counts_ignore_orphan_session_assignments(tmp_path: Path) -> None:
+    category = write_categories(tmp_path, [(None, "Review")])[0]
+    existing = "aaaaaaaaaaa1"
+    deleted = "aaaaaaaaaaa2"
+    (tmp_path / "sessions" / existing).mkdir(parents=True)
+    for sid in (existing, deleted):
+        set_entity_tags(tmp_path, "session", sid, [category["id"]], category["id"])
+    assert (tmp_path / "tags" / "session" / f"{deleted}.json").exists()
+    assert usage_counts(tmp_path) == {category["id"]: 1}
+    set_entity_tags(tmp_path, "project", "project-1", [category["id"]], category["id"])
+    assert usage_counts(tmp_path, "project") == {category["id"]: 1}

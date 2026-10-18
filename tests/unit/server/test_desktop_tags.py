@@ -160,3 +160,54 @@ async def test_assignment_response_uses_one_registry_snapshot(api, monkeypatch) 
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"] == {"session_id": sid, "tags": [], "primary": None}
+
+
+@pytest.mark.asyncio
+async def test_name_only_put_replay_preserves_ids_assignments_and_counts(api) -> None:
+    client, root = api
+    # Byte-identical replay models a response lost before the client learns IDs.
+    body = '{"tags":[{"name":"Review"},{"name":"Fix"}]}'
+    headers = {"Content-Type": "application/json"}
+    response = await client.put("/v1/desktop/tags", content=body, headers=headers)
+    assert response.status_code == 200, response.text
+    original = response.json()["result"]["tags"]
+    ids = [tag["id"] for tag in original]
+    sids = ["aaaaaaaaaaa1", "aaaaaaaaaaa2", "aaaaaaaaaaa3"]
+    for sid in sids:
+        seed(root, sid)
+        assigned = await client.put(
+            f"/v1/desktop/sessions/{sid}/tags", json={"tags": ids, "primary": ids[1]}
+        )
+        assert assigned.status_code == 200, assigned.text
+    response = await client.put("/v1/desktop/tags", content=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["tags"] == [{**tag, "conversations": 3} for tag in original]
+    rows = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"]
+    for row in rows:
+        assert [tag["id"] for tag in row["tags"]] == ids
+        assert row["primary"] == ids[1]
+
+
+@pytest.mark.asyncio
+async def test_assignment_put_preserves_oldest_tag_order(api) -> None:
+    client, root = api
+    sid = "aaaaaaaaaaa1"
+    seed(root, sid)
+    registry = await client.put("/v1/desktop/tags", json={"tags": [{"name": "A"}, {"name": "B"}]})
+    a, b = registry.json()["result"]["tags"]
+    url = f"/v1/desktop/sessions/{sid}/tags"
+    assert (await client.put(url, json={"tags": [a["id"]], "primary": a["id"]})).status_code == 200
+    for _ in range(2):
+        response = await client.put(url, json={"tags": [b["id"], a["id"]], "primary": b["id"]})
+        assert response.status_code == 200, response.text
+        assert [tag["id"] for tag in response.json()["result"]["tags"]] == [a["id"], b["id"]]
+    await client.put("/v1/desktop/tags", json={"tags": [{"id": a["id"], "name": "A"}]})
+    row = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"][0]
+    assert row["primary"] == a["id"]
+
+
+def test_route_schema_publishes_store_caps() -> None:
+    from local_operator.server.routes.desktop_sessions import TagAssignment, TagRegistry
+
+    assert TagRegistry.model_json_schema()["properties"]["tags"]["maxItems"] == 32
+    assert TagAssignment.model_json_schema()["properties"]["tags"]["maxItems"] == 8
