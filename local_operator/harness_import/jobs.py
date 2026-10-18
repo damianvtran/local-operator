@@ -42,7 +42,7 @@ class ImportJob:
     throwaway instance reports success while the real import keeps running.
     """
 
-    __slots__ = ("job_id", "session_key", "progress", "result", "service", "task")
+    __slots__ = ("job_id", "session_key", "progress", "result", "service", "request", "task")
 
     def __init__(self, job_id: str, progress: ImportProgress, *, session_key: str = ""):
         self.job_id = job_id
@@ -50,6 +50,10 @@ class ImportJob:
         self.progress = progress
         self.result: ImportResult | None = None
         self.service: Any = None
+        #: The accepted request, retained so a page that reattaches to a job
+        #: (``/import status``) can paint its selected session rows without
+        #: re-reading the source or guessing from progress alone.
+        self.request: ImportRequest | None = None
         self.task: asyncio.Task[Any] | None = None
 
 
@@ -98,6 +102,7 @@ class ImportJobRegistry:
         )
         job = ImportJob(progress.job_id, progress, session_key=session_key)
         job.service = service
+        job.request = request
         # A cancel can arrive between accepting the job and the event loop
         # running its first step; clear only here, before ``create_task``.
         service.clear_cancel()

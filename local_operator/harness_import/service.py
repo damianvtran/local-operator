@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import shutil
 import threading
 import time
 import unicodedata
@@ -502,38 +503,50 @@ class HarnessImportService:
         target_id = directory.name
         outcome.target_session_id = target_id
         mapped = mapped or self._map(adapter, session)
-        self._materialise_target(directory, session, mapped, adapter.source)
-        manifest_store.write_manifest(
-            directory,
-            self._manifest(
-                source=adapter.source,
-                session=session,
-                directory=directory,
-                fingerprint=fingerprint,
-                mapped=mapped,
-                status="partial",
-                counts=self._counts(mapped),
-                predecessor=predecessor,
-            ),
-        )
-        transcript = Transcript(directory, defer_materialise=True)
-        committed = {entry.id for entry in transcript.entries()}
-        rows = [row for row in mapped.rows if row.id not in committed]
-        if rows:
-            self._append(transcript, mapped, outcome, rows=rows)
-        manifest_store.write_manifest(
-            directory,
-            self._manifest(
-                source=adapter.source,
-                session=session,
-                directory=directory,
-                fingerprint=fingerprint,
-                mapped=mapped,
-                status="complete",
-                counts=self._counts(mapped),
-                predecessor=predecessor,
-            ),
-        )
+        # A cancellation or any write failure can land after the target
+        # directory exists but before one row is committed. Leaving
+        # created_at/title/partial-manifest there advertises an empty session
+        # that no listing will ever show. Remove only a directory THIS call
+        # created and only while it still has no transcript; a partial import
+        # with committed rows keeps its manifest so a resume can continue.
+        created_here = not directory.exists()
+        try:
+            self._materialise_target(directory, session, mapped, adapter.source)
+            manifest_store.write_manifest(
+                directory,
+                self._manifest(
+                    source=adapter.source,
+                    session=session,
+                    directory=directory,
+                    fingerprint=fingerprint,
+                    mapped=mapped,
+                    status="partial",
+                    counts=self._counts(mapped),
+                    predecessor=predecessor,
+                ),
+            )
+            transcript = Transcript(directory, defer_materialise=True)
+            committed = {entry.id for entry in transcript.entries()}
+            rows = [row for row in mapped.rows if row.id not in committed]
+            if rows:
+                self._append(transcript, mapped, outcome, rows=rows)
+            manifest_store.write_manifest(
+                directory,
+                self._manifest(
+                    source=adapter.source,
+                    session=session,
+                    directory=directory,
+                    fingerprint=fingerprint,
+                    mapped=mapped,
+                    status="complete",
+                    counts=self._counts(mapped),
+                    predecessor=predecessor,
+                ),
+            )
+        except Exception:
+            if created_here and not (directory / "transcript.jsonl").exists():
+                shutil.rmtree(directory, ignore_errors=True)
+            raise
         self._apply_stats(outcome, mapped)
         outcome.outcome = "imported"
         self._update_index(adapter.source, session, target_id, fingerprint, outcome)

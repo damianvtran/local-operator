@@ -1012,6 +1012,10 @@ _FRONTEND_LOCAL_SLASHES = {
     # user is not sitting at — the same rule `/model default` states explicitly
     # when it refuses to run on a follower.
     "settings",
+    # Reads THIS machine's foreign source stores and writes THIS machine's
+    # config/session root; a follower routed here would inspect and import on
+    # the owner's host instead. Same rule `/settings` states for config.yml.
+    "import",
     "provider",
     "search",
     "accounts",

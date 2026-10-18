@@ -419,6 +419,11 @@ from local_operator.tui.widgets.goal_panel import (
     GoalMarkDone,
     GoalPanel,
 )
+from local_operator.tui.widgets.harness_import_view import (
+    HarnessImportView,
+    HarnessImportViewDismissed,
+    ImportLaunch,
+)
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
@@ -6144,6 +6149,11 @@ class OperatorApp(App[None]):
         # contract. Held here for the same reason the two above are: the Esc
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
+        # The import mode (``/import``): a fifth sibling of the full-page MODE
+        # contract. It owns its own service worker and job polling; the app
+        # holds the widget so teardown and the Esc chain can close it.
+        self._import_view: Any | None = None
+        self._import_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
@@ -25954,6 +25964,8 @@ class OperatorApp(App[None]):
         # owns itself: its OWN Esc handler runs the ladder first (editor, then
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
+        if self._close_import_view():
+            return
         if self._close_settings_view():
             return
         # The projects page sits at the same precedence, and owns no ladder of
@@ -30026,10 +30038,10 @@ class OperatorApp(App[None]):
         stale while the page was open — a ``/clear`` or a session swap behind
         the page moves ``_welcome_visible`` under it.
 
-        EVERY full-page mode counts, not just ``/settings``. All four replace
+        EVERY full-page mode counts, not just ``/settings``. All five replace
         the transcript region through the same three lines (hide the
         transcript, mount before ``#input-dock``, add the mode's class), so all
-        four collide with the boot layout the same way — measured from the
+        five collide with the boot layout the same way — measured from the
         splash before this term was generalised: the subagent view took 21 of
         28 rows at 100x30 and the org chart 26 of 38 at 140x40, both with the
         card still clamped. Keying on ``_settings_view`` alone made the siblings
@@ -30051,6 +30063,7 @@ class OperatorApp(App[None]):
             and self._subagent_view is None
             and self._org_chart_view is None
             and self._projects_view is None
+            and self._import_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -36329,6 +36342,99 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_org_chart_view()
 
+    def _cmd_import(self, arg: str, notice: NoticeFn) -> None:
+        """``/import`` — open the full-page import mode.
+
+        Parsing lives here so the page receives ONE small launch record; the
+        page itself owns loading, previewing and the two-step confirm. A bare
+        form opens the source list, and a malformed form is refused on the
+        notice line rather than opening a page whose next key would fail.
+        """
+        from local_operator.i18n.keys import tui_import
+        from local_operator.i18n.text import tr
+
+        text = tr("tui.import")
+        pieces = arg.split()
+        form = pieces[0].casefold() if pieces else ""
+        if form in ("", "list"):
+            launch = ImportLaunch()
+        elif form in ("preview", "run"):
+            if len(pieces) < 2:
+                notice(text(tui_import.error_source_required()), "warning")
+                return
+            source = pieces[1]
+            session_id = pieces[2] if len(pieces) > 2 else ""
+            all_sessions = session_id.casefold() == "all"
+            launch = ImportLaunch(
+                action="preview" if form == "preview" else "run",
+                source=source,
+                session_id="" if all_sessions else session_id,
+                all=all_sessions,
+            )
+        elif form == "status":
+            launch = ImportLaunch(action="status")
+        elif form == "cancel":
+            launch = ImportLaunch(action="cancel")
+        else:
+            notice(text(tui_import.error_unknown_subcommand(form=form)), "warning")
+            return
+        self._open_import_view(launch)
+
+    def _open_import_view(self, launch: ImportLaunch) -> None:
+        """Enter the full-page import mode.
+
+        Same MODE contract as :meth:`_open_settings_view`: the transcript is
+        hidden, the dock stays in place and inert, and the page owns focus.
+        Its data loading is async in the widget's own worker, so the first
+        frame is the loading state rather than a blocked app.
+        """
+        if self._import_view is not None:
+            return
+        if self._settings_view is not None:
+            self._close_settings_view()
+        self._import_focus_restore = self.focused
+        view = HarnessImportView(launch)
+        self._import_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        # The import page shares the settings page's region contract, so it
+        # reuses that layout class (the same greyed dock, the same transcript
+        # slot) rather than introducing a second full-page skeleton.
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_import_view(self) -> bool:
+        """Leave the import mode and restore the conversation. True if open."""
+        view = self._import_view
+        if view is None:
+            return False
+        self._import_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._import_focus_restore
+        self._import_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass
+        return True
+
+    def on_harness_import_view_dismissed(self, message: HarnessImportViewDismissed) -> None:
+        """The page's esc hint/key — same exit as the mode's own Esc chain."""
+        message.stop()
+        self._close_import_view()
+
     def _cmd_settings(self, notice: NoticeFn) -> None:
         """``/settings`` — open the full-page settings surface.
 
@@ -36543,7 +36649,12 @@ class OperatorApp(App[None]):
         restored here and nowhere else. The transcript was only hidden, so it
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
+
+        The import page shares this region, so it is torn down here too: every
+        session-swap, /clear, approval and ctrl+C path already calls this
+        method, and a second copy of those nine call sites would drift.
         """
+        self._close_import_view()
         view = self._settings_view
         if view is None:
             return False
@@ -40033,6 +40144,8 @@ class OperatorApp(App[None]):
                 self.action_toggle_sidebar()
         elif command == "/settings":
             self._cmd_settings(notice)
+        elif command == "/import":
+            self._cmd_import(arg, notice)
         elif command == "/hub":
             # The Hub links surface. The action is SYNC and owns its own worker,
             # the fleet-door and usage-panel pattern: calling it directly keeps
