@@ -14,6 +14,7 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 keywords = ["local", "agent", "execution", "operator", "agent-to-agent", "agentic", "local-first", "ai", "proactive"]
 # The default install is deliberately small: the core agent (exec mode,
