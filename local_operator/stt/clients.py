@@ -74,6 +74,10 @@ class SttClientResult:
     raw_unavailable: str = ""
     #: The provider-detected language when it reports one.
     language: str | None = None
+    #: The provider's confidence in ``language``, when it reports one. The
+    #: client rules require this (or a caller-supplied hint) before trusting a
+    #: detected label; a bare label is unstable across takes.
+    language_probability: float | None = None
     #: Provider-side cleanup provenance (``"none"`` when no switch was sent).
     cleanup: str = "none"
 
@@ -235,6 +239,7 @@ class ElevenLabsSttClient:
         # raw copy is the text itself on that path.
         provider_removed = bool(sends_no_verbatim and no_verbatim)
         detected = payload.get("language_code")
+        probability = payload.get("language_probability")
         return SttClientResult(
             text=text,
             model=model_id,
@@ -242,6 +247,9 @@ class ElevenLabsSttClient:
             raw_text=None if provider_removed else text,
             raw_unavailable=(RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM if provider_removed else ""),
             language=detected if isinstance(detected, str) else None,
+            language_probability=(
+                float(probability) if isinstance(probability, (int, float)) else None
+            ),
             cleanup="elevenlabs.no_verbatim" if provider_removed else "none",
         )
 
