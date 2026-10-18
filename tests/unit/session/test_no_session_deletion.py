@@ -134,6 +134,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
     ),
+    (
+        "local_operator/procname.py::_sweep_orphan_plants",
+        "shutil.rmtree",
+        # Every path this module writes is `<runtime root>/<build key>` or a
+        # staging entry beside it, and `<venv>/bin|lib`. The key is the
+        # interpreter's own (parent name, resolved path, size, mtime), the root
+        # is passwd-home-derived, and the basenames are the brand — no session
+        # id, config dir or caller input can reach any of them.
+        "Reclaims <runtime root>/<key>.tmp.<pid>.<thread>, a staging tree this module made",
+    ),
+    (
+        "local_operator/procname.py::_plant_runtime",
+        "os.rename",
+        "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
+        2,
+    ),
+    (
+        "local_operator/procname.py::_plant_runtime",
+        "shutil.rmtree",
+        "Removes only this plant's own staging tree, or a CORRUPT <runtime root>/<key>",
+        3,
+    ),
+    (
+        "local_operator/procname.py::_link_to",
+        "os.replace",
+        "Atomic replace of <venv>/bin/'Local Operator' with a symlink to the runtime image",
+    ),
+    (
+        "local_operator/procname.py::_link_to",
+        "<path>.unlink",
+        "Clears this pid's own .tmp symlink in <venv>/bin after the replace",
+    ),
     # -- operator/device pairing store (stage D, issue #1310) ----------------
     # Every path in these FOUR is built from `config_dir()/operator/...` plus a
     # device id validated by `_safe_name` (alphanumerics, '-' and '_', at most 128

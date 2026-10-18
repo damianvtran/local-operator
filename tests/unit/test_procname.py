@@ -43,14 +43,21 @@ pytestmark = pytest.mark.skipif(
 
 
 def _fake_venv(tmp_path: Path) -> Path:
-    """A venv-shaped tree whose 'interpreter' is a hardlink of the real one.
+    """A venv-shaped tree that BELIEVES it is a venv.
 
     Real, because the thing under test IS filesystem behaviour: inode identity,
     link counts and symlink resolution cannot be faked with a mock and still
-    prove anything.
+    prove anything. ``pyvenv.cfg`` is part of that shape rather than decoration:
+    the runtime image has none beside it and CPython locates the stdlib
+    differently in the two cases, so a fixture without it would exercise the
+    image path while claiming to be a venv.
     """
     (tmp_path / "bin").mkdir(parents=True, exist_ok=True)
     (tmp_path / "lib").mkdir(parents=True, exist_ok=True)
+    real = Path(os.path.realpath(sys.executable))
+    (tmp_path / "pyvenv.cfg").write_text(
+        f"home = {real.parent}\ninclude-system-site-packages = false\n", encoding="utf-8"
+    )
     return tmp_path
 
 
@@ -105,6 +112,35 @@ def _generation_venv(root: Path) -> Path:
     return target
 
 
+def _runnable_venv(root: Path) -> Path:
+    """A generation-shaped venv whose interpreter can actually START.
+
+    Returns its ``bin/python3``. The base tree is a copy of this interpreter
+    with symlinks into the real ``lib`` (stdlib and dylib), which is what
+    ``_generation_venv`` deliberately does not provide: that fixture is for
+    tests that never execute the target, and a child exec'd from it dies with
+    ``No module named 'encodings'``. Nothing here touches uv's tree — whose
+    mtime is part of the build key for every venv on the machine.
+    """
+    real = Path(os.path.realpath(sys.executable))
+    if ".framework" in str(real):
+        pytest.skip("framework interpreters cannot be branded (stub re-exec)")
+    base = root / "base"
+    (base / "bin").mkdir(parents=True)
+    (base / "lib").mkdir(parents=True)
+    copied = base / "bin" / real.name
+    shutil.copy2(real, copied)
+    for entry in (real.parent.parent / "lib").iterdir():
+        if entry.name.startswith("python") or entry.name.startswith("libpython"):
+            os.symlink(entry, base / "lib" / entry.name)
+    venv = root / "gen"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n", encoding="utf-8")
+    (venv / "bin" / "python3").symlink_to(copied)
+    return venv / "bin" / "python3"
+
+
 def _generation_base(root: Path) -> Path:
     """The shared interpreter tree a generation venv's ``bin/python3`` points into.
 
@@ -131,13 +167,28 @@ def _unbrandable_reason(root: Path) -> str | None:
     return None
 
 
+@pytest.fixture(autouse=True)
+def stable_runtime(tmp_path, monkeypatch):
+    """Keep every plant out of the operator's real ``~/.local/share/lop``.
+
+    ``LOCAL_OPERATOR_RUNTIME_ROOT`` rather than a monkeypatched function: the
+    plants here are re-checked by CHILD processes (a spawn executes the link),
+    and an environment variable is the only override that crosses that
+    boundary. See :func:`procname.runtime_root` for why the variable exists.
+    """
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
+    return root
+
+
 @pytest.fixture()
-def branded(tmp_path, monkeypatch):
+def branded(tmp_path, monkeypatch, stable_runtime):
     """Point ``procname`` at a throwaway prefix and plant into it.
 
     ``sys.prefix``/``sys.base_prefix`` are patched so the module believes it is
-    in a venv it owns. NOTHING is written outside ``tmp_path``: the operator's
-    real venvs and installs must never be touched by a test run.
+    in a venv it owns, and the runtime root is redirected so the image is
+    published under ``tmp_path``. NOTHING is written outside ``tmp_path``: the
+    operator's real venvs and installs must never be touched by a test run.
     """
     prefix = _fake_venv(tmp_path)
     monkeypatch.setattr(sys, "prefix", str(prefix))
@@ -146,17 +197,48 @@ def branded(tmp_path, monkeypatch):
     if ".framework" in str(real):
         pytest.skip("framework interpreters cannot be branded (stub re-exec)")
     if real.stat().st_dev != os.stat(prefix).st_dev:
-        pytest.skip("interpreter and tmp_path on different devices: hardlink impossible")
+        pytest.skip("interpreter and tmp_path on different devices: no clone")
     link = procname.ensure_branded_interpreter()
     if link is None:
         pytest.skip("no branded image could be planted in this environment")
     return link
 
 
-class TestStaleness:
-    """The three triggers, each demonstrated firing AND repairing."""
+@pytest.fixture()
+def hardlink_branded(branded, monkeypatch):
+    """The FALLBACK rung: a runtime root that cannot be planted into.
 
-    def test_replants_when_link_names_a_different_inode(self, branded, tmp_path):
+    The per-venv hardlink and its dylib pin are one release of insurance
+    (decision D2), and every one of their staleness rules still has a caller:
+    a read-only stable root, a non-APFS volume, an interpreter whose tree
+    cannot back an image. Faking the rung unavailable is how those rules are
+    exercised without a read-only filesystem.
+    """
+    # Start from the per-venv shape this rung exists to serve. ``branded`` has
+    # already planted the runtime link, and leaving it there would make
+    # ``ensure`` (correctly) keep it: a healthy runtime link is never replaced
+    # by the fallback.
+    real = Path(os.path.realpath(sys.executable))
+    branded.unlink()
+    os.link(real, branded)
+    monkeypatch.setattr(procname, "_plant_runtime", lambda real, root: None)
+    link = procname.ensure_branded_interpreter()
+    assert link is not None, "the fallback rung must still plant"
+    assert not link.is_symlink(), "this fixture is the hardlink rung by definition"
+    return link
+
+
+class TestStaleness:
+    """The FALLBACK rung's triggers, each demonstrated firing AND repairing.
+
+    The runtime rung's own staleness rule is identity against the build image
+    (``TestStableRuntimeImage``); these are the inode-shaped rules the per-venv
+    hardlink keeps for one release of insurance (decision D2). They are
+    exercised through ``hardlink_branded``, which plants with the runtime rung
+    unavailable — the same state as a read-only stable root.
+    """
+
+    def test_replants_when_link_names_a_different_inode(self, hardlink_branded, tmp_path):
         """Trigger (a): ``uv tool install --force`` replaced the interpreter.
 
         uv PRESERVES unknown files in ``bin/`` but does not refresh them, so the
@@ -172,13 +254,13 @@ class TestStaleness:
         real_ino = os.stat(os.path.realpath(sys.executable)).st_ino
         stale = tmp_path / "previous-interpreter"
         stale.write_bytes(b"the interpreter uv just replaced")
-        branded.unlink()
-        os.link(stale, branded)  # different inode, but nlink == 2
-        assert os.stat(branded).st_ino != real_ino
-        assert os.stat(branded).st_nlink >= 2, "only trigger (a) may detect this"
+        hardlink_branded.unlink()
+        os.link(stale, hardlink_branded)  # different inode, but nlink == 2
+        assert os.stat(hardlink_branded).st_ino != real_ino
+        assert os.stat(hardlink_branded).st_nlink >= 2, "only trigger (a) may detect this"
 
-        assert procname.ensure_branded_interpreter() == branded
-        assert os.stat(branded).st_ino == real_ino
+        assert procname.ensure_branded_interpreter() == hardlink_branded
+        assert os.stat(hardlink_branded).st_ino == real_ino
 
     def test_replants_when_hardlink_became_a_copy(self, branded):
         """Trigger (b): ``st_nlink < 2``.
@@ -192,36 +274,36 @@ class TestStaleness:
         assert os.stat(branded).st_nlink == 1
 
         assert procname.ensure_branded_interpreter() == branded
-        assert os.stat(branded).st_nlink >= 2
+        assert branded.is_symlink(), "a copy at the path is replaced by the image link"
 
-    def test_replants_when_libpython_symlink_dangles(self, branded):
+    def test_replants_when_libpython_symlink_dangles(self, hardlink_branded):
         """Trigger (c): the measured 100%-abort mode.
 
-        Without ``<venv>/lib/libpython3.X.dylib`` the branded image dies with
+        Without ``<venv>/lib/libpython3.X.dylib`` the branded hardlink dies with
         ``Abort trap: 6`` on every launch — 40/40 measured. A first run can
         spuriously succeed from a warm dyld launch closure, which is exactly why
         this is pinned by a test rather than by a manual smoke check.
         """
         name = procname._libpython_name()
         assert name, "a brandable interpreter must expose an LDLIBRARY dylib"
-        lib = branded.parent.parent / "lib" / name
+        lib = hardlink_branded.parent.parent / "lib" / name
         assert lib.is_symlink() and lib.exists(), "plant must create a live symlink"
 
         lib.unlink()
         lib.symlink_to("/nonexistent/libpython.dylib")
         assert not lib.exists(), "precondition: the symlink dangles"
 
-        assert procname.ensure_branded_interpreter() == branded
+        assert procname.ensure_branded_interpreter() == hardlink_branded
         assert lib.exists(), "the dangling symlink must be repaired"
 
-    def test_orphan_temps_from_dead_plants_are_swept(self, branded):
+    def test_orphan_temps_from_dead_plants_are_swept(self, hardlink_branded):
         """A plant killed between ``os.link`` and ``os.replace`` leaks a temp.
 
         Reproduced with ``kill -9``: the cleanup on the error path cannot run,
         so one entry accumulates per crashed startup. A LIVE pid's temp must
         survive — a concurrent worktree is plausibly mid-plant.
         """
-        bin_dir = branded.parent
+        bin_dir = hardlink_branded.parent
         dead = bin_dir / f".{procname.BRAND}.999999.tmp"
         # A DIFFERENT live pid: this process's own temp name is the one the
         # plant itself claims and consumes via `os.replace`, so using it here
@@ -230,13 +312,13 @@ class TestStaleness:
         dead.write_bytes(b"orphan")
         mine.write_bytes(b"in flight")
 
-        branded.unlink()  # force the replant path, which is where the sweep runs
-        assert procname.ensure_branded_interpreter() == branded
+        hardlink_branded.unlink()  # force the replant path, which is where the sweep runs
+        assert procname.ensure_branded_interpreter() == hardlink_branded
 
         assert not dead.exists(), "a dead pid's temp must be swept"
         assert mine.exists(), "a live pid's temp must be left alone"
 
-    def test_the_orphan_sweep_asks_procstate_and_never_signals(self, branded, monkeypatch):
+    def test_the_orphan_sweep_asks_procstate_and_never_signals(self, hardlink_branded, monkeypatch):
         """The sweep asks ``procstate.pid_alive``; it must never touch ``os.kill``.
 
         THE C1-CLASS TRAP: ``os.kill(pid, 0)`` is a liveness probe on POSIX and
@@ -263,11 +345,11 @@ class TestStaleness:
 
         monkeypatch.setattr(procstate, "pid_alive", _dead)
 
-        orphan = branded.parent / f".{procname.BRAND}.999999.tmp"
+        orphan = hardlink_branded.parent / f".{procname.BRAND}.999999.tmp"
         orphan.write_bytes(b"orphan")
-        branded.unlink()  # force the replant path, which is where the sweep runs
+        hardlink_branded.unlink()  # force the replant path, which is where the sweep runs
 
-        assert procname.ensure_branded_interpreter() == branded
+        assert procname.ensure_branded_interpreter() == hardlink_branded
 
         assert 999999 in asked, "the sweep must ask the shared liveness probe"
         assert not orphan.exists()
@@ -307,7 +389,7 @@ class TestStaleness:
             "does not need it, and the sweep imports it for itself"
         )
 
-    def test_replants_when_libpython_points_at_the_wrong_library(self, branded):
+    def test_replants_when_libpython_points_at_the_wrong_library(self, hardlink_branded):
         """Trigger (c), second half: a LIVE symlink is not automatically CORRECT.
 
         Found while verifying the B4 fix. `exists()` only proves the link
@@ -317,16 +399,16 @@ class TestStaleness:
         """
         name = procname._libpython_name()
         assert name
-        lib = branded.parent.parent / "lib" / name
+        lib = hardlink_branded.parent.parent / "lib" / name
         lib.unlink()
         lib.symlink_to("/etc/hosts")  # live, resolvable, and wrong
         assert lib.exists(), "precondition: the symlink resolves"
 
-        assert procname.ensure_branded_interpreter() == branded
+        assert procname.ensure_branded_interpreter() == hardlink_branded
         expected = Path(os.path.realpath(sys.executable)).parent.parent / "lib" / name
         assert lib.resolve() == expected.resolve()
 
-    def test_orphan_temps_are_swept_in_lib_as_well_as_bin(self, branded):
+    def test_orphan_temps_are_swept_in_lib_as_well_as_bin(self, hardlink_branded):
         """REGRESSION (review round 1, B3): both plant directories are swept.
 
         A killed plant leaks a temp named for the BRAND in `bin/` or for the
@@ -335,21 +417,21 @@ class TestStaleness:
         """
         name = procname._libpython_name()
         assert name
-        bin_orphan = branded.parent / f".{procname.BRAND}.999999.tmp"
-        lib_orphan = branded.parent.parent / "lib" / f".{name}.999998.tmp"
+        bin_orphan = hardlink_branded.parent / f".{procname.BRAND}.999999.tmp"
+        lib_orphan = hardlink_branded.parent.parent / "lib" / f".{name}.999998.tmp"
         bin_orphan.write_bytes(b"orphan")
         lib_orphan.write_bytes(b"orphan")
 
-        branded.unlink()  # force the replant path
-        assert procname.ensure_branded_interpreter() == branded
+        hardlink_branded.unlink()  # force the replant path
+        assert procname.ensure_branded_interpreter() == hardlink_branded
 
         assert not bin_orphan.exists(), "bin/ orphan must be swept"
         assert not lib_orphan.exists(), "lib/ orphan must be swept too"
 
-    def test_replanting_onto_an_identical_link_consumes_its_temp(self, branded):
+    def test_replanting_onto_an_identical_link_consumes_its_temp(self, hardlink_branded):
         """REGRESSION: the ordinary replant must not leak its staging name.
 
-        Trigger (c) — the missing companion libpython — fires while ``branded``
+        Trigger (c) — the missing companion libpython — fires while ``hardlink_branded``
         ALREADY names the right inode, so the plant's ``os.replace(tmp, link)``
         moves one hardlink onto another hardlink of the SAME file. POSIX says
         that call "shall return successfully and perform no other action", so
@@ -363,20 +445,22 @@ class TestStaleness:
         process's pid, which is alive.
         """
         real = Path(os.path.realpath(sys.executable))
-        assert os.stat(branded).st_ino == os.stat(real).st_ino, "precondition: same inode"
+        assert os.stat(hardlink_branded).st_ino == os.stat(real).st_ino, "precondition: same inode"
         name = procname._libpython_name()
         assert name
-        lib = branded.parent.parent / "lib" / name
+        lib = hardlink_branded.parent.parent / "lib" / name
         lib.unlink()
         lib.symlink_to("/nonexistent/libpython.dylib")  # trigger (c), and only (c)
 
-        assert procname.ensure_branded_interpreter() == branded
+        assert procname.ensure_branded_interpreter() == hardlink_branded
 
-        leftovers = sorted(path.name for path in branded.parent.glob(f".{procname.BRAND}.*.tmp"))
+        leftovers = sorted(
+            path.name for path in hardlink_branded.parent.glob(f".{procname.BRAND}.*.tmp")
+        )
         assert leftovers == [], f"the replant leaked its temp: {leftovers}"
-        assert branded.exists(), "the link the caller asked for must survive"
+        assert hardlink_branded.exists(), "the link the caller asked for must survive"
 
-    def test_orphan_temp_of_a_zombie_planter_is_swept(self, branded):
+    def test_orphan_temp_of_a_zombie_planter_is_swept(self, hardlink_branded):
         """A SIGKILLed plant is a ZOMBIE, not a live pid, and its temp is litter.
 
         ``os.kill(pid, 0)`` answers for an exited-but-unreaped process exactly
@@ -411,12 +495,12 @@ class TestStaleness:
             # running plant, so this pid reads alive to it.
             os.kill(pid, 0)
 
-            bin_dir = branded.parent
+            bin_dir = hardlink_branded.parent
             zombie_temp = bin_dir / f".{procname.BRAND}.{pid}.tmp"
             zombie_temp.write_bytes(b"orphan of a killed plant")
 
-            branded.unlink()  # force the replant path, which is where the sweep runs
-            assert procname.ensure_branded_interpreter() == branded
+            hardlink_branded.unlink()  # force the replant path, which is where the sweep runs
+            assert procname.ensure_branded_interpreter() == hardlink_branded
 
             assert not zombie_temp.exists(), "a zombie plant's temp must be swept"
         finally:
@@ -454,7 +538,7 @@ class TestStaleness:
             with pytest.raises(PermissionError):
                 os.stat(dylib)
             assert (
-                procname._needs_replant(branded, Path(os.path.realpath(sys.executable)), dylib)
+                procname._stale_hardlink(branded, Path(os.path.realpath(sys.executable)), dylib)
                 is True
             )
         finally:
@@ -465,12 +549,16 @@ class TestStaleness:
         """The common path does no filesystem writes.
 
         This runs on every startup, so a plant that re-links unconditionally
-        would churn an inode (and race sibling worktrees) for nothing.
+        would churn the path (and race sibling worktrees) for nothing. The
+        probe is ``lstat``: ``stat`` would follow the symlink to the shared
+        image, which is the same for every venv and would hide a rewritten link.
         """
-        before = os.stat(branded)
+        before = os.lstat(branded)
+        target = os.readlink(branded)
         assert procname.ensure_branded_interpreter() == branded
-        after = os.stat(branded)
+        after = os.lstat(branded)
         assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
+        assert os.readlink(branded) == target
 
     def test_replants_when_the_link_is_present_but_not_executable(self, tmp_path):
         """Trigger (d), isolated from (a) and (b) so it cannot pass by accident.
@@ -496,10 +584,10 @@ class TestStaleness:
         real.chmod(0o755)
         os.link(real, link)
         assert (
-            procname._needs_replant(link, real, None) is False
+            procname._stale_hardlink(link, real, None) is False
         ), "the control: an executable inode-matching link is healthy"
         real.chmod(0o600)
-        assert procname._needs_replant(link, real, None) is True
+        assert procname._stale_hardlink(link, real, None) is True
 
     def test_a_neutered_link_is_repaired_rather_than_handed_out(self, branded):
         """(d's) outcome: the plant replaces it, and the pair gets the new link.
@@ -519,31 +607,50 @@ class TestStaleness:
 
         assert executable == str(branded)
         assert os.access(branded, os.X_OK) is True
-        assert (
-            branded.stat().st_ino == os.stat(os.path.realpath(sys.executable)).st_ino
-        ), "the repair must plant the interpreter, not something else"
+        assert branded.is_symlink(), "the repair must plant the image link, not a copy"
+        image = Path(os.readlink(branded))
+        real = procname.real_interpreter()
+        assert real is not None
+        assert image.parent.parent.name == procname._build_key(
+            real
+        ), "the repair must name the image for THIS interpreter build"
+        assert image.stat().st_ino != os.stat(os.path.realpath(sys.executable)).st_ino
         assert argv0 == "Local Operator [eval] session=deadbeef"
 
-    def test_a_link_with_no_identifiable_dylib_is_never_handed_out(self, branded, monkeypatch):
-        """The no-dylib refusal must cover "link present, companion unverifiable".
+    def test_an_image_whose_stdlib_does_not_resolve_is_never_handed_out(self, branded):
+        """The gate ``os.access`` cannot see: an executable image with no stdlib.
 
-        With no dylib name, trigger (c) cannot run at all — so a link that is the
-        interpreter's inode, executable and ``nlink >= 2`` would otherwise be
-        handed out as ``executable=`` with its companion missing or
-        unidentifiable, and dyld aborts at load, which is the one failure no
-        ``os.access`` check can see (review round 1, R-4). The refusal therefore
-        comes BEFORE the staleness early return.
-
-        ``branded`` has just planted a healthy shape, which is what makes this
-        discriminate: with the check below the early return, the healthy link was
-        returned here and this cell would fail.
+        A symlink to the runtime clone whose ``lib`` no longer resolves is
+        executable and still dies at ``No module named 'encodings'``, so an
+        image is only handed to ``subprocess`` when the stdlib resolves through
+        the ``lib`` beside it. This is the runtime rung's equivalent of the
+        no-dylib refusal the hardlink rung carries.
         """
-        monkeypatch.setattr(procname, "_libpython_name", lambda: None)
+        image = Path(os.readlink(branded))
+        (image.parent.parent / "lib").unlink()
+        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
 
-        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+        # A path INSIDE a venv is resolved through that venv's pyvenv.cfg, so
+        # only the image itself (no pyvenv.cfg beside it) is asked the question.
+        assert not (image.parent.parent / "pyvenv.cfg").exists()
+        assert procname._executable_image(image) is None
 
-        assert executable is None
-        assert argv0 == sys.executable
+    def test_a_corrupt_published_image_is_rebuilt(self, branded):
+        """A published image that CANNOT start is not a race winner.
+
+        Published directories are immutable by convention, not at the cost of
+        a machine that can never repair itself: an image whose stdlib does not
+        resolve cannot have a running process behind it, so it is removed and
+        republished rather than silently downgrading every venv to the
+        fallback rung for the life of the install.
+        """
+        image = Path(os.readlink(branded))
+        (image.parent.parent / "lib").unlink()
+        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+
+        assert procname.ensure_branded_interpreter() == branded
+        assert procname._executable_image(branded) is not None
+        assert procname._stdlib_through(Path(os.readlink(branded)))
 
     def test_an_unrepairable_neutered_link_withholds_the_label_too(self, branded, monkeypatch):
         """The EDR-RACE case: the plant reports success and the file is still dead.
@@ -560,6 +667,10 @@ class TestStaleness:
         branded.unlink()
         branded.write_bytes(b"x" * 49968)
         branded.chmod(0o600)
+        # The runtime rung is faked as unavailable so the path taken is the
+        # one this test is about: a fallback plant that REPORTS success while
+        # the file stays inert.
+        monkeypatch.setattr(procname, "_plant_runtime", lambda real, root: None)
         monkeypatch.setattr(procname, "_plant_hardlink", lambda link, real: True)
 
         argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
@@ -601,17 +712,25 @@ class TestFallbackLadder:
         monkeypatch.setattr(sys, "base_prefix", str(tmp_path))
         assert procname.ensure_branded_interpreter() is None
 
-    def test_no_dylib_means_no_plant(self, tmp_path, monkeypatch):
-        """Without a dylib to symlink, a planted hardlink would be a landmine.
+    def test_a_source_that_cannot_back_an_image_plants_nothing(
+        self, tmp_path, monkeypatch, stable_runtime
+    ):
+        """No stdlib in the source tree AND no dylib to pin: rung 2, honestly.
 
-        Refusing is correct: the alternative plants an image that aborts on
-        every launch once dyld's warm closure expires.
+        The runtime image would die at ``No module named 'encodings'`` and the
+        hardlink at dyld's missing dylib (the measured 100%-abort mode), so
+        nothing is planted and the caller is told there is no name. The
+        alternative — planting one of them blind — is a launch that fails
+        everywhere the warm dyld closure is not.
         """
         monkeypatch.setattr(sys, "prefix", str(_fake_venv(tmp_path)))
         monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(procname, "_stdlib_through", lambda image: False)
         monkeypatch.setattr(procname, "_libpython_name", lambda: None)
         assert procname.ensure_branded_interpreter() is None
         assert not (tmp_path / "bin" / procname.BRAND).exists()
+        real = procname.real_interpreter()
+        assert real is not None and not (stable_runtime / procname._build_key(real)).exists()
 
     def test_reexec_returns_when_branding_is_unavailable(self, monkeypatch):
         """``reexec_branded`` must RETURN (not exit) so the process stays alive.
@@ -1079,7 +1198,7 @@ class TestCrossTreeSpawnIdentity:
         and the child must still report THAT tree's ``sys.prefix`` (a
         generation flip converges one session at a time through it).
         """
-        target = _generation_venv(tmp_path / "gen")
+        target = _runnable_venv(tmp_path / "runnable")
         argv0, executable = procname.spawn_identity_for_interpreter(
             procname.LABEL_DAEMONS_REFRESH, str(target)
         )
@@ -1582,6 +1701,268 @@ class TestCrossTreeSpawnSites:
 
         assert calls == ["own"], f"a same-tree spawn must not replant elsewhere: {calls}"
         assert recorded["executable"] in (None, str(procname.ensure_branded_interpreter()))
+
+
+class TestStableRuntimeImage:
+    """One image per Python build, and every venv links to it.
+
+    The properties that make macOS's privacy rows stop multiplying: the image
+    is a clone (own inode), its path is a FUNCTION of the interpreter build,
+    and every venv — generation or worktree — resolves through the same one.
+    """
+
+    def _copied_tree(self, tmp_path: Path) -> Path:
+        """A throwaway interpreter tree with a real ``lib``, safe to mutate.
+
+        The operator's uv interpreter is NEVER touched: bumping its mtime or
+        unlinking its dylib would re-key every venv on the machine (and is the
+        2026-09-19 blast radius this layout exists to remove).
+        """
+        real = Path(os.path.realpath(sys.executable))
+        base = tmp_path / "base"
+        (base / "bin").mkdir(parents=True)
+        (base / "lib").mkdir(parents=True)
+        copied = base / "bin" / real.name
+        shutil.copy2(real, copied)
+        for entry in (real.parent.parent / "lib").iterdir():
+            if entry.name.startswith("python") or entry.name.startswith("libpython"):
+                os.symlink(entry, base / "lib" / entry.name)
+        return copied
+
+    def test_the_plant_publishes_a_clone_beside_a_stdlib_link(self, branded):
+        image = Path(os.readlink(branded))
+        real = procname.real_interpreter()
+        assert real is not None
+        real_stat = Path(os.path.realpath(real)).stat()
+        image_stat = image.stat()
+
+        assert image_stat.st_nlink == 1, "the image must not share uv's inode"
+        assert image_stat.st_ino != real_stat.st_ino
+        assert (image_stat.st_size, image_stat.st_mtime_ns) == (
+            real_stat.st_size,
+            real_stat.st_mtime_ns,
+        ), "a clone keeps the bytes AND the timestamps"
+        assert (image.parent.parent / "lib").is_symlink()
+        assert (image.parent.parent / "lib").resolve() == (real.parent.parent / "lib").resolve()
+        assert (image.parent.parent / "include").is_symlink()
+        assert os.readlink(branded) == str(image)
+        assert branded.parent.name == "bin" and image.name == procname.BRAND
+
+    def test_executing_the_venv_link_names_this_process_and_keeps_the_venv(self, tmp_path):
+        """The triple TCC, Activity Monitor and Python each read differently.
+
+        Twenty launches, not one: the warm-dyld trap in the module docstring is
+        exactly a first-run success followed by 100% failure, so a single smoke
+        run proves nothing about this shape.
+        """
+        target = _runnable_venv(tmp_path)
+        venv = target.parent.parent
+        _, link = procname.spawn_identity_for_interpreter(procname.LABEL_SERVE, target, port=1)
+        assert link is not None, "the runtime rung must be available here"
+        link = Path(link)
+        assert link.is_symlink()
+        probe = (
+            "import ctypes, os, sys;"
+            "l=ctypes.CDLL('/usr/lib/libSystem.dylib');"
+            "b=ctypes.create_string_buffer(64);"
+            "l.proc_name(ctypes.c_int(os.getpid()),b,ctypes.c_uint(64));"
+            "print(b.value.decode());print(sys.prefix)"
+        )
+        for launch in range(20):
+            result = subprocess.run(
+                [procname.BRAND, SAFE_PATH_FLAG, "-c", probe],
+                executable=str(link),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert result.returncode == 0, (launch, result.stderr)
+            name, prefix = result.stdout.strip().splitlines()[:2]
+            assert name == procname.BRAND, (launch, name)
+            assert os.path.realpath(prefix) == os.path.realpath(venv), (launch, prefix)
+
+    def test_two_venvs_share_one_image(self, branded, tmp_path):
+        """A worktree venv and a generation venv are the SAME privacy client."""
+        real = procname.real_interpreter()
+        assert real is not None
+        second = _fake_venv(tmp_path / "second")
+        (second / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+        (second / "bin" / "python3").symlink_to(real)
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_SERVE, second / "bin" / "python3", port=1
+        )
+
+        assert executable is not None
+        assert os.readlink(executable) == os.readlink(branded)
+        assert len([p for p in procname.runtime_root().iterdir() if p.is_dir()]) == 1
+
+    def test_a_new_interpreter_build_publishes_a_new_image(self, tmp_path):
+        """A replaced interpreter is a NEW key; the old image is left alone."""
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        first = procname._plant_runtime(real, root)
+        assert first is not None
+        before = {p.name: p.stat().st_mtime_ns for p in root.iterdir() if p.is_dir()}
+
+        bumped = real.stat().st_mtime_ns + 1_000_000_000
+        os.utime(real, ns=(bumped, bumped))
+        second = procname._plant_runtime(real, root)
+
+        assert second is not None and second != first
+        assert first.parent.parent.is_dir(), "a published image is never collected"
+        after = {p.name: p.stat().st_mtime_ns for p in root.iterdir() if p.is_dir()}
+        assert set(after) == set(before) | {second.parent.parent.name}
+        for name, mtime in before.items():
+            assert after[name] == mtime, "the published directory is immutable"
+
+    def test_a_broken_image_falls_back_to_python3_in_the_daemon_shim(self, tmp_path, branded):
+        """The shim asks the stdlib question, and falls back rather than failing."""
+        from local_operator import update as update_mod
+
+        def shim_tree(image: Path) -> Path:
+            stable = tmp_path / "stable"
+            (stable / "bin").mkdir(parents=True, exist_ok=True)
+            written = stable / "bin" / "python3"
+            written.write_text(update_mod._DAEMON_SHIM, encoding="utf-8")
+            written.chmod(0o755)
+            gen = stable / "generations" / "g1"
+            bin_dir = gen / "tools" / "local-operator" / "bin"
+            bin_dir.mkdir(parents=True)
+            os.symlink("generations/g1", stable / "current")
+            (bin_dir / "Local Operator").symlink_to(image)
+            (bin_dir / "python3").symlink_to(Path(os.path.realpath(sys.executable)))
+            return written
+
+        image = Path(os.readlink(branded))
+        good = shim_tree(image)
+        ran = subprocess.run(
+            [str(good), "-c", "print('ok')"], capture_output=True, text=True, timeout=60
+        )
+        assert ran.returncode == 0 and ran.stdout.strip() == "ok", ran.stderr
+
+        # Same layout and same name, but the image's stdlib no longer resolves:
+        # the shim must exec the sibling interpreter instead of that image, and
+        # the fallback is a script so a pass here cannot be the image running.
+        bin_dir = tmp_path / "stable" / "generations" / "g1" / "tools" / "local-operator" / "bin"
+        (image.parent.parent / "lib").unlink()
+        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+        (bin_dir / "python3").unlink()
+        (bin_dir / "python3").write_text("#!/bin/sh\necho fallback\n")
+        (bin_dir / "python3").chmod(0o755)
+
+        ran = subprocess.run(
+            [str(good), "-c", "print('should-not-run')"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert ran.returncode == 0, ran.stderr
+        assert ran.stdout.strip() == "fallback", ran.stdout
+
+    def test_concurrent_planters_publish_one_image_and_leak_no_temps(self, tmp_path):
+        import concurrent.futures
+
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: procname._plant_runtime(real, root), range(8)))
+
+        assert all(result is not None for result in results)
+        assert len({str(result) for result in results}) == 1
+        assert len([p for p in root.iterdir() if p.is_dir()]) == 1
+        assert not list(root.glob("*.tmp.*")), "every planter must consume its own temp"
+        image = results[0]
+        assert image is not None and procname._healthy_image(image)
+
+    def test_an_unwritable_runtime_root_is_a_rung_not_an_error(self, tmp_path):
+        """A sandboxed child cannot publish; it must say so, not raise."""
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "readonly"
+        root.mkdir()
+        root.chmod(0o500)
+        try:
+            assert procname._plant_runtime(real, root) is None
+        finally:
+            root.chmod(0o700)
+        assert not list(root.glob("*.tmp.*")), "a failed plant cleans up after itself"
+
+    def test_a_healthy_runtime_link_is_never_replaced_by_the_fallback(self, branded, monkeypatch):
+        """The sandboxed-child case: cannot plant, must not downgrade either.
+
+        A read-only runtime root makes the runtime rung unavailable, and the
+        hardlink rung below it must then leave a HEALTHY runtime symlink alone.
+        Replacing it would give the child a second path (a second privacy
+        prompt) and undo what its parent planted.
+        """
+        image = Path(os.readlink(branded))
+        monkeypatch.setattr(procname, "_plant_runtime", lambda real, root: None)
+
+        assert procname.ensure_branded_interpreter() == branded
+
+        assert branded.is_symlink(), "a healthy runtime link must survive rung 2"
+        assert os.readlink(branded) == str(image)
+
+    def test_the_runtime_root_does_not_follow_home(self, monkeypatch):
+        """SDK children get ``HOME`` rewritten; the privacy client must not move.
+
+        ``agent/sdk.py`` sets ``HOME`` to an agent home for SDK children, so a
+        root derived from the environment would plant a second image — a second
+        privacy prompt — for every such child. The passwd entry is the answer
+        that does not move, and this pins that it is the one consulted.
+        """
+        import pwd as pwd_module
+        from types import SimpleNamespace
+
+        monkeypatch.delenv("LOCAL_OPERATOR_RUNTIME_ROOT", raising=False)
+        monkeypatch.setenv("HOME", "/nonexistent/agent-home")
+        monkeypatch.setattr(
+            pwd_module, "getpwuid", lambda uid: SimpleNamespace(pw_dir="/Users/real")
+        )
+        assert procname.runtime_root() == Path("/Users/real/.local/share/lop/runtime")
+
+    def test_a_legacy_hardlink_is_migrated_to_the_symlink(self, branded, tmp_path):
+        real = Path(os.path.realpath(sys.executable))
+        branded.unlink()
+        os.link(real, branded)
+        assert not branded.is_symlink()
+
+        assert procname.ensure_branded_interpreter() == branded
+        assert branded.is_symlink()
+        real = procname.real_interpreter()
+        assert real is not None
+        assert os.readlink(branded) == str(procname.runtime_image(real))
+
+    def test_real_interpreter_looks_through_the_venv_symlink(self, tmp_path):
+        """Running through the link, ``realpath(sys.executable)`` is the CLONE.
+
+        So the base interpreter must come from the venv's ``pyvenv.cfg``
+        instead — otherwise every plant after the first would clone a clone.
+        """
+        target = _runnable_venv(tmp_path)
+        _, link = procname.spawn_identity_for_interpreter(procname.LABEL_SERVE, target, port=1)
+        assert link is not None
+        script = tmp_path / "which.py"
+        script.write_text(
+            "import os, sys;"
+            "from local_operator import procname;"
+            "print(os.path.realpath(sys.executable));"
+            "print(procname.real_interpreter())",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [procname.BRAND, str(script)],
+            executable=str(link),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[2])),
+        )
+        assert result.returncode == 0, result.stderr
+        running_as, base = result.stdout.strip().splitlines()[:2]
+        assert Path(running_as) == Path(os.readlink(link)), "precondition: the clone"
+        assert Path(base) == Path(os.path.realpath(target))
 
 
 def test_branded_image_actually_renames_the_process(branded):
