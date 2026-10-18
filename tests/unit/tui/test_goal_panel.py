@@ -15,6 +15,8 @@ which is what would make a new global action a config migration.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from rich.cells import cell_len
 from rich.style import Style
@@ -299,6 +301,12 @@ async def test_the_clear_key_arms_first_and_only_the_second_press_erases() -> No
         assert session.goal == GOAL, "one press must not erase anything"
         assert session.goal_status == "active"
         panel = app.query_one(GoalPanel)
+        # Content delivery can trail the key's state change under shard load;
+        # assert the rendered rehearsal, not the first (possibly empty) frame.
+        deadline = time.monotonic() + 5
+        while "c again to clear · esc cancels" not in _card_text(panel):
+            assert time.monotonic() < deadline, "the armed clear hint never rendered (5s)"
+            await pilot.pause()
         assert "c again to clear · esc cancels" in _card_text(panel)
         await pilot.press("c")
         await pilot.pause()
