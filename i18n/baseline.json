@@ -75,7 +75,9 @@
     "local_operator/tui/widgets/session_sidebar.py",
     "local_operator/tools/team_tool.py",
     "local_operator/supplements/generator.py",
-    "local_operator/evaluation/runner/episode.py"
+    "local_operator/evaluation/runner/episode.py",
+    "local_operator/harness/loop.py",
+    "local_operator/incidents.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -113,7 +115,6 @@
     "local_operator/exec_startup.py": 0,
     "local_operator/harness/comms.py": 1,
     "local_operator/harness/jobs.py": 4,
-    "local_operator/harness/loop.py": 11,
     "local_operator/harness/rows.py": 1,
     "local_operator/harness/secret_sinks.py": 12,
     "local_operator/harness/subagent.py": 4,
@@ -123,7 +124,6 @@
     "local_operator/hub_sync/report.py": 4,
     "local_operator/hub_sync/resolver.py": 7,
     "local_operator/hub_sync/service.py": 1,
-    "local_operator/incidents.py": 9,
     "local_operator/info/render.py": 24,
     "local_operator/keymap.py": 4,
     "local_operator/mcp/auth.py": 2,

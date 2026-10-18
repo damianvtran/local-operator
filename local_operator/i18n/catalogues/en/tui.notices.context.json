@@ -1,0 +1,62 @@
+{
+  "tui.notices.reasoning_echo_filled": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; emitted when a provider refuses a missing reasoning echo and the loop retries with it filled"
+  },
+  "tui.notices.reasoning_echo_thinking_off": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the retry disables thinking instead of filling the echo"
+  },
+  "tui.notices.budget_exhausted_retry": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {effort} is the lowered reasoning rung; the operator's own setting is unchanged"
+  },
+  "tui.notices.budget_exhausted_continue": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; re-asks without lowering effort"
+  },
+  "tui.notices.budget_exhausted_no_output": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {cause} names why no visible output arrived"
+  },
+  "tui.notices.output_limit_continuing": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the turn resumes from the cut point"
+  },
+  "tui.notices.output_limit_cut_off": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the remainder was never sent and the operator must ask again"
+  },
+  "tui.notices.output_limit_tool_call": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the call was cut mid-argument and never executed"
+  },
+  "tui.notices.output_limit_before_call": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the call never ran and is re-issued unchanged"
+  },
+  "tui.notices.empty_reply": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the reply had neither prose nor tool calls"
+  },
+  "tui.notices.repeated_tool_errors": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the loop asks the model for a different approach"
+  },
+  "tui.notices.kept_going_stopped": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the continuation limit stopped the turn and dropped the pending message"
+  }
+}
