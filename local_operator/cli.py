@@ -514,7 +514,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=_ag.push_hub_id().envelope(locale=help_locale)["text"],
     )
-    _add_hub_publish_flags(push_parser)
+    _add_hub_publish_flags(push_parser, help_locale=help_locale)
     # Pull command
     pull_parser = agents_subparsers.add_parser(
         "pull", help=_ag.pull().envelope(locale=help_locale)["text"], parents=[parent_parser]
@@ -548,7 +548,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_ag.sync_all().envelope(locale=help_locale)["text"],
     )
-    _add_hub_sync_flags(sync_parser)
+    _add_hub_sync_flags(sync_parser, help_locale=help_locale)
     sync_parser.add_argument(
         "--force",
         action="store_true",
@@ -643,7 +643,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=_th.push_id().envelope(locale=help_locale)["text"],
     )
-    _add_hub_publish_flags(teams_push)
+    _add_hub_publish_flags(teams_push, help_locale=help_locale)
     teams_pull = teams_subparsers.add_parser(
         "pull",
         help=_th.pull().envelope(locale=help_locale)["text"],
@@ -673,7 +673,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     teams_sync_group.add_argument(
         "--all", action="store_true", help=_th.sync_all().envelope(locale=help_locale)["text"]
     )
-    _add_hub_sync_flags(teams_sync)
+    _add_hub_sync_flags(teams_sync, help_locale=help_locale)
     teams_link = teams_subparsers.add_parser(
         "link",
         help=_th.link().envelope(locale=help_locale)["text"],
@@ -10037,7 +10037,9 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     return 0
 
 
-def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
+def _add_hub_publish_flags(
+    parser: argparse.ArgumentParser, *, help_locale: str | None = None
+) -> None:
     """The preview/confirm surface `agents push` and `teams push` share (p2p3 §7.3).
 
     One definition so the two commands cannot drift; the flags only DO anything
@@ -10047,11 +10049,13 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     satisfied, so it never needs refusing.
     """
 
-    # These helpers are also called independently of build_cli_parser: resolve
-    # its read-only pre-startup locale on every call, not from cached/global EN.
-    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+    # A parser build owns one locale snapshot, so reuse its explicit value.
+    # Standalone callers still need a fresh read-only resolution on every call;
+    # None, not a process cache or truthiness, distinguishes those two paths.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
 
-    help_locale = resolve_help_locale()
+        help_locale = resolve_help_locale()
 
     parser.add_argument(
         "--yes",
@@ -10081,7 +10085,7 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
+def _add_hub_sync_flags(parser: argparse.ArgumentParser, *, help_locale: str | None = None) -> None:
     """The merge flags `agents sync` and `teams sync` share (design B5.3).
 
     One definition so the two commands cannot drift. `--prefer` is a CONFLICT
@@ -10089,11 +10093,13 @@ def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
     a side wholesale, and neither is reachable from auto-update.
     """
 
-    # These helpers are also called independently of build_cli_parser: resolve
-    # its read-only pre-startup locale on every call, not from cached/global EN.
-    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+    # A parser build owns one locale snapshot, so reuse its explicit value.
+    # Standalone callers still need a fresh read-only resolution on every call;
+    # None, not a process cache or truthiness, distinguishes those two paths.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
 
-    help_locale = resolve_help_locale()
+        help_locale = resolve_help_locale()
 
     parser.add_argument(
         "--check", action="store_true", help=_hs.sync_check().envelope(locale=help_locale)["text"]

@@ -154,10 +154,18 @@ def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check, 
 
 def test_helpers_resolve_locale_each_call_and_direct_parsers_preserve_protocol(monkeypatch):
     import local_operator.cli as cli
+    from local_operator.i18n import cli_help
     from local_operator.i18n.cli_help import help_locale
     from local_operator.i18n.messages import Msg
 
     seen = []
+    resolutions = []
+
+    def record_resolution():
+        locale = help_locale()
+        resolutions.append(locale)
+        return locale
+
     original = Msg.envelope
 
     def record(self, *, locale=None):
@@ -166,10 +174,12 @@ def test_helpers_resolve_locale_each_call_and_direct_parsers_preserve_protocol(m
         return original(self, locale=locale)
 
     monkeypatch.setattr(Msg, "envelope", record)
+    monkeypatch.setattr(cli_help, "help_locale", record_resolution)
     for locale in ("en", "fr", "en"):
         monkeypatch.setenv("LOP_LANG", locale)
         assert help_locale() == locale
         seen.clear()
+        resolutions.clear()
         for name in ("_add_hub_publish_flags", "_add_hub_sync_flags"):
             parser = argparse.ArgumentParser(prog=name)
             getattr(cli, name)(parser)
@@ -183,12 +193,65 @@ def test_helpers_resolve_locale_each_call_and_direct_parsers_preserve_protocol(m
         # independently and check exactly one helper render per key below.
         assert {value for _, value in seen} == {locale}
         assert len(seen) == 24
+        assert resolutions == [locale, locale]
     assert not (REPO / "local_operator/i18n/catalogues/fr/cli.hub_shared_help.json").exists()
     monkeypatch.setenv("LOP_LANG", "fr")
     seen.clear()
+    resolutions.clear()
     cli.build_cli_parser()
     assert len(seen) == 24
     assert {locale for _, locale in seen} == {"fr"}
+    assert resolutions == ["fr"]
+
+
+def test_one_build_resolves_once_and_reuses_its_snapshot_for_all_shared_copy(monkeypatch):
+    from local_operator import cli
+    from local_operator.i18n import cli_help
+    from local_operator.i18n.messages import Msg
+
+    resolutions = []
+    renders = []
+    original = Msg.envelope
+
+    def resolve_once():
+        resolutions.append("fr")
+        assert len(resolutions) == 1, "one parser build must use one locale snapshot"
+        return "fr"
+
+    def record(self, *, locale=None):
+        if self.code.startswith("cli.hub_shared_help."):
+            renders.append(locale)
+        return original(self, locale=locale)
+
+    monkeypatch.setattr(cli_help, "help_locale", resolve_once)
+    monkeypatch.setattr(Msg, "envelope", record)
+    cli.build_cli_parser()
+    assert resolutions == ["fr"]
+    assert renders == ["fr"] * 24
+
+
+def test_explicit_helper_locale_is_honored_without_reading_environment(monkeypatch):
+    from local_operator import cli
+    from local_operator.i18n import cli_help
+    from local_operator.i18n.messages import Msg
+
+    renders = []
+    original = Msg.envelope
+
+    def forbidden():
+        raise AssertionError("an explicit parser snapshot must not resolve again")
+
+    def record(self, *, locale=None):
+        if self.code.startswith("cli.hub_shared_help."):
+            renders.append(locale)
+        return original(self, locale=locale)
+
+    monkeypatch.setenv("LOP_LANG", "en")
+    monkeypatch.setattr(cli_help, "help_locale", forbidden)
+    monkeypatch.setattr(Msg, "envelope", record)
+    for name in ("_add_hub_publish_flags", "_add_hub_sync_flags"):
+        getattr(cli, name)(argparse.ArgumentParser(prog=name), help_locale="fr")
+    assert renders == ["fr"] * 12
 
 
 def _restore_helpers():
@@ -214,24 +277,45 @@ def _restore_helpers():
     restore = Restore()
     tree = restore.visit(tree)
     assert restore.count == 12
+    # Reverse only the deliberate optional-locale plumbing. Keep the original
+    # BASE hashes: rehashing the new signature would hide a protocol regression.
+    guard = ast.parse(
+        "if help_locale is None:\n"
+        "    from local_operator.i18n.cli_help import help_locale as resolve_help_locale\n"
+        "    help_locale = resolve_help_locale()"
+    ).body[0]
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPERS:
-            # Remove only the exact read-only locale bootstrap added by this slice.
-            node.body = [
-                statement
-                for statement in node.body
-                if not (
-                    isinstance(statement, ast.ImportFrom)
-                    and statement.module == "local_operator.i18n.cli_help"
-                )
-                and not (
-                    isinstance(statement, ast.Assign)
-                    and any(
-                        isinstance(target, ast.Name) and target.id == "help_locale"
-                        for target in statement.targets
-                    )
-                )
+            assert len(node.args.kwonlyargs) == len(node.args.kw_defaults) == 1
+            argument = node.args.kwonlyargs[0]
+            assert argument.arg == "help_locale"
+            assert argument.annotation is not None
+            assert ast.dump(argument.annotation) == ast.dump(
+                ast.parse("str | None", mode="eval").body
+            )
+            assert isinstance(node.args.kw_defaults[0], ast.Constant)
+            assert node.args.kw_defaults[0].value is None
+            node.args.kwonlyargs = []
+            node.args.kw_defaults = []
+            matches = [
+                statement for statement in node.body if ast.dump(statement) == ast.dump(guard)
             ]
+            assert len(matches) == 1
+            node.body = [statement for statement in node.body if statement not in matches]
+    calls = 0
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in HELPERS
+        ):
+            assert len(node.keywords) == 1
+            keyword = node.keywords[0]
+            assert keyword.arg == "help_locale"
+            assert isinstance(keyword.value, ast.Name) and keyword.value.id == "help_locale"
+            node.keywords = []
+            calls += 1
+    assert calls == 4
     tree.body = [
         node
         for node in tree.body
