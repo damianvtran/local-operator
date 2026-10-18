@@ -16,7 +16,7 @@ import pytest
 from pydantic import SecretStr
 
 from local_operator.artifacts import ArtifactKind, JobAttempt, JobOutcome
-from local_operator.audiogen import AudioRoute
+from local_operator.audiogen import AudioRoute, pricing
 from local_operator.audiogen import availability as audio_availability
 from local_operator.audiogen import rungs as audio_rungs
 from local_operator.audiogen.cascade import (
@@ -335,6 +335,44 @@ async def test_a_sound_effect_ledger_row_counts_seconds(monkeypatch, tmp_path):
     assert not result.is_error
     assert "sound effect" in _text(result)
     assert spent[0].unit == "seconds" and spent[0].units == 4.0
+
+
+@pytest.mark.asyncio
+async def test_a_sub_second_byok_effect_row_counts_one_started_second(monkeypatch, tmp_path):
+    """0.5 s is ONE unit at 2000 micro, and the row stays an estimate.
+
+    The merged lane recorded ``units: 0.5`` beside a half-cost figure for this
+    exact request. The count comes from the same whole-second rule the
+    estimate prices with, and the label must not drift towards a charge.
+    """
+    spent: list[Any] = []
+    estimate = pricing.sound_effect_estimate("elevenlabs", None, 0.5)
+    assert estimate is not None and estimate.amount_usd == pytest.approx(0.002)
+    outcome = _outcome(
+        route=AudioRoute.ELEVENLABS,
+        model="eleven_text_to_sound_v2",
+        cost_usd=estimate.amount_usd,
+        cost_source="rate_table",
+        billing_basis="estimated",
+        cost_provenance=estimate.price_version,
+        usage_record_id=None,
+    )
+    _fake_cascade(monkeypatch, outcome)
+    result = await audio_tool.execute_generate_sound_effect(
+        "call-sfx-half",
+        {"prompt": "a single clap", "duration_s": 0.5},
+        None,
+        None,
+        _context(tmp_path, spent),
+    )
+    assert not result.is_error
+    assert "Cost $0.002 " in _text(result)
+    row = spent[0]
+    assert row.units == 1.0 and row.unit == "seconds"
+    assert row.amount_micro == 2000
+    assert row.billing_basis == "estimated"
+    assert row.cost_source == "catalogue"
+    assert row.price_version == pricing.PRICE_VERSION
 
 
 @pytest.mark.asyncio

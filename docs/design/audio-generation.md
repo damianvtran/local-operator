@@ -101,8 +101,13 @@ provenance (`cost_source` = `reported` for every Radient figure,
 from the vendors' published pages on that date), labelled
 `estimated` at `rate_table` source and **never written as a charge** — the
 same convention the web-search table established. Unknown provider/model →
-`None` ("amount not stated"), never a fabricated zero. The approval prompt
-carries the estimate before the spend; the ledger row keeps the estimate flag
+`None` ("amount not stated"), never a fabricated zero. Sound effects are
+priced over **whole started seconds** — `ceil(duration_s)` units at the
+per-second rate, the same rule the server lane bills by — so 0.5 s is one
+unit ($0.0020) and 4.01 s is five ($0.0100), never a fractional half-unit;
+the ledger row's count applies the same `ceil` rule through
+`sound_effect_units`, so amount and count describe one quantity. The approval
+prompt carries the estimate before the spend; the ledger row keeps the estimate flag
 end to end (`billing_basis` survives every hop).
 
 **Spend ledger.** A new `audio` channel ("Generated audio",

@@ -467,10 +467,19 @@ async def _cancel_receipt(
 
 
 def _spend_units(spec: AudioJobSpec) -> tuple[float, str]:
-    """The channel record's count and unit: chars for speech, seconds for effects."""
+    """The channel record's count and unit: chars for speech, whole seconds for effects.
+
+    Sound effects count in whole started seconds — the same
+    :func:`pricing.sound_effect_units` rule the estimate prices with — so a
+    row's count and its estimated amount describe one quantity. A fractional
+    count here was how 0.5 s reached the ledger as ``units: 0.5`` beside a
+    figure priced for one second. Radient rows keep the server's own count
+    when the settled payload states one (``units=`` on the record); this is
+    only the default.
+    """
     if spec.direction == "voiceover":
         return float(len(spec.text)), "chars"
-    return float(spec.duration_s or 0.0), "seconds"
+    return float(pricing.sound_effect_units(float(spec.duration_s or 0.0))), "seconds"
 
 
 def _record_audio_channel(
