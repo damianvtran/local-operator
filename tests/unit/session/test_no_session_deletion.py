@@ -1655,6 +1655,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "dir_fd-bound FILE unlink",
     ),
+    # The orphan sweep (failure-diagnostic recovery). Both calls unlink a name
+    # that `os.listdir(artifacts_fd)` returned, resolved with
+    # `dir_fd=self._artifacts_fd`: the bundle's OWN `artifacts/` directory,
+    # opened with `_DIR_FLAGS` under the bundle root and confined by openat
+    # semantics. The two admissible shapes are this writer's staging file
+    # (`.artifact.<32 hex>.tmp`) and a 64-hex artifact digest; neither is a
+    # session directory or a transcript, both live one level under
+    # `artifacts/`, and `unlink` cannot remove a directory at all (EISDIR).
+    (
+        "local_operator/evaluation/evidence/store.py"
+        "::EvidenceWriter.discard_unreferenced_artifacts",
+        "os.unlink",
+        "dir_fd-confined to the bundle's artifacts/ dir; names are this writer's "
+        ".artifact.*.tmp staging file or 64-hex artifact digests, never a session "
+        "path, and unlink cannot remove a directory",
+        2,
+    ),
     (
         "local_operator/fork.py::consume_boot_prompt",
         "<path>.unlink",
