@@ -38,6 +38,9 @@ IMPORT_COMMAND = "import"
 #: lives in the English-only ``tui.review`` namespace, deliberately out of the
 #: audited ``wire.slash`` catalogue.
 REVIEW_COMMAND = "review"
+#: ``/schedule`` repeats the shape once more: a TUI-owned page whose copy lives
+#: in the English-only ``tui.schedule`` namespace.
+SCHEDULE_COMMAND = "schedule"
 
 PREVIOUS_ENGLISH: dict[str, str] = {
     "help": "List all commands",
@@ -114,9 +117,9 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # `wire.slash`: their copy lives in English-only namespaces so the audited
     # wire.slash hash stays valid, and a missing or extra command raises a
     # KeyError here either way rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 3 == 55
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 4 == 56
     for command in SLASH_COMMANDS:
-        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND, REVIEW_COMMAND):
+        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND, REVIEW_COMMAND, SCHEDULE_COMMAND):
             continue
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 
@@ -134,7 +137,7 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
     # function, rendered through the runtime — asserted under the pinned `en`
     # locale (RFC §7).
     for command in SLASH_COMMANDS:
-        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND, REVIEW_COMMAND):
+        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND, REVIEW_COMMAND, SCHEDULE_COMMAND):
             continue
         function = getattr(wire_slash, command.name)
         message = function()
