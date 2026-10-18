@@ -143,8 +143,11 @@ def test_name_only_registry_retries_reuse_casefolded_identity(tmp_path: Path) ->
     original = write_categories(tmp_path, [(None, "Review"), (None, "Fix")])
     replayed = write_categories(tmp_path, [(None, " review "), (None, "FIX")])
     assert [tag["id"] for tag in replayed] == [tag["id"] for tag in original]
-    with pytest.raises(ValueError):
-        write_categories(tmp_path, [(original[0]["id"], "Renamed"), (None, "review")])
+    draft: list[tuple[str | None, str]] = [(original[0]["id"], "Renamed"), (None, "review")]
+    renamed, fresh = write_categories(tmp_path, draft)
+    assert renamed == {"id": original[0]["id"], "name": "Renamed"}
+    assert fresh["id"] not in {tag["id"] for tag in original}
+    assert write_categories(tmp_path, draft) == [renamed, fresh]
 
 
 def test_primary_changes_and_put_order_preserve_assignment_history(tmp_path: Path) -> None:
@@ -170,3 +173,25 @@ def test_usage_counts_ignore_orphan_session_assignments(tmp_path: Path) -> None:
     assert usage_counts(tmp_path) == {category["id"]: 1}
     set_entity_tags(tmp_path, "project", "project-1", [category["id"]], category["id"])
     assert usage_counts(tmp_path, "project") == {category["id"]: 1}
+
+
+@pytest.mark.parametrize("new_first", [False, True])
+def test_buffered_rename_and_old_name_creation_is_order_independent(
+    tmp_path: Path, new_first: bool
+) -> None:
+    old = write_categories(tmp_path, [(None, "Review")])[0]
+    draft: list[tuple[str | None, str]] = [(old["id"], "Renamed"), (None, "Review")]
+    if new_first:
+        draft.reverse()
+    result = write_categories(tmp_path, draft)
+    by_name = {tag["name"]: tag["id"] for tag in result}
+    assert by_name["Renamed"] == old["id"]
+    assert by_name["Review"] != old["id"]
+    assert write_categories(tmp_path, draft) == result
+
+
+def test_duplicate_names_are_still_refused_with_explicit_rename(tmp_path: Path) -> None:
+    old = write_categories(tmp_path, [(None, "Review")])[0]
+    with pytest.raises(ValueError):
+        write_categories(tmp_path, [(old["id"], "Renamed"), (None, " renamed ")])
+    assert read_categories(tmp_path) == [old]
