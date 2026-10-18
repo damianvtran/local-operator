@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 
@@ -26,7 +27,7 @@ from tests.unit.session.test_session import ScriptedStream
 from tests.unit.supplements.test_runner import _await_row, _make_session
 
 
-def artifact(n=0, **extra):
+def artifact(n: int = 0, **extra: Any) -> dict[str, Any]:
     return dict(
         digest=f"{n:032x}",
         kind="audio",
@@ -51,7 +52,9 @@ def test_audio_snapshots_reuse_bounded_facts_not_text_or_other_tools():
     message = Message.tool_result(audio)
     items = snapshot_messages([message])
     assert len(items[0].artifacts) == 3
-    message.provider_payload["details"]["artifacts"][0]["name"] = "mutated"
+    payload = message.provider_payload
+    assert payload is not None  # tool_result builds it from ToolResult.details
+    payload["details"]["artifacts"][0]["name"] = "mutated"
     sounds = turn_sounds(items + items)
     assert len(sounds) == 3 and sounds[0] == {
         "attachment": "0" * 32,
@@ -92,7 +95,7 @@ def test_sound_only_row_is_nonempty_and_survives_open_frame_and_versions(state, 
         sounds=sounds,
     )
     final = next_version(row, state=state)
-    assert final["sounds"] == sounds
+    assert final.get("sounds") == sounds
     assert reader_disposition(final, job_live=live) == expected
     kept = strip_entry(
         {
@@ -105,9 +108,16 @@ def test_sound_only_row_is_nonempty_and_survives_open_frame_and_versions(state, 
         },
         supplements=True,
     )
+    assert kept is not None
     assert kept["payload"]["details"]["sounds"] == sounds * 3
+    # The event field is wire-typed dict[str, Any]; the stored row type is the
+    # stricter TypedDict. Same dicts at runtime, so the cast is serialization-safe.
     event = SupplementProgressEvent(
-        anchor="answer", job="audio-job", version=1, state="done", sounds=sounds
+        anchor="answer",
+        job="audio-job",
+        version=1,
+        state="done",
+        sounds=cast("list[dict[str, Any]]", sounds),
     )
     assert event.model_dump()["sounds"] == sounds
     empty = build_details(anchor="answer", job="job", version=1, state="done", decision=Decision())
