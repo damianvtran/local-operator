@@ -1,17 +1,20 @@
 """Compaction memory follows committed history, not speculative model calls."""
 
 import asyncio
+import json
 import sqlite3
 import threading
 import time
 import types
 from itertools import count
+from typing import Any
 
 import pytest
 
 from local_operator.harness.types import Message, TextContent
 from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, guard
 from local_operator.memory_capture import (
+    capture_detail,
     extract,
     finish,
     hint,
@@ -796,7 +799,7 @@ async def test_cancelled_capture_is_retried_at_the_next_boundary_without_a_resta
         await session.dispose()
 
 
-# --- The admission/write invariant and the ``captures.reason`` column ---------
+# --- The admission/write invariant and the ``meta`` attribution record --------
 #
 # DEFECT (2026-10, measured on the operator's store): ``extract`` admitted candidates
 # with the DEFAULT guard while ``persist`` re-guards title/body through ``validate_fact``
@@ -805,7 +808,7 @@ async def test_cancelled_capture_is_retried_at_the_next_boundary_without_a_resta
 # ``finish``'s bare handler recorded ``failed``/0 — one bad row zeroed the whole pass on
 # 221 of 587 captures. These tests pin the three halves of the fix: admission matches the
 # write, the write survives a row it refuses, and a budget-stopped scan lands its partial
-# rows. ``captures.reason`` is what makes the remainder attributable.
+# rows. The ``meta`` attribution record is what makes the remainder attributable.
 
 #: 40 hex chars: the shape the opaque rule refuses as an unnamed key.
 HEX = "0123456789abcdef0123456789abcdef01234567"
@@ -865,18 +868,29 @@ def test_a_candidate_the_write_would_refuse_is_skipped_not_admitted(text, offend
 
 
 def _capture_row(store, marker_id):
-    """The capture row's diagnostic columns (``watermark`` deliberately keeps a 2-tuple)."""
+    """The capture's coarse attribution from ``meta``.
+
+    ``captures`` deliberately keeps its 4-column shape (mixed-version rollout), so the
+    reason and counts live in the store's existing key/value table.
+    """
     with store.connection() as db:
         row = db.execute(
-            "SELECT reason,refused FROM captures WHERE session=? AND compaction=?",
-            (store.identity.session_id, marker_id),
+            "SELECT value FROM meta WHERE key=?",
+            (f"capture.{store.identity.session_id}.{marker_id}",),
         ).fetchone()
-        return (row[0], row[1]) if row else None
+        return json.loads(row[0]) if row else None
 
 
 def _reason(store, marker_id):
-    row = _capture_row(store, marker_id)
-    return row[0] if row else None
+    record = _capture_row(store, marker_id)
+    return record["reason"] if record else None
+
+
+def _detail(store, marker_id):
+    """The capture detail, asserting a terminal row exists (the hint's path)."""
+    detail = capture_detail(store, marker_id)
+    assert detail is not None, "a terminal capture row must exist"
+    return detail
 
 
 def _scan_rows(count_):
@@ -894,14 +908,19 @@ def _refused_row():
 def test_a_clean_pass_records_no_reason(store):
     persist(store, "clean-marker", extract(USEFUL_LOCATORS), "ok")
     assert watermark(store, "clean-marker") == ("ok", len(USEFUL_BODIES))
-    assert _capture_row(store, "clean-marker") == (None, 0)
+    assert _capture_row(store, "clean-marker") is None
+    assert _detail(store, "clean-marker").reason is None
 
 
 def test_the_write_skips_a_row_it_refuses_and_counts_it(store):
     """BELT: a row shape the admit site does not know costs one candidate, not the pass."""
     persist(store, "belt-marker", _scan_rows(39) + [_refused_row()], "ok")
     assert watermark(store, "belt-marker") == ("ok", 39)
-    assert _capture_row(store, "belt-marker") == ("refused-row", 1)
+    assert _capture_row(store, "belt-marker") == {
+        "reason": "refused-row",
+        "refused": 1,
+        "skipped": 0,
+    }
     assert store.search("item38")
 
 
@@ -952,6 +971,37 @@ async def test_budget_exhaustion_lands_a_partial_result_instead_of_failure(store
     terminal = await finish(store, "budget-marker", task, "")
     assert (terminal, watermark(store, "budget-marker")) == ("ok", ("ok", 40))
     assert _reason(store, "budget-marker") == "timeout"
+    assert "scan budget" in hint(store, "budget-marker")
+
+
+@pytest.mark.asyncio
+async def test_a_budget_stop_with_no_rows_is_a_failure(store, monkeypatch):
+    """TOTAL LOSS: a budget stop that found nothing must not read as a completed pass."""
+    _fake_scan_clock(monkeypatch, 1.1)
+    # No locator in any window: the scan stops having found nothing at all.
+    task = asyncio.create_task(asyncio.to_thread(extract, "plain prose " * 1200))
+    terminal = await finish(store, "budget-empty", task, "")
+    assert (terminal, watermark(store, "budget-empty")) == ("failed", ("failed", 0))
+    assert _detail(store, "budget-empty").reason == "timeout"
+    message = hint(store, "budget-empty")
+    assert "did not complete" in message and "timed out" in message
+
+
+@pytest.mark.asyncio
+async def test_carry_rows_survive_a_budget_stop(store, monkeypatch):
+    """MINOR 1: the marquee retention is not the arm that ran out of budget."""
+    _fake_scan_clock(monkeypatch, 1.1)
+    task = asyncio.create_task(asyncio.to_thread(extract, "plain prose " * 1200))
+    terminal = await finish(
+        store,
+        "budget-carry",
+        task,
+        "",
+        carry="- Asks: keep the launch plan",
+    )
+    assert (terminal, watermark(store, "budget-carry")) == ("ok", ("ok", 1))
+    assert _detail(store, "budget-carry").reason == "timeout"
+    assert store.search("launch plan")
 
 
 @pytest.mark.asyncio
@@ -969,10 +1019,23 @@ async def test_a_quota_refusal_is_attributed_and_still_records_the_marker(store,
     assert await finish(store, "quota-marker", asyncio.create_task(scan()), "") == "failed"
     assert watermark(store, "quota-marker") == ("failed", 0)
     assert _reason(store, "quota-marker") == "quota"
+    assert "quota" in hint(store, "quota-marker")
 
 
-def test_an_older_store_gains_the_reason_column_and_keeps_its_rows(tmp_path):
-    """MIGRATION: additive on a live store; old rows keep NULL diagnostics."""
+#: The exact 4-column shape every released store has. A 5th/6th column here is the
+#: regression this test exists for: it breaks the PREVIOUS release's positional write.
+CAPTURES_SHAPE = ["session", "compaction", "status", "n"]
+
+
+def test_a_previous_release_store_round_trips_without_a_schema_change(tmp_path):
+    """COMPATIBILITY: a 4-column store written positionally still round-trips.
+
+    Running sessions keep the old binary in memory after an upgrade. Its ``persist``
+    does ``INSERT INTO captures VALUES (?,?,?,?)`` with no column list, so adding a
+    column here would make every one of those sessions' captures fail until restart.
+    The reason/counts live in ``meta`` instead, and this test opens a store created and
+    written by that old shape through the current reader and writer.
+    """
     path = tmp_path / "cfg" / "memory" / "memory.db"
     path.parent.mkdir(parents=True)
     old = sqlite3.connect(path)
@@ -980,6 +1043,7 @@ def test_an_older_store_gains_the_reason_column_and_keeps_its_rows(tmp_path):
         "CREATE TABLE captures(session TEXT,compaction TEXT,status TEXT,n INTEGER,"
         " PRIMARY KEY(session,compaction));"
     )
+    # The previous release's write, verbatim: no column list, four values.
     old.execute("INSERT INTO captures VALUES ('capture-session','old-marker','failed',0)")
     old.commit()
     old.close()
@@ -990,11 +1054,54 @@ def test_an_older_store_gains_the_reason_column_and_keeps_its_rows(tmp_path):
         origin="capture-device",
     )
     with store.connection() as db:
-        assert "reason" in {row[1] for row in db.execute("PRAGMA table_info(captures)")}
-        assert [tuple(row) for row in db.execute("SELECT * FROM captures")] == [
-            ("capture-session", "old-marker", "failed", 0, None, None)
-        ]
-    # The pre-existing reader (status,n only) and a new writer both work after migrating.
+        assert [row[1] for row in db.execute("PRAGMA table_info(captures)")] == CAPTURES_SHAPE
     assert watermark(store, "old-marker") == ("failed", 0)
-    persist(store, "new-marker", extract("/src/after-migration.py"), "ok")
+    persist(store, "new-marker", extract("/src/after-rollout.py"), "ok")
     assert watermark(store, "new-marker") == ("ok", 1)
+    assert _detail(store, "new-marker").reason is None
+
+
+@pytest.mark.asyncio
+async def test_a_pass_whose_every_candidate_is_refused_is_a_failure(store):
+    """TOTAL LOSS: all-refused is a failure, not ``ok``/0."""
+
+    async def scan():
+        return [_refused_row()]
+
+    terminal = await finish(store, "all-refused", asyncio.create_task(scan()), "")
+    assert terminal == "failed"
+    assert watermark(store, "all-refused") == ("failed", 0)
+    assert _detail(store, "all-refused").refused == 1
+    assert "did not complete" in hint(store, "all-refused")
+
+
+def test_admission_skips_are_counted_distinctly_from_write_refusals(store):
+    """MINOR 2: a stricter admission rule leaves a count, not a silent gap."""
+    rows = extract(f"/docs/{HEX} ~/docs/proof.md")
+    assert rows.skipped == 1
+    assert [row["body"] for row in rows] == ["~/docs/proof.md"]
+    assert persist(store, "admission-marker", rows, "ok") == ("ok", "refused-row")
+    assert watermark(store, "admission-marker") == ("ok", 1)
+    assert _capture_row(store, "admission-marker") == {
+        "reason": "refused-row",
+        "refused": 0,
+        "skipped": 1,
+    }
+    assert "withheld" in hint(store, "admission-marker")
+
+
+def test_a_pass_whose_every_candidate_is_refused_at_admission_is_a_failure(store):
+    """An admission-only total loss is still a total loss."""
+    rows = extract(f"/docs/{HEX}")
+    assert list(rows) == [] and rows.skipped == 1
+    assert persist(store, "admission-empty", rows, "ok") == ("failed", "refused-row")
+    assert watermark(store, "admission-empty") == ("failed", 0)
+
+
+def test_a_non_mapping_row_costs_one_candidate_not_the_pass(store):
+    """NIT 1: the belt's contract holds for a malformed row, not just ``MemoryError``."""
+    malformed: Any = ["not-a-mapping"]  # the shape a future producer bug would emit
+    terminal = persist(store, "malformed-row", malformed, "ok")
+    assert terminal == ("failed", "refused-row")
+    assert watermark(store, "malformed-row") == ("failed", 0)
+    assert _detail(store, "malformed-row").refused == 1
