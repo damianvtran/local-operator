@@ -274,14 +274,14 @@ def _seed_long_title() -> None:
 @pytest.mark.asyncio
 async def test_cancel_command_reattaches_and_arms_the_poll(monkeypatch) -> None:
     """Q-1: a fresh `/import cancel` page must leave Importing and show cancelled."""
-    import time
-
     from local_operator.harness_import.service import HarnessImportService
 
     original = HarnessImportService._import_one
 
     def slow_import(self, *args, **kwargs):
-        time.sleep(0.6)
+        # Hold the job until the REAL cancel signal, not a 0.6s head start:
+        # under load the close/reopen can take longer and truthfully show done.
+        assert self._cancel.wait(5), "the reattached page never requested cancellation"
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(HarnessImportService, "_import_one", slow_import)

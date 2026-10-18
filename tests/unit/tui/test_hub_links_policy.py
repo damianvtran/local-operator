@@ -110,8 +110,16 @@ def _policy_values(root: Path, link_id: str) -> dict[str, Any]:
 async def _open_panel(app: OperatorApp, pilot: Any) -> None:
     """Open the overlay the way a user does and ENGAGE the panel (past typed-ahead)."""
     app.action_hub_links()
-    await pilot.pause()
-    await pilot.pause()
+    # The inventory is a real thread hop. Keys sent while it is loading have
+    # no selected row to act on, however many message-pump pauses preceded them.
+    await _await_settle(
+        pilot,
+        lambda: not _mounted_panel(app)._loading
+        and bool(_mounted_panel(app)._rows)
+        and app.focused is _mounted_panel(app),
+        what="the initial inventory and panel focus",
+        guard=5,
+    )
     # One navigation key engages the panel (round-3 D15), so subsequent presses
     # are treated as intent rather than typed-ahead.
     await pilot.press("down")
@@ -319,11 +327,28 @@ async def test_printable_keys_never_write_until_a_bound_key_engages_the_card(
             await asyncio.sleep(0.065)
         await pilot.pause()
         assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+        # Preserve the typed-ahead burst above, but do not send the deliberate
+        # action until there is a served row; loading cannot accept a write.
+        panel = _mounted_panel(app)
+        await _await_settle(
+            pilot,
+            lambda: not panel._loading and bool(panel._rows),
+            what="the printable-key test's initial inventory",
+            guard=5,
+        )
         # A bound key engages; the next printable IS the action.
         await pilot.press("down")
         await pilot.pause()
         await pilot.press("a")
-        await pilot.pause()
+        # Teardown cancels workers; observe the write AND its installed re-read
+        # before leaving the app, not merely an idle message pump.
+        await _await_settle(
+            pilot,
+            lambda: _policy_values(tmp_path, identity.link_id)["auto_push"] is True
+            and not panel._refreshing,
+            what="the engaged auto-push write and re-read",
+            guard=5,
+        )
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is True
 
 
@@ -1098,8 +1123,15 @@ async def test_tui_second_write_after_the_grant_uses_the_served_revision(
         assert not panel._refreshing, "the grant write must settle"
         # The app re-read the inventory; `s` now uses the freshly served revision.
         await pilot.press("s")
-        await pilot.pause()
-        await pilot.pause()
+        # A second write has the same thread+reread boundary as the grant;
+        # exiting after two pauses can cancel its worker before it settles.
+        await _await_settle(
+            pilot,
+            lambda: _policy_values(tmp_path, identity.link_id)["subscribe"] is False
+            and not panel._refreshing,
+            what="the second policy write and re-read",
+            guard=5,
+        )
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert "link policy changed" not in painted, painted
     values = _policy_values(tmp_path, identity.link_id)
@@ -1396,8 +1428,15 @@ async def test_the_consent_block_carries_no_cli_machinery(
         await pilot.pause()
         await _open_panel(app, pilot)
         await pilot.press("a")
-        await pilot.pause()
-        await pilot.pause()
+        # The compositor can still hold the loading/old frame after the arm;
+        # wait for the actual consent ink without weakening any copy checks.
+        await _await_settle(
+            pilot,
+            lambda: "Publish publicly?"
+            in "\n".join(strip.text for strip in app.screen._compositor.render_strips()),
+            what="the public-publish consent frame",
+            guard=5,
+        )
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert "Publish publicly?" in painted, painted
         assert "ctrl+y" in painted and "esc to cancel" in painted, painted
