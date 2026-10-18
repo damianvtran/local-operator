@@ -1,0 +1,47 @@
+{
+  "cli.stop_help.stop": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Top-level summary: stopping requests graceful completion before escalating to signals. Keep lop as the executable name."
+  },
+  "cli.stop_help.target": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Positional matching selector, not a path requirement: conversation name, session id, pid, or cwd substring; matching ignores case."
+  },
+  "cli.stop_help.pid": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--pid selects only the exact numeric process identifier. Preserve the flag token."
+  },
+  "cli.stop_help.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--session selects the exact session identifier, not a fuzzy name match."
+  },
+  "cli.stop_help.all": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--all targets this machine only. TTY is a terminal; preserve --yes as the confirmation-bypass flag."
+  },
+  "cli.stop_help.yes": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--yes bypasses the --all confirmation and is mandatory when stdin is not a terminal. Preserve --all and stdin tokens."
+  },
+  "cli.stop_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--json emits one machine-readable outcome per target rather than a single aggregate outcome."
+  },
+  "cli.stop_help.timeout": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--timeout is the per-session graceful operation wait before escalation, with a default of 10 seconds."
+  },
+  "cli.stop_help.force": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Safety caveat for --force: unverified socket identity, a running turn, and an already-signalled departure may be interrupted. Plain stop already handles cooperative mid-turn runtimes promptly through their socket."
+  }
+}
