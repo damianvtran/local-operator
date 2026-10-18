@@ -132,9 +132,14 @@ def sound_effect_units(duration_s: float) -> int:
     against the $0.0020 the server charges).
 
     Shared by the estimate and the channel row so the amount and the count
-    cannot disagree. A non-positive duration has no units; both callers treat
-    it as unpriceable before asking.
+    cannot disagree. A non-positive duration has no units, and a NON-FINITE one
+    (``nan``/``inf``, which JSON's ``1e999`` produces) is not a count at all:
+    it answers 0 — the ledger's own "no count" — rather than raising out of a
+    receipt. The estimator additionally answers ``None`` for it, so a consent
+    card says "amount not stated" instead of losing its summary.
     """
+    if not math.isfinite(duration_s):
+        return 0
     return int(math.ceil(duration_s))
 
 
@@ -149,7 +154,7 @@ def sound_effect_estimate(
     anything under a second. ``None`` stays the honest answer for an unknown
     provider/model ("amount not stated"), never a zero.
     """
-    if duration_s <= 0:
+    if not math.isfinite(duration_s) or duration_s <= 0:
         return None
     resolved = (model or "").strip() or "eleven_text_to_sound_v2"
     rate = SOUND_EFFECT_RATES_PER_SECOND.get((provider, resolved))
