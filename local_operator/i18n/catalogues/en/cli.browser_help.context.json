@@ -1,0 +1,102 @@
+{
+  "cli.browser_help.browser": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'browser' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.install": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'install' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.status_repair": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status_repair' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "shared by the tabs/reconcile loop iterations (one call site)"
+  },
+  "cli.browser_help.cleanup": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'cleanup' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.cleanup_yes": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'cleanup_yes' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.daemon_action": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "select over the start/stop/restart loop; raw loop value; EN byte-identical x3"
+  },
+  "cli.browser_help.pair": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pair' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.pair_reset": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pair_reset' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.pair_list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pair_list' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.pair_revoke": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pair_revoke' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.drive": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'drive' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.drive_target": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'drive_target' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.logs": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logs' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.uninstall": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'uninstall' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.uninstall_purge": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'uninstall_purge' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.serve": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'serve' argument; flag/command tokens stay in situ"
+  },
+  "cli.browser_help.tabs": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "extracted from the loop tuple (variable-indirection blind spot); read-only promise stays"
+  },
+  "cli.browser_help.reconcile": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the alias note quotes 'tabs'; keep the command name"
+  }
+}
