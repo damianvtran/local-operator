@@ -2223,6 +2223,45 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page review view ─────────────────────────────────────────────── *
+ *
+ * The sixth sibling MODE (see the org-chart, settings, projects and import
+ * blocks): opened by `/review`, it takes the transcript's region and leaves the
+ * dock greyed. It reuses `.settings-view*` wholesale — same rows, same body
+ * scroll contract, same hint row — because a second full-page skeleton is how
+ * two pages drift apart.
+ *
+ * ROW INK IS NOT CSS. Group headers, the selected row's ground, the lane strips
+ * and the CI tones are painted as rich `Text` spans from
+ * `theme.semantic_color`, the same split the settings list uses for its own
+ * rows; a widget `class:` cannot reach inside one Static. The single rule here
+ * is the pane width: a lane clause ("Round 2 · remediation posted · stale —
+ * reviewed 3f2a91b, head 9d29452") wraps, so the review pane gets four more
+ * cells than /settings' 34 rather than clipping the freshness tail. */
+.review-view .settings-view-pane {
+    width: 38;
+    /* The pane is the selected request's FULL record; one that overflows must
+     * be reachable (Tab focuses it, its own keys scroll it), not clipped. */
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.review-view-pane-text {
+    width: 1fr;
+    height: auto;
+}
+
+/* Narrow pages reserve two detail lines instead of one. The extra row is the
+ * only layout change: the list above keeps its own density (design D2). */
+.review-view .settings-view-detail.review-detail-narrow {
+    height: 3;
+}
+
+
 /* ── full-page projects view ───────────────────────────────────────────── *
  *
  * The fourth sibling MODE (see the org-chart and settings blocks above):

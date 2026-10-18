@@ -13,7 +13,7 @@ desktop at all (see ``/mobile``).
 
 from typing import Any, Mapping, Sequence
 
-from local_operator.i18n.keys import tui_import, wire_memory, wire_slash
+from local_operator.i18n.keys import tui_import, tui_review, wire_memory, wire_slash
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
@@ -1519,6 +1519,17 @@ SLASH_COMMANDS: list[SlashCommand] = [
         aliases=("migrate",),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.ANY,
+    ),
+    # The review page is a MODE over THIS machine's derived code-request
+    # index (`<config>/code_requests/<session_id>.json`) and fetch cache, so it
+    # is deliberately TUI-only: no `desktop_destination` means no
+    # command-palette row, and `_FRONTEND_LOCAL_SLASHES` keeps a follower from
+    # reading another machine's ledger while the user is looking at this one.
+    # The desktop already owns a Code review pane of its own; a destination
+    # here would open that pane for a command this terminal paints itself.
+    SlashCommand(
+        "review",
+        _tr(tui_review.slash_help()),
     ),
     SlashCommand(
         "sidebar",
