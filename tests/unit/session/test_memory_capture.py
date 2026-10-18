@@ -3,12 +3,14 @@
 import asyncio
 import sqlite3
 import threading
+import time
+import types
 from itertools import count
 
 import pytest
 
 from local_operator.harness.types import Message, TextContent
-from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore
+from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, guard
 from local_operator.memory_capture import (
     extract,
     finish,
@@ -792,3 +794,207 @@ async def test_cancelled_capture_is_retried_at_the_next_boundary_without_a_resta
         assert watermark(store, marker.id) is not None, "retried without a process restart"
     finally:
         await session.dispose()
+
+
+# --- The admission/write invariant and the ``captures.reason`` column ---------
+#
+# DEFECT (2026-10, measured on the operator's store): ``extract`` admitted candidates
+# with the DEFAULT guard while ``persist`` re-guards title/body through ``validate_fact``
+# with ``opaque=True``, which ALSO refuses long hex/base64 runs. A row the scanner had
+# accepted was refused at the write, ``persist`` raised out of the transaction, and
+# ``finish``'s bare handler recorded ``failed``/0 — one bad row zeroed the whole pass on
+# 221 of 587 captures. These tests pin the three halves of the fix: admission matches the
+# write, the write survives a row it refuses, and a budget-stopped scan lands its partial
+# rows. ``captures.reason`` is what makes the remainder attributable.
+
+#: 40 hex chars: the shape the opaque rule refuses as an unnamed key.
+HEX = "0123456789abcdef0123456789abcdef01234567"
+#: A 40-char mixed-case token with digits: the base64 shape the opaque rule refuses.
+BASE64 = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCd"
+
+CLEAN_CORPUS = (
+    USEFUL_LOCATORS,
+    "Evidence at ~/docs/proof.md, https://example.invalid/task/25",
+    "secret API_TOKEN #LOH-25 abc123def",
+    "branch: fix/capture thread: 1700000000.123456",
+    "docs/説明.md src/task.py ../docs/proof.md",
+)
+
+#: (text, does a candidate survive the stricter guard?) — the false entries are the
+#: shapes the DEFAULT guard admits and the WRITE's opaque guard refuses.
+GUARD_CORPUS = tuple((text, True) for text in CLEAN_CORPUS) + (
+    (f"/docs/{HEX}", False),
+    (f"https://example.invalid/{HEX}", False),
+    (f"src/{BASE64}.py", False),
+)
+
+
+@pytest.mark.parametrize("text,expect_rows", GUARD_CORPUS)
+def test_every_candidate_extract_returns_passes_the_guard_the_write_applies(text, expect_rows):
+    """PROPERTY: everything ``extract`` emits survives ``guard(x, opaque=True)``.
+
+    This is the invariant that was violated, asserted with the exact call
+    ``validate_fact`` makes on title and body, over ordinary locators AND the long
+    hex/base64 shapes only the opaque rule refuses.
+    """
+    rows = extract(text)
+    for row in rows:
+        guard(row["body"], opaque=True)
+        guard(row["title"], opaque=True)
+    assert bool(rows) is expect_rows, (
+        "a candidate the write would refuse was admitted anyway"
+        if expect_rows
+        else "nothing was emitted"
+    )
+
+
+@pytest.mark.parametrize(
+    "text,offending",
+    [
+        (f"/docs/{HEX}", HEX),
+        (f"https://example.invalid/{HEX}", HEX),
+        (f"src/{BASE64}.py", BASE64),
+    ],
+)
+def test_a_candidate_the_write_would_refuse_is_skipped_not_admitted(text, offending):
+    """A refused shape is skipped at admission; the pass keeps the rest of its rows."""
+    rows = extract(text + " and ~/docs/proof.md")
+    bodies = {row["body"] for row in rows}
+    assert not any(offending in body for body in bodies)
+    assert "~/docs/proof.md" in bodies, "the benign neighbour in the same text still lands"
+
+
+def _capture_row(store, marker_id):
+    """The capture row's diagnostic columns (``watermark`` deliberately keeps a 2-tuple)."""
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT reason,refused FROM captures WHERE session=? AND compaction=?",
+            (store.identity.session_id, marker_id),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+
+def _reason(store, marker_id):
+    row = _capture_row(store, marker_id)
+    return row[0] if row else None
+
+
+def _scan_rows(count_):
+    return [
+        {"title": f"/src/item{n}.py", "body": f"/src/item{n}.py", "tags": ["locator"]}
+        for n in range(count_)
+    ]
+
+
+def _refused_row():
+    body = f"https://example.invalid/{HEX}"
+    return {"title": body, "body": body, "tags": ["locator"]}
+
+
+def test_a_clean_pass_records_no_reason(store):
+    persist(store, "clean-marker", extract(USEFUL_LOCATORS), "ok")
+    assert watermark(store, "clean-marker") == ("ok", len(USEFUL_BODIES))
+    assert _capture_row(store, "clean-marker") == (None, 0)
+
+
+def test_the_write_skips_a_row_it_refuses_and_counts_it(store):
+    """BELT: a row shape the admit site does not know costs one candidate, not the pass."""
+    persist(store, "belt-marker", _scan_rows(39) + [_refused_row()], "ok")
+    assert watermark(store, "belt-marker") == ("ok", 39)
+    assert _capture_row(store, "belt-marker") == ("refused-row", 1)
+    assert store.search("item38")
+
+
+@pytest.mark.asyncio
+async def test_one_unwritable_row_cannot_zero_the_whole_capture(store):
+    """REGRESSION: 39 good rows beside one 40-hex URI land 39, never ``failed``/0."""
+
+    async def scan():
+        return _scan_rows(39) + [_refused_row()]
+
+    terminal = await finish(store, "one-bad-row", asyncio.create_task(scan()), "")
+    assert (terminal, watermark(store, "one-bad-row")) == ("ok", ("ok", 39))
+    assert _reason(store, "one-bad-row") == "refused-row"
+
+
+def _fake_scan_clock(monkeypatch, step):
+    """Advance the scan clock one ``step`` per reading; keep ``time.time`` real.
+
+    ``extract`` reads ``time.monotonic`` once before the loop and once per window, so a
+    per-reading fake clock provokes a budget stop without a multi-second test.
+    ``persist`` stamps rows with ``time.time``, which stays the real function.
+    """
+    import local_operator.memory_capture as capture
+
+    ticks = count(0)
+    monkeypatch.setattr(
+        capture,
+        "time",
+        types.SimpleNamespace(monotonic=lambda: next(ticks) * step, time=time.time),
+    )
+    return " ".join(f"/src/item{n}.py" for n in range(3000))
+
+
+def test_a_scan_that_runs_out_of_budget_hands_back_the_rows_it_found(monkeypatch):
+    text = _fake_scan_clock(monkeypatch, 1.1)
+    with pytest.raises(TimeoutError) as stopped:
+        extract(text)
+    assert getattr(
+        stopped.value, "rows", None
+    ), "a budget stop must carry the rows found so far, not just an exception"
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_lands_a_partial_result_instead_of_failure(store, monkeypatch):
+    """PARTIAL BUDGET: the rows found before the stop land, attributed ``timeout``."""
+    text = _fake_scan_clock(monkeypatch, 1.1)
+    task = asyncio.create_task(asyncio.to_thread(extract, text))
+    terminal = await finish(store, "budget-marker", task, "")
+    assert (terminal, watermark(store, "budget-marker")) == ("ok", ("ok", 40))
+    assert _reason(store, "budget-marker") == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_a_quota_refusal_is_attributed_and_still_records_the_marker(store, monkeypatch):
+    """``quota`` is not a generic store error, and the failure marker still lands."""
+
+    def refuse(db, scope, owner, *, relief=False):
+        raise MemoryError("Memory quota reached (synthetic).")
+
+    monkeypatch.setattr(store, "_quota", refuse)
+
+    async def scan():
+        return _scan_rows(1)
+
+    assert await finish(store, "quota-marker", asyncio.create_task(scan()), "") == "failed"
+    assert watermark(store, "quota-marker") == ("failed", 0)
+    assert _reason(store, "quota-marker") == "quota"
+
+
+def test_an_older_store_gains_the_reason_column_and_keeps_its_rows(tmp_path):
+    """MIGRATION: additive on a live store; old rows keep NULL diagnostics."""
+    path = tmp_path / "cfg" / "memory" / "memory.db"
+    path.parent.mkdir(parents=True)
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE captures(session TEXT,compaction TEXT,status TEXT,n INTEGER,"
+        " PRIMARY KEY(session,compaction));"
+    )
+    old.execute("INSERT INTO captures VALUES ('capture-session','old-marker','failed',0)")
+    old.commit()
+    old.close()
+
+    store = MemoryStore(
+        tmp_path / "cfg",
+        MemoryIdentity("capture-session", "t", "a"),
+        origin="capture-device",
+    )
+    with store.connection() as db:
+        assert "reason" in {row[1] for row in db.execute("PRAGMA table_info(captures)")}
+        assert [tuple(row) for row in db.execute("SELECT * FROM captures")] == [
+            ("capture-session", "old-marker", "failed", 0, None, None)
+        ]
+    # The pre-existing reader (status,n only) and a new writer both work after migrating.
+    assert watermark(store, "old-marker") == ("failed", 0)
+    persist(store, "new-marker", extract("/src/after-migration.py"), "ok")
+    assert watermark(store, "new-marker") == ("ok", 1)

@@ -59,7 +59,44 @@ _LOCATOR = re.compile(
 #: each call linear; windowing makes the worst case independent of input size, and lets
 #: the time budget be checked between windows (a single re call cannot be interrupted).
 SCAN_WINDOW = 4096
+#: How long the scan may look before it stops and hands back what it found. Named because
+#: two things must agree: this value, and ``finish``'s await, which has to be STRICTLY
+#: longer than it (see ``_SCAN_GRACE``) or the partial rows never reach the write.
+SCAN_BUDGET = 2.0
+#: Grace on the await in ``finish``. The scan checks its own budget between windows, so it
+#: normally raises with its partial rows a moment after ``SCAN_BUDGET``; the await only has
+#: to outlast that hand-off. It stays a bound, not a promise: a wedged thread still times
+#: out here, and that path records ``timeout`` without rows (nothing was observable).
+_SCAN_GRACE = 0.5
+#: Coarse, content-free causes recorded on a ``captures`` row. Literal members only: this
+#: column exists so a failed pass is attributable at all, so it must never carry free text
+#: (a body, a locator or an exception message) out of the store.
+#: ``refused-row`` = a candidate ``validate_fact`` would not admit; ``timeout`` = the scan
+#: budget ran out; ``quota`` = the store refused growth; ``store-error`` = anything else.
+CAPTURE_REASONS = ("timeout", "refused-row", "quota", "store-error")
 _HEADINGS = re.compile(r"^#{1,4}\s*(?:Goal|Key Decisions|Progress|Critical Context)\b", re.I)
+
+
+class BudgetExceeded(TimeoutError):
+    """The scan ran out of its budget; ``rows`` is every candidate found so far.
+
+    A TimeoutError SUBCLASS on purpose: an existing caller that only knows "capture
+    timed out" keeps working, while ``finish`` can tell this apart and persist the partial
+    rows instead of recording a ``failed``/0 marker for a pass that merely ran long.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]]):
+        super().__init__("memory capture budget")
+        self.rows = rows
+
+
+class _QuotaExceeded(MemoryError):
+    """``MemoryStore._quota`` refused a capture write; ``finish`` records ``quota``.
+
+    Subclasses MemoryError so a caller that only handles the store's refusal keeps
+    working; the subclass exists solely so the row's reason is not mislabelled as a
+    generic store error.
+    """
 
 
 def policy(config: Path) -> dict[str, Any]:
@@ -228,17 +265,32 @@ def extract_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return extract(snapshot(messages))
 
 
+def _ranked(counts: Counter[str], last: dict[str, int]) -> list[dict[str, Any]]:
+    """The bounded candidate list, ranked by last occurrence then frequency.
+
+    ONE renderer for both exits (the completed scan and the budget-exceeded one), so a
+    partial result is shaped and ordered exactly like a complete one.
+    """
+    return [
+        {"title": locator[:100], "body": locator, "tags": ["locator"]}
+        for locator in sorted(counts, key=lambda x: (last[x], counts[x], x), reverse=True)[:40]
+    ]
+
+
 def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
-    """CPU-only bounded scan; returns values, never opens a store or writes state."""
+    """CPU-only bounded scan; returns values, never opens a store or writes state.
+
+    Raises :class:`BudgetExceeded` when the scan budget runs out, carrying the rows found
+    up to that point: running out of time is a degraded result, never a lost one.
+    """
     started = time.monotonic()
-    found = []
     counts: Counter[str] = Counter()
     last: dict[str, int] = {}
     index = 0
     offset = 0
     for window in windows(text[:2000000]):
-        if time.monotonic() - started > 2:
-            raise TimeoutError("memory capture budget")
+        if time.monotonic() - started > SCAN_BUDGET:
+            raise BudgetExceeded(_ranked(counts, last))
         start = offset
         offset += len(window)
         if start and not text[start - 1].isspace():
@@ -264,13 +316,19 @@ def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
                 if "/" not in identifier and not any(char.isdigit() for char in identifier):
                     continue
             try:
-                guard(locator)
+                # WHY opaque=True: ``persist`` re-guards every free-text field with
+                # ``guard(x, opaque=True)`` via ``validate_fact``, and that enables the
+                # long-hex/base64 rule this default guard does NOT. Admitting a locator
+                # here that the write will refuse used to mean the row was accepted by the
+                # scanner and then zeroed the whole pass (221 of 587 rows, 2026-10). A
+                # candidate that would be refused is SKIPPED at admission instead — the
+                # same pattern ``carry_rows`` already uses for the same reason.
+                guard(locator, opaque=True)
             except MemoryError:
                 continue
             counts[locator] += 1
             last[locator] = index
-    for locator in sorted(counts, key=lambda x: (last[x], counts[x], x), reverse=True)[:40]:
-        found.append({"title": locator[:100], "body": locator, "tags": ["locator"]})
+    found = _ranked(counts, last)
     semantic = False
     semantic_count = 0
     for line in summary.splitlines()[:1000]:
@@ -282,7 +340,10 @@ def extract(text: str, summary: str = "") -> list[dict[str, Any]]:
         if semantic and line.strip().startswith(("- ", "* ")):
             text = line.strip()[2:202]
             try:
-                guard(text)
+                # Same reason as the locator arm: match the guard the WRITE applies, so a
+                # semantic bullet carrying a long hex/base64 run is skipped here instead of
+                # being refused (fatally, before the belt in ``persist``) later.
+                guard(text, opaque=True)
             except MemoryError:
                 continue
             found.append({"title": text[:100], "body": text, "tags": ["summary"]})
@@ -309,29 +370,58 @@ def persist(
     rows: list[dict[str, Any]],
     status: str,
     committed_at: float | None = None,
+    reason: str | None = None,
 ) -> None:
-    """Atomic exact-candidate refresh; never overwrite a correction or resurrect a forget."""
+    """Atomic exact-candidate refresh; never overwrite a correction or resurrect a forget.
+
+    ``reason`` is the coarse cause recorded beside the row, so a pass that captured less
+    than everything is attributable later (see :data:`CAPTURE_REASONS`). When the caller
+    names no reason and an individual candidate is refused, ``refused-row`` is recorded:
+    the pass still commits, it simply landed fewer facts than the scanner admitted. The
+    count of those rows is written to ``captures.refused`` (0 on a clean pass), so the
+    magnitude survives without logging any content.
+    """
     guard(marker_id)
     if status not in ("ok", "failed") or len(rows) > 52:
         raise MemoryError("Invalid capture result.")
+    if reason is not None and reason not in CAPTURE_REASONS:
+        raise MemoryError("Invalid capture reason.")
     timestamp = time.time() if committed_at is None else committed_at
     facts = {}
+    refused = 0
     for row in rows:
-        fact = validate_fact(
-            dict(
-                row,
-                status="candidate",
-                created_at=timestamp,
-                source_time=timestamp,
-                source={
-                    "session": store.identity.session_id,
-                    "entry": marker_id,
-                    "kind": "compaction",
-                    "author": "deterministic-capture",
-                },
+        try:
+            fact = validate_fact(
+                dict(
+                    row,
+                    status="candidate",
+                    created_at=timestamp,
+                    source_time=timestamp,
+                    source={
+                        "session": store.identity.session_id,
+                        "entry": marker_id,
+                        "kind": "compaction",
+                        "author": "deterministic-capture",
+                    },
+                )
             )
-        )
+        except MemoryError:
+            # BELT at the write. The admit site now matches ``validate_fact``'s stricter
+            # guard, but that is a rule the scanner KNOWS; a future field-shape rule it
+            # does not yet know would otherwise reach here and — because the loop below
+            # is inside the transaction — raise out of ``persist`` and leave a
+            # ``failed``/0 row, which is how ONE bad row erased 221 passes. A row shape
+            # the store refuses now costs one candidate and is counted.
+            refused += 1
+            continue
         facts[_dump([fact["body"], fact["tags"]])] = fact
+    if refused:
+        # Count only, never the row: content is untrusted and must not be echoed. The
+        # count itself is also written to ``captures.refused`` below, so a pass's loss
+        # is queryable rather than only a line in a log.
+        logger.warning("memory capture skipped %d refused candidate(s)", refused)
+        if reason is None:
+            reason = "refused-row"
     # A moved session's full portable truth must be indexed before a capture
     # exports anything, otherwise the new candidates would replace its old facts.
     store.import_session()
@@ -407,11 +497,21 @@ def persist(
             )
             store._reindex(db, entity)
             captured += 1
-        store._quota(db, "session", store.identity.session_id)
+        if facts:
+            try:
+                store._quota(db, "session", store.identity.session_id)
+            except MemoryError as exc:
+                # Re-raised under a subclass so ``finish`` can record ``quota`` rather than
+                # a generic ``store-error``. The message is the store's own (content-free).
+                raise _QuotaExceeded(str(exc)) from None
         db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+        # Explicit columns: ``captures`` gained the additive ``reason``/``refused``
+        # columns, and a positional INSERT would be wrong on either side of that
+        # migration.
         db.execute(
-            "INSERT INTO captures VALUES (?,?,?,?)",
-            (store.identity.session_id, marker_id, status, captured),
+            "INSERT INTO captures(session,compaction,status,n,reason,refused)"
+            " VALUES (?,?,?,?,?,?)",
+            (store.identity.session_id, marker_id, status, captured, reason, refused),
         )
         db.execute(
             "DELETE FROM captures WHERE session=? AND compaction NOT IN "
@@ -439,7 +539,7 @@ async def finish(
     carry: str = "",
 ) -> str:
     try:
-        rows = await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        rows = await asyncio.wait_for(asyncio.shield(task), timeout=SCAN_BUDGET + _SCAN_GRACE)
         # Summary parsing is deterministic, not another provider request. The
         # carry rows are added ONCE (see ``carry_rows``); the digest is NOT also
         # fed through ``extract`` in the same pass, which would persist the same
@@ -457,14 +557,49 @@ async def finish(
         return "ok"
     except asyncio.CancelledError:
         raise
-    except Exception:
-        # No exception payload logging: content is untrusted and could be a
-        # sensitive value. Failure is a safe terminal state, never a new turn.
+    except BudgetExceeded as partial:
+        # The scan budget is a DEGRADATION, not a failure: persist what was found and
+        # record why the result is partial. Only the scan rows go in — the summary and
+        # carry arms belong to a completed pass, and re-running them here would make the
+        # timeout path do work it just ran out of budget for.
         try:
-            await asyncio.to_thread(persist, store, marker_id, [], "failed", committed_at)
+            await asyncio.to_thread(
+                persist, store, marker_id, partial.rows, "ok", committed_at, "timeout"
+            )
         except Exception:
-            pass
+            # A partial write that could not land is still not a success.
+            await _record_failure(store, marker_id, "store-error", committed_at)
+            return "failed"
+        return "ok"
+    except asyncio.TimeoutError:
+        # The await expired before the scan reported (a wedged thread): no rows were
+        # observable, so this stays a failure — but recorded as ``timeout``, which is
+        # the attribution the reason column exists for.
+        await _record_failure(store, marker_id, "timeout", committed_at)
         return "failed"
+    except Exception as exc:
+        await _record_failure(
+            store,
+            marker_id,
+            "quota" if isinstance(exc, _QuotaExceeded) else "store-error",
+            committed_at,
+        )
+        return "failed"
+
+
+async def _record_failure(
+    store: MemoryStore, marker_id: str, reason: str, committed_at: float | None
+) -> None:
+    """Write the terminal ``failed`` marker; never raise and never log a payload.
+
+    Failure is a safe terminal state, never a new turn. Nothing here may escape: a
+    store that refused the failure marker (full, locked, corrupt) has already cost the
+    pass, and ``finish``'s caller only needs the terminal string.
+    """
+    try:
+        await asyncio.to_thread(persist, store, marker_id, [], "failed", committed_at, reason)
+    except Exception:
+        pass
 
 
 def recovery_text(transcript: Any, marker: Any) -> str:
