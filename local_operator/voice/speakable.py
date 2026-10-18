@@ -20,7 +20,8 @@ What this does, in order:
 5. Whitespace is folded.
 6. The result is capped at ``max_spoken_chars`` on a sentence boundary when one
    exists inside the cap, else a word boundary, and a short closing sentence
-   says the rest is on screen.
+   says the rest is on screen. The closing sentence is spoken, so it rides
+   INSIDE the cap rather than after it (see :func:`cap`).
 
 Pure and dependency-free, so it is cheap to pin in tests and safe to call on
 the request path.
@@ -44,7 +45,10 @@ MAX_MAX_SPOKEN_CHARS = 4000
 
 CODE_PLACEHOLDER = "(code block omitted)"
 LINK_WORD = "link"
-TRUNCATION_TAIL = "The rest is on screen."
+#: Spoken, not shown: the listener has no way to see that a cut happened, so the
+#: closing sentence has to say it in the first person. It counts against the cap
+#: like any other spoken word.
+TRUNCATION_TAIL = "That's where I'll stop — the rest is on screen."
 
 _FENCE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 #: Non-greedy and single-line-bounded so one stray ``[[`` cannot swallow the rest
@@ -111,6 +115,9 @@ def cap(text: str, max_chars: int) -> Speakable:
 
     The closing sentence counts against the cap, so the spoken total never
     exceeds it: ``/voice/text``'s ``spoken_chars`` is a promise the caller can trust.
+    That arithmetic is why :data:`TRUNCATION_TAIL` may not grow past
+    ``MIN_MAX_SPOKEN_CHARS - 1``: at the floor the tail would otherwise consume
+    the whole budget and the reply would be nothing but a goodbye.
     """
     if len(text) <= max_chars:
         return Speakable(text=text, truncated=False)
