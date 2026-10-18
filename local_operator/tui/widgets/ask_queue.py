@@ -122,9 +122,9 @@ STATUS_EXPIRED = store.STATUS_EXPIRED
 #: the question (design §12) — nobody is waiting on it, and a stale tap can only
 #: be refused. ``expired`` injects nothing at all (§2.2). ``timed_out`` joins
 #: them on this surface (decision D10/D11): its deadline fired and the agent went
-#: ahead without an answer, so no surface offers one any more — the store still
-#: counts it outstanding and still takes a late answer through chat, but the list
-#: reads it the way it reads a declined ask, one settled line with a status word.
+#: ahead without an answer, so no surface offers one any more — the store no
+#: longer counts it outstanding (#2388) but still takes a late answer through
+#: chat, and the list reads it the way it reads a declined ask, one settled line with a status word.
 #:
 #: A SURFACE NO LONGER DROPS THEM (design §4): the list keeps every row and the
 #: three-way filter picks the half, so what this set is FOR now is the question a
@@ -218,8 +218,9 @@ SETTLED_CHIPS: dict[str, tuple[str, str]] = {
 #: ...which is to say: everything the reader must not be asked to answer. THE
 #: OUTSTANDING SET, taken from the fold rather than re-listed here, MINUS the
 #: lapsed set (D10): "answerable now" is outstanding AND NOT lapsed, and both
-#: halves live in ``asks.store`` so no surface re-lists the statuses. The wire's
-#: tally keeps counting the whole outstanding set; only the OFFER narrows.
+#: halves live in ``asks.store`` so no surface re-lists the statuses. Since
+#: #2388 the two sets are disjoint, so this equals the outstanding set; the
+#: subtraction stays so the offer never widens if they overlap again.
 _ANSWERABLE = store.OUTSTANDING_STATUSES - store.LAPSED_STATUSES
 
 #: THE DELIVERING HALF's word (§10): answered, response row not yet durable. It
@@ -253,11 +254,13 @@ STATUS_MARKS: dict[str, str] = {
 #: something to answer, but it is the reason the pending count is honest.
 DELIVERING_MARK = "▸"
 
-#: The glyph a row wears while an answer for it is IN FLIGHT through the engage
-#: seam (fleet scope only — the current session's ops are synchronous). Sized
-#: for the phone's own window (engage 30 s + ack 15 s), it is not a spinner:
-#: nothing repaints on a clock here, and a row that looked busy would be the
-#: animated affordance §5.0 forbids. It exists so the row cannot be fired twice.
+#: The glyph a row wears while an op for it is IN FLIGHT through the fleet
+#: worker (fleet scope only — the current session's ops are synchronous). Sized
+#: for the DIAL's own window (engage 30 s + ack 15 s), which a dismissal no longer
+#: takes (it is one append against the log, fork A §14) — the mark is about the row
+#: being spoken for, not about a clock. It is not a spinner: nothing repaints on a
+#: clock here, and a row that looked busy would be the animated affordance §5.0
+#: forbids. It exists so the row cannot be fired twice.
 IN_FLIGHT_MARK = "…"
 
 
@@ -319,10 +322,10 @@ class AskRow:
     def lapsed(self) -> bool:
         """Whether the row's deadline fired with no answer (``store.is_lapsed``).
 
-        Still outstanding to the store, but read-only here (D10): it sits in the
-        Settled half behind its ``timed out`` chip, and the only gesture it takes
-        is ``x`` dismiss — the one op the queue accepts on a timed-out ask, which
-        answers nobody.
+        No longer outstanding to the store (#2388), though it still takes a late
+        answer, and read-only here (D10): it sits in the Settled half behind its
+        ``timed out`` chip, and the only gesture it takes is ``x`` dismiss — the
+        one op the queue accepts on a timed-out ask, which answers nobody.
         """
         return store.is_lapsed(self.status)
 
@@ -459,7 +462,7 @@ def delivering_chip(row: AskRow) -> tuple[str, str] | None:
     its chip (round 2: F3/Q1/U4).
 
     IT DOES NOT HOLD THE SESSION'S MARK (round 2: F13). The mark is the index's
-    OUTSTANDING set (``open``/``timed_out``, §4.8) unioned with the current
+    OUTSTANDING set (``open`` only since #2388, §4.8) unioned with the current
     session's answerable rows, so it clears the moment the user answers — which
     is right, because it tracks a debt the USER owes and this ask's debt was
     paid. The agent's own delivery lag is what this row states; the sidebar is
@@ -1073,10 +1076,12 @@ class AskQueueList(Widget):
     def set_in_flight(self, ask_id: str, active: bool) -> None:
         """Paint ``ask_id`` as being sent (or stop painting it).
 
-        Called by the app around a fleet answer: the engage-and-dial window is
-        the phone's 30 s + 15 s, and the row must both SAY it is in flight and
-        REFUSE a second gesture for that window — the mark and the guard are the
-        same state, deliberately, so they cannot disagree.
+        Called by the app around a fleet op: for an answer or a decline the window
+        is the DIAL's (the phone's 30 s + 15 s), and for a dismissal it is the
+        append that settles it against the log with nothing dialled (fork A §14) —
+        the row must both SAY it is spoken for and REFUSE a second gesture for that
+        window, whichever op set it. The mark and the guard are the same state,
+        deliberately, so they cannot disagree.
         """
         if active:
             self._in_flight.add(ask_id)

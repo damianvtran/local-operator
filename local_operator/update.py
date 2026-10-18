@@ -247,7 +247,7 @@ _HOST_IS_MACOS = sys.platform == "darwin"
 #: match ``mobile.daemon.DEFAULT_PORT``; do not import that module here.
 _MOBILE_HEALTHZ = "http://127.0.0.1:4098/healthz"
 
-MobileRefreshKind = Literal["skipped", "restarted", "failed", "unsupervised"]
+MobileRefreshKind = Literal["skipped", "restarted", "failed", "unsupervised", "already"]
 
 
 @dataclass(frozen=True)
@@ -6664,6 +6664,14 @@ def refresh_mobile_after_upgrade(*, deadline: float | None = None) -> MobileRefr
         # The child owns the plist half now, so any sentence it produced about
         # a stale-LaunchAgent repair rides up through the summary here — the
         # line the plist child used to print for this daemon.
+        # A child on a build new enough to answer D3's gate SKIPS the bounce when
+        # the daemon is already current and says so with a machine line; rc 0 is
+        # no longer proof of a bounce, and claiming one would add the "refresh the
+        # phone UI" line for a phone that never lost its connection. An OLD child
+        # still claims `restarted` for a skipped bounce — one release of a harmless
+        # wrong sentence, disclosed in D3 rather than papered over.
+        if DaemonStatus("mobile", "already") in _parse_daemon_reports(completed.stdout):
+            return MobileRefresh(kind="already", lines=_result_lines(completed.stdout))
         return MobileRefresh(kind="restarted", lines=_result_lines(completed.stdout))
     except subprocess.TimeoutExpired:
         return MobileRefresh(kind="failed", error="timed out")
@@ -6939,6 +6947,16 @@ def _mobile_daemon_refresh(result: MobileRefresh) -> DaemonRefresh:
             "mobile",
             lines=(*result.lines, "mobile daemon restarted — refresh the phone UI"),
             statuses=(DaemonStatus("mobile", "refreshed"),),
+        )
+    if result.kind == "already":
+        # D3: the daemon's argv already named the generation `current` points at,
+        # so the child left it alone. No "refresh the phone UI" line — nothing on
+        # the phone changed — and the status is the vocabulary's own word for
+        # "left alone, and that is not a failure".
+        return DaemonRefresh(
+            "mobile",
+            lines=result.lines,
+            statuses=(DaemonStatus("mobile", "already"),),
         )
     if result.kind == "failed":
         # U1: name the recovery, not just the failure — the update itself
@@ -7611,10 +7629,9 @@ def _run_daemon_repair(*, services_only: bool) -> int:
     upgrade does; without that, a stale mobile daemon is skipped here while the other
     three move (review round 2, MINOR-2).
 
-    The mobile half is UNCONDITIONAL, as it is on the upgrade path: the build
-    question is deliberately not asked for that daemon (see
-    ``mobile/install.py``), so this is not "bounce it if it is behind" but "the
-    phone relay is restarted by a repair, as it is by an upgrade".
+    The mobile half is asked whether the daemon is already on the current build
+    (D3, ``mobile_refresh_command``): a hand run reaches the same gate an upgrade
+    does, so a repair on a current daemon reports it and does not bounce it.
 
     A REFUSED REPAIR BOUNCES NOTHING (``_repair_refusal``, evaluated here because the
     child reports a refusal as a printed warning and exit 0, which the caller cannot
@@ -7657,8 +7674,9 @@ def mobile_refresh_command() -> int:
     guard is what covers a direct run of the hidden flag.
 
     Exit code: 0 when the refresh did not FAIL (a ``current``, ``repaired`` or
-    ``not-addressable`` outcome) and the bounce succeeded; 1 when either half
-    did — the last stderr line is what the parent's failure sentence carries.
+    ``not-addressable`` outcome) and the bounce succeeded — or was skipped because
+    the daemon was already on the current generation; 1 when either half did — the
+    last stderr line is what the parent's failure sentence carries.
     """
     refusal = _repair_refusal()
     if refusal is not None:
@@ -7677,6 +7695,26 @@ def mobile_refresh_command() -> int:
     warning = outcome.warning()
     if warning:
         print(warning, file=sys.stderr)
+
+    # ALREADY THERE IS NOT A BOUNCE (D3). Once `lop update` moves the supervised
+    # units on every run, every no-op update check reaches this child, and an
+    # unconditional bounce would drop the phone's connection each time. The gate is
+    # asked HERE rather than in the parent because the parent is the SUPERSEDED
+    # build: skipping the spawn there would also skip the plist repair above. It is
+    # asked only on a ``current`` plist outcome — a ``repaired`` one has just
+    # rewritten this job's definition, where the bounce is what starts it.
+    #
+    # TRI-STATE, read exactly as `generation_staleness_of_process` documents it:
+    # ``False`` means both the daemon's own generation and `current` were READ and
+    # match; ``True`` is a proven move; ``None`` is the unanswered question (no
+    # generation in its argv, no readable pointer) and a pip/pipx layout has no
+    # pid here at all. Every answer except ``False`` bounces, so the mutable path
+    # is byte-for-byte what it was.
+    if outcome.kind == "current":
+        pid = mobile_install._supervised_pid()
+        if pid is not None and generation_staleness_of_process(pid) is False:
+            print(_daemon_report_line("mobile", "already"), flush=True)
+            return 0
 
     result = mobile_install.service_action("restart")
     if not result["ok"]:
@@ -7883,17 +7921,23 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
         return StageReport()
 
     before = _live_serve_records()
+    # ONE CALL, ONE OWNER (D1). This fork called `reload_serve_daemons(rolling=True)`
+    # on a generation install and `restart_services()` on a mutable one, so the
+    # branch that ships on this host's own layout never moved the supervised units:
+    # the mobile relay, browser bridge, tunnel and wakes LaunchAgents stayed on
+    # 0.71.5 through seven releases (0.73.1-0.73.10) and the phone served the
+    # pre-#2465 asks sheet from a build nobody was updating. The fork is a
+    # leftover, not a policy: it routed to serve-only when `refresh_daemons_after_upgrade`
+    # still short-circuited a generation install to `pending`, and 4e512ae6e removed
+    # that short-circuit. What differs between the layouts is the reload's rolling
+    # contract, so that is all the argument carries.
+    rolling = _is_generation_install()
     try:
-        if _is_generation_install():
-            from local_operator.services import reload_serve_daemons
-
-            refreshes = (
-                reload_serve_daemons(rolling=True)
-                if wait_s is None
-                else reload_serve_daemons(wait_s=wait_s, rolling=True)
-            )
-        else:
-            refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
+        refreshes = (
+            restart_services(rolling=rolling)
+            if wait_s is None
+            else restart_services(wait_s=wait_s, rolling=rolling)
+        )
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         print(
             f"warning: the installed services could not be moved onto the new build: {exc}; "
@@ -7926,7 +7970,16 @@ def _run_services_tail(*, services: bool) -> StageReport:
 
 
 def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any]:
-    """Loaded/serving/pending are measurements, never aliases for current."""
+    """Loaded/serving/pending are measurements, never aliases for current.
+
+    ``services`` carries BOTH halves: the serving rows measured around the stage,
+    and one row per supervised status the stage reported (D2). The supervised rows
+    used to be the ``pending`` ones only, so a generation install — the layout
+    this host runs — recorded nothing about units that had just been moved, or
+    about the ones that were not. ``refreshed`` proves a new pid, not the build
+    (see ``launchd.restart_if_build_moved``'s Q5 note), which is why
+    ``central_services_complete`` stays False below.
+    """
     from local_operator import services
     from local_operator.session.runtime import registry
     from local_operator.session.runtime.types import SessionRecord
@@ -7995,15 +8048,7 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             )
     except Exception:  # noqa: BLE001 — failed inventory is explicit
         serving_measured = False
-    pending = [
-        {
-            "name": item.name,
-            "state": "pending",
-            "reason": "unit presence/serving identity and rolling continuity are unproved",
-        }
-        for item in stage.daemons
-        if item.status == "pending"
-    ]
+    supervised = [{"name": item.name, "state": item.status, "reason": ""} for item in stage.daemons]
     return {
         "contract": "rolling-no-kill-v1",
         "mode": "rolling-immutable",
@@ -8020,7 +8065,7 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
         # empty authoritative census. Never announce overall COMPLETE.
         "central_services_complete": False,
         "serving_measured": serving_measured,
-        "services": serving + pending,
+        "services": serving + supervised,
         "runtimes": {
             "measured": measured,
             **{key: value if measured else None for key, value in counts.items()},

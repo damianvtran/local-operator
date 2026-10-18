@@ -260,8 +260,11 @@ class BashEffects:
 
     ``outputs`` are raw path spellings, already joined against the directory the shell was
     in at that point (``~/``-rooted, absolute or session-cwd-relative). ``sweep_dirs`` are the
-    directories the command ``cd``'d into AND wrote something in: the only places the
-    touched-directory sweep may look (see :func:`_sweep`).
+    directories the command wrote a variable path into: the one it ``cd``'d to, or an EMPTY
+    string for a command that never ``cd``'d — the only places the touched-directory sweep may
+    look, the empty entry resolving to the session cwd at the consumer (``prefilter``'s
+    ``if directory else cwd`` fallback). A command whose ``cd`` target was unknowable
+    contributes no entry: its relative names were dropped, not guessed against the cwd.
     """
 
     outputs: tuple[str, ...] = ()
@@ -486,7 +489,17 @@ def bash_effects(command: str) -> BashEffects:
                         emit(raw, found)
                     unnamed_write = unnamed_write or _variable_write(body)
         outputs.extend(found)
-        if unnamed_write and cwd:
+        # ``cwd`` is "" before any ``cd``, a path after one, and ``None`` when a
+        # ``cd``'s target cannot be known statically. The sweep must run for the
+        # FIRST state too — the no-``cd`` shape is the common one, and the
+        # consumer's ``if directory else cwd`` fallback resolves an empty entry
+        # to the session cwd, which is exactly the directory the command worked
+        # in. A truthiness check here silently defeated that fallback (dead
+        # code): the sweep never armed unless the command happened to ``cd``.
+        # ``None`` stays excluded — its relative names are dropped rather than
+        # guessed (see ``_in_dir``), so sweeping the session cwd would look in
+        # a directory the command was provably NOT in.
+        if unnamed_write and cwd is not None:
             sweep_dirs.append(cwd)
 
     for token in tokens:

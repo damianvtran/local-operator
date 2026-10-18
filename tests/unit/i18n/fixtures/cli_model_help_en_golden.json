@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "Switch another running lop session's model (like /model there)",
+  "cli.model_help.target": "conversation-name / session-id / cwd substring (case-insensitive). Omit when addressing with --pid/--session.",
+  "cli.model_help.selector": "the model to switch to, e.g. deepseek/deepseek-flash",
+  "cli.model_help.pid": "target by exact pid",
+  "cli.model_help.session": "target by exact session id"
+}

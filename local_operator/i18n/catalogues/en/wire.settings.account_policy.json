@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "account selection policy",
+  "wire.settings.account_policy.help": "Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting.",
+  "wire.settings.account_policy.reset_soonest.label": "Reset soonest",
+  "wire.settings.account_policy.reset_soonest.description": "Prefer the nearest included-plan reset; spread ties and unknown reports deterministically. Default for new configurations.",
+  "wire.settings.account_policy.headroom.label": "Most headroom",
+  "wire.settings.account_policy.headroom.description": "Prefer cached remaining quota, spreading accounts within ten percentage points of the best.",
+  "wire.settings.account_policy.fair.label": "Fair spread",
+  "wire.settings.account_policy.fair.description": "Use a stable session-based spread instead of ranking cached resets or remaining quota.",
+  "wire.settings.account_policy.legacy.label": "legacy usage-aware pick",
+  "wire.settings.account_policy.legacy.help": "Compatibility setting, used only when account selection policy is absent: true selects Most headroom; false selects Fair spread. An explicit account selection policy takes precedence. Reset the account selection policy row to restore Reset soonest and clear legacy overrides.",
+  "wire.settings.account_policy.error.unavailable": "Account routing is unavailable.",
+  "wire.settings.account_policy.error.invalid_shape": "Expected only a value field.",
+  "wire.settings.account_policy.error.invalid_json": "Expected a JSON object.",
+  "wire.settings.account_policy.error.write_failed": "The setting could not be saved. Check configuration permissions on this computer and try again."
+}

@@ -55,6 +55,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.settings.hub_defaults",
+        # Account-routing policy copy is an approved English-only child, not
+        # an edit to the already-audited wire.settings or translated ledgers.
+        "wire.settings.account_policy",
         "wire.slash",
         "wire.aida_cadence",
         # The OpenRouter host-speed settings row (English-only, own namespace so
@@ -84,6 +87,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     # Approved source namespace, not a prefix-wide wildcard. Mutation controls
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
+    assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
@@ -97,7 +101,10 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
 
 
-@pytest.mark.parametrize("target_namespace", ["wire.errors.files", "wire.errors.sdk_spec"])
+@pytest.mark.parametrize(
+    "target_namespace",
+    ["wire.errors.files", "wire.errors.sdk_spec", "wire.settings.account_policy"],
+)
 @pytest.mark.parametrize("mutation", ["unexpected-namespace", "missing-declared", "empty-declared"])
 def test_exact_wire_namespace_contract_rejects_mutations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, target_namespace: str

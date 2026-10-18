@@ -36,6 +36,30 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     return root, emitted
 
 
+def test_account_policy_missing_generated_key_fails_counterfactual(
+    generated, i18n_generate
+) -> None:
+    """The new English-only child is still subject to canonical drift checks."""
+    root, emitted = generated
+    (root / "en" / "wire.settings.account_policy.json").write_text(
+        json.dumps(
+            {
+                "wire.settings.account_policy.label": "account selection policy",
+                "wire.settings.account_policy.help": "Synthetic policy help",
+            }
+        )
+    )
+    planned = i18n_generate._planned_files(emitted)
+    for path, text in planned.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    assert i18n_generate._check(planned) == 0
+    module = i18n_generate.KEYS_DIR / "wire_settings_account_policy.py"
+    assert "def label()" in module.read_text()
+    module.write_text(module.read_text().replace("def label()", "def missing_label()"))
+    assert i18n_generate._check(planned) == 1
+
+
 def test_ts_key_map_reuses_icu_argument_types(i18n_generate) -> None:
     output = i18n_generate._render_ts_key_map(
         {

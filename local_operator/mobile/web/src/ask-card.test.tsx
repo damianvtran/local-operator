@@ -408,17 +408,47 @@ describe("AskCard", () => {
 		).toBeTruthy();
 	});
 
-	it("says a COLD dismissal brings the session up, before the tap", () => {
-		/* U3: the label promises "send no reply" and that stays true, but on a cold
-		   conversation the relay also brings it up to RECORD the dismissal — the
-		   conversation surfaces as active, which the copy owed the reader. */
-		const cold = renderCard(ask({ status: "timed_out", runtime_live: false }));
+	it("keeps the dismiss control's width while the dismissal is in flight", async () => {
+		/* D1 (design round 1): the in-flight mark used to be the bare glyph `…`,
+		   which collapsed the control from 208 px to a 44 px square under the
+		   thumb. The label IS the width, so keeping it — dimmed and disabled by
+		   the `busy` state — is the whole fix, and the assertion is that the
+		   in-flight name is the resting one. The glyph stays on answer/decline,
+		   where D1 called it optional. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise<never>(() => {}),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
 		expandLapsed();
-		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
-		cold.unmount();
-		renderCard(ask({ status: "timed_out" }));
+		const resting = screen.getByRole("button", { name: "dismiss — send no reply" });
+		fireEvent.click(resting);
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		const inFlight = screen.getByRole("button", { name: "dismiss — send no reply" });
+		// The same node, so the same box: nothing remounted and no label changed.
+		expect(inFlight).toBe(resting);
+		expect((inFlight as HTMLButtonElement).disabled).toBe(true);
+		expect(inFlight.getAttribute("aria-busy")).toBe("true");
+	});
+
+	it("promises no engage for a COLD dismissal, before or during the tap", async () => {
+		/* FORK A (2026-10-16): the relay used to ENGAGE the conversation to RECORD the
+		   dismissal, so the card said so in advance (U3) and named the ~30 s while it
+		   ran. A dismissal now takes the no-boot door on every surface, so "dismiss —
+		   send no reply" is the WHOLE truth warm or cold, and the card must claim no
+		   bring-up at either moment. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise<never>(() => {}),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
 		expandLapsed();
-		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
+		expect(
+			screen.getByRole("button", { name: /dismiss — send no reply/ }),
+		).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		expect(screen.queryByText(/brought up to record it/)).toBeNull();
+		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		expect(screen.queryByText(/~30 s/)).toBeNull();
 	});
 
 	it("stops claiming an engage the moment the outcome is known", async () => {

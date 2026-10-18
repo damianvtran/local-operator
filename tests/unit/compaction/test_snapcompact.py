@@ -533,14 +533,37 @@ def test_history_blocks_policy_replays_text_pages_as_text():
 
 
 def test_history_blocks_policy_all_text_middle_is_char_complete():
-    """Nothing is dropped in a flip: every archived character is still sent."""
-    archive = _large_archive()
+    """Nothing is dropped in a flip: every archived character is still sent.
+
+    The carry, when a pass minted one, rides as a leading text block (see
+    ``_with_carry_block``); this pins the ORIGINAL invariant for an archive
+    without one, and the carry's own block is asserted separately below.
+    """
+    archive = _large_archive().model_copy(update={"carry": ""})
     assert set(archive.middle_kinds) == {"t"}
     blocks = history_blocks(archive)
     assert [b["kind"] for b in blocks] == ["text", "text", "text"]
     assert blocks[0]["text"] == archive.text_head
     assert blocks[2]["text"] == archive.text_tail
     assert blocks[0]["text"] + blocks[1]["text"] + blocks[2]["text"] == archive.text
+
+
+def test_history_blocks_carry_replays_as_leading_text():
+    """A carried digest replays FIRST, ahead of the verbatim oldest edge.
+
+    The carry is the retention mechanism (see compaction.mine): it must be
+    readable on every replay or the cliff return. Its block leads so the model
+    reads the retained asks/decisions/identifiers before the frames and edges.
+    """
+    archive = _large_archive()
+    assert archive.carry, "a text-heavy pass should have mined a carry"
+    blocks = history_blocks(archive)
+    # Trailing newline on the block keeps the digest from gluing onto the
+    # oldest edge when a provider concatenates parts with no separator.
+    assert blocks[0] == {"kind": "text", "text": archive.carry + "\n"}
+    # The carry is ADDITIVE: the archive's own replay is unchanged behind it.
+    without = history_blocks(archive.model_copy(update={"carry": ""}))
+    assert blocks[1:] == without
 
 
 def test_history_blocks_policy_all_image_matches_legacy():
@@ -686,6 +709,7 @@ def test_archive_json_dump_keeps_its_persisted_shape():
         "truncated_chars",
         "middle_kinds",
         "page_digests",
+        "carry",
         "created_at",
     }
     assert payload["middle_kinds"] == archive.middle_kinds
@@ -827,10 +851,16 @@ def test_estimate_archive_tokens():
     assert estimate_archive_tokens(all_image) == edges + 3 * FRAME_TOKEN_ESTIMATE
 
     # A fully text-carried middle drops the frame term: the estimate is just
-    # the archived text, because the flipped pages join back to it exactly.
+    # the archived text (plus the carry, when present) because the flipped
+    # pages join back to it exactly.
     flipped = _large_archive()
     assert replayed_frame_count(flipped) == 0
-    assert estimate_archive_tokens(flipped) == estimate_tokens(Message.assistant(flipped.text))
+    assert estimate_archive_tokens(flipped) == estimate_tokens(
+        Message.assistant((flipped.carry + "\n" if flipped.carry else "") + flipped.text)
+    )
+    assert estimate_archive_tokens(flipped.model_copy(update={"carry": ""})) == estimate_tokens(
+        Message.assistant(flipped.text)
+    )
 
     # Legacy archives price every stored frame, exactly as before.
     legacy = all_image.model_copy(update={"middle_kinds": ""})

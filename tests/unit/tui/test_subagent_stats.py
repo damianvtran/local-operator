@@ -1231,6 +1231,7 @@ async def test_a_relayed_event_costs_no_repaint_until_the_next_tick() -> None:
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
@@ -1288,6 +1289,7 @@ async def test_a_mounted_panel_lays_out_against_the_screen_not_its_own_width() -
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(60, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
@@ -1332,6 +1334,7 @@ async def test_an_overgrown_panel_charges_the_rail_padding_to_its_ceiling() -> N
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(60, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
@@ -1354,6 +1357,7 @@ async def test_a_child_appearing_paints_at_once_rather_than_waiting_for_a_tick()
     session.jobs = _fake_jobs()
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         session.jobs = _fake_jobs(Job("j1", "docs sweep", progress="auditing merged MRs"))
@@ -1709,6 +1713,7 @@ async def test_a_swept_child_is_dropped_from_the_stats_cache() -> None:
     session.jobs = _fake_jobs(*jobs)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)
@@ -1748,6 +1753,7 @@ async def test_a_spinning_row_repaints_without_a_layout_pass() -> None:
     session.jobs = _fake_jobs(Job("j1", "docs sweep", status="running"))
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app)
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
         panel.sync(session)

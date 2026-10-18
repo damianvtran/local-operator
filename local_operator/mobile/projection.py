@@ -3612,7 +3612,7 @@ class ProjectionFold:
         keeps that distinction rather than collapsing the pair to absence.
 
         ``outstanding_count`` is the runtime's own tally of asks still wanting
-        the user (open + timed-out-and-answerable), passed through verbatim
+        the user (open asks; a timed-out one is settled, #2388), passed through verbatim
         rather than re-counted from the rows: the rows are a CAP-20 prefix, so
         re-counting them here would under-report a queue longer than the cap —
         the exact disagreement (``asks_open: 20`` beside 9 drawn rows) QA found

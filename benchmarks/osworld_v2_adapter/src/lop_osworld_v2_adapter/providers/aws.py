@@ -1555,6 +1555,48 @@ class AwsProvider:
 
         await asyncio.to_thread(run)
 
+    async def probe_control_server(self, timeout: float) -> bool:
+        """One bounded GET to the guest's readiness endpoint; never raises.
+
+        The same endpoint, and the same meaning, as the allocation readiness
+        check (``_READY_PATH``, upstream's own ``ensure_ready`` probe), asked
+        again in the one state where the answer changes what the harness does:
+        after an ambiguous delivery (see ``guest_loss``), where a control
+        server that answers is the difference between continuing the episode
+        with an UNKNOWN-outcome warning and ending it exactly as before. Read-
+        only by construction: a GET, no statement, no observation build.
+
+        Bounded on both ends: ``requests`` gets ``timeout`` (applied to the
+        connect and read phases separately, so this call's own worst case
+        is roughly twice it), and the RPC layer's outer deadline cancels
+        whatever remains -- see ``_PROBE_TIMEOUT_S`` in ``adapter.py`` for
+        the chosen arithmetic -- while the call runs on a worker thread so
+        a hung connect cannot block the worker's event loop (and with it
+        the cancel path).
+
+        Deliberately boolean: refused, timed out, a DNS failure and a non-200
+        status all collapse into False because the caller's decision is fail
+        closed and nothing acts on the taxonomy. The URL is never surfaced --
+        it names the guest's address.
+        """
+
+        origin = self._guest_origin()
+        if origin is None:
+            return False
+
+        def request() -> int:
+            return int(self._clients.http_get(f"{origin}{_READY_PATH}", timeout))
+
+        try:
+            return await asyncio.to_thread(request) == 200
+        except Exception:
+            # Every way the transport can describe a guest that is not
+            # answering, collapsed in one place. The exception text can echo
+            # the URL or the guest's state, so it is discarded; the caller
+            # re-raises the ORIGINAL ambiguous failure, so this path adds no
+            # diagnostic of its own.
+            return False
+
     async def evaluate(self) -> Any:
         env = self._require_env()
 

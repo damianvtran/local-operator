@@ -248,5 +248,360 @@
     "role": "session picker preview-mode key label",
     "tone": "plain, factual",
     "note": "The 'ctrl+e' key label in the session picker's footer, naming the chord that toggles the preview mode whose name follows it. A key name is syntax shown to the user, kept verbatim like tui.hub_links.hint.confirm ('ctrl+y'); it is extracted because the footer paints it as user-facing copy. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.small.goal_panel.settled_heading": {
+    "role": "heading",
+    "tone": "plain",
+    "note": "Section heading over the settled-goal history; a noun, not a verb, and it carries no count because the rows below do."
+  },
+  "tui.small.goal_panel.no_goal_hint": {
+    "role": "empty-state hint",
+    "tone": "plain",
+    "note": "Empty state for the goal card; the literal `/goal <text>` is a command a user types, so it must stay unmodified in every locale."
+  },
+  "tui.small.goal_panel.none_yet": {
+    "role": "empty-state fragment",
+    "tone": "plain",
+    "note": "Prefixed by two spaces as its own indent; a claim about the record, so it is withheld when the record is truncated."
+  },
+  "tui.small.goal_panel.done_suffix": {
+    "role": "row suffix",
+    "tone": "plain",
+    "note": "Trails a finished goal row; keeps its two leading spaces and the em dash, which separates it from the goal text."
+  },
+  "tui.small.goal_panel.judge_absent": {
+    "role": "placeholder",
+    "tone": "plain",
+    "note": "Shown when no judge is attached; the em dash is the absent-value sentinel, and `judge:` is a protocol word kept as-is."
+  },
+  "tui.small.goal_panel.judge_line": {
+    "role": "row label",
+    "tone": "plain",
+    "note": "`judge:` is protocol vocabulary and the state word comes from the generated table, so only the label is copy here."
+  },
+  "tui.small.goal_panel.judge_run": {
+    "role": "counter fragment",
+    "tone": "plain",
+    "note": "Run counter appended to the judge line; both numbers are raw digits with no grouping, matching the pre-slice f-string."
+  },
+  "tui.small.goal_panel.more_settled_indent": {
+    "role": "overflow row",
+    "tone": "plain",
+    "note": "Indented overflow notice carrying the hidden count; raw digits, and the ellipsis is a single character, not three dots."
+  },
+  "tui.small.goal_panel.more_settled": {
+    "role": "overflow row",
+    "tone": "plain",
+    "note": "Unindented overflow notice for the same fact as its indented sibling; a separate key because the indentation differs between the two call sites."
+  },
+  "tui.small.network_panel.relay_checking_indent": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Pending relay row; the trailing newline is part of the row and the two-space indent is its list indent."
+  },
+  "tui.small.network_panel.checking_indent": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Generic pending row shared by the members and identity sections; trailing newline and two-space indent are load-bearing."
+  },
+  "tui.small.network_panel.no_members": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Shown when the payload reports no members; the double-space indent and trailing newline are part of the row."
+  },
+  "tui.small.network_panel.relay_not_running": {
+    "role": "status row",
+    "tone": "plain",
+    "note": "Relay-not-running row; the run of spaces aligns its value with the sibling `running, pid …` row, so the padding is layout."
+  },
+  "tui.small.network_panel.stale_tag": {
+    "role": "row tag",
+    "tone": "plain",
+    "note": "Bracketed staleness marker on a member row; the brackets are part of the tag, and it never takes an argument."
+  },
+  "tui.small.network_panel.suspect_tag": {
+    "role": "row warning",
+    "tone": "yellow",
+    "note": "Warning tag for a possibly copied key; keeps its two-space indent and the sentence is deliberately cautious about the inference."
+  },
+  "tui.small.network_panel.member_count": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Member count with knowable singular/plural; the count is carried as a string so the digit stays raw (never `1,200`)."
+  },
+  "tui.small.network_panel.trust_field": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Trust state of a member; the value is protocol vocabulary from the payload and is not translated."
+  },
+  "tui.small.network_panel.installed_row": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "`installed:` is a protocol label whose column padding aligns it with the identity row; the value is a bare yes/no."
+  },
+  "tui.small.network_panel.identity_row": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "`identity:` is a protocol label kept as-is; the value comes from `present`/`missing` and the spacing aligns the column."
+  },
+  "tui.small.network_panel.relay_running": {
+    "role": "detail row",
+    "tone": "plain",
+    "note": "Relay-running row; `relay:` and `pid` are protocol words, and the padding after the colon aligns the value column."
+  },
+  "tui.small.approval.decision_allowed": {
+    "role": "row prefix",
+    "tone": "plain",
+    "note": "The live ask's decision row; the trailing space separates it from the tool name that follows, so it is layout."
+  },
+  "tui.small.approval.decision_denied": {
+    "role": "row prefix",
+    "tone": "plain",
+    "note": "The denial variant of the same row; keeps its trailing space and is deliberately a separate key from the allowed form."
+  },
+  "tui.small.info_panel.not_answering": {
+    "role": "state word",
+    "tone": "plain",
+    "note": "Stand-in for a wedged heartbeat, written as a state word rather than a sentence so it sits in the same slot as the real state values."
+  },
+  "tui.small.info_panel.install_info_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading over the install block; the trailing newline is part of the heading and the rule below it is drawn in code, not copy."
+  },
+  "tui.small.panels.scroll_hint": {
+    "role": "affordance suffix",
+    "tone": "plain",
+    "note": "Appended to a panel's hint only when it can actually scroll; the leading space and the arrows are the whole point, so keep both."
+  },
+  "tui.small.model_picker.effort": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Reasoning-effort list on a model row; the value is a slash-joined token list from the catalogue data and must stay untranslated."
+  },
+  "tui.small.model_picker.none_word": {
+    "role": "value word",
+    "tone": "plain",
+    "note": "The value shown when a model reports no reasoning efforts at all; a word, not an em dash, so it reads as a value."
+  },
+  "tui.small.model_picker.default": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "The model's default reasoning effort; the value is a protocol token and stays as-is."
+  },
+  "tui.small.model_picker.released": {
+    "role": "row field",
+    "tone": "plain",
+    "note": "Release date on a model row; the value is a date string supplied by the catalogue, not a formatted date."
+  },
+  "tui.small.model_picker.no_matching_models": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Empty state when a filter is active and matched nothing."
+  },
+  "tui.small.model_picker.no_models_available": {
+    "role": "empty state",
+    "tone": "plain",
+    "note": "Empty state when no filter is active; distinct from the filtered form because the two states need different guidance."
+  },
+  "tui.small.network_panel.mesh_networks_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading of the mesh-networks card; trailing newline included, the rule under it is drawn in code."
+  },
+  "tui.small.session_panel.diagnostics_heading": {
+    "role": "card heading",
+    "tone": "plain",
+    "note": "Heading of the diagnostics card; trailing newline included, the rule under it is drawn in code."
+  },
+  "tui.small.subagent_panel.ctrl_g_shrink": {
+    "role": "keybinding hint",
+    "tone": "plain",
+    "note": "Shown while the panel is expanded; `ctrl+g` is the literal chord a user presses and stays verbatim."
+  },
+  "tui.small.subagent_panel.ctrl_g_expand": {
+    "role": "keybinding hint",
+    "tone": "plain",
+    "note": "Shown while the panel is collapsed; the paired state of the shrink hint and a separate key because the wording differs."
+  },
+  "tui.small.wake_panel.scheduled_count": {
+    "role": "header count",
+    "tone": "plain",
+    "note": "Count of scheduled wakes; the singular branch spells the digit into the sentence, matching the pre-split form, and the digit is raw (never grouped)."
+  },
+  "tui.small.settings_view.default_marker": {
+    "role": "marker",
+    "tone": "dim",
+    "note": "Marks a value as the built-in default; the two leading spaces are its indent and the parentheses are the marker itself."
+  },
+  "tui.small.settings_view.hop_count": {
+    "role": "count",
+    "tone": "faint",
+    "note": "Chain hop count; the indent is layout and the digit is raw (never grouped)."
+  },
+  "tui.small.settings_view.reorder_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Key hints under a selected hop; the indent, the arrow glyphs and the chord letters are all load-bearing."
+  },
+  "tui.small.settings_view.press_key": {
+    "role": "prompt",
+    "tone": "accent",
+    "note": "Prompt while capturing a keybinding; the ellipsis is a single character."
+  },
+  "tui.small.settings_view.hop_row_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Detail hint for a hop row; the chords are literal keys a user presses."
+  },
+  "tui.small.settings_view.chain_row_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Detail hint for a chain row; separate key from the hop variant because the wording differs."
+  },
+  "tui.small.settings_view.chain_add_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Hint for adding a chain; the angle-bracket placeholders are the instruction's shape and stay verbatim."
+  },
+  "tui.small.settings_view.hop_add_hint": {
+    "role": "hint row",
+    "tone": "faint",
+    "note": "Hint for adding a hop; the shorter sibling of the chain-add hint."
+  },
+  "tui.small.settings_view.read_only_pane": {
+    "role": "state label",
+    "tone": "dim",
+    "note": "Standalone read-only marker for a pane; no indent, unlike its sibling read_only_label."
+  },
+  "tui.small.settings_view.overflow_more": {
+    "role": "overflow row",
+    "tone": "dim",
+    "note": "Overflow notice with the hidden row count; ellipsis is one character and the digit is raw."
+  },
+  "tui.small.settings_view.read_only_label": {
+    "role": "state label",
+    "tone": "dim",
+    "note": "The indented form of the read-only marker; a separate key from read_only_pane because the indent differs."
+  },
+  "tui.small.settings_view.title": {
+    "role": "title",
+    "tone": "head",
+    "note": "The screen's title; a single lowercase word, matching the app's other panel titles."
+  },
+  "tui.small.settings_view.bool_on": {
+    "role": "choice label",
+    "tone": "plain",
+    "note": "Boolean TRUE choice label. Deliberately lowercase and lowercase-only: it renders in a value column beside 'off'."
+  },
+  "tui.small.settings_view.bool_off": {
+    "role": "choice label",
+    "tone": "plain",
+    "note": "Boolean FALSE choice label; paired with bool_on and equally short because the column is narrow."
+  },
+  "tui.small.todo_panel.header": {
+    "role": "heading",
+    "tone": "muted",
+    "note": "Panel header; one key for both the flat and the staged header, which carry identical bytes."
+  },
+  "tui.small.todo_panel.resolved": {
+    "role": "count",
+    "tone": "muted",
+    "note": "Resolved-over-total counter in the header; both digits are raw and the slash is layout."
+  },
+  "tui.small.todo_panel.dropped": {
+    "role": "count",
+    "tone": "muted",
+    "note": "Dropped counter appended to the header only when non-zero."
+  },
+  "tui.small.todo_panel.more_todos": {
+    "role": "overflow",
+    "tone": "dim",
+    "note": "Overflow row for items the screen cannot afford; the ellipsis and the noun are both part of the copy."
+  },
+  "tui.small.todo_panel.stage": {
+    "role": "label",
+    "tone": "dim",
+    "note": "Stage counter after the header; the leading separator attaches it to the line it follows."
+  },
+  "tui.small.todo_panel.more_hidden": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Collapsed-count affordance before the collapse hint; the trailing separator is layout."
+  },
+  "tui.small.todo_panel.done_hidden": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Same affordance when the hidden remainder is all done (two-valued switch)."
+  },
+  "tui.small.todo_panel.collapse": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The key name is display vocabulary; only the verb translates."
+  },
+  "tui.small.todo_panel.expand": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The other half of the same two-valued hint."
+  },
+  "tui.small.todo_panel.more_below": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "Scroll cue; the digit may arrive pre-padded to pin the column, so it is a string, not a number."
+  },
+  "tui.small.todo_panel.more_below_padded": {
+    "role": "affordance",
+    "tone": "dim",
+    "note": "The end-state variant, where a run of spaces of the same width stands in for the count."
+  },
+  "tui.small.todo_panel.blocked": {
+    "role": "status",
+    "tone": "muted",
+    "note": "Status marker appended to a row; the leading space-dash-space is part of the marker."
+  },
+  "tui.small.todo_panel.dropped_row": {
+    "role": "status",
+    "tone": "dim",
+    "note": "The dropped variant of the same marker."
+  },
+  "tui.small.command_picker.projects": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Availability count in the command palette's status line; the plural moves into the message so a translator can inflect it."
+  },
+  "tui.small.command_picker.entries": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Same shape for the entries count, joined to the projects count with a separator in code."
+  },
+  "tui.small.session_sidebar.opened_by": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Names who opened the session; role is a normalised role word and stays a parameter."
+  },
+  "tui.small.session_sidebar.lead_return": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The lead key when the list has the keyboard: the keycap is display vocabulary, the verb translates."
+  },
+  "tui.small.session_sidebar.lead_focus": {
+    "role": "hint",
+    "tone": "muted",
+    "note": "The same lead when the list does not have focus; the way in rather than out."
+  },
+  "tui.small.session_sidebar.pin_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Pin affordance glued after the lead; the leading separator is layout and the keycap stays."
+  },
+  "tui.small.session_sidebar.asks_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Ask-door teacher (U13): the chord is display vocabulary, 'asks' is the word."
+  },
+  "tui.small.session_sidebar.hide_suffix": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "The sidebar toggle affordance; the keycap is display vocabulary, 'hide' is the word."
   }
 }

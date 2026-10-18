@@ -1,7 +1,107 @@
 {
-  "tui.usage.paid.continue": {"role": "shared included-quota continuation note", "tone": "Factual; lowercase matches the terminal panel.", "note": "Only explicit shared included exhaustion plus eligible paid headroom permits this claim. Family-only exhaustion does not."},
-  "tui.usage.paid.family_caps": {"role": "independent model-family restriction", "tone": "Factual, concise.", "note": "Shown independently from included-quota continuation, unless paid scope explicitly supersedes tiers."},
-  "tui.usage.paid.blocked": {"role": "paid spend eligibility qualifier", "tone": "Keep the actual funded balance visible.", "note": "The vendor explicitly says spending is unavailable; this is not a zero balance."},
-  "tui.usage.paid.eligibility_unknown": {"role": "unknown paid spend eligibility", "tone": "Do not imply enabled or disabled.", "note": "Vendor eligibility was not reported."},
-  "tui.usage.paid.unlimited": {"role": "explicit uncapped paid allowance", "tone": "No invented percentage or denominator.", "note": "Only explicit eligible unlimited metadata earns this qualifier."}
+  "tui.usage.paid.continue": {
+    "role": "shared included-quota continuation note",
+    "tone": "Factual; lowercase matches the terminal panel.",
+    "note": "Only explicit shared included exhaustion plus eligible paid headroom permits this claim. Family-only exhaustion does not."
+  },
+  "tui.usage.paid.family_caps": {
+    "role": "independent model-family restriction",
+    "tone": "Factual, concise.",
+    "note": "Shown independently from included-quota continuation, unless paid scope explicitly supersedes tiers."
+  },
+  "tui.usage.paid.blocked": {
+    "role": "paid spend eligibility qualifier",
+    "tone": "Keep the actual funded balance visible.",
+    "note": "The vendor explicitly says spending is unavailable; this is not a zero balance."
+  },
+  "tui.usage.paid.eligibility_unknown": {
+    "role": "unknown paid spend eligibility",
+    "tone": "Do not imply enabled or disabled.",
+    "note": "Vendor eligibility was not reported."
+  },
+  "tui.usage.paid.unlimited": {
+    "role": "explicit uncapped paid allowance",
+    "tone": "No invented percentage or denominator.",
+    "note": "Only explicit eligible unlimited metadata earns this qualifier."
+  },
+  "tui.usage.windows_count": {
+    "role": "header count",
+    "tone": "plain",
+    "note": "Number of rate-limit windows reported; digit is raw, never grouped."
+  },
+  "tui.usage.exhausted": {
+    "role": "counter",
+    "tone": "plain",
+    "note": "Windows already spent; the digit travels as a string so it stays raw."
+  },
+  "tui.usage.near_limit": {
+    "role": "counter",
+    "tone": "plain",
+    "note": "Windows approaching their limit; raw digit."
+  },
+  "tui.usage.reported_balance": {
+    "role": "counter",
+    "tone": "plain",
+    "note": "Windows reporting a balance; the singular/plural is knowable from the number, and the digit stays raw."
+  },
+  "tui.usage.not_reported": {
+    "role": "counter",
+    "tone": "plain",
+    "note": "Windows with no reported figure; raw digit."
+  },
+  "tui.usage.unavailable": {
+    "role": "row suffix",
+    "tone": "dim",
+    "note": "Suffix on a usage row when the figure cannot be fetched; the spacing around the separator dot is layout."
+  },
+  "tui.usage.resets_in": {
+    "role": "row suffix",
+    "tone": "dim",
+    "note": "Reset countdown; the leading comma and space attach it to the row it follows, and the value is already a humanised duration."
+  },
+  "tui.usage.no_windows": {
+    "role": "empty state",
+    "tone": "dim",
+    "note": "Empty state for the windows list; indent is layout."
+  },
+  "tui.usage.fetching": {
+    "role": "loading",
+    "tone": "dim",
+    "note": "Shown while the first report is in flight; single-character ellipsis."
+  },
+  "tui.usage.title": {
+    "role": "title",
+    "tone": "fg",
+    "note": "The panel's title; a single capitalised noun."
+  },
+  "tui.usage.sign_in_expired": {
+    "role": "counter",
+    "tone": "warning",
+    "note": "Windows whose credential has expired; raw digit."
+  },
+  "tui.usage.stale": {
+    "role": "counter",
+    "tone": "warning",
+    "note": "Windows whose data is stale; raw digit."
+  },
+  "tui.usage.refreshing": {
+    "role": "loading",
+    "tone": "dim",
+    "note": "Shown while a refresh is in flight, beside the existing figures."
+  },
+  "tui.usage.refresh_failed": {
+    "role": "error note",
+    "tone": "warning",
+    "note": "Explains that the numbers on screen predate a failed refresh; the em dash separates the failure from the reassurance."
+  },
+  "tui.usage.showing_prefix": {
+    "role": "scroll counter",
+    "tone": "faint",
+    "note": "Scroll counter prefix; the trailing space separates it from the range that follows, so it is layout."
+  },
+  "tui.usage.of_separator": {
+    "role": "scroll counter",
+    "tone": "faint",
+    "note": "Separator between the shown range and the total; spaces are layout. Deliberately its own key rather than reaching across namespaces."
+  }
 }

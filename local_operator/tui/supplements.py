@@ -40,6 +40,7 @@ __all__ = [
     "COPY_CANCELLED",
     "COPY_FAILED",
     "COPY_PREPARING",
+    "cause_phrase",
     "display_text",
     "file_row_parts",
     "file_size_text",
@@ -49,12 +50,40 @@ __all__ = [
     "state_rank",
 ]
 
-#: The fixed display copy (memo §2.8, round-1 design D7/D10). One spelling per
-#: line, byte-identical to the copy table's sentence up to the pointer-surface
-#: action pair this surface does not paint (see the module docstring).
+#: The fixed display copy (memo §2.8, round-1 design D7/D10; the failed line's
+#: typed-cause variant is licensed there too — round-1 design D1/D3, 2026-10-17).
+#: One spelling per line, byte-identical to the copy table's sentence up to the
+#: pointer-surface action pair this surface does not paint (see the module
+#: docstring) and up to the failed line's ` — <phrase>` suffix, whose word set
+#: `_CAUSE_PHRASES` below owns for every surface.
 COPY_PREPARING = "Preparing highlights…"
 COPY_CANCELLED = "Highlights cancelled"
 COPY_FAILED = "Couldn't prepare highlights"
+
+#: The failed line's typed-cause phrases, one per allowlisted ``failure_kind`` (the
+#: ``provider_<kind>`` vocabulary the row's ``cause`` carries). The state line says WHICH
+#: wall was hit, because a Retry that will hit the same wall is not useful (operator,
+#: 2026-10-17). Memo §2.8 licenses the variant, and THIS table is the one word set every
+#: surface transcribes (the phone web's ``supplement.ts`` ports it verbatim). ``provider_quota``
+#: says "limit reached", never "exhausted": the kind covers rate limits too, and a spent-quota
+#: reading stops a user retrying a retryable wall (design round 1, D1). ``provider_unknown`` --
+#: and any token this build does not know -- renders NO phrase: ``unknown`` folds ``aborted``
+#: in, and inventing a failure mode for a catch-all is worse than the bare sentence (D2).
+_CAUSE_PHRASES: dict[str, str] = {
+    "provider_quota": "provider limit reached",
+    "provider_auth": "provider sign-in needed",
+    "provider_transient": "provider temporarily unavailable",
+    "provider_timeout": "provider timed out",
+    "provider_request": "provider refused the request",
+    "provider_content": "provider blocked the content",
+    "provider_context": "provider context limit",
+}
+
+
+def cause_phrase(cause: object) -> str:
+    """The muted phrase for a failed row's typed ``cause``; ``""`` when absent/unknown."""
+    return _CAUSE_PHRASES.get(str(cause), "") if cause else ""
+
 
 #: How far along a state is, for "is this row newer than what we hold".
 #: The journaled arms only (memo §2.4): live beats are never journaled, so a

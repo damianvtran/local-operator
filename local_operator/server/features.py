@@ -144,6 +144,19 @@ def feature_flags() -> dict[str, Any]:
         # `session_pins` are untouched: no row changes shape, and the
         # pin's own promise is unchanged.
         "session_catalogue_page": 1,
+        # An ORDER the chats list can be read in, named by the `sort`
+        # parameter on GET /v1/desktop/sessions: `sort=activity` is the
+        # sidebar's own head order (rows that need the reader first, then
+        # everything else newest-activity-first), which keeps a reader's
+        # recent conversations inside the first page on a store whose cold
+        # population a wake band would otherwise fill.
+        #
+        # ITS OWN KEY, the same rule `session_catalogue_page` states above:
+        # a client that does not see it sends no `sort` and reads the rank
+        # order byte-for-byte as today, and a backend that lacks it refuses
+        # the parameter BY NAME (`sort must be one of activity.`) rather
+        # than silently answering a different ordering.
+        "session_catalogue_sort": 1,
         # Searching past conversations by their CONTENT (name, id, exact
         # body, bounded soft match) rather than by the page a client
         # already holds. Its own key rather than a bump of
@@ -887,6 +900,14 @@ def feature_flags() -> dict[str, Any]:
         # definitive (show nothing, do not retry), because a backend that
         # answers this key yet 404s the route is broken, not slow.
         "quota_notice": 1,
+        # THE QUEUED ASIDE ADOPT (decision D4): `POST .../asides/{id}/adopt` made
+        # while the conversation is mid-turn answers `status: "queued"` and the
+        # pair lands at the turn's safe boundary as a `history_delta`, instead of
+        # the plain-RuntimeError 503 an older backend gives; a state that cannot
+        # defer is a typed 409 `aside_adopt_refused`. The renderer enables its
+        # mid-turn adopt control only when this key is present, so an older
+        # backend keeps today's disabled state.
+        "aside_adopt_queue": 1,
         # PER-SESSION VOICE MODE (docs/design/qwen-voice.md): the three
         # `/v1/desktop/voice*` routes and the `type: "voice"` frame on
         # `/v1/desktop/events`. Its own key for the rule `code_requests` states:

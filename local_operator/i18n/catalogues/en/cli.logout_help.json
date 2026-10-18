@@ -1,0 +1,4 @@
+{
+  "cli.logout_help.logout": "Log out of a provider (removes stored credentials)",
+  "cli.logout_help.provider": "Provider to log out of"
+}

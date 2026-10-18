@@ -1,0 +1,37 @@
+{
+  "cli.send_help.send": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'send' argument; flag/command tokens stay in situ"
+  },
+  "cli.send_help.target": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--pid/--session references in situ"
+  },
+  "cli.send_help.message": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "stdin semantics; tokens in situ"
+  },
+  "cli.send_help.pid": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pid' argument; flag/command tokens stay in situ"
+  },
+  "cli.send_help.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'session' argument; flag/command tokens stay in situ"
+  },
+  "cli.send_help.steer": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'steer' argument; flag/command tokens stay in situ"
+  },
+  "cli.send_help.wake": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'wake' argument; flag/command tokens stay in situ"
+  }
+}

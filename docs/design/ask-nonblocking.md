@@ -3,7 +3,8 @@
 Status: PROPOSED — gate for the implementation PRs. Base: `origin/main` @ `302a061e5`
 (v0.64.10). Author: architect, 2026-09-30. **AMENDED 2026-10-03 — see §10**
 (in-flight answer revision, #1936): §10 is binding on §2.2's event table, §2.4, the §4
-ops line and §5's copy contract; read it beside those sections.
+ops line and §5's copy contract; read it beside those sections. **AMENDED 2026-10-16 —
+see §13** (#2388): a timed-out ask settles; the outstanding set and `asks_open` are `open` only.
 **§5.0 and R7 (§7) AMENDED 2026-10-08, in place — see the "Superseded text" note in
 §5.0** (the composer-routing invariant is reversed: on the queued-ask path the composer
 never answers an ask; the answer is given in the ask surface, whose explicit free-text
@@ -53,8 +54,9 @@ to confirm.) Any surface lists it,
 answers it (whole ask, atomic), or declines it. On **answer** the runtime injects one
 `ask_response` turn (questions + answers, one source of text for model and card) and every
 surface paints the same response as a card. On **deadline** the runtime injects one
-`ask_timeout` notice; the ask stays visible as *timed out* and a **late answer** is still
-accepted and attributed (`status: late`, same `ask_id`). A cold session is engaged at the
+`ask_timeout` notice and the ask SETTLES (amended 2026-10-16, §13): it stays visible as a
+settled *timed out* row and no longer counts as outstanding. The queue still accepts and
+attributes a **late answer** (`status: late`, same `ask_id`), but no surface offers one. A cold session is engaged at the
 deadline through the existing wake engine. Approvals are untouched and keep blocking.
 
 ---
@@ -111,7 +113,7 @@ deadline through the existing wake engine. Approvals are untouched and keep bloc
 | `queued` | `expires_at, timeout_s, urgent, tool_call_id, questions[{id,question,options,multi,secret,persist,recommended}]` — written only by the owning runtime |
 | `answered` | `by:{surface}`, `answers{qid:[str]}` — secret answers hold **`[<key>]` only, never a value** |
 | `declined` | `by` — explicit "no answer / decide yourself" (today's Esc) |
-| `dismissed` | `by` — view-only removal of a timed-out ask; injects nothing |
+| `dismissed` | `by` — view-only removal of a timed-out ask; injects nothing OF ITS OWN, but never cancels a deadline notice the ask had not yet delivered (§14) |
 
 **Status is a pure fold of (events, now)** — no `timed_out` event, which removes the
 answer-vs-deadline race. The precedence is **total** (first match wins, so every
@@ -160,7 +162,7 @@ double-handing the handoff→append gap) — never a window term, never the wire
 | `late` | `ask-response-<ask_id>` — the response supersedes the deadline row for good (§2.3); both rows exist only when the deadline fired first | yes (one; two across reconciles when the deadline fired first) |
 | `timed_out` | `ask-timeout-<ask_id>` | yes (one) |
 | `declined` | `ask-response-<ask_id>` with `status:"declined"` — **the same type and id as an answer**, so the model learns the user declined rather than re-asking | yes (one) |
-| `dismissed` | **NONE** — terminal-and-satisfied; `reconcile` must never attempt a delivery (else it loops forever) | no |
+| `dismissed` | `ask-timeout-<ask_id>` WHEN the notice was never delivered (§14), else **NONE** — terminal-and-satisfied; `reconcile` must never attempt a delivery for a record that owes none (else it loops forever) | yes (one; only in that case) |
 | `expired` | **NONE** — same rule | no |
 | `open` | none yet | no |
 
@@ -189,6 +191,11 @@ sanctioned flip is `timed_out`→`late` (the ANSWER is what is undelivered there
 `dismissed`/`expired` are `false` only when no delivered row exists at all. Handoff alone
 never reads true, for any reader — in-process, another process, or the index.
 
+**Amended 2026-10-16 (§14):** a dismissed ask that still OWES its notice keeps this hint exactly as
+it is — "any row present", so it reads `false` until the notice lands — and what it owes is tracked
+by the FOLD's `notice_owed`, never by a second reading of this flag. The flag is the consumption
+marker for the rows a status requires; `notice_owed` is the statement that one is required at all.
+
 **Derived index (non-authoritative, stdlib-only, self-healing):**
 `<config_dir>/asks/<sid>.json` — open + last-7d terminal asks with deadlines and a
 `delivered` hint. Same contract as `wakes/store.py` (module docstring `:1-41`; `write_entry`
@@ -209,6 +216,14 @@ like `wakes/`; `policy.py` constants; `render.py` the one text function).
 rows and publishes state. Any process may append `answered/declined/dismissed` (cold answer
 path, §2.4) — under flock, non-secret only. The wire (`asks` on frontend state, §4) is
 published by the owner from the fold on every change.
+
+**Amended 2026-10-16 (§14):** a `dismissed` row may be written with NO runtime at all, by
+`asks/dismiss.py` — the door the relay's cold arm and the TUI's fleet worker call for
+`ask_dismiss`. It appends under the same flock, rewrites the derived index, and cancels the ask's
+deadline wake row through `wakes.arm.cancel_wake` (the one writer for a session nobody owns) —
+which is what leaves nothing able to boot a runtime for a dismissed ask. A session with a LIVE
+owner is refused (`ask_owner_present`) and the caller dials that owner instead, because a running
+runtime republishes its own wake list and would lose an outside write.
 
 **Timeout scheduling.** Two layers, deliberately different:
 1. *In-runtime*: one earliest-deadline timer per session (WakeScheduler `_arm` style, one
@@ -412,7 +427,9 @@ PendingAsk (frontend_state.asks[] and SessionProjection.asks[] and index entry)
   answers?  {qid:[str]}        // secret: [<key>] only
   answered_by?  {surface}
 SessionProjection.asks: PendingAsk[]  (cap 20 newest; open first)   asks_open: int
-SessionListRow.asks_open: int   (pending_kind unchanged = approvals)
+                     // asks_open = OPEN asks (§13, 2026-10-16); a timed_out row rides
+                     // `asks` but is settled and not counted
+SessionListRow.asks_open: int   (pending_kind unchanged = approvals; open asks, §13)
 EntryKind "ask_response": details {ask_id, status: "answered"|"late"|"declined",
                                      questions, answers, at, text}
 EntryKind "ask_timeout" : details {ask_id,status:"timed_out",waited_s,urgent,text}
@@ -1175,7 +1192,7 @@ picker's chrome row, and never as a chip of its own. `tui.sidebar_visible` still
 user with the sidebar hidden sees the total only in the picker.
 
 **Marks.** `session_sidebar.set_asking` now takes `{session_id: count}` and marks EVERY session whose
-outstanding set (open ∪ timed_out — the same set the wire's `asks_open` publishes) is non-empty, one
+outstanding set (`open` since §13 — the same set the wire's `asks_open` publishes) is non-empty, one
 glyph cell per row, under the existing `!` gate mark. The index read rides the sidebar's own poll,
 throttled to 10 s.
 
@@ -1212,7 +1229,7 @@ TUI has none, so it is stated in words). The bar keeps the chip register unchang
 
 **The delivering half (§10) is PENDING and never SETTLED.** An answered-but-undelivered ask sits in the
 `Waiting or moved on` segment; the session's MARK cleared when it was answered (§4.8's outstanding set is
-`open`+`timed_out`: it tracks the debt the USER owes, and this one was paid); its drawer clause is `N answer(s) delivering
+`open` since §13: it tracks the debt the USER owes, and this one was paid); its drawer clause is `N answer(s) delivering
 — the agent will be told`, in §5's words and
 deliberately WITHOUT the desktop's "you can still change
 it" (this surface has no revise wire — recorded as a deferred follow-up, not silently promised). Its row
@@ -1252,7 +1269,7 @@ Round 2's review, QA, design and UX passes left F12–F18, D11–D15 and U12–U
 now recorded rather than claimed:
 
 **Corrections (the note was wrong, not the code).** (1) A **delivering** row does **not** hold the
-session's mark: the mark is §4.8's outstanding set (`open` + `timed_out`) unioned with the current
+session's mark: the mark is §4.8's outstanding set (`open`; `timed_out` left it in §13) unioned with the current
 session's answerable rows, so it clears the moment the user answers — the debt it tracks is the USER's,
 and this ask's was paid. Four sites said otherwise; all four are fixed here and in the code. (2) At
 **100×30** the fleet header's two-rung ladder drops the **subject** as well as the drawer clause, so the
@@ -1336,7 +1353,7 @@ the half).
 
 | reason | event appended | folded status | injects |
 |---|---|---|---|
-| `moot` | `withdrawn` (NEW kind) | `withdrawn` (NEW, terminal) | **NOTHING** (symmetric with `dismissed`) |
+| `moot` | `withdrawn` (NEW kind) | `withdrawn` (NEW, terminal) | **NOTHING** (symmetric with `dismissed`, which since §14 injects nothing of its own and can still deliver the deadline notice it owes) |
 | `answered_in_chat` | `answered` (existing kind), `by: {surface: "chat", message_id?}` | `answered` (existing) | the standard response row, cells = the user's words |
 
 **Cells for `answered_in_chat`.** The model records the user's message **verbatim** — one cell per
@@ -1404,6 +1421,9 @@ message answers it, withdraw it"). Track with the §9 text edits.
    (`dismiss` being `timed_out`-only means a user cannot clear an OPEN ask — a UX gap, not the
    engine gap) and is **deferred out of this slice**: it rides the PR thread as `deferred — dismiss
    remains timed_out-only; widening it is a policy change with its own copy`, so it is not lost.
+   (2026-10-16, §13: the user-side settle of a TIMED-OUT ask then came by its deadline, not by
+   an op — `timed_out` left the outstanding set, so a lapsed ask no longer waits on the user.
+   The OPEN-ask gap above is unchanged.)
 2. **`/new`, session delete, or stop with open asks**: today they persist (durable by design,
    answerable from any surface). Proposal: no auto-withdraw; the operator can still answer or
    dismiss. Confirm.
@@ -1427,3 +1447,91 @@ user-act terminal row present (`answered`, `declined`, `dismissed`) outranks a l
 and only a `withdrawn` with no such sibling folds to `withdrawn`; and (b) old builds folding
 `withdrawn` rows tolerate the unknown kind. Both are cheap to state now and expensive to discover
 later.
+
+## 13. Amendment (2026-10-16): a timed-out ask settles (#2388)
+
+An ask now settles when the AGENT is told, by its deadline or by an answer. Before, it settled only
+when the user acted. `asks/store.py` `OUTSTANDING_STATUSES` is `{open}`. `LAPSED_STATUSES` stays
+`{timed_out}` and is now DISJOINT from it, no longer a subset. Binding on §1, the §4 frozen
+contract (`asks_open`), §11's marks and totals, and §12.2 item 1, which were amended in place. §2.2's
+queue model and event table are untouched: the fold, the injection rows and the `timed_out`→`late`
+flip it defines are exactly what the paragraphs below say does not move.
+
+* **What moves.** Every count read off the outstanding set or `asks_open` stops counting a timed-out
+  ask: the wire tally, a stopped session's durable projection (`mobile/daemon.py`), the phone's
+  session-list chip, the desktop's truncated `N outstanding` and attention count, and the TUI's
+  fleet total and truncated header. This closes the residual #1116 disclosed: a lapsed-only session
+  no longer reads as owed.
+* **What does not move.** `timed_out` still injects (`INJECTING_STATUSES`), so reconcile still writes the
+  `ask-timeout-<id>` row and the agent is still told. The fold, `expected_row_ids`/`delivered_hint`,
+  the `timed_out`→`late` flip, `render.refusal_copy` and the index's 7 d row horizon are unchanged.
+  The row is still SHOWN as a settled `Timed out` receipt with Dismiss, and every surface gates that
+  door on the ROWS, never on the tally. `asks.lapsed_visible_for` still decides how long it is shown.
+* **Late answers.** The queue still accepts one (`respond` → `late`, and chat attribution through
+  `withdraw(answered_in_chat)`). No surface offers one: D10 (#2481, and #1116 on desktop) made a
+  lapsed ask read-only on every surface, and this amendment keeps that (decision D17).
+* **Old and new runtimes.** The open-policy dropped-row checks (TUI `ask_open_policy`, phone
+  `ask-open-policy.ts`, desktop) still compare the tally with the answerable rows NAMED, lapsed rows
+  included. That stays correct against both runtimes, because rows are open-first and only the tail is
+  dropped. A lapsed-only frame now carries tally 0 and reads SETTLED.
+* **Removed.** `store.pending_asks` had no production caller. Its invariant ("a timeout notice is
+  owed exactly while the ask is outstanding") stopped holding, so it was deleted rather than split.
+
+## 14. Amendment (2026-10-16): a dismissal boots nothing; the owed notice waits (fork A)
+
+Ben chose fork A on card `a-1ef1`: "a dismissal boots nothing; the notice waits". A dismissal is the
+user putting a lapsed ask away, and the phone's own button has always said `dismiss — send no reply`
+— but the only door was the relay's cold ANSWER arm, which ENGAGES the conversation. Measured end to
+end on `origin/main` (real relay, real runtime child, mock provider): a cold `ask_dismiss` on a
+`timed_out` ask whose notice was never delivered started a runtime, appended `ask-timeout-<id>` (the
+boot's own reconcile) and ran one PAID turn. The same op on a LIVE session delivered nothing at all,
+because `dismissed` outranks `timed_out` in the fold and is not INJECTING — so the dismissal ERASED
+the notice the agent was still owed. Both halves are fixed here. §2.2's fold table, the row ids, the
+wire and `INJECTING_STATUSES` are otherwise untouched.
+
+**Three facts bind this amendment.**
+
+1. **A dismissal boots nothing.** `asks/dismiss.py`'s `dismiss_cold(config_dir, session_id, ask_id,
+   *, by, now_ms)` is the door for every surface that has no runtime: it checks the owner, folds the
+   log, appends the `dismissed` event (flocked `O_APPEND` — any process may write one), rewrites the
+   ask's row in the derived index to `dismissed`, and cancels the ask's deadline wake row. The
+   relay's cold arm (`mobile/daemon.py`, `op == "ask_dismiss"`) and the TUI's fleet worker
+   (`tui/app.py::_fleet_ask_worker`) both call it, and ONLY `ask_owner_present` falls back to the
+   dial, because that owner is the thing that settles the ask. A refusal — an unknown ask, an ask
+   that is not lapsed — comes back in the queue's own words through `render.dismiss_refusal`, ONE
+   function both doors call, and never becomes a boot. The wording does not change: "only a
+   timed-out ask can be dismissed; it is still open."
+2. **On a LIVE session, dismissing an ask whose notice was never delivered delivers it and runs one
+   turn.** This is ACCEPTED behaviour, not an incidental. The live arm is deliberately unchanged
+   (`daemon.request` → `AskQueue.dismiss` → `_settled` → `_kick` → reconcile): a running runtime
+   republishes its in-memory wake list and its record of handed rows, so an outside write would be
+   lost or would deliver a notice with nobody's turn to read it.
+3. **The notice waits for the next real run.** `store.fold` keeps a dismissed record's
+   `dismissed_at` and sets `notice_owed` while the dismissed event is dated at or after
+   `expires_at` and `now` is inside the same 7 d window the notice itself is worth delivering in;
+   `store.expected_row_ids` returns `ask-timeout-<id>` for such a record, so `AskQueue._reconcile`
+   writes the row it has always written — `details.status` stays `"timed_out"`, plus an additive
+   `details.dismissed: true` — in the copy `render.TIMEOUT_NOTICE_DISMISSED` /
+   `TIMEOUT_SECRET_DISMISSED` gives it: the ordinary notice plus "The user dismissed it without
+   answering.", with the "Proceed without it…" instruction kept verbatim (it is MORE true after a
+   dismissal, not less) and a secret ask still naming only its key. `delivered_hint` is unchanged
+   (the "any row present" hint, decision D22), and a dismissed ask whose notice already landed
+   injects nothing — the case the narrowed `test_a_dismissed_ask_injects_nothing` now pins.
+
+**Why removing the deadline wake row is safe — the condition this rests on.** `ask-timeout-<id>` is
+how a deadline survives a runtime that does not exist: the supervisor engages a runtime for it. Only
+a timed-out ask can be dismissed, so its deadline has already passed and the row has nothing left to
+deliver except the boot itself; the notice it would have delivered is kept owed by the fold above.
+**If a dismissal is ever allowed BEFORE the deadline, removing the row becomes wrong**, because then
+the fire would be the only thing that delivers a notice for a live ask — that rule and this
+cancellation must change together.
+
+**Surfaces.** The phone's card loses the two lines that promised the engage ("the conversation is
+brought up to record it." and "bringing the session up to record the dismissal — this can take up to
+~30 s"; `mobile/web/src/components/ask-card.tsx`), because "dismiss — send no reply" is the whole
+truth again. The TUI carried no sentence for this op — only the IN FLIGHT mark and comments sizing it
+for the engage window; the mark stays (it is what refuses a second gesture) and the comments now say
+which op still pays a dial.
+
+**Not addressed here.** A second COLD dismissal reads "you already declined this."
+(`render.refusal_copy`) — it predates this amendment and is left as it was.

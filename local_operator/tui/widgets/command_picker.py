@@ -53,6 +53,8 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.sigils import SlashContext, at_token, is_boundary, split_token
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import (
@@ -67,6 +69,8 @@ from local_operator.tui.autocomplete import (
 # how the len()/cell_len split that this helper exists to prevent gets
 # reintroduced, one module at a time.
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 #: Row budget. Eight rows matches the editor's own ``max-height: 8``, so a full
 #: picker never towers over the field that opened it, and it still shows more
@@ -2655,9 +2659,9 @@ class CommandPicker(Static):
         entries = hidden - projects
         parts: list[str] = []
         if projects:
-            parts.append(f"{projects} project" if projects == 1 else f"{projects} projects")
+            parts.append(_t(_x.command_picker_projects(count=projects, shown=str(projects))))
         if entries:
-            parts.append(f"{entries} entry" if entries == 1 else f"{entries} entries")
+            parts.append(_t(_x.command_picker_entries(count=entries, shown=str(entries))))
         dim = Style(
             color=theme_mod.semantic_color("dim"),
             bgcolor=theme_mod.semantic_color("surface"),

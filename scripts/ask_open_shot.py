@@ -63,7 +63,7 @@ from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
 isolate_capture()
 
-from local_operator.asks import policy  # noqa: E402
+from local_operator.asks import policy, store  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from tests.unit.tui.test_app_pilot import _factory  # noqa: E402
 from tests.unit.tui.test_sidebar_swap_reset import (  # noqa: E402
@@ -126,7 +126,7 @@ def _wire(rows: list[dict[str, Any]] | None) -> dict[str, Any]:
     """The two frame fields a runtime publishes (``frontend_state.ask_wire``'s shapes)."""
     if rows is None:
         return {"asks": None, "asks_open": None}
-    outstanding = sum(1 for row in rows if row["status"] in ("open", "timed_out"))
+    outstanding = sum(1 for row in rows if store.is_outstanding(row["status"]))
     return {"asks": list(rows) or None, "asks_open": outstanding}
 
 

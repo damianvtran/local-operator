@@ -1138,6 +1138,19 @@ def backfill_session_origins(
         opening = session_name(directory, max_chars=NAME_MAX_CHARS, condense=False)
         if not opening:
             continue
+        # KNOWN SHARING, not an oversight: this fallback is read as a user ROW
+        # (``session_name`` collapses a ``$skill`` payload and strips an
+        # appended reference block). A preamble survives that — it is at the
+        # head of the message — but a brief whose BODY embeds a skill payload
+        # collapses to that payload's typed line and its ``[role: x]``
+        # preamble is no longer the text matched below, so the directory would
+        # not be stamped as a subagent. That miss STICKS rather than healing on
+        # a later sweep: the ``else`` arm below writes ``origin-scan.json`` and
+        # the loop above skips every directory carrying one. No brief embeds a
+        # payload today (a delegated brief is prose plus ``[role: x]``), so
+        # this is recorded rather than special-cased: reading the RAW opener
+        # here instead would give this one reader a second definition of "the
+        # opener".
         if _ROLE_PREAMBLE.match(opening) or opening.startswith(_SCOUT_PREAMBLE):
             mark_session_origin(directory, ORIGIN_SUBAGENT, backfilled=True)
             stamped += 1
@@ -3704,7 +3717,26 @@ def session_name(
     stored = stored_session_title(session_dir)
     if stored:
         return _condense(stored, max_chars) if condense else stored
-    opening = _opening_message(session_dir)
+    # Imported HERE rather than at module scope, because this module sits in
+    # ``local_operator.cli``'s import closure and the harness package is banned
+    # there: ``tests/unit/test_cli_new.py::test_cli_import_pulls_no_engine_modules``
+    # exists so a bare `lop` does not drag the engine in on every startup, and a
+    # module-scope import of ``harness.rows`` put it back (a harness-package
+    # import is enough to fail the guard, not just ``harness.rows`` itself).
+    # Same shape ``harness.rows`` uses for ``skills.invoke``, and the cost is a
+    # ``sys.modules`` lookup on a path that has already read a file.
+    from local_operator.harness.rows import user_row_text
+
+    # The opener is a persisted USER ROW, so the fallback is read through the
+    # same "what did the user actually say" rule the transcript paints with.
+    # A ``$skill`` invocation persists as its EXPANDED payload, and naming a
+    # conversation after it labels this picker — and every surface that serves
+    # this same fallback, the desktop sidebar included — with the whole
+    # SKILL.md body (``docs/design/history-fold-convergence.md`` row D8).
+    # It closes the ``@path`` half of the same class too: an expansion is
+    # APPENDED to the opener, and the TUI names such a conversation from the
+    # bare token it was handed, so without this one conversation had two names.
+    opening = user_row_text(_opening_message(session_dir))
     if not opening:
         return ""
     # ``condense=False`` returns the opening text with its line breaks intact,

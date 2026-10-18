@@ -2,6 +2,19 @@
  * Type-only relay contract; no wire catalogue is bundled implicitly.
  * Regenerate with generate.py; --check rejects drift in CI. */
 export type MessageParams = {
+  "relay.account_policy.back": undefined;
+  "relay.account_policy.entry": undefined;
+  "relay.account_policy.error": undefined;
+  "relay.account_policy.load_error": undefined;
+  "relay.account_policy.loading": undefined;
+  "relay.account_policy.rejected": undefined;
+  "relay.account_policy.retry": undefined;
+  "relay.account_policy.save": undefined;
+  "relay.account_policy.saved": undefined;
+  "relay.account_policy.saving": undefined;
+  "relay.account_policy.scope": undefined;
+  "relay.account_policy.title": undefined;
+  "relay.account_policy.unavailable": undefined;
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;
   "relay.login.password.label": undefined;
@@ -197,6 +210,7 @@ export type MessageParams = {
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
   "wire.errors.desktop.skill_not_found": undefined;
+  "wire.errors.desktop.sort_unknown": { "sorts": string };
   "wire.errors.desktop.start_after_end": undefined;
   "wire.errors.desktop.unknown_command": undefined;
   "wire.errors.desktop.unknown_provider": undefined;
@@ -1072,6 +1086,20 @@ export type MessageParams = {
   "wire.settings.web_search_timeout_seconds.label": undefined;
   "wire.settings.web_tools.description": undefined;
   "wire.settings.web_tools.title": undefined;
+  "wire.settings.account_policy.error.invalid_json": undefined;
+  "wire.settings.account_policy.error.invalid_shape": undefined;
+  "wire.settings.account_policy.error.unavailable": undefined;
+  "wire.settings.account_policy.error.write_failed": undefined;
+  "wire.settings.account_policy.fair.description": undefined;
+  "wire.settings.account_policy.fair.label": undefined;
+  "wire.settings.account_policy.headroom.description": undefined;
+  "wire.settings.account_policy.headroom.label": undefined;
+  "wire.settings.account_policy.help": undefined;
+  "wire.settings.account_policy.label": undefined;
+  "wire.settings.account_policy.legacy.help": undefined;
+  "wire.settings.account_policy.legacy.label": undefined;
+  "wire.settings.account_policy.reset_soonest.description": undefined;
+  "wire.settings.account_policy.reset_soonest.label": undefined;
   "wire.settings.hub_defaults.agents.help": undefined;
   "wire.settings.hub_defaults.agents.label": undefined;
   "wire.settings.hub_defaults.agents.off.description": undefined;

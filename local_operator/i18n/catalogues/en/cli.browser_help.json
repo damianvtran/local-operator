@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "Connect the browser tool to a Chromium extension",
+  "cli.browser_help.install": "Install the bridge daemon",
+  "cli.browser_help.status": "Show daemon, extension and pairing status",
+  "cli.browser_help.status_repair": "Reconcile advertised state against reality: drop tabs that no longer exist and republish a fresh heartbeat. Safe while sessions are live.",
+  "cli.browser_help.json": "machine-readable output",
+  "cli.browser_help.cleanup": "Close one proven-terminal browser owner after revalidation",
+  "cli.browser_help.cleanup_yes": "Approve this exact cleanup",
+  "cli.browser_help.daemon_action": "{action, select, start{Start} stop{Stop} restart{Restart} other{{action}}} the daemon",
+  "cli.browser_help.pair": "Show the extension pairing code",
+  "cli.browser_help.pair_reset": "Revoke the paired browser first",
+  "cli.browser_help.pair_list": "List the authorised browser extensions, and which one is driving",
+  "cli.browser_help.pair_revoke": "Revoke ONE authorised extension (its id, an unambiguous id prefix, or part of its label), leaving every other one paired",
+  "cli.browser_help.drive": "Choose which authorised extension drives the browser",
+  "cli.browser_help.drive_target": "Extension id (or an unambiguous prefix), or part of its label",
+  "cli.browser_help.logs": "Tail the daemon log",
+  "cli.browser_help.uninstall": "Remove the bridge daemon",
+  "cli.browser_help.uninstall_purge": "Also delete pairing state",
+  "cli.browser_help.serve": "Run the bridge daemon (foreground)",
+  "cli.browser_help.tabs": "List durable ownership records and live tabs (read-only)",
+  "cli.browser_help.reconcile": "Alias for 'tabs': inspect ownership without closing anything"
+}

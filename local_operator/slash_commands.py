@@ -13,7 +13,7 @@ desktop at all (see ``/mobile``).
 
 from typing import Any, Mapping, Sequence
 
-from local_operator.i18n.keys import wire_memory, wire_slash
+from local_operator.i18n.keys import tui_import, wire_memory, wire_slash
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
@@ -1506,6 +1506,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.WORD,
         desktop_destination="settings",
     ),
+    # The import page is a MODE over this terminal's own source stores and
+    # config root, so it is deliberately TUI-only: no desktop_destination means
+    # no command-palette row, and `_FRONTEND_LOCAL_SLASHES` keeps a follower
+    # from running it against another machine. The trailing text is this
+    # command's own vocabulary (`list`, `preview <source> [id]`, `run …`,
+    # `status`, `cancel`), not prose, so ANY is the shape the desktop would
+    # forward if this command ever grows a destination.
+    SlashCommand(
+        "import",
+        _tr(tui_import.slash_help()),
+        aliases=("migrate",),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.ANY,
+    ),
     SlashCommand(
         "sidebar",
         # `focus` is named because it is the only way into the list's keyboard
@@ -2062,7 +2076,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         _tr(wire_memory.command()),
         arguments=ArgumentMode.OPTIONAL,
         argument_shape=ArgumentShape.SUBCOMMAND,
-        subcommands=("list", "show", "search", "edit", "forget", "status"),
+        # This vocabulary is what the desktop planner and the command route
+        # admit, and it must equal ``memory_cli.OPERATIONS``: the terminal path
+        # parses with that tuple, so a verb missing here is a verb the desktop
+        # spends as a model message (or 422s) while the TUI runs it.
+        # tests/unit/test_memory_inspect.py pins the two lists together.
+        subcommands=("list", "show", "search", "edit", "forget", "status", "inspect"),
     ),
     SlashCommand(
         "project",

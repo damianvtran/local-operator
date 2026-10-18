@@ -104,6 +104,20 @@ from local_operator.evaluation.receipts import (
 # 1.6 makes answer ownership explicit and binds the public answer to its request.
 # Canonical replies gain fields, so mixed peers must fail during hello in
 # either direction, before any environment allocation or simulator invocation.
+#
+# ``probe`` (in 1.6, deliberately NOT a bump) adds a read-only liveness check
+# of the environment's control server. It is a NEW line shape rather than a
+# changed one: no existing call's canonical bytes move, so the exact-version
+# pin has nothing new to lock out, and BOTH stale sides fail closed the same
+# way the one caller already handles every probe failure. An old worker cannot
+# parse the method and tears its channel down; an old adapter that never
+# implements it (it is deliberately outside ``EvaluationAdapter``'s structural
+# check) answers the one request with an ``adapter_error``. The caller treats
+# refused, unanswered and torn-channel alike as FALSE and ends the episode
+# exactly as it did before the method existed. The method is only ever sent
+# after a failed ``execute`` whose batch may not be replayed; it mutates
+# nothing, carries no operation key, and its answer decides nothing except
+# whether the session may stay usable for the bridge's read-only re-bind.
 ADAPTER_SCHEMA_VERSION = "1.6"
 # One alias for the three models that pin the version, so a future bump cannot
 # move the constant while leaving a model silently accepting the older literal.
@@ -120,6 +134,7 @@ AdapterMethod: TypeAlias = Literal[
     "prepare",
     "reset_start",
     "observe",
+    "probe",
     "execute",
     "ask_user_exchange",
     "score",
@@ -148,6 +163,7 @@ METHOD_STATES: Mapping[AdapterMethod, frozenset[AdapterState]] = {
     "prepare": frozenset({"INSPECTED"}),
     "reset_start": frozenset({"PREPARED"}),
     "observe": frozenset({"RUNNING"}),
+    "probe": frozenset({"RUNNING"}),
     "execute": frozenset({"RUNNING"}),
     "ask_user_exchange": frozenset({"RUNNING"}),
     "score": frozenset({"RUNNING", "FINALIZING"}),
@@ -163,6 +179,7 @@ METHOD_NEXT_STATE: Mapping[AdapterMethod, AdapterState] = {
     "prepare": "PREPARED",
     "reset_start": "RUNNING",
     "observe": "RUNNING",
+    "probe": "RUNNING",
     "execute": "RUNNING",
     "ask_user_exchange": "RUNNING",
     "score": "FINALIZING",
@@ -181,7 +198,7 @@ KEYED_METHODS = frozenset(
         "close",
     }
 )
-READ_ONLY_METHODS = frozenset({"hello", "inspect_requirements", "observe"})
+READ_ONLY_METHODS = frozenset({"hello", "inspect_requirements", "observe", "probe"})
 
 
 def canonical_params_digest(method: AdapterMethod, params: ProtocolModel) -> Digest:
@@ -676,6 +693,44 @@ class ObservationResult(ProtocolModel):
     observation: Observation
 
 
+class ProbeParams(ProtocolModel):
+    """Ask the worker whether the environment's control server is answering.
+
+    READ-ONLY, state-free and idempotent. The probe exists for the ONE moment
+    a failed ``execute`` may not be replayed: the harness asks a bounded
+    liveness question BEFORE deciding whether an ambiguous delivery may keep
+    its session usable and continue (``supervisor._ambiguous_delivery_failure``),
+    and that decision is the answer's only consumer. It carries no operation
+    key for the same reason ``observe`` does not: there is no mutation to
+    correlate or replay.
+
+    WHY NOT ``observe``. ``observe`` answers the LAST ACCEPTED observation
+    from the worker's own state, deliberately without touching the guest (the
+    re-bind contract depends on it: see ``test_fake_end_to_end``), so it
+    cannot say whether the control server that dropped the in-flight execute
+    is serving again. Liveness is therefore its own call, and the guest-side
+    implementation reuses the same bounded readiness GET the allocation loop
+    already trusts (``_READY_PATH``).
+    """
+
+    episode_id: StrictIdentifier
+
+
+class ProbeResult(ProtocolModel):
+    """The probe's bounded answer: did the control server answer?
+
+    ``reachable`` False covers every not-answering mode -- connection refused,
+    timed out, answered with a non-200 status -- deliberately collapsed into
+    one boolean: the decision it feeds is fail-closed, and a taxonomy of
+    unreachability would be a second vocabulary the harness never acts on.
+    A probe that cannot complete at all (the worker is gone, an adapter
+    predating the method) fails the RPC instead; the caller treats any probe
+    failure as False.
+    """
+
+    reachable: bool
+
+
 class ObservationPhaseError(Exception):
     """The mutation COMMITTED; only reading the resulting state failed.
 
@@ -865,6 +920,7 @@ AdapterParams: TypeAlias = (
     | PrepareParams
     | ResetStartParams
     | ObserveParams
+    | ProbeParams
     | ExecuteParams
     | AskUserExchangeParams
     | ScoreParams
@@ -876,6 +932,7 @@ AdapterResult: TypeAlias = (
     | RequirementsResult
     | PrepareResult
     | ObservationResult
+    | ProbeResult
     | ExecuteResult
     | AskUserExchangeResult
     | ScoreResult
@@ -889,6 +946,7 @@ PARAM_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
     "prepare": PrepareParams,
     "reset_start": ResetStartParams,
     "observe": ObserveParams,
+    "probe": ProbeParams,
     "execute": ExecuteParams,
     "ask_user_exchange": AskUserExchangeParams,
     "score": ScoreParams,
@@ -902,6 +960,7 @@ RESULT_MODELS: Mapping[AdapterMethod, type[ProtocolModel]] = {
     "prepare": PrepareResult,
     "reset_start": AckResult,
     "observe": ObservationResult,
+    "probe": ProbeResult,
     "execute": ExecuteResult,
     "ask_user_exchange": AskUserExchangeResult,
     "score": ScoreResult,
@@ -925,7 +984,21 @@ class ReplayEntry(ProtocolModel):
 
 @runtime_checkable
 class EvaluationAdapter(Protocol):
-    """Async benchmark implementation loaded only inside the worker."""
+    """Async benchmark implementation loaded only inside the worker.
+
+    ONE method is deliberately NOT part of this structural check: ``probe``
+    (the read-only liveness question the ambiguous-delivery gate sends; see
+    ``ProbeParams``). It is the only method whose ABSENCE degrades exactly to
+    the pre-existing behaviour -- a failed probe never re-binds, so an
+    adapter that does not implement it keeps every ending it had before the
+    method existed -- and leaving it out of the check is what keeps such an
+    adapter LOADABLE, so a new harness can still run an arm built before the
+    method. Reflection over the wire tables is the other half: the worker
+    dispatches ``probe`` by attribute lookup, and an adapter without it
+    answers the one request with an ``adapter_error`` that the caller reads
+    as an unanswered probe. Every other method here is required: its absence
+    would break the episode's core flow rather than one resilience path.
+    """
 
     metadata: AdapterMetadata
 

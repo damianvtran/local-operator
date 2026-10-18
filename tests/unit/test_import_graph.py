@@ -467,6 +467,31 @@ def test_ask_store_import_is_stdlib_only(ask_store_modules: set[str]) -> None:
     ], ours
 
 
+# --- The cold dismissal door --------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def cold_dismiss_modules() -> set[str]:
+    """Modules loaded by importing the no-boot dismissal door."""
+    return _imported_modules("local_operator.asks.dismiss")
+
+
+def test_cold_dismiss_import_stays_off_the_mobile_client(
+    cold_dismiss_modules: set[str],
+) -> None:
+    # ``asks/dismiss.py`` first asked the MOBILE client who owned the session
+    # (``mobile.attach_client.find_runtime_record``) and threw the record away,
+    # keeping only the pid — so the door paid the client's whole cold closure
+    # (approval, keychain, signing) to read a liveness marker. The pid probe it
+    # actually wanted is ``resume.live_runtime_pid``, which the client function
+    # calls underneath (agent review round 1, NIT).
+    _assert_absent(
+        cold_dismiss_modules,
+        "local_operator.mobile",
+        "the door asks the liveness probe, not the phone client",
+    )
+
+
 # --- The wake index ----------------------------------------------------------
 
 

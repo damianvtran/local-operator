@@ -101,6 +101,17 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _dismissed_event(ask_id: str, *, at: int) -> dict[str, Any]:
+    """One ``dismissed`` row as the COLD door writes it (§2.2: any process may)."""
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": ask_id,
+        "at": at,
+        "by": {"surface": "phone"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # enqueue
 # ---------------------------------------------------------------------------
@@ -248,6 +259,26 @@ def test_only_a_timed_out_ask_can_be_dismissed(tmp_path: Path):
     outcome = queue.dismiss(ask_id)
     assert outcome["ok"] is False
     assert "still open" in outcome["error"]
+
+
+def test_a_repeat_dismissal_says_the_ask_is_already_dismissed(tmp_path: Path):
+    """The LIVE door's half of the dismissed sentence (U3 = Q3 = MINOR-4).
+
+    A second dismissal used to answer "only a timed-out ask can be dismissed; it
+    is still open." on this path too — the row is dismissed, not open, and the
+    sentence said the opposite of what the user had just done. The cold door
+    (``asks/dismiss.py``) returns the same words, because both read
+    ``render.dismiss_refusal``.
+    """
+    queue = _queue(tmp_path, FakeSession(), now=BASE + 200_000)
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 200_000
+    assert queue.dismiss(ask_id, by="terminal")["ok"] is True
+    assert queue.dismiss(ask_id, by="terminal") == {
+        "ok": False,
+        "error": "you already dismissed this.",
+    }
 
 
 def test_decline_is_terminal_on_write(tmp_path: Path):
@@ -533,14 +564,63 @@ def test_a_declined_ask_writes_the_response_row(tmp_path: Path):
 
 
 def test_a_dismissed_ask_injects_nothing(tmp_path: Path):
+    """AMENDED 2026-10-16 (fork A, §14): this cell now pins the case the old
+    sentence is still true for — the deadline notice was ALREADY delivered.
+
+    Before the fork, ANY dismissal injected nothing, so this passed by asserting
+    the whole rule. The rule narrowed rather than disappeared: a dismissal whose
+    notice never reached the transcript still owes it (the next two cells), and
+    one whose row is already durable owes nothing — the row is the delivery
+    marker, so the dismissal has nothing left to deliver.
+    """
     session = FakeSession()
     queue = _queue(tmp_path, session, now=BASE + 200_000)
     queue._now = lambda: BASE
     ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    session.transcript.ids.add(store.timeout_row_id(ask_id))
     queue._now = lambda: BASE + 200_000
     assert queue.dismiss(ask_id, by="terminal")["ok"] is True
     assert _run(queue.reconcile()) == []
     assert session.batches == []
+
+
+def test_a_cold_dismissal_delivers_its_notice_on_reopen(tmp_path: Path):
+    """THE FORK'S OWN CELL (A, §14): a dismissal does not swallow the notice.
+
+    The shape is the one Ben hit: the session was STOPPED when the deadline
+    passed, so the notice was never delivered, and the dismissal arrives from a
+    surface with no runtime (the phone, an external writer — "any process may
+    append answered/declined/dismissed"). The next runtime's LOAD-TIME reconcile
+    must still inject the deadline notice, in its dismissed wording, because the
+    agent has never been told it is waiting on an answer that is not coming.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session, now=BASE)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    store.append_event(queue.session_dir, _dismissed_event(ask_id, at=BASE + 200_000))
+
+    reopened = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: BASE + 200_100)
+    assert _run(reopened.reconcile(load_time=True)) == [store.timeout_row_id(ask_id)]
+    (message,) = session.batches[0]
+    assert message.id == store.timeout_row_id(ask_id)
+    assert message.details["status"] == store.STATUS_TIMED_OUT
+    assert message.details["dismissed"] is True
+    assert "dismissed it without answering" in message.details["text"]
+
+
+def test_an_owed_dismissed_notice_is_delivered_once(tmp_path: Path):
+    """Level-triggered and idempotent, like every other row: the marker is the
+    transcript row (``ask-timeout-<id>``), so the second reconcile writes
+    nothing rather than injecting the notice twice."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session, now=BASE)
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    store.append_event(queue.session_dir, _dismissed_event(ask_id, at=BASE + 200_000))
+
+    reopened = AskQueue(session, config_dir=tmp_path, session_id="s1", clock=lambda: BASE + 200_100)
+    assert _run(reopened.reconcile(load_time=True)) == [store.timeout_row_id(ask_id)]
+    assert _run(reopened.reconcile()) == []
+    assert len(session.batches) == 1
 
 
 def test_an_expired_ask_injects_nothing(tmp_path: Path):
@@ -1493,17 +1573,16 @@ def test_every_question_reaches_the_projection(tmp_path: Path, count: int):
 
 
 # ---------------------------------------------------------------------------
-# the outstanding view of a timed-out ask (the flip precondition)
+# a timed-out ask: still shown, already settled (#2388)
 # ---------------------------------------------------------------------------
 
 
-def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path: Path):
-    """A queue whose ONLY ask timed out must not read as empty.
+def test_the_projection_keeps_a_timed_out_ask_but_counts_it_settled(tmp_path: Path):
+    """A queue whose ONLY ask timed out keeps the row and owes nothing.
 
-    The row stays (it is still answerable) and the outstanding tally is 1, not
-    0 — the defect was a surface tallying ``open`` alone, which dropped exactly
-    this row while the bar still offered it and a late answer still reached the
-    agent. Answering it late settles it and the outstanding set empties.
+    The row stays (a settled receipt the user can dismiss), but it is not
+    outstanding: the agent was told at the deadline and moved on (#2388). The
+    queue still takes a late answer, which folds to ``late``.
     """
     session = FakeSession()
     queue = _queue(tmp_path, session)
@@ -1512,7 +1591,7 @@ def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path
     rows = queue.projection()
     assert [row["ask_id"] for row in rows] == [ask_id]
     assert rows[0]["status"] == store.STATUS_TIMED_OUT
-    assert len(store.outstanding_asks(rows)) == 1
+    assert store.outstanding_asks(rows) == []
 
     assert queue.respond(ask_id, {"q0": ["late answer"]}, by="phone")["ok"] is True
     late = queue.projection()
@@ -1523,9 +1602,9 @@ def test_the_projection_keeps_a_timed_out_ask_and_counts_it_outstanding(tmp_path
 def test_the_index_keeps_a_timed_out_only_queue_rather_than_going_absent(tmp_path: Path):
     """The derived index must not drop to absence for a timed-out-only queue.
 
-    That file is the COLD reader's view (the aggregate route, the phone's list)
-    of what the user can still answer, so a queue that folded to no outstanding
-    rows would hide the asks everywhere but the live bar.
+    That file is the COLD reader's view (the aggregate route, the phone's list),
+    and a stopped session's timed-out row must stay in it although it is no
+    longer outstanding (#2388): the row is where Dismiss lives.
     """
     session = FakeSession()
     queue = _queue(tmp_path, session)
@@ -1535,7 +1614,8 @@ def test_the_index_keeps_a_timed_out_only_queue_rather_than_going_absent(tmp_pat
     entry = store.read_entry(tmp_path, "s1")
     assert entry is not None
     assert [row["ask_id"] for row in entry["asks"]] == [ask_id]
-    assert store.outstanding_asks(entry["asks"])[0]["status"] == store.STATUS_TIMED_OUT
+    assert entry["asks"][0]["status"] == store.STATUS_TIMED_OUT
+    assert store.outstanding_asks(entry["asks"]) == []
     # ``now`` is injected so the reader's staleness sweep is judged at the SAME
     # instant the fold was (the fixture clock is years behind the wall clock).
     rows = store.index_asks(tmp_path, now=BASE + 120_001)

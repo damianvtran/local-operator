@@ -111,6 +111,43 @@ raise ValueError("developer only exception prose")
         found = i18n_check.scan_source("local_operator/y.py", source)
         assert [v.kind for v in found] == ["print"]
 
+    def test_assembled_copy_counts_in_argument_position(self, i18n_check) -> None:
+        """`+` and the ternary fold: both reach a sink as copy.
+
+        These are the two constructs the pre-fold scanner could not see — the
+        documented blind spot that let `"allowed " if allowed else "denied "`
+        and `"effort " + value` sit outside the ratchet in already-activated
+        files. One finding per CALL, not per operand: the expression is one
+        piece of copy however many constants it is built from.
+        """
+        source = (
+            'bits.append("no matching models" if query else "no models available")\n'
+            'bits.append("effort " + (join(xs) or "none"))\n'
+        )
+        found = i18n_check.scan_source("local_operator/assembled.py", source)
+        assert [v.kind for v in found] == ["textual.append", "textual.append"]
+
+    def test_a_name_reference_stays_invisible(self, i18n_check) -> None:
+        """The REMAINING blind spot, pinned so it is a fact and not a hope.
+
+        Copy assigned or returned before it reaches a sink is not counted; nor
+        is a value selected by `dict.get`. Widening to those needs data-flow
+        analysis rather than another syntactic fold. This test is the honest
+        statement of the limit: if a later change starts seeing them, this
+        test fails and whoever widened it updates the docstring too.
+        """
+        source = (
+            'msg = "copied to clipboard" + suffix\n'
+            "out.append(msg)\n"
+            'out.append({"darwin": "cmd"}.get(plat, "super"))\n'
+        )
+        assert i18n_check.scan_source("local_operator/refs.py", source) == []
+
+    def test_a_rule_string_alone_is_not_prose(self, i18n_check) -> None:
+        """A drawn rule carries no letters, so it never counts on its own."""
+        source = 'text = Text("\u2500" * width)\nprint("\u2500" * width)\n'
+        assert i18n_check.scan_source("local_operator/rule.py", source) == []
+
     def test_pragma_exempts_its_line_only(self, i18n_check) -> None:
         source = 'print("kept")  # i18n: ignore dev log\nprint("counted")\n'
         found = i18n_check.scan_source("local_operator/z.py", source)

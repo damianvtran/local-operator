@@ -284,7 +284,24 @@ def test_extracted_sites_ratchet_without_activating_legacy_cli(i18n_check):
         assert violations == [], "CLI20's new help site must fail the scoped ratchet"
     baseline = i18n_check.load_baseline(i18n_check.BASELINE)
     assert not i18n_check.in_enforced_scope("local_operator/cli.py", baseline["enforced"])
-    assert baseline["files"]["local_operator/cli.py"] == 772
+    # 772 -> 807 in the scanner-coverage change that taught the checker to fold
+    # `+` and the ternary in argument position: the legacy CLI's own literal
+    # count is unchanged, but the improved scanner now SEES more of it. The
+    # pin moves with the detector, which is the point of pinning it here.
+    #
+    # 807 -> 746 in CLI tranche 1 (#2552), 746 -> 702 in help tranche 1
+    # (#2558): the ceiling moves with each extraction tranche. Hard-coding it
+    # here turned every later tranche into a stale-pin break, so the assertion
+    # is now DERIVED (no slack: ceiling == live count) plus a never-rises bound
+    # -- the pin's real meaning, without the chain.
+    entries = i18n_check.load_allowlist(i18n_check.ALLOWLIST)
+    scanned = i18n_check.scan_tree(i18n_check.REPO)
+    live = i18n_check._counts(scanned, entries).get("local_operator/cli.py", 0)
+    assert baseline["files"]["local_operator/cli.py"] == live, (
+        baseline["files"]["local_operator/cli.py"],
+        live,
+    )
+    assert live <= 702, live
     assert baseline["files"]["local_operator/exec_startup.py"] == 0
 
 

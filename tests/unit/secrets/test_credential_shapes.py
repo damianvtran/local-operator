@@ -8734,3 +8734,110 @@ def test_the_identifier_release_ceiling_is_exactly_fifteen_letters() -> None:
     assert scrub_shapes(over_ceiling) != over_ceiling
     short = "xai" + "_" + "a" * 7
     assert scrub_shapes(short) == short, "below the 8 floor: no match"
+
+
+# ---------------------------------------------------------------------------
+# The client-inline anchor: a command word, never a filename stem
+# ---------------------------------------------------------------------------
+#
+# Operator-reported 2026-10-16. ``\b`` treats the dot in a module path as a
+# boundary, so the old anchor fired on a SOURCE-FILE NAME and then masked any
+# package-style ``-p`` argument within 200 characters of it. Measured on session
+# ``19b15d6e369d``: one reasoning line masked a real crate NAME and REGISTERED
+# it, after which crate paths, ``cargo test -p <crate>``, ``git add`` pathspecs
+# and a later ``project`` tool ``name:`` argument all came back as the marker.
+# The reported symptom was a cargo command whose package argument had become the
+# marker, failing with "package pattern(s) … not found in workspace".
+#
+# FAIL-ON-REVERT: restoring the bare ``\b`` anchor reds the rows whose input
+# carries a `-p`/`-a` flag after the stem (measured: 5 of the 6 non-invocation
+# rows red; the slug row passes on the reverted source because it carries no
+# flag for the old rule to reach, and it is kept as a boundary row).
+
+#: The client name that anchored the false positive, built so this test file
+#: itself stays legible to the scanner it exercises.
+_MONGO = "mon" + "go"
+
+#: A real crate name, the value that was destroyed in the incident.
+_INCIDENT_CRATE = "minerva" + "-" + "core" + "-" + "platform"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # the operator's exact damage: a package flag after a filename stem
+        _MONGO + ".rs; cargo test -p " + _INCIDENT_CRATE + " --lib legal_mda_payload",
+        # the verbatim reasoning text from the incident session
+        "The "
+        + _MONGO
+        + ".rs edits succeeded compilation earlier (`cargo check -p "
+        + _INCIDENT_CRATE
+        + " --all-targets` PASSED after e",
+        # a crate path and a package flag on one line
+        "g crates/"
+        + _INCIDENT_CRATE
+        + "/src/"
+        + _MONGO
+        + ".rs; cargo test -p "
+        + _INCIDENT_CRATE
+        + " --lib x",
+        _MONGO + ".rs; cargo clippy -p " + _INCIDENT_CRATE + " --all-targets",
+        # a hyphenated slug and a path segment are not invocations either
+        "see " + _MONGO + "-driver notes",
+        "src/" + _MONGO + "/main.rs; go test -p pkg",
+    ],
+)
+def test_a_client_name_that_is_not_an_invocation_never_anchors_the_rule(line: str) -> None:
+    """A filename stem, a slug or a path segment must not anchor the client rule.
+
+    The rule's stated subject is "the client binary" — a word being INVOKED. A
+    stem reaches a package flag and masks it; these rows are the pinned harm.
+    """
+    masked, hits = scrub_shapes_with_hits(line)
+    assert masked == line, f"{line!r} was rewritten"
+    assert not hits, f"{line!r} filed a hit"
+    assert not _promotes(line, _INCIDENT_CRATE), f"{line!r} registered the crate name"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "mysql -u root -p" + "s3cr3tPw" + " -e 'show databases'",
+        "mongosh -p" + "s3cr3tPw" + " --eval 'db.stats()'",
+        "redis-cli -a " + "s3cr3tPw" + " ping",
+        "psql -h h -p " + "s3cr3tPw" + " -U admin",
+        _MONGO + " -p " + "s3cr3tPw" + " --eval x",
+        "/usr/bin/" + _MONGO + " -p " + "s3cr3tPw" + " --eval x",
+        # a LINE BREAK is a command boundary: a multi-line result's next line
+        # starts a command, and review round 1 caught this leaking when the
+        # leading class carried no newline.
+        "line one\n" + "mysql -p " + "s3cr3tPw",
+        "line one\r\n" + "psql -p " + "s3cr3tPw",
+        "line one\n" + "redis-cli -a " + "s3cr3tPw",
+        # ...and a BACKTICK substitution is a command too: review round 1's second
+        # leak. The enumerated leading class missed it; the negative lookbehind
+        # that replaced the class admits every separator by construction.
+        "`" + "mysql -p " + "s3cr3tPw" + "`",
+        "$(" + "psql -p " + "s3cr3tPw" + ")",
+        "x || " + "redis-cli -a " + "s3cr3tPw",
+        "-- " + "mysqldump -p " + "s3cr3tPw",
+    ],
+)
+def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> None:
+    """The controls: every true positive keeps its mask, path-qualified included.
+
+    A narrowing that leaked here would be the worse failure — these are the
+    inline-password spellings the rule exists for.
+    """
+    masked, hits = scrub_shapes_with_hits(line)
+    assert masked != line, f"{line!r} stopped masking"
+    assert [h.label for h in hits] == ["client-inline-password"], f"{line!r}: {hits}"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["docker run -p 8080:80 nginx", "ssh -p 2222 host", "go test -p pkg"],
+)
+def test_the_published_port_negatives_are_untouched_by_the_anchor(line: str) -> None:
+    """``-p`` as a PORT (or a Go package flag) is not this rule's, and never was."""
+    assert scrub_shapes(line) == line, f"{line!r} was rewritten"

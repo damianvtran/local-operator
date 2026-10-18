@@ -152,9 +152,10 @@ function isLapsedRow(row: PolicyAskRow): boolean {
  * deadline, the agent long since moved on. Opening the modal sheet over the
  * conversation for them would spend the view's one open on a queue with nothing
  * to answer, so a frame of only lapsed rows reads like settled ones (clause 3).
- * The tally still counts them outstanding (the store's contract), so the
- * dropped-rows guard compares the tally with the outstanding rows NAMED, lapsed
- * or not: a larger tally still means a row the frame does not carry.
+ * A runtime from before #2388 still counts them in the tally, so the
+ * dropped-rows guard compares the tally with the answerable rows NAMED, lapsed
+ * or not: a larger tally still means a row the frame does not carry, against
+ * either runtime (a current one counts open asks only).
  */
 export function readQueue(
 	rows: readonly PolicyAskRow[] | undefined | null,
@@ -190,9 +191,12 @@ export function readQueue(
  * under-open, never override a refusal.
  *
  * ONE RESIDUAL LIMIT, not closable on the client: the runtime projects at most 20
- * rows before it computes the tally, so an outstanding timed-out ask that sorts
- * behind 20 newer rows is on neither field and no client can name it. The residue
- * is at most one extra auto-open, which is the surface the feature exists to show.
+ * rows before it computes the tally, so an outstanding ask that sorts behind 20
+ * newer rows is on neither field and no client can name it. A current runtime
+ * cannot reach that (open asks are capped at 8 and a timed-out one is not in the
+ * tally); a runtime from before #2388 could, by timed-out asks piling up. The
+ * residue is at most one extra auto-open, which is the surface the feature exists
+ * to show.
  */
 export function namesEveryOutstanding(
 	tally: number | undefined | null,

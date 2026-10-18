@@ -316,17 +316,30 @@ class SessionList(BaseModel):
 
     ``sessions`` IS MORE THAN THE PAGE, deliberately, and the consequence is
     part of the contract: **``len(sessions)`` may exceed ``limit``**. It carries
-    the newest ``limit`` conversations AND every pinned conversation the page did
-    not reach, because it is the array a client REPLACES its rows with — a pinned
-    conversation parked in a sibling field would be one the client does not hold
-    until it learns about that field, and on a store larger than the page (the
-    ordinary case; 5,267 sessions against a 500-row page on the operator's) the
-    pin would then have no row, no count and no trace anywhere in the app. The
-    additions are ordinary rows in the catalogue's own ranking order — the page's
-    order continued below the page, NOT pin recency, which the store also holds
-    and which would put a second ordering authority inside one section — each
-    with ``pinned: true``, so a client sections them with no new field and no
-    sort. ``limit`` and ``truncated`` describe the PAGE ONLY.
+    the newest ``limit`` conversations AND every RUNNING conversation below the
+    page — a row whose ``status_code`` is ``approval``, ``answer``, ``busy``,
+    ``wedged`` or ``delegating`` — on the head answer AND on every scoped one,
+    because it is the array a client REPLACES its rows with: the ranking puts
+    completed outcomes above work in progress, so a page bound can leave a live
+    turn out of the answer entirely, and the client cannot ask again for a row it
+    was never handed (measured on the store: a busy turn at rank 51 of a 50-row
+    head, behind 46 unread completions). On the head answer only it ALSO carries
+    every pinned conversation the page did not reach: a pinned conversation
+    parked in a sibling field would be one the client does not hold until it
+    learns about that field, and on a store larger than the page (the ordinary
+    case; 5,267 sessions against a 500-row page on the operator's) the pin would
+    then have no row, no count and no trace anywhere in the app. A SCOPED answer
+    cannot speak for the pinned set — the client settles its pin facts from the
+    head answer — and a pinned extra there would be a row outside the scope that
+    asked for it.
+
+    The additions are ordinary rows in the page's own order — the order the
+    answer itself is in, continued below the page, NOT pin recency, which the
+    store also holds and which would put a second ordering authority inside one
+    section — and a pinned extra carries ``pinned: true``, so a client sections
+    it with no new field and no sort. A running extra is marked as nothing: a
+    client reads its running set off the very ``status.code`` these rows carry.
+    ``limit`` and ``truncated`` describe the PAGE ONLY.
 
     The CLIENT half of that decision cannot be tested from this repository: there
     is no in-tree consumer of this route, so what is pinned here is the shape the
@@ -337,9 +350,9 @@ class SessionList(BaseModel):
     sessions: list[SessionRow]
     #: Whether the ranking held more rows than the PAGE — the same question it
     #: has always answered, and deliberately not "rows this answer does not
-    #: carry": the extras appended for pins are rows the client is being handed,
-    #: not history it is missing, and this flag is what a client uses to decide
-    #: whether more exists to fetch.
+    #: carry": the extras appended for pins and for running rows are rows the
+    #: client is being handed, not history it is missing, and this flag is what a
+    #: client uses to decide whether more exists to fetch.
     truncated: bool = False
     limit: int = 100
     degraded: list[str] = Field(default_factory=list)

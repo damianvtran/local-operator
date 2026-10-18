@@ -644,6 +644,27 @@ class AsyncJob(BaseModel):
     # the point. The WIRE is the tolerant side: ``JobState`` is
     # ``extra="allow"``, so an older attached reader ignores the key.
     requested_model_label: str | None = None
+    #: The reasoning LEVEL the launch asked for, when it asked for one — the
+    #: effort half of the same pin, stamped at REGISTRATION beside
+    #: ``requested_model_label`` and never overwritten, for the same reason: a
+    #: fallback hop is free to clamp the level away
+    #: (``failover.spec_for_target`` keeps it only where the target's ladder
+    #: accepts it), and without this stamp the level the launch chose survives in
+    #: NO field of the row — so the completion receipt cannot name the drop the
+    #: design note requires it to name ("A team's ``effort: xhigh`` can quietly
+    #: become DeepSeek's default on a fallback. That is acceptable, but the run
+    #: receipt should name it"). It is derived at registration by
+    #: ``harness.subagent._requested_effort``, which is also where the SOURCE of
+    #: the level can be widened without touching any reader below.
+    #:
+    #: RUNTIME-ONLY, deliberately ABSENT from ``_ROSTER_ROW_FIELDS`` (the
+    #: allowlist in ``session/session.py``): both facts a restored row would read
+    #: out of it — this level and ``model_fallback_effort`` — are gone after a
+    #: restart anyway, and the durable row it feeds (``_job_result_message``) is
+    #: built from the LIVE job while the row is alive. Persisting a key an older
+    #: owner's strict sidecar model does not know would cost it the whole row for
+    #: a clause nothing can render from the snapshot.
+    requested_effort: str | None = None
     #: True while a route edge has taken this PINNED child off its requested
     #: model: the child is serving on a fallback while its pin stays visible on
     #: ``requested_model_label``. ``model_fallback_reason`` carries the edge's
@@ -665,6 +686,17 @@ class AsyncJob(BaseModel):
     #: honestly gone while the comparison still holds.
     model_fallback: bool = False
     model_fallback_reason: str = ""
+    #: The effort the fallback is ACTUALLY running at — the route edge's own
+    #: ``ModelChangeEvent.effort`` — recorded with the flag above and cleared
+    #: with it. ``None`` does NOT mean "no fallback": it means the model now
+    #: serving runs at its own default (a target with no effort ladder sends
+    #: nothing, so there is no rung to name). A reader that needs "is a fallback
+    #: in force" asks ``model_fallback``; a reader that needs "what level is it
+    #: on" asks this, and renders the empty answer as ``model default``.
+    #: RUNTIME-ONLY like the flag above: a restored row can render neither fact,
+    #: so persisting them would buy its readers nothing and cost a strict sidecar
+    #: model the whole row.
+    model_fallback_effort: str | None = None
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
     # child spends most of its tokens in the earlier model calls of the same
@@ -771,6 +803,38 @@ def is_model_fallback(requested: str | None, effective: str | None) -> bool:
     requested_s = str(requested or "").strip()
     running = str(effective or "").strip()
     return bool(requested_s and running and requested_s != running)
+
+
+#: What a fallback's reasoning level reads as when the target model exposes
+#: none: the level is the model's own and nothing is sent, so naming a rung
+#: would be a claim about a model this codebase's table does not characterise.
+#: ONE spelling because the parent notice and the completion row are read side
+#: by side.
+EFFORT_DEFAULT_LABEL = "model default"
+
+
+def effort_fallback_clause(requested: str | None, actual: str | None) -> str:
+    """``, effort <requested> → <actual or "model default">``, else ``""``.
+
+    The EFFORT half of the pin-integrity disclosure, sitting beside
+    :func:`is_model_fallback`'s model half and keyed on the same rule — say
+    nothing unless the two DIFFER. A level that survived the hop is not news,
+    and a child that asked for no level has nothing to lose, so both arms stay
+    silent and the receipt only grows where a real drop happened.
+
+    Because it is the shared spelling of a phrase that appears in the parent's
+    live notice (``_pinned_fallback_notice``) and in the durable completion row
+    (``Session._job_result_message``), it lives here rather than in either
+    renderer: a second spelling is how two surfaces come to disagree about the
+    same hop. Empty is the honest answer for an unrecorded value, not
+    ``model default`` — "nobody asked" and "the model is on its own level" are
+    different facts, and only the caller knows which one it holds.
+    """
+    wanted = str(requested or "").strip()
+    running = str(actual or "").strip()
+    if not wanted or wanted == running:
+        return ""
+    return f", effort {wanted} → {running or EFFORT_DEFAULT_LABEL}"
 
 
 def model_fallback_badge(

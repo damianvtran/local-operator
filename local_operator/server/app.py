@@ -48,6 +48,7 @@ from local_operator.server.routes import (
     desktop_claim,
     desktop_code_requests,
     desktop_hub,
+    desktop_imports,
     desktop_lifecycle,
     desktop_mcp,
     desktop_mesh,
@@ -838,6 +839,7 @@ app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
+app.include_router(desktop_imports.router)
 # Agent Hub update availability/apply. Beside the profile routes it extends; no
 # sibling declares a `/v1/desktop/hub...` template, so nothing can swallow it.
 app.include_router(desktop_hub.router)

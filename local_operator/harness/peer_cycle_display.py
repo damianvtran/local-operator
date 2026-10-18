@@ -12,6 +12,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 # Keep live and cold provenance on the harness vocabulary: a function-local
@@ -54,6 +55,43 @@ def record_id(session_id: str, parent_id: str, quiet_root: str) -> str:
         _NAMESPACE,
         json.dumps([session_id, parent_id, quiet_root, CUSTOM_TYPE], separators=(",", ":")),
     ).hex
+
+
+def _directory_of(value: Any) -> Path:
+    """The journal directory behind a ``Transcript`` or a plain path.
+
+    WHY BOTH FORMS. Every reader below needs only ``directory`` -- the root id
+    and the index both live beside the journal, never in the parsed entries.
+    Accepting a ``Path`` is what lets a hot request path (a desktop page read)
+    reach this code without constructing ``Transcript``, whose ``__init__``
+    eagerly replays the WHOLE journal: 70,353 rows / 485 MB measured at 6.6-8.9
+    s on the operator's store, paid synchronously on the event loop for a page
+    that needed two index lookups. One helper, so the two accepted forms cannot
+    drift apart between the callers that read it.
+    """
+    if isinstance(value, (str, Path)):
+        return Path(value)
+    return Path(value.directory)
+
+
+def candidate_record_ids(session_id: str, messages: Any) -> list[str]:
+    """Every display record a page's messages could own, deduplicated.
+
+    THE ONE DERIVATION, shared by discovery and by the desktop read path's own
+    "is there anything to look up?" gate: a second spelling here would let the
+    gate and the read disagree about which rows owe proof, and a page would
+    then omit a certificate the reader was given every reason to expect.
+    """
+    candidates: list[str] = []
+    for message in messages:
+        if getattr(message, "role", None) != "assistant":
+            continue
+        candidates.extend(
+            record_id(session_id, message.id, call.id)
+            for call in message.tool_calls
+            if call.name in {"eval", "no_reply"}
+        )
+    return list(dict.fromkeys(candidates))
 
 
 def digest(value: Any) -> str:
@@ -672,8 +710,10 @@ def validate_indexed_record(
 ) -> tuple[dict[str, Any] | None, int]:
     """Validate ONE finite raw interval through existing offsets/dependencies.
 
-    The existing index supplies root results and journal order; no source->proof
-    index is introduced. At most4096 existing facts/512 IDs per read and512KiB
+    ``transcript`` is a ``Transcript`` OR the journal directory itself (see
+    ``_directory_of``); only the directory is read. The existing index supplies
+    root results and journal order; no source->proof index is introduced. At
+    most4096 existing facts/512 IDs per read and512KiB
     total are inspected. Bookkeeping is classified by the index's existing
     source_class; rendered CustomMessages are still decoded and checked.
     """
@@ -685,7 +725,7 @@ def validate_indexed_record(
 
     if not isinstance(record, dict) or not 0 < max_bytes <= 512 * 1024:
         return None, 0
-    directory = transcript.directory
+    directory = _directory_of(transcript)
     index = index or refresh_index(directory.parent.parent, directory.name)
     if index is None or not index.source_views.origins_complete:
         return None, 0
@@ -752,31 +792,33 @@ def validate_indexed_record(
 
 
 def discover_records(
-    transcript: Any, messages: Any, session_id: str, *, max_bytes: int = 512 * 1024
+    transcript: Any,
+    messages: Any,
+    session_id: str,
+    *,
+    max_bytes: int = 512 * 1024,
+    index: Any = None,
 ) -> dict[str, Any] | None:
     """Discover deterministic IDs from selected raw roots using the existing index.
 
     Historical proofs are NOT limited by the hot16 cache. Only existing archive
     IDs are read, in <=512-ID batches within one response's byte allowance.
     Remaining/unavailable source is explicit; no whole-journal fallback exists.
+
+    ``transcript`` is a ``Transcript`` OR the journal directory itself (see
+    ``_directory_of``). ``index`` lets a caller that already holds a CURRENT
+    resident index pass it in; when omitted this function keeps its original
+    ``refresh_index`` contract (build/load the cache), which the interactive
+    display paths still rely on.
     """
     from local_operator.session.transcript import read_indexed_raw_rows
     from local_operator.session.transcript_index import refresh_index
 
-    candidates = []
-    for message in messages:
-        if getattr(message, "role", None) != "assistant":
-            continue
-        candidates.extend(
-            record_id(session_id, message.id, call.id)
-            for call in message.tool_calls
-            if call.name in {"eval", "no_reply"}
-        )
-    candidates = list(dict.fromkeys(candidates))
+    candidates = candidate_record_ids(session_id, messages)
     if not candidates:
         return None
-    directory = transcript.directory
-    index = refresh_index(directory.parent.parent, directory.name)
+    directory = _directory_of(transcript)
+    index = index or refresh_index(directory.parent.parent, directory.name)
     if index is None:
         return {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
     cut_rows = [index.journal_rows.get(message.id) for message in messages]

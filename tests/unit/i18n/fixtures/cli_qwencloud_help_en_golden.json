@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "Store the QwenCloud console session cookie that /usage reads",
+  "cli.qwencloud_help.set": "Store the cookie; the value is read from STDIN, never argv",
+  "cli.qwencloud_help.status": "Whether a cookie is stored and how old it is; never the value",
+  "cli.qwencloud_help.rm": "Remove the stored cookie",
+  "cli.qwencloud_help.migrate": "Move a plaintext ticket into the encrypted secret store"
+}

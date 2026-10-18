@@ -245,6 +245,9 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             assert withheld == {
                 "highlights",
                 "hub",
+                # No desktop destination: the page reads and writes THIS
+                # terminal's source stores/config root. Withheld deliberately.
+                "import",
                 "keys",
                 "links",
                 "memory",

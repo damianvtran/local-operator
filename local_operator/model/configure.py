@@ -29,7 +29,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +115,11 @@ DEFAULT_TOP_P = 0.9
 DEFAULT_MODEL_NAMES = _DEFAULT_MODEL_NAMES
 
 # Sensible ModelSpec fallbacks when the legacy registry knows nothing.
+# ``UNKNOWN_MAX_OUTPUT`` is NO LONGER a spec default — seeding a no-data route
+# with it is the defect ``build_model_spec`` documents (the 8k stand-in was read
+# as a published cap, and the budget clamped every router route to it); see that
+# function for the value a no-data route carries now. The constant is kept as
+# the documented history its neighbours cite.
 UNKNOWN_CONTEXT_WINDOW = 128_000
 UNKNOWN_MAX_OUTPUT = 8_192
 
@@ -899,7 +904,24 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             info = None
 
     context_window = UNKNOWN_CONTEXT_WINDOW
-    max_output = UNKNOWN_MAX_OUTPUT
+    # 0, not ``UNKNOWN_MAX_OUTPUT``: 8192 is a NUMBER and a no-data route must not
+    # assert one. ``ModelSpec.max_output_tokens`` defaults to 8192, so a spec built
+    # from a placeholder row was indistinguishable from a model that really
+    # publishes an 8k cap -- and ``turn_output_budget`` therefore clamped every
+    # router route (``radient/auto``, ``radient-key/auto``, ``openrouter/auto``) to
+    # 8192, which a reasoning-heavy turn spends entirely on thinking and returns
+    # empty at ``stop_reason='length'``. The registry sentinel
+    # (``aggregator_router_model_info.max_tokens = -1``) says the SELECTED model's
+    # cap is unknown; that fact has to survive into the spec. 0 is already this
+    # codebase's no-data value (``turn_output_budget``, ``_effective_max_tokens``)
+    # and already renders as "output unknown" in the picker.
+    #
+    # ``UNKNOWN_MAX_OUTPUT`` itself is untouched and stays exported: it stops
+    # being a SPEC default only. This was its last code reader, and the seed it
+    # described is the defect, so the constant now survives as the documented
+    # history its neighbours cite (``_fill_from_row`` on where a missing cap used
+    # to fall back to) rather than as a live default anywhere.
+    max_output = 0
     supports_images = True
     # The mirror of ``supports_images`` with the OPPOSITE default, and the
     # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
@@ -2226,9 +2248,17 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
         # provider's real limit. The band's `311.0k/—` is the visible half.
         info.context_window = row.context_window
     # Independent of the window: an OpenAI-shaped gateway can quote a context
-    # length and no completion cap, and a missing `max_tokens` falls back to
-    # UNKNOWN_MAX_OUTPUT (8192), which truncates a long answer with no error.
-    # ``None`` and ``-1`` are both "no data" here, same as the window.
+    # length and no completion cap, and the ROW's cap is worth taking where the
+    # direct sources left none -- a stated cap NARROWS the ask, and a model with a
+    # real 8k limit asked for 131,072 is a 400 or a silent cut.
+    #
+    # What this comment used to say is the defect that was fixed here: a missing
+    # ``max_tokens`` fell back to ``UNKNOWN_MAX_OUTPUT`` (8192) in the SPEC builder,
+    # "which truncates a long answer with no error". The fallback is gone -- a
+    # no-data route now carries ``0`` and the budget fills it with the policy
+    # ceiling (see ``build_model_spec``), so the fill below is no longer a guard
+    # against an invented 8k cap; it is how a real, stated cap still reaches the
+    # spec. ``None`` and ``-1`` are both "no data" here, same as the window.
     if not (info.max_tokens and info.max_tokens > 0) and row.max_tokens > 0:
         # Guarded like the other two listing paths: this row is second-hand
         # catalogue data (models.dev, or an aggregator's document), so it can
@@ -4513,28 +4543,33 @@ class SessionStreamFn:
         return self._settings if isinstance(self._settings, Mapping) else {}
 
     def _push_usage_aware_pick(self, settings: Mapping[str, Any] | None) -> None:
-        """Push ``retry.usageAwareAccountPick`` into the auth store.
+        """Push the centrally resolved account policy at construction and hot apply.
 
-        The operator's opt-out for the cascade's usage-ranked first pick
-        travels through here because this is the one place a session parses
-        ``retry.*``; the store itself defaults to ON and knows nothing about
-        config. Duck-typed (``getattr``) because the test doubles handed in as
-        ``auth_store`` implement only the failover protocol.
+        The auth store copies this preference rather than reading session config
+        per call. Rebinding the mapping alone can therefore report an applied
+        value while selection still uses the old policy. Constructor and hot
+        apply MUST share this helper; the resolver owns canonical precedence,
+        the reset-soonest default and strict legacy-boolean compatibility.
 
-        Factored out of ``__init__`` so :meth:`apply_settings` can re-push it
-        (review round 2, B1). This is the ONE ``retry.*`` key that is not read
-        back off the mapping per call — the store copies it into its own state
-        (``AuthStore._usage_aware_pick``) — so a rebind alone moves what
-        ``RetrySettings`` reports while leaving what the cascade actually does
-        unchanged. That gap is what made a live ``— applied`` notice untrue for
-        this key. Constructor and re-push share this method precisely so the
-        two cannot drift apart again.
+        Duck typing retains the older failover-store protocol: stores with the
+        enum setter receive all three policies, while older hosts receive only
+        the headroom compatibility flag. Neither path clears a valid affinity
+        lease or unrelated provider/model/effort route state.
         """
-        configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
-        if callable(configure_pick):
-            from local_operator.providers.failover import RetrySettings
+        from local_operator.providers.account_policy import (
+            effective_account_selection_policy,
+        )
 
-            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
+        policy = effective_account_selection_policy(settings)
+        configure_policy = getattr(self._auth_store, "configure_account_selection_policy", None)
+        if callable(configure_policy):
+            # Rebind the preference without clearing a still-useful success
+            # lease or unrelated provider/model/effort route pins.
+            configure_policy(policy)
+        else:
+            configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
+            if callable(configure_pick):
+                configure_pick(policy == "headroom")
 
     def apply_settings(self, values: Mapping[str, Any] | None) -> None:
         """Rebind the settings mapping every routing decision reads.
@@ -6462,6 +6497,32 @@ class SessionStreamFn:
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
+        # A quota/preflight pick must stay coherent until THIS request finishes,
+        # without granting an unsuccessful pick a durable cache lease. Store-
+        # owned identity cleanup also works when an old generator is closed
+        # after a newer boundary replaced it; no ContextVar spans a yield.
+        begin = getattr(self._auth_store, "begin_account_request", None)
+        end = getattr(self._auth_store, "end_account_request", None)
+        boundary = (
+            begin(self._session_id, request) if callable(begin) and not request.isolated else None
+        )
+        stream = self._stream_account_request(request, signal, boundary)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                if boundary is not None and callable(end):
+                    end(self._session_id, boundary)
+
+    async def _stream_account_request(
+        self,
+        request: ChatRequest,
+        signal: AbortSignal | None,
+        boundary: object | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         # A session's old hint describes its preceding request, not this one.
         # Only the counted boundary held by this conversation can reconcile it
         # with appended assistant/tool/user content. Cold tokenization stays off
@@ -6626,6 +6687,20 @@ class SessionStreamFn:
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
         request = self._apply_cache_affinity(request)
+        update_boundary = getattr(self._auth_store, "update_account_request", None)
+        if boundary is not None and callable(update_boundary):
+            from local_operator.providers.account_affinity import endpoint_mode_resolver
+
+            # Snapshot the SAME fitted client factory's actual API decision for
+            # preflight. This constructs no request/refresh; a capability flag
+            # cannot tell an explicitly selected Chat route from Responses.
+            mode_client = self._client_for(request.model)
+            update_boundary(
+                self._session_id,
+                boundary,
+                request,
+                endpoint_mode=endpoint_mode_resolver(mode_client, request),
+            )
 
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message

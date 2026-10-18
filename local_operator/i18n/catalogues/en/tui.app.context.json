@@ -1,0 +1,232 @@
+{
+  "tui.app.sidebar.why_retry_budget": {
+    "role": "reason",
+    "tone": "dim",
+    "note": "One clause in the sidebar's why-list; the list is joined in code, so no punctuation."
+  },
+  "tui.app.sidebar.why_retired": {
+    "role": "reason",
+    "tone": "dim",
+    "note": "One clause in the sidebar's why-list; 'retired' is the source lifecycle word, kept."
+  },
+  "tui.app.sidebar.why_left_screen": {
+    "role": "reason",
+    "tone": "dim",
+    "note": "One clause in the sidebar's why-list."
+  },
+  "tui.app.skills.teams_heading": {
+    "role": "heading",
+    "tone": "muted",
+    "note": "Heading of the teams block in the skills help; lower-case house style."
+  },
+  "tui.app.skills.agents_heading": {
+    "role": "heading",
+    "tone": "muted",
+    "note": "Heading of the agents block in the skills help."
+  },
+  "tui.app.skills.led_by": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Team row: manager then roster size. The plural moves the word into the message; the manager name is data and the count is shown raw."
+  },
+  "tui.app.skills.send_agent": {
+    "role": "affordance",
+    "tone": "plain",
+    "note": "A command line the user types: the verb may translate, the syntax must not."
+  },
+  "tui.app.skills.detach_agent": {
+    "role": "affordance",
+    "tone": "plain",
+    "note": "A command line the user types; same rule as send_agent."
+  },
+  "tui.app.goals.settled_heading": {
+    "role": "heading",
+    "tone": "muted",
+    "note": "Heading of the settled-goals block in the skills help."
+  },
+  "tui.app.config.applied": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Config-change receipt listing keys that took effect now; keys are identifiers and stay untranslated."
+  },
+  "tui.app.config.effect_new": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Verb agreement lives in the message so a translator can inflect it; /new is a command name and stays."
+  },
+  "tui.app.config.needs_relaunch": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "Same agreement rule as effect_new; 'relaunch' is the thing that must happen."
+  },
+  "tui.app.config.toggle_on": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "A two-valued switch turned on; the em dash separates the label from the lag note."
+  },
+  "tui.app.config.toggle_off": {
+    "role": "receipt",
+    "tone": "plain",
+    "note": "The switch's off state; warns that calls are refused meanwhile."
+  },
+  "tui.app.config.label_web_search": {
+    "role": "label",
+    "tone": "plain",
+    "note": "Switch name used in both toggle messages; lower-case house style."
+  },
+  "tui.app.config.label_web_fetch": {
+    "role": "label",
+    "tone": "plain",
+    "note": "Switch name used in both toggle messages."
+  },
+  "tui.app.parked.wakes": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Count of parked wakes; the plural moves the noun into the message and the digit stays raw."
+  },
+  "tui.app.parked.monitors": {
+    "role": "count",
+    "tone": "dim",
+    "note": "Count of parked monitors; same shape as the wake count."
+  },
+  "tui.app.parked.dormant": {
+    "role": "trailer",
+    "tone": "dim",
+    "note": "Trailer after the parked counts; the leading em dash is layout and {parked} is the joined count phrases."
+  },
+  "tui.app.stop_all.already_leaving": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Sessions already shutting down; the phrase covers one and many, so only the digit varies."
+  },
+  "tui.app.stop_all.will_be_stopped": {
+    "role": "row",
+    "tone": "dim",
+    "note": "The pronoun changes with the count, so the whole clause is pluralised in the message rather than a pronoun passed in from code."
+  },
+  "tui.app.stop_all.repeat_hint": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "The command name and the seconds figure are technical; only the sentence translates."
+  },
+  "tui.app.aida.next_checkin": {
+    "role": "fragment",
+    "tone": "dim",
+    "note": "Aida cadence row; {when} is already-humanised relative time."
+  },
+  "tui.app.aida.extras_used": {
+    "role": "fragment",
+    "tone": "dim",
+    "note": "Aida extra check-ins; the two NBSPs keep the count from wrapping away from 'of' and are part of the string."
+  },
+  "tui.app.signin.opening": {
+    "role": "status",
+    "tone": "muted",
+    "note": "Told before the browser opens; the ellipsis is part of the copy."
+  },
+  "tui.app.signin.finished_hint": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Two clauses joined by a middot; ctrl+c is a key name and stays."
+  },
+  "tui.app.signin.full_link": {
+    "role": "label",
+    "tone": "dim",
+    "note": "The unshortened URL, for copying; the colon is the label separator."
+  },
+  "tui.app.help.paste_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note describing what the key does; the key name itself is a separate muted span."
+  },
+  "tui.app.help.copy_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note for ctrl+c."
+  },
+  "tui.app.help.copy_note_more": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Continuation of the copy note on its own line, aligned under the first."
+  },
+  "tui.app.help.skill_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note for the skill sigil; the sigil is a separate span."
+  },
+  "tui.app.help.model_saved_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note for /model saved; config.yml is a filename and stays."
+  },
+  "tui.app.help.cmd_paste_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note for cmd+v; names one terminal that does not forward it."
+  },
+  "tui.app.help.title_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note for the window title; the shell command and key path stay English."
+  },
+  "tui.app.help.title_note_more": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Continuation: the env var, the glyphs and the state words are all pinned by other docs."
+  },
+  "tui.app.help.notify_note": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Help-table note for notifications; the shell command and key path stay English."
+  },
+  "tui.app.help.notify_note_more": {
+    "role": "note",
+    "tone": "dim",
+    "note": "Continuation: env var stays, the two delivery behaviours are the translatable part."
+  },
+  "tui.app.notifications.more": {
+    "role": "overflow",
+    "tone": "dim",
+    "note": "Overflow prefix for the notifications listing; two leading spaces are an indent and the digit is raw."
+  },
+  "tui.app.notifications.sidebar_hint": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Overflow line plus the key that opens the full list; ctrl+b stays."
+  },
+  "tui.app.notifications.mark_all_read": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "Shown when the listing is capped, so 'all' means more than what is visible; the command name stays."
+  },
+  "tui.app.notifications.mark_these_read": {
+    "role": "hint",
+    "tone": "dim",
+    "note": "The uncapped variant, where every listed item is on screen."
+  },
+  "tui.app.providers.none": {
+    "role": "placeholder",
+    "tone": "dim",
+    "note": "Placeholder in a status row when no leg is enabled; the brackets are part of the placeholder."
+  },
+  "tui.app.providers.stale_all": {
+    "role": "status",
+    "tone": "dim",
+    "note": "Provider-status summary when every listed provider is stale; 'stale list:' is the label the status line already used."
+  },
+  "tui.app.providers.stale_named": {
+    "role": "status",
+    "tone": "dim",
+    "note": "Same summary when only some providers are stale; names are identifiers."
+  },
+  "tui.app.providers.stale_all_error": {
+    "role": "status",
+    "tone": "dim",
+    "note": "Model-picker status line; the error text after the dash is already localised from the wire."
+  },
+  "tui.app.providers.no_live_list": {
+    "role": "status",
+    "tone": "dim",
+    "note": "Providers with nothing stored to list; names are identifiers."
+  }
+}

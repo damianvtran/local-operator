@@ -912,8 +912,8 @@ class QueuedAskHarness:
             row.answers = answers
             row.answered_by = {"surface": "phone"}
         open_rows = [row for row in (self.projection.asks or []) if row.status == store.STATUS_OPEN]
-        # The tallies the phone renders come from the OUTSTANDING set (open +
-        # timed-out-and-answerable), which is the rule the real wire publishes —
+        # The tallies the phone renders come from the OUTSTANDING set (open
+        # asks; a timed-out one is settled, #2388), the rule the real wire publishes —
         # a fixture that counted ``open`` here would capture evidence for a
         # count the runtime no longer produces. The legacy MIRROR card is still
         # the head OPEN ask only, so the two are taken from different sets on
@@ -986,7 +986,7 @@ def _foreign_ask_projection() -> SessionProjection:
 
 
 def _ended_ask_projection() -> SessionProjection:
-    """A conversation whose runtime is GONE, with an ask still outstanding.
+    """A conversation whose runtime is GONE, with a lapsed (timed-out) ask.
 
     WHY IT IS ITS OWN SESSION (QA round 3, Q-1). Making `asks-foreign` ended
     turned its own route into a durable row with no asks and its frame stopped
@@ -1024,7 +1024,9 @@ def _ended_ask_projection() -> SessionProjection:
             ],
         )
     ]
-    projection.asks_open = 1
+    # Its only ask is timed out, which no longer counts (#2388): a live runtime
+    # would publish 0 here, so the committed rig shows the same chip-less list row.
+    projection.asks_open = 0
     return projection
 
 

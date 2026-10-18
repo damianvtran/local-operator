@@ -820,7 +820,14 @@ def _verify_semantics(
             issues.error("score_invalid", "state.json")
     terminal_location = "outcome.json" if outcome is not None else "events.jsonl"
     if terminal_output_observation is not None and not terminal_states:
-        issues.error("finalization_invalid", terminal_location)
+        # Its own code, not ``finalization_invalid``: this exact state is what a
+        # bundle looks like when an episode dies between finalization and the
+        # terminal snapshot ``_close_out`` writes (measured: a truncated
+        # step-budget end followed by a scoring failure). An abandonment is the
+        # only terminal such a bundle can ever carry, and it can only be
+        # written if this one unmet requirement is distinguishable from every
+        # other finalization defect -- see ``EvidenceWriter.abandon``.
+        issues.error("terminal_output_unresolved", terminal_location)
     if outcome is not None or terminal_states:
         # Open bundles may legitimately have in-flight requests or batches. A
         # terminal lifecycle snapshot begins sealing authority, so every initiated

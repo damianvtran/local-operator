@@ -17,7 +17,9 @@ import pytest
 import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
+    CONTINUE_TRUNCATED_ANSWER_PROMPT,
     LENGTH_ENDED_CALL_RESULT_TEXT,
+    LENGTH_STOP_RECOVERY_PROMPT,
     MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
     TRUNCATED_RESULT_TEXT,
@@ -74,6 +76,7 @@ from local_operator.harness.types import (
     Usage,
     turn_output_budget,
 )
+from local_operator.incidents import OUTPUT_LIMIT_CAUSE
 from local_operator.providers.failover import (
     MAX_MEDIA_DOWNLOAD_RETRIES,
     ProviderError,
@@ -3490,7 +3493,7 @@ async def test_empty_length_truncation_retries_at_lower_effort():
     assert stream.requests[0].model.reasoning_effort == "high"
     assert stream.requests[1].model.reasoning_effort == "medium"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and not end.aborted
     # The empty assistant message must not survive into the context: it is an
@@ -3499,6 +3502,54 @@ async def test_empty_length_truncation_retries_at_lower_effort():
         not (m.role == "assistant" and not m.text and not m.tool_calls)
         for m in context.messages
         if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_empty_truncation_retreat_is_bounded_and_leaves_the_session_effort_alone():
+    """A step-down is a RETRY, not a rewrite of the level the user chose.
+
+    The reported symptom was "I set Max and it went back to High". The retreat
+    exists for a good reason -- a turn that spends its whole output budget
+    thinking and returns nothing should retry cheaper rather than be lost -- but
+    its ceiling must not outlive the call it paid for, and it must never mutate
+    the HOST's spec. (``config.model`` is the run's own snapshot; a host that
+    resolves per call, which is every real one, hands back its own spec, so the
+    snapshot is never the session.)
+
+    The stream below stages the three calls that separate the two claims: an
+    empty truncation at ``high``, the cheaper retry at ``medium``, then a tool
+    batch and a second model call in the SAME run. That third call is the
+    regression: with the ceiling left set it ran at ``medium`` -- silently, for
+    the rest of the turn -- and with the host spec mutated it would have run at
+    ``medium`` forever.
+    """
+    host_model = _laddered_model()  # effort ``high``
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    context = LoopContext(tools=[echo_tool(executed)])
+    config = make_config(stream, model=host_model, get_model=lambda: host_model)
+
+    events = [e async for e in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert [r.model.reasoning_effort for r in stream.requests] == ["high", "medium", "high"]
+    assert executed == ["echo"]
+    assert (
+        host_model.reasoning_effort == "high"
+    ), "the retreat must not rewrite the session's configured effort"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any(
+        "retrying once at effort medium (your reasoning effort is unchanged)" in n.text
+        for n in notices
     )
 
 
@@ -3534,7 +3585,7 @@ async def test_a_whitespace_only_length_stop_takes_the_silent_path_too():
     assert len(stream.requests) == 2
     assert stream.requests[1].model.reasoning_effort == "medium"
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("retrying at effort medium" in n.text for n in notices)
+    assert any("retrying once at effort medium" in n.text for n in notices)
     # And the whitespace turn does not ride into the retry's history, for the
     # same reason the empty one does not.
     assert all(
@@ -3571,6 +3622,205 @@ async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
     assert any("no visible output" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
+    # THE LADDERED HALF OF THE SAME MISREAD CLASS (review m1). This end used to
+    # be bare, and a bare end reads as a COMPLETED ANSWER on every surface -- the
+    # exact shape that let a cut-off child reach its parent saying it had
+    # finished. Branding it costs no extra request (the retries were already
+    # spent); it only stops the end from lying. The `auto` half (no rung at all,
+    # after the one re-ask) is pinned by
+    # ``test_a_second_silent_length_turn_ends_the_run_NAMED``.
+    assert end.aborted is True
+    assert end.cut_off_cause == "output-limit", end.cut_off_cause
+
+
+@pytest.mark.asyncio
+async def test_a_silent_length_turn_with_no_rung_self_completes_once():
+    """THE FIX. A ``length`` cut-off with NOTHING produced, on a model with no
+    cheaper effort rung to retreat to, is re-asked instead of ending empty.
+
+    The router's ``auto`` sentinel is the fleet's shape (141 of the 281 measured
+    ``length`` stops): ``_lower_effort`` declines because the level is delegated
+    to the server, so the old loop yielded a notice and ended -- with nothing on
+    the wire, and every surface reading the end as a finished run. A delegated
+    CHILD is where that cost the most: its deliverable is the point, and the
+    parent paid to resume it.
+
+    Pinned on the DERIVED spec, not a hand-built one, so this states the ladder
+    and cap production builds.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    router = build_model_spec("radient", "auto")
+    assert router.max_output_tokens == 0, "a no-data route must not assert a cap"
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],  # nothing produced
+            [StreamTextDelta(delta="carrying on"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, model=router), None
+        )
+    ]
+
+    # The re-ask is exactly ONE extra model call, and the run then finishes.
+    assert len(stream.requests) == 2
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("re-asking it to continue the work" in n.text for n in notices), [
+        n.text for n in notices
+    ]
+    # The recovery prompt is PERSISTED, so a resumed session can see why the
+    # conversation continued -- and it is harness chrome, so no surface paints it.
+    assert any(
+        m.role == "user" and m.text == LENGTH_STOP_RECOVERY_PROMPT
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+    # The empty assistant turn must not ride into the re-ask's wire history -- an
+    # assistant message with no content blocks is illegal on the Anthropic wire,
+    # and replaying "I said nothing" teaches the re-ask to say nothing.
+    assert all(
+        not (m.role == "assistant" and not m.text and not m.tool_calls)
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.aborted and end.cut_off_cause == ""
+
+
+@pytest.mark.asyncio
+async def test_a_second_silent_length_turn_ends_the_run_NAMED():
+    """The budget is spent by a second silent ``length`` turn, and the end must
+    say so: a bare end reads as a COMPLETED ANSWER on every surface.
+
+    This is the half that reaches a parent. The child settles either way; the
+    difference is whether the end event carries the involuntariness and the
+    cause (``Session._classify_cut_off`` turns the pair into an error outcome
+    naming ``output-limit``), so the parent reads "cut off" rather than
+    "finished".
+    """
+    from local_operator.model.configure import build_model_spec
+
+    router = build_model_spec("radient", "auto")
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],
+            [StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, model=router), None
+        )
+    ]
+
+    # initial + the one re-ask; the second silent length ends the run.
+    assert len(stream.requests) == 2
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    assert end.cut_off_cause == "output-limit", end.cut_off_cause
+    # The loop stamps the TOKEN and the involuntariness; the rendered sentence is
+    # the classifier's -- the one-writer-per-fact split every other arm uses.
+    assert end.cut_off == ""
+
+
+@pytest.mark.asyncio
+async def test_a_silent_length_turn_with_a_lower_rung_still_takes_the_retreat():
+    """NEGATIVE CONTROL for the new arm: a laddered model is offered no re-ask.
+
+    It has a genuinely cheaper setting to retreat to, where the budget goes to
+    output instead of thought, and that retreat is the better move -- so the new
+    recovery must not spend its call on the wrong shape. The step down is the
+    existing behaviour, pinned here beside the new arm so a later edit that
+    widened the condition fails on the arm it moved.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta="answered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+        )
+    ]
+
+    assert len(stream.requests) == 2
+    assert [r.model.reasoning_effort for r in stream.requests] == ["high", "medium"]
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("retrying once at effort medium" in n.text for n in notices)
+    assert not any("re-asking it to continue the work" in n.text for n in notices)
+    # And the re-ask prompt for the no-rung arm is not what was appended.
+    assert not any(
+        m.role == "user" and m.text == LENGTH_STOP_RECOVERY_PROMPT
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and not end.aborted
+    # NEGATIVE CONTROL for m1's widening: a laddered run that RECOVERS through
+    # its retreat is NOT branded. The flag is reset per model call, so a run
+    # that answers after a cut-off must not be reported to its parent as cut.
+    assert end.cut_off_cause == "", end.cut_off_cause
+
+
+@pytest.mark.asyncio
+async def test_a_clean_stop_is_unaffected_by_the_length_recovery():
+    """NEGATIVE CONTROL: the ordinary end keeps its bare shape.
+
+    A fix that stamped a cause on every end would pass "a cause is present" while
+    making every completion read as a cut-off. The flag is per MODEL CALL, so a
+    run that recovers through the re-ask and then answers is not branded with the
+    earlier call's cut-off either -- which is what the first test above measures.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]])
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")], LoopContext(), make_config(stream), None
+        )
+    ]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.aborted and end.cut_off_cause == ""
+
+
+def test_the_output_limit_cause_is_a_named_involuntary_token():
+    """The vocabulary half, beside the loop's own arm: a token missing from
+    ``CUT_OFF_CAUSES`` -- or one in the deliberate half -- would leave the new
+    end invisible on the surfaces this change exists to fix."""
+    from local_operator.incidents import (
+        CUT_OFF_CAUSES,
+        DELIBERATE_CUT_OFF_CAUSES,
+        is_cut_off_cause,
+        is_deliberate_cause,
+        render_cut_off_reason,
+    )
+
+    assert OUTPUT_LIMIT_CAUSE == "output-limit"
+    assert OUTPUT_LIMIT_CAUSE in CUT_OFF_CAUSES
+    assert OUTPUT_LIMIT_CAUSE not in DELIBERATE_CUT_OFF_CAUSES
+    assert is_cut_off_cause(OUTPUT_LIMIT_CAUSE)
+    assert not is_deliberate_cause(OUTPUT_LIMIT_CAUSE)
+    assert render_cut_off_reason(OUTPUT_LIMIT_CAUSE)
+
+
+def test_the_length_recovery_prompt_is_harness_chrome():
+    """Persisted harness chrome must be registered, or the phone and a resumed
+    session paint the harness's words as the operator's own."""
+    assert LENGTH_STOP_RECOVERY_PROMPT in harness_chrome_prompts()
+    assert is_harness_chrome(LENGTH_STOP_RECOVERY_PROMPT)
+    assert not is_harness_chrome("please fix the failing length test")
 
 
 @pytest.mark.asyncio
@@ -3603,8 +3853,9 @@ async def test_text_only_length_truncation_is_announced_but_not_retried():
     assert "output limit" in notices[0].text
     assert notices[0].kind == "warning"
     # The copy is pinned here because it is the one row of the family the user
-    # can be left holding with no other move: a text truncation is NOT
-    # auto-continued below, and its sibling rows all name one, so this one must
+    # can be left holding with no other move: for an INTERACTIVE session a text
+    # truncation is not auto-continued (a delegated child continues it once --
+    # see the tests below), and its sibling rows all name one, so this one must
     # name a remedy too (design round 1, D4). It also uses the family's em dash,
     # not the `--` it shipped with on the first pass (D2).
     assert notices[0].text == (
@@ -3616,6 +3867,87 @@ async def test_text_only_length_truncation_is_announced_but_not_retried():
     assert "partial" in "".join(
         getattr(m, "text", "") or "" for m in context.messages if isinstance(m, Message)
     )
+    # NEGATIVE CONTROL for the child continuation: with the flag off (the
+    # default, every interactive session) the prose truncation keeps its bare
+    # end -- only the notice changed, not the ending.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert not end.aborted and end.cut_off_cause == ""
+
+
+@pytest.mark.asyncio
+async def test_a_child_continues_a_prose_truncation_once():
+    """A cut ANSWER is continued IN PLACE for a delegated child.
+
+    The prose arm deliberately does not auto-continue an interactive session:
+    the human can ask for the rest. A child has no such reader -- its parent can
+    continue it only by paying for a resume -- and its deliverable is often that
+    very message (a verdict, a report, a handoff). One continuation spends one
+    request to finish it; the notice says so, and the end is NOT branded because
+    the run completed its answer.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first half"), StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta=" second half"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")],
+            context,
+            make_config(stream, continue_truncated_answer=True),
+            None,
+        )
+    ]
+
+    assert len(stream.requests) == 2, "the continuation is one extra request"
+    assert any(
+        m.role == "user" and m.text == CONTINUE_TRUNCATED_ANSWER_PROMPT
+        for m in context.messages
+        if isinstance(m, Message)
+    ), "the continuation must be persisted as harness chrome"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("continuing the answer where it stopped" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert (
+        not end.aborted and end.cut_off_cause == ""
+    ), "a run that finished its answer through the continuation is not cut off"
+
+
+@pytest.mark.asyncio
+async def test_a_second_prose_truncation_ends_the_run_NAMED():
+    """The prose continuation budget is ONE; a second cut ends the run as a
+    NAMED ``output-limit`` cut-off.
+
+    A bare end reads as a completed answer on every surface -- the exact misread
+    the silent arm's brand removes, and just as wrong for a truncated report.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="first half"), StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta="second half"), StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    events = [
+        e
+        async for e in AgentLoop().run(
+            [Message.user("go")],
+            context,
+            make_config(stream, continue_truncated_answer=True),
+            None,
+        )
+    ]
+
+    assert len(stream.requests) == 2, "initial + exactly one continuation"
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    assert end.cut_off_cause == "output-limit", end.cut_off_cause
 
 
 @pytest.mark.asyncio
@@ -3628,13 +3960,20 @@ async def test_a_whitespace_only_length_stop_is_silent_to_both_surfaces():
     row claim an answer was cut off over a fold that said no answer existed --
     two voices for one event, which is the failure this family exists to
     prevent. Both sides strip now.
+
+    The model here has NO ladder, so the no-rung re-ask (see
+    ``MAX_LENGTH_SILENT_RECOVERIES``) is the arm that owns this turn: whitespace
+    is nothing, so the whitespace turn is exactly the silence a re-ask exists
+    for. The run is given a second turn so the re-ask is a STEP in a run rather
+    than the run's end, and the fold assertion below is still what the test is
+    for.
     """
     stream = ScriptedStream(
         [
-            # Whitespace, then the limit: no visible answer at all. The model
-            # has no ladder, so there is no lower rung to retreat to and the
-            # turn ends on the notice rather than retrying.
+            # Whitespace, then the limit: no visible answer at all, and no rung
+            # below this model -- so the loop re-asks it once.
             [StreamTextDelta(delta="   "), StreamEndEvent(stop_reason="length")],
+            [StreamTextDelta(delta="answered"), StreamEndEvent(stop_reason="stop")],
         ]
     )
     context = LoopContext()
@@ -3646,12 +3985,14 @@ async def test_a_whitespace_only_length_stop_is_silent_to_both_surfaces():
     ):
         events.append(event)
 
-    assert len(stream.requests) == 1
+    assert len(stream.requests) == 2
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert len(notices) == 1
-    # The SILENT arm, not the partial-answer arm: nothing was said.
-    assert "no visible output" in notices[0].text
-    assert "answer" not in notices[0].text
+    # The live notice names the limit the run is recovering from; the SILENT arm
+    # decides WHICH notice, so "answer" must not appear in it (nothing was said).
+    assert any("re-asking it to continue the work" in n.text for n in notices), [
+        n.text for n in notices
+    ]
+    assert all("answer" not in n.text for n in notices)
 
     # And the fold reads the same turn the same way -- if this ever diverges,
     # the live row and the replayed row disagree about one event.

@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "Manage agents",
+  "cli.agents_help.list": "List all agents",
+  "cli.agents_help.list_page": "Page number to display (default: 1)",
+  "cli.agents_help.list_perpage": "Number of agents per page (default: 10)",
+  "cli.agents_help.create": "Create a new agent",
+  "cli.agents_help.create_name": "Name of the agent to create",
+  "cli.agents_help.delete": "Delete an agent (local by name or Radient by ID)",
+  "cli.agents_help.delete_name": "Name of the agent to delete locally",
+  "cli.agents_help.delete_id": "ID of the agent to delete from Radient",
+  "cli.agents_help.delete_org": "Delete an agent from this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)",
+  "cli.agents_help.push": "Push (upload) an agent to Radient; `--org` and `--hub-id` push through the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only with changes pending, 3 declined, 130 cancelled)",
+  "cli.agents_help.push_name": "Name of the agent to push to Radient",
+  "cli.agents_help.push_id": "ID of the agent to push to Radient (explicit overwrite)",
+  "cli.agents_help.push_org": "Publish into this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)",
+  "cli.agents_help.push_hub_id": "Republish (overwrite) this hub listing from the local agent (checks for personal references first); needs --name (--id is a local id)",
+  "cli.agents_help.pull": "Pull (download) an agent from Radient",
+  "cli.agents_help.pull_id": "ID of the agent to pull from Radient",
+  "cli.agents_help.pull_org": "Pull from this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)",
+  "cli.agents_help.sync": "Update installed starters and hub-pulled agents to their latest text",
+  "cli.agents_help.sync_name": "Sync only the installed profile with this name",
+  "cli.agents_help.sync_all": "Sync every installed starter and hub-pulled agent (default when --name is absent)"
+}

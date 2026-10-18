@@ -27,7 +27,9 @@ real runtime is an in-process ``RuntimeServer`` on a loopback socket.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from typing import cast
 
 import httpx
 import pytest
@@ -610,6 +612,42 @@ def _durable_session() -> None:
     ask_store.write_entry(config_dir(), SESSION_A, cwd="/tmp/gone", asks=[_pending()])
 
 
+def _durable_ask_session(ask_id: str, *, expired: bool) -> None:
+    """The same durable, runtime-less session, with a real ask IN THE LOG.
+
+    The cold dismissal folds the LOG, so an index row with no ``queued`` event
+    behind it is not dismissible at all (there is no ask) — a test that seeded
+    only the index would be asserting the refusal while believing it tested the
+    door. ``expired`` picks the two states a dismissal distinguishes: past its
+    deadline (the one state it is offered on) and still inside it.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    _session_dir(SESSION_A)
+    directory = config_dir() / "sessions" / SESSION_A
+    asyncio.run(Transcript(directory).append_message(Message.user("existing", id="existing")))
+    now = int(time.time() * 1000)
+    ask_store.append_event(
+        directory,
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now - 3_600_000,
+            "created_at": now - 3_600_000,
+            # Past the deadline and inside the 7 d window (the state a dismissal
+            # is offered on, and the one whose notice is still owed), or still
+            # running: the refusal cell's state.
+            "expires_at": now - 60_000 if expired else now + 3_600_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [_question("q1")],
+        },
+    )
+
+
 def _cold_engage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[_FakeAskClient, list[tuple[str, object]]]:
@@ -640,17 +678,18 @@ def _cold_engage(
         ("ask_respond", {"ask_id": "ask-1", "answers": {"q1": ["yes"]}}, "answered"),
         ("ask_revise", {"ask_id": "ask-1", "answers": {"q1": ["no"]}}, "revised"),
         ("ask_decline", {"ask_id": "ask-1"}, "declined"),
-        ("ask_dismiss", {"ask_id": "ask-1"}, "dismissed"),
     ],
 )
 def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answered_with) -> None:
-    """THE ENGAGE (design §2.4), for all four settle ops.
+    """THE ENGAGE (design §2.4), for the three settle ops that NEED a runtime.
 
     The operator's bug was exactly this: a queued ask is durable so the agent
     can move on, and the relay REFUSED the answer once the runtime had exited —
     "session not connected" — so the answer was accepted by the phone and read
-    by nobody. Decline and dismiss settle the ask just as an answer does, so
-    they take the SAME arm: one engage path, four ops.
+    by nobody. Decline settles the ask just as an answer does, so it takes the
+    SAME arm: one engage path. ``ask_dismiss`` USED to be the fourth and is not
+    any more (fork A, §14): the next cell pins its own arm, and the split is the
+    point — an answer has to reach a runtime, a dismissal does not.
     """
     from local_operator.session.runtime.launch import AskErrand
 
@@ -672,6 +711,265 @@ def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answer
         assert client.calls[-1][1]["answers"] == body["answers"]
     # The engaged connection is released rather than left open by the route.
     assert client.closed is True
+
+
+def test_a_cold_dismiss_never_engages(monkeypatch) -> None:
+    """FORK A (§14): dismissing on a stopped conversation boots NOTHING.
+
+    The engage arm exists because a queued ask's READER is a runtime. A dismissal
+    has no reader: it is one append plus an index rewrite, squared against the
+    fold, and the notice it may still owe is delivered by the next real reopen.
+    Before the fork this op engaged (measured end to end: a boot, a deadline
+    notice and a PAID TURN), which is the promise the phone's card was already
+    making — "dismiss — send no reply".
+    """
+    client, engagements = _cold_engage(monkeypatch)
+    _durable_ask_session("ask-lapsed", expired=True)
+
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "dismissed"}
+    assert engagements == []
+    assert client.calls == []
+    # The dismissal is DURABLE — the phone's settled row is not a paint.
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert [event["kind"] for event in events][-1] == ask_store.EVENT_DISMISSED
+
+
+def _durable_lapsed_ask(ask_id: str) -> None:
+    """A durable, runtime-less session whose LAPSED ask is in the LOG and the INDEX.
+
+    Both halves are the point. ``dismiss_cold`` folds the LOG (an ask is only
+    dismissible when the log says it lapsed), and the phone's screen reads the
+    INDEX: ``_durable_projection`` builds a stopped conversation's ``asks`` from
+    the derived index (``asks.store.session_asks``), which is what the dock and
+    the header chip draw.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    _session_dir(SESSION_A)
+    directory = config_dir() / "sessions" / SESSION_A
+    asyncio.run(Transcript(directory).append_message(Message.user("existing", id="existing")))
+    now = int(time.time() * 1000)
+    ask_store.append_event(
+        directory,
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now - 3_600_000,
+            "created_at": now - 3_600_000,
+            # Past the deadline (the only state a dismissal is offered on) and
+            # well inside the 7 d window a lapsed row stays visible for.
+            "expires_at": now - 60_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [_question("q1")],
+        },
+    )
+    ask_store.write_entry(
+        config_dir(),
+        SESSION_A,
+        cwd=str(directory),
+        asks=[
+            _pending(
+                {
+                    "ask_id": ask_id,
+                    "status": "timed_out",
+                    "created_at": now - 3_600_000,
+                    "expires_at": now - 60_000,
+                }
+            )
+        ],
+    )
+
+
+def test_a_cold_dismiss_republishes_the_conversation_s_own_asks(monkeypatch) -> None:
+    """UX round 1, U1 (MAJOR): the no-boot path pushes a frame, minus the engage.
+
+    The dock and the header chip read ``projection.asks``, and nothing refreshed
+    them: the card's ``onSettled`` re-reads ``/api/asks`` for the SHEET, so the
+    sheet said "1 timed out" while the dock still read "2 questions timed out"
+    at +45 s, until the user left the screen. Main did not have this because its
+    engage pushed a frame. The dismissal now recaptures the durable projection
+    and publishes it to the session's subscribers — what
+    ``_engage_and_publish``'s repaint does, without starting anything.
+    """
+    from local_operator.mobile.daemon import _durable_projection
+
+    _cold_engage(monkeypatch)
+    _durable_lapsed_ask("ask-lapsed")
+    before = _durable_projection(SESSION_A)
+    assert before is not None, "the fixture must project asks for this cell to mean anything"
+    assert [row.ask_id for row in before.asks or ()] == ["ask-lapsed"]
+
+    client, daemon = _client_and_daemon()
+    subscriber: "asyncio.Queue[dict[str, object]]" = asyncio.Queue()
+    daemon.table.session_subscribers[SESSION_A] = {subscriber}
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+    assert reply.status_code == 200, reply.text
+
+    frame = subscriber.get_nowait()
+    assert frame["session_id"] == SESSION_A
+    # PRESENT and empty: the rows are gone from the frame the screen paints, and
+    # the tally rides beside them (the client's capability proxy is either field).
+    assert cast("list[dict[str, object]]", frame.get("asks")) == []
+    # Still the cold door: nothing was dialled and nothing was started.
+    assert daemon.table.entries == {}
+
+
+@pytest.mark.parametrize(
+    "evict_payload", [True, False], ids=["payload-evicted", "payload-retained"]
+)
+def test_a_cold_dismiss_repaints_with_the_current_fold(monkeypatch, evict_payload) -> None:
+    """Agent review round 2, M-3: the repaint carries the ended receipt — and the
+    CURRENT fold.
+
+    ``_repaint_stopped_screen`` and the SSE route both fold with the daemon's own
+    ended rule ("a stopped screen is ended iff an ended entry for it exists"),
+    because the phone's composer reads ``projection.ended``: a conversation this
+    daemon has watched die must not come back to life on the phone because a
+    dismissal repainted it. The republish spelling omitted the flag, so the frame
+    the subscriber received NEXT said ``ended=False`` over a screen whose last
+    frame said ``True`` — until some later frame corrected it.
+
+    The two payload states are the fence's own two branches, and a dismissal must
+    be honest in both: the payload EVICTED under cache pressure (the ledger turns a
+    fresh fold into the retained epoch — the state this capture exists for), and the
+    payload RETAINED (``state.terminal and not terminal`` serves that frame back
+    verbatim, which for a repaint that follows a write is the FRAME FROM BEFORE THE
+    WRITE — the dock and the chip would keep showing the ask the user just
+    dismissed, which is the U1 symptom itself).
+    """
+    from local_operator.mobile.daemon import _projection_frame
+
+    _cold_engage(monkeypatch)
+    _durable_lapsed_ask("ask-lapsed")
+    client, daemon = _client_and_daemon()
+    record = _record(SESSION_A, 9_999_911)
+    entry = SessionEntry(record)
+    entry.ended = True  # the scan's own verdict on a pid that is gone
+    daemon.table.entries[record.pid] = entry
+    subscriber: "asyncio.Queue[dict[str, object]]" = asyncio.Queue(maxsize=8)
+    daemon.table.session_subscribers[SESSION_A] = {subscriber}
+
+    async def seed() -> None:
+        # The frame the watching phone received when the death was proved — the
+        # scan's capture, pushed to this same subscriber set (daemon.py's dead-pid
+        # branch). That frame is what the dock and the chip are drawn from, and the
+        # ask below is the one the phone is about to dismiss.
+        dead = await daemon._capture_durable_projection(
+            SESSION_A, record=record, terminal=True, ended=True
+        )
+        assert dead is not None and [row.ask_id for row in dead.asks or ()] == ["ask-lapsed"]
+        subscriber.put_nowait(_projection_frame(dead))
+        if evict_payload:
+            daemon.session_projections.pop(SESSION_A, None)
+        assert daemon._projection_generations[SESSION_A].terminal is True
+
+    asyncio.run(seed())
+    assert subscriber.get_nowait()["ended"] is True
+
+    reply = client.post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+    assert reply.status_code == 200, reply.text
+
+    frame = subscriber.get_nowait()
+    # The rows the dismissal just settled are gone from the frame that repaints the
+    # screen; the receipt the screen already had is kept.
+    assert frame["asks"] == []
+    assert frame["ended"] is True
+
+
+def test_a_dismissal_that_landed_is_not_failed_by_a_broken_repaint(monkeypatch, caplog) -> None:
+    """Agent review round 2, M-4: the repaint is a courtesy, the dismissal is durable.
+
+    The capture at the end of this route reads the same disk the dismissal has
+    already written, and it only decides what is DRAWN: what it produces is what
+    the next fold would produce anyway. Catching ``_StaleProjection`` alone meant
+    any other raise (a session directory that vanished under the fold, a full
+    disk) reached the route's own except ladder and answered 422/502 for a
+    dismissal that had ALREADY landed — so the phone painted a failure over a
+    durable success and the user tapped again. Answer the dismissal; log the paint.
+    """
+    _cold_engage(monkeypatch)
+    _durable_lapsed_ask("ask-lapsed")
+    client, daemon = _client_and_daemon()
+    subscriber: "asyncio.Queue[dict[str, object]]" = asyncio.Queue()
+    daemon.table.session_subscribers[SESSION_A] = {subscriber}
+
+    async def broken_capture(session_id, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise OSError("the fold could not read the session directory")
+
+    monkeypatch.setattr(daemon, "_capture_durable_projection", broken_capture)
+    with caplog.at_level(logging.DEBUG, logger="local_operator.mobile.daemon"):
+        reply = client.post(
+            f"/api/sessions/{SESSION_A}/command",
+            json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+        )
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "dismissed"}
+    # Nothing was painted, and nothing was claimed: the subscriber waits for the
+    # next honest frame rather than being handed one built from a failed read.
+    assert subscriber.empty()
+    # The claim that survives the broken paint is the durable one.
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert events[-1]["kind"] == ask_store.EVENT_DISMISSED
+    assert any("repaint failed" in record.getMessage() for record in caplog.records)
+
+
+def test_a_cold_dismiss_from_the_phone_records_the_remote_surface(monkeypatch) -> None:
+    """Agent review round 1, MINOR-3: the phone sends no ``by``, so name the door.
+
+    ``daemon.py`` passes ``by=str(body.get("by") or "")`` and the phone's
+    ``ask_dismiss`` body carries no ``by`` at all, which recorded ``by:
+    {"surface": ""}`` — an audit line that names nobody, where the LIVE door
+    records ``"remote"`` for the same tap (``serving.py``: ``by or "remote"``).
+    """
+    _cold_engage(monkeypatch)
+    _durable_ask_session("ask-lapsed", expired=True)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-lapsed"},
+    )
+    assert reply.status_code == 200, reply.text
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert events[-1]["kind"] == ask_store.EVENT_DISMISSED
+    assert events[-1]["by"] == {"surface": "remote"}
+
+
+def test_a_cold_dismiss_of_an_open_ask_refuses_in_the_queues_own_words(monkeypatch) -> None:
+    """Only ``ask_owner_present`` falls back to the dial (fork A).
+
+    A refusal is the answer, not a reason to boot a runtime: an open ask is not
+    dismissible (no surface offers it, and the queue refuses it), so engaging to
+    ask a runtime the same question would spend a boot to be told the same thing.
+    The sentence is the queue's, verbatim, because a stale tap reads the same
+    words on the phone as on the TUI.
+    """
+    client, engagements = _cold_engage(monkeypatch)
+    _durable_ask_session("ask-open-1", expired=False)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-open-1"},
+    )
+
+    assert reply.status_code == 422, reply.text
+    assert reply.json()["error"] == "only a timed-out ask can be dismissed; it is still open."
+    assert engagements == []
+    assert client.calls == []
 
 
 def test_a_refused_cold_answer_keeps_the_session_claimed_active(monkeypatch) -> None:

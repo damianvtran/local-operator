@@ -637,7 +637,11 @@ def test_terminal_step_requires_final_observation_and_lifecycle(tmp_path: Path) 
             monotonic_ns=4,
             wall_time_ms=4,
         )
-    assert "finalization_invalid" in {issue.code for issue in verify_bundle(root).issues}
+    # The unmet requirement (no terminal lifecycle snapshot explains the
+    # terminated step) now carries its own code -- see verify.py and
+    # ``EvidenceWriter.abandon`` -- so an ambiguity abandonment can tolerate
+    # exactly it; every other consumer still refuses on any error issue.
+    assert "terminal_output_unresolved" in {issue.code for issue in verify_bundle(root).issues}
 
 
 def test_action_after_terminal_step_is_invalid(tmp_path: Path) -> None:

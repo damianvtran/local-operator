@@ -1,13 +1,129 @@
 """Native relay/PeerLink sockets, two isolated homes, no live mesh mutation."""
 
 import json
+from typing import Any
 
 import pytest
 
-from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore
+from local_operator.memory import MemoryError
+from local_operator.memory import MemoryError as SensitiveMemoryError
+from local_operator.memory import (
+    MemoryIdentity,
+    MemoryStore,
+    guard,
+    parse_url,
+    safe_segment,
+)
 from local_operator.network import audit, identity, memory, wire
 from tests.unit.network.test_mcpdefs_link import _bind_and_start, _set_peer_endpoints
 from tests.unit.network.test_relay_e2e import _pair, serve_shaped_relay
+
+# Fixed PUBLIC Ed25519 bytes from the independent public-origin discriminator.
+# This is neither a private key nor host provenance. Derive through production
+# device_id_for in the test; never search/mint until a guard happens to accept.
+_PUBLIC_ORIGIN_KEY = "8464ccf9ebd8d19a0f63287f11100526a9b9ca0222825fc2ed997f6cfe1821e0"
+_PUBLIC_ORIGIN_ID = "d_ac37443550475dfe7a5ffd3028fc5964"
+
+
+def _public_origin_hazard():
+    value = identity.device_id_for(bytes.fromhex(_PUBLIC_ORIGIN_KEY))
+    binding_matches = value == _PUBLIC_ORIGIN_ID
+    assert binding_matches, "fixed public-key/device-ID binding changed"
+    return value
+
+
+def _assert_value_free_refusal(caught, value):
+    # Keep rejected bytes out of failure messages/properties: report only the
+    # label/boolean, not an assertion that renders the rejected argument.
+    did_not_echo = value not in str(caught.value)
+    assert did_not_echo, "sensitive-memory refusal echoed its input"
+
+
+def test_public_origin_free_text_guards_still_refuse_before_any_put(tmp_path):
+    """The free-text refusals survive the merged structural-id repairs.
+
+    This case originally characterized raw-string refusal as the fail-closed
+    state of every surface. The merged repairs deliberately accept a minted
+    ``d_``+hex device id on the write/sync path (#2492) and exempt a minted
+    reference from the recall-query guard (#2511); both are pinned by their own
+    regression suites. This control keeps what those repairs did NOT move:
+    guard() and a free-text safe_segment() still refuse the raw value, and
+    constructing with it (no put) writes no storage artifact; a future
+    host-bound change must arrive through a separately reviewed path, never
+    this arbitrary naked string. No peer/identity mint/socket fixture is
+    requested by these controls.
+    """
+    value = _public_origin_hazard()
+    root = tmp_path / "refused-origin"
+    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
+        guard(value)
+    _assert_value_free_refusal(rejected, value)
+    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
+        safe_segment(value)
+    _assert_value_free_refusal(rejected, value)
+    # Structural acceptance itself belongs to #2492's regression suite; the
+    # only claim here is that construction alone touches no storage (no put).
+    MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin=value,
+    )
+    assert not root.exists(), "constructing with a structural origin left a storage artifact"
+
+
+# A minted-reference recall query is now an admitted read (#2511), pinned by
+# that repair's own tests; these carriers are the surfaces that still refuse.
+@pytest.mark.parametrize("carrier", ["body", "title", "tags", "source-uri", "url", "owner"])
+def test_public_origin_bytes_remain_untrusted_in_other_fields(tmp_path, carrier):
+    value = _public_origin_hazard()
+    root = tmp_path / "refused-carrier"
+    store = MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin="synthetic-device",
+    )
+    fact: dict[str, Any] = {
+        "title": "Widget proof",
+        "body": "Deployment evidence in docs/widget.md",
+    }
+    with pytest.raises(SensitiveMemoryError, match="Sensitive value refused") as rejected:
+        if carrier in ("body", "title"):
+            fact[carrier] = value
+            store.put("session", fact)
+        elif carrier == "tags":
+            fact["tags"] = [value]
+            store.put("session", fact)
+        elif carrier == "source-uri":
+            fact["source"] = {
+                "kind": "observed",
+                "uri": "https://example.invalid/evidence/" + value,
+            }
+            store.put("session", fact)
+        elif carrier == "url":
+            # A valid memory URL/entity reaches the actual safe-segment guard;
+            # unknown scope/syntax errors are not a sensitive-value refusal.
+            parse_url("memory://session/" + value)
+        else:
+            MemoryIdentity(session_id=value)
+    _assert_value_free_refusal(rejected, value)
+    assert not root.exists(), "untrusted carrier refusal left a storage artifact"
+
+
+def test_benign_origin_and_fact_still_use_the_real_store(tmp_path):
+    root = tmp_path / "benign-control"
+    store = MemoryStore(
+        root / "config",
+        MemoryIdentity("synthetic-session"),
+        root / "session",
+        origin="synthetic-device",
+    )
+    body = "Widget deployment evidence lives at docs/widget.md"
+    item = store.put("session", {"title": "Widget proof", "body": body})
+    assert store.path.is_file()
+    assert store.show("session", item["id"])["fact"]["body"] == body
+    assert store.search("Widget deployment", scope="session")
 
 
 @pytest.fixture

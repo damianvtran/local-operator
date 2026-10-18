@@ -138,6 +138,20 @@ async def test_a_block_that_fails_twice_is_dropped_and_recorded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejection_reasons_reach_the_detail() -> None:
+    """The repair message already carried the validator's errors; the journal did not --
+    a reader saw "N block(s) still rejected" and could not tell a fabrication from a
+    malformed chart without rerunning the job."""
+    outcome, recorder = await _run([LYING_BLOCK, LYING_BLOCK], max_turns=2)
+    assert outcome.error == "bound:turns" and outcome.cause == ""
+    joined = " ".join(outcome.detail)
+    assert "turn 1: 1 rejected — " in joined, outcome.detail
+    assert "turn 2: 1 rejected — " in joined, outcome.detail
+    assert "not in the evidence" in joined
+    assert "still rejected at 2 of 2 turn(s) — Latency:" in joined, outcome.detail
+
+
+@pytest.mark.asyncio
 async def test_the_turn_bound_stops_the_run_cleanly() -> None:
     outcome, recorder = await _run([LYING_BLOCK, LYING_BLOCK, LYING_BLOCK], max_turns=2)
     assert len(recorder.requests) == 2, "maxTurns=2 must not spend a third turn"

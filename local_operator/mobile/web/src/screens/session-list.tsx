@@ -535,16 +535,16 @@ function SessionCard({
 				    outstanding, which needs no mark. */}
 				{typeof s.asks_open === "number" && s.asks_open > 0 ? (
 					/* THE UNIT IS THE FIELD'S OWN (agent review round 1, R3): `asks_open`
-					   counts ASKS (open, or timed-out and still answerable — the
-					   outstanding set), and this chip used to print that number with the
-					   word "questions" — so the PR's own fixture showed "2 questions"
+					   counts ASKS (the outstanding set — open asks since #2388, when a
+					   timed-out ask became settled), and this chip used to print that
+					   number with the word "questions" — so the PR's own fixture showed "2 questions"
 					   where the bar above it said "4 questions waiting" and the header
 					   said 3. The chip now says what it counts ("2 asks"); the surfaces
 					   that hold the whole ask list state questions, which is §5.0's own
 					   unit for the bar.
 
 					   THE ARIA LABEL IS NOT "waiting" (M1, asks-open widening): the
-					   field's set now includes a timed-out-but-answerable ask, and §5's
+					   field's set once included a timed-out ask, and §5's
 					   header rule is explicit that an outstanding ask "is not a
 					   'waiting for you' state" — the agent keeps working. So the label
 					   uses this client's own word for the set (`outstandingAsks`,
@@ -1358,6 +1358,11 @@ export function SessionListScreen() {
 				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
 				</h1>
+				<button type="button" onClick={() => navigate("/settings/account-routing")}
+					className="ml-auto min-h-11 shrink-0 rounded-md border border-control px-3 text-body-sm text-ink-muted"
+					aria-label={messageRuntime.t("relay.account_policy.title")}>
+					{messageRuntime.t("relay.account_policy.entry")}
+				</button>
 				{/* OFFLINE, QUIETLY (mobile UX batch 2, U11). `connected === false` on
 				    this screen used to change nothing once rows were on it: the list
 				    kept painting a frozen frame as though it were live. The chip is

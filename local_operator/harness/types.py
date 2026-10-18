@@ -3084,6 +3084,19 @@ class LoopConfig(BaseModel):
     #: those the bare stop stays its legitimate ending. Off by default: a
     #: direct embedder keeps today's ending exactly.
     recover_wordless_stop: bool = False
+    #: A truncation that produced VISIBLE text is, by contract, announced and
+    #: left there: the reader can ask for the rest. That is right for an
+    #: interactive session -- continuing prose the human did not ask for is its
+    #: own annoyance. A delegated CHILD's deliverable is often exactly that last
+    #: message (a review verdict, a QA report, a handoff), and its only reader is
+    #: a parent that can continue it solely by paying for a resume -- the cost
+    #: this flag exists to remove. With this on, ONE run-scoped continuation asks
+    #: the model to finish the answer in place; when that budget is spent the end
+    #: is stamped ``output-limit`` (``aborted=True``) so a cut PURE-PROSE report
+    #: is never read as a finished one -- a text+call turn is the call arm's and
+    #: keeps its own re-ask (``agent review round 1, M-1``). Off by default: every
+    #: direct embedder keeps today's ending exactly.
+    continue_truncated_answer: bool = False
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )
@@ -3578,6 +3591,23 @@ def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
     :data:`DEFAULT_TURN_OUTPUT_TOKENS`. It is the hook a configuration key would
     feed, but see AGENTS.md ("Adding a configuration key") before wiring one:
     a key that only exists in the code that reads it is invisible to /settings.
+
+    WHERE THE ``0`` COMES FROM, because the narrowing rule above is only as good
+    as the specs feeding it. ``model.configure.build_model_spec`` used to seed a
+    route it could not resolve with ``UNKNOWN_MAX_OUTPUT`` (8192) -- a NUMBER, in
+    a field whose whole contract is "the ceiling the PROVIDER publishes". A
+    no-data route therefore arrived here looking exactly like a model that really
+    states an 8k cap, and this function's ``advertised > 0`` arm clamped every
+    aggregator ROUTER route (``radient/auto``, ``radient-key/auto``,
+    ``openrouter/auto``) to 8192: the registry's ``max_tokens = -1`` ("the
+    SELECTED model's cap is unknown") was erased at spec-build time. A
+    reasoning-heavy turn then spent all 8192 on thinking, emitted nothing, and
+    returned ``stop_reason='length'`` -- 138 of the fleet's silent stops measured
+    ``output_tokens == reasoning_tokens == 8192``. The builder now carries ``0``
+    ("no data"), which is the value this function already routes to the ceiling,
+    so the 131072 policy applies to the router routes as it does to any other
+    route that publishes no cap. Nothing here changed to make that work: the
+    ``advertised > 0`` test was always correct, and the defect was one layer down.
     """
     limit = DEFAULT_TURN_OUTPUT_TOKENS if ceiling is None or ceiling <= 0 else int(ceiling)
     advertised = int(getattr(model, "max_output_tokens", 0) or 0)

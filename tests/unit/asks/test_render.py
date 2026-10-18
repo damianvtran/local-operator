@@ -161,6 +161,51 @@ def test_a_secret_notice_names_the_key_and_never_quotes_the_prompt():
     assert "stays open for the user" not in text
 
 
+def test_a_dismissed_notice_says_so_and_still_says_proceed_without_it():
+    """Fork A (§14): the notice the dismissal now delivers names the dismissal.
+
+    Without the sentence the row would be indistinguishable from an ordinary
+    deadline notice, and the model would read "the ask timed out" for an ask the
+    user explicitly put away. The actionable half is UNCHANGED and load-bearing —
+    the point of the deadline is that the session must not stall forever — so the
+    dismissed variant keeps it verbatim.
+    """
+    text = render.timeout_text(_record(), now_ms=1_700_003_600_000, dismissed=True)
+    assert text.startswith("[Ask timed out]")
+    assert "The user dismissed it without answering." in text
+    assert "Proceed without it: use your recommended option or best judgment" in text
+    # Still never "the user denied": a dismissal is not a no.
+    assert "denied" not in text
+
+
+def test_a_dismissed_secret_notice_names_the_key_only():
+    """A secret ask's dismissed notice names the KEY and never the prompt.
+
+    The question text may itself describe the credential (§2.5), so the dismissal
+    sentence is the only thing added — the listing rule does not move because the
+    ask was put away — and the instruction that survives is the secret variant's
+    own ("do not run anything that needed it").
+    """
+    record = _record(
+        questions=[
+            {
+                "id": "API_KEY",
+                "question": "Paste the [redacted] key",
+                "secret": True,
+                "options": [],
+                "multi": False,
+                "persist": False,
+                "recommended": None,
+            }
+        ]
+    )
+    text = render.timeout_text(record, now_ms=1_700_003_600_000, dismissed=True)
+    assert "API_KEY" in text
+    assert "[redacted]" not in text
+    assert "The user dismissed it without answering." in text
+    assert "Do not run anything that needed it" in text
+
+
 def test_a_bridge_notice_names_the_request_and_keeps_the_untrusted_clause() -> None:
     """D3 (design round 2, PR #2378): the MODEL's listing carries the clause.
 
@@ -262,6 +307,25 @@ def test_the_span_helper_reads_like_a_person_wrote_it():
 
 
 # --- the withdrawn state's sentence, and the withdraw op's own copy ----------
+
+
+def test_a_dismissed_ask_has_its_own_word_on_both_doors():
+    """UX round 1, U3 = QA Q3 = agent review MINOR-4: a dismissed ask is not "declined".
+
+    ``refusal_copy`` answered an answered-or-dismissed ask with "you already
+    declined this." — a word for a decision the user never took — and
+    ``dismiss_refusal`` answered a REPEAT dismissal with the lapsed-only sentence
+    ("…is still open."), which says the opposite of what happened. Both doors
+    read one constant, so the phone's second tap and a stale sheet cannot be told
+    apart by the wording.
+    """
+    dismissed = _record(status=store.STATUS_DISMISSED)
+    assert render.refusal_copy(dismissed) == "you already dismissed this."
+    assert render.dismiss_refusal(dismissed) == "you already dismissed this."
+    # The declined case keeps its own sentence, and the two must not swap.
+    assert (
+        render.refusal_copy(_record(status=store.STATUS_DECLINED)) == "you already declined this."
+    )
 
 
 def test_a_withdrawn_ask_refuses_with_the_chat_route():

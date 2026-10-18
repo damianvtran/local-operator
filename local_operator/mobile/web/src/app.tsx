@@ -6,6 +6,7 @@
 import { useEffect } from "react";
 import { useRoute } from "./router";
 import { PairScreen } from "./screens/pair";
+import { AccountRoutingScreen } from "./screens/account-routing";
 import { PastSessionsScreen } from "./screens/past-sessions";
 import { SessionListScreen } from "./screens/session-list";
 import { SessionScreen } from "./screens/session-view";
@@ -18,6 +19,8 @@ export function App() {
 	   so it is retained at the root rather than per screen. */
 	useEffect(() => retainConfigStream(), []);
 	switch (route.name) {
+		case "account-routing":
+			return <AccountRoutingScreen />;
 		case "past":
 			return <PastSessionsScreen />;
 		case "pair":

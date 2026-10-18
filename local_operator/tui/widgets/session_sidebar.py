@@ -23,6 +23,8 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.resume import (
     UNNAMED_DEVICE,
     UNTITLED_CONVERSATION,
@@ -43,6 +45,8 @@ from local_operator.tui.widgets.session_picker import (
     row_state_mark,
 )
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 if TYPE_CHECKING:
     # Type-only: the app's concrete class imports THIS module (it assembles
@@ -650,10 +654,9 @@ class SessionSidebar(Widget, can_focus=True):
         self.show_subagents: bool = False
         #: ``(session_id, outstanding_ask_count)`` for the session whose asks this
         #: sidebar can actually count — the one the app is attached to. Empty
-        #: string means "no mark". COUNTED OVER THE OUTSTANDING SET (open +
-        #: timed-out-and-answerable), matching the wire's ``asks_open`` and the
-        #: bar's ``present``: a queue of nothing but timed-out asks is still one
-        #: the user can answer, so its row must keep its mark. See
+        #: string means "no mark". COUNTED OVER THE OUTSTANDING SET (open asks;
+        #: a timed-out one is settled, #2388), matching the wire's ``asks_open``
+        #: and the bar's ``present``, so the row and the wire cannot disagree. See
         #: :meth:`set_asking` for why the count is
         #: live-only rather than read out of the catalogue.
         self._asking: dict[str, int] = {}
@@ -1173,10 +1176,9 @@ class SessionSidebar(Widget, can_focus=True):
         marks, which is why this does not simply feed ``pending``.
 
         ``marks`` maps ``session_id -> count``, and each count is the OUTSTANDING
-        tally (open + timed-out-and-answerable, the same set the wire's
-        ``asks_open`` publishes): a timed-out ask is still one the user can
-        answer, so a queue of nothing but those must keep the mark rather than
-        dropping it to absence.
+        tally (open asks, the same set the wire's ``asks_open`` publishes): a
+        timed-out ask is settled (#2388), so a queue of nothing but those puts
+        no mark here.
 
         A MAPPING rather than one pair, because the mark is no longer only the
         current session's (amendment A3): the index tally covers every session
@@ -2205,7 +2207,7 @@ class SessionSidebar(Widget, can_focus=True):
         # which both features keep as the tooltip's last line.
         if entry.row.opened_by is not None:
             role = opener_role(entry.row.opened_by)
-            lines.append(f"opened by {role}" if role else AGENT_OPENED_MARK)
+            lines.append(_t(_x.session_sidebar_opened_by(role=role)) if role else AGENT_OPENED_MARK)
         lines.append(entry.id)
         return "\n".join(lines)
 
@@ -2699,8 +2701,12 @@ class SessionSidebar(Widget, can_focus=True):
         # what gives way: the position is discoverable by scrolling (the
         # cursor row is painted) and the panel's own toggle is on the frame
         # that opens it.
-        lead = "esc return" if self.has_focus else "f9 focus"
-        base = lead if self.has_focus else f"{lead} · ctrl+b hide"
+        lead = (
+            _t(_x.session_sidebar_lead_return())
+            if self.has_focus
+            else _t(_x.session_sidebar_lead_focus())
+        )
+        base = lead if self.has_focus else f"{lead}{_t(_x.session_sidebar_hide_suffix())}"
         # The chip is a PARTICIPANT in the ladder above, never an append after
         # it: appending past a candidate that has already been fit-tested voids
         # that test and the final `truncate_cells` then crops mid-word (the
@@ -2796,7 +2802,7 @@ class SessionSidebar(Widget, can_focus=True):
         # break this footer's key-and-what-it-does contract — recorded on the
         # PR rather than smuggled in as an append.
         if self.has_focus:
-            pin = f"{lead} · ctrl+k pin"
+            pin = f"{lead}{_t(_x.session_sidebar_pin_suffix())}"
             layer = " · ctrl+a ⌥" if chip else ""
             # THE FLEET DOOR'S KEY (round 2: U2), spent like every other fact on
             # this line — whole or not at all, and only while the note it teaches
@@ -2821,20 +2827,30 @@ class SessionSidebar(Widget, can_focus=True):
             # object (`ctrl+f   asks: 4` reads as one statement). MEASURED: 34
             # cells with the object, 29 without, and 29 is exactly the floor a
             # 100-column terminal gives this panel.
-            key = " · ctrl+f asks" if ask_note else ""
+            key = _t(_x.session_sidebar_asks_suffix()) if ask_note else ""
             key_short = " · ctrl+f" if ask_note else ""
             rungs: list[str] = []
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
                 if chip:
-                    rungs.append(f"{position} · {pin}{key}{layer}{{t}}")
-                rungs.append(f"{position} · {pin}{key}{{t}}")
+                    rungs.append(
+                        f"{position} · {pin}{key}{layer}{{t}}"
+                    )  # i18n: ignore keycap display vocabulary: separators + {t} token
+                rungs.append(
+                    f"{position} · {pin}{key}{{t}}"
+                )  # i18n: ignore keycap display vocabulary: separators + {t} token
                 if chip:
-                    rungs.append(f"{position} · {pin}{layer}{{t}}")
-                rungs.append(f"{position} · {pin}{{t}}")
+                    rungs.append(
+                        f"{position} · {pin}{layer}{{t}}"
+                    )  # i18n: ignore keycap display vocabulary: separators + {t} token
+                rungs.append(
+                    f"{position} · {pin}{{t}}"
+                )  # i18n: ignore keycap display vocabulary: separators + {t} token
             if chip:
-                rungs.append(f"{pin}{key}{layer}{{t}}")
+                rungs.append(
+                    f"{pin}{key}{layer}{{t}}"
+                )  # i18n: ignore keycap display vocabulary: separators + {t} token
             rungs += [
                 f"{pin}{key}{{t}}",
                 # The ask door's teacher outranks the pin's rung (U13): both are
@@ -2857,7 +2873,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # see the unpaged branch below for the rule; the same order is
                 # applied to this two-template rung (hide-dropped full variants
                 # before the hub-free ones).
-                head_hide = f"{position} · {lead} · ctrl+b hide"
+                head_hide = f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
                 head_plain = f"{position} · {lead}"
                 candidates = [head_hide + tail_full, head_plain + tail_full]
                 if hub_note and tail_nohub != tail_full:

@@ -130,6 +130,8 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -417,6 +419,11 @@ from local_operator.tui.widgets.goal_panel import (
     GoalMarkDone,
     GoalPanel,
 )
+from local_operator.tui.widgets.harness_import_view import (
+    HarnessImportView,
+    HarnessImportViewDismissed,
+    ImportLaunch,
+)
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
@@ -547,6 +554,9 @@ from local_operator.tui.widgets.wake_panel import WakePanel
 # while the splash showed the moved word (round-1 F1, reproduced).
 from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 
+# Resolved once at import: `tr` reads the active locale per CALL, so this binding
+# follows a live language change without re-importing (see docs/I18N.md).
+_t = tr("tui.app")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
@@ -576,8 +586,6 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
 #: across two sessions must meet one vocabulary. Kept short on purpose: the
 #: access note leads the footer and leaves ~39 cells for this clause at 100
 #: columns (see `_catalogue_status`).
-STALE_LIST_LABEL = "stale list:"
-
 #: Discovery statuses that mean "this provider produced a listing" (live or
 #: stored). The complement — ``static`` and ``unauthenticated`` — produced no
 #: listing, so they are not part of "every provider is stale". ``static`` is
@@ -6141,6 +6149,11 @@ class OperatorApp(App[None]):
         # contract. Held here for the same reason the two above are: the Esc
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
+        # The import mode (``/import``): a fifth sibling of the full-page MODE
+        # contract. It owns its own service worker and job polling; the app
+        # holds the widget so teardown and the Esc chain can close it.
+        self._import_view: Any | None = None
+        self._import_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
@@ -10118,8 +10131,8 @@ class OperatorApp(App[None]):
             exit_on_error=False,
         )
 
-    def _liveness_row_text(self, session: Any, *, now: float | None = None) -> str:
-        """The exact string the row would paint for ``session`` right now.
+    def _liveness_row_text(self, source: SessionInteraction, *, now: float | None = None) -> str:
+        """The exact liveness term the row would paint for ``source`` right now.
 
         THE REPAINT GATE IS ON THIS STRING, NOT ON THE VERDICT ENUM, and the
         difference is the whole feature. A FAILED probe deliberately touches
@@ -10132,11 +10145,65 @@ class OperatorApp(App[None]):
         (a failed probe does not clear the stamp) while letting the failing arm
         repaint, because the *rendering* changes as the age grows: STALE at 4 m
         and STALE at 10 m are different rows even though they are one state.
+
+        AND ONE SUPPRESSION, asked of the one shared predicate
+        (:meth:`_bring_up_in_flight`) so this string, the gate that watches it
+        and the row that paints from it cannot drift: a viewer with no stamp
+        and no retained dial honestly reads NEVER, but during a bring-up a
+        runtime IS arriving — the band narrates that window with ``starting…``
+        — and painting the verdict over it is the startup flash (measured: a
+        probe tick landing in the mount engage's spawn phase, ~2 s before the
+        bind landed, painted the false row with the cue up). ONLY NEVER is
+        suppressed: STALE and COMING carry evidence of their own. The
+        suppression yields an empty string — the same string
+        ``_show_sidebar_connection`` composes the row from — so a bring-up
+        that ends without binding repaints the verdict on the next due tick,
+        which is the state the row exists for.
         """
+        session = source.session
+        if not _is_viewer(session):
+            return ""
         verdict = owner_liveness(session, now=now)
         if verdict is OwnerLiveness.LIVE:
             return ""
+        if verdict is OwnerLiveness.NEVER and self._bring_up_in_flight(source):
+            return ""
         return liveness_text(verdict, now=now, verified_at=getattr(session, "verified_at", None))
+
+    def _liveness_fill_text(
+        self, source: SessionInteraction, *, verdict: OwnerLiveness | None = None
+    ) -> str:
+        """The EXACT connection-field string the liveness fill would paint.
+
+        THE GATE REMEMBERS THIS STRING AND THE PAINT USES IT, because the
+        liveness tail is not the whole row: a pending fork keeps its own prefix
+        in front of the tail (``forking · esc``), and it keeps it while the
+        reader is SUPPRESSED — the composition the startup flash fix added. A
+        gate that watched only the tail stored ``""`` over a row that read
+        ``forking · esc``; the next due tick compared ``"" == ""``, skipped,
+        and the takeover row outlived the bind, standing on a live session (a
+        row the unchanged gate could no longer clear in either direction).
+
+        So both callers go through this one composition:
+        ``_show_sidebar_connection`` paints what it returns and
+        ``_reprobe_liveness`` remembers it. The guards are the fill's own — a
+        non-viewer and a LIVE verdict paint nothing here (the widget carries
+        the fork cell for a live session) — so the string stays empty exactly
+        when the row does. ``verdict`` is accepted so the fill, which has just
+        classified the session to decide WHETHER to fill, does not classify it
+        a second time.
+        """
+        if not _is_viewer(source.session):
+            return ""
+        if verdict is None:
+            verdict = owner_liveness(source.session)
+        if verdict is OwnerLiveness.LIVE:
+            return ""
+        text = self._liveness_row_text(source)
+        fork_probe = getattr(source.session, "has_pending_fork", None)
+        if callable(fork_probe) and fork_probe():
+            return f"{_FORK_PENDING_TEXT} · {text}" if text else _FORK_PENDING_TEXT
+        return text
 
     async def _reprobe_liveness(self, source: SessionInteraction, session: Any) -> None:
         """One bounded probe, and a repaint when the row WOULD DIFFER FROM THE SCREEN.
@@ -10159,7 +10226,7 @@ class OperatorApp(App[None]):
         await self._liveness_probe.tick(session)
         if not self._is_current(source):
             return
-        current = self._liveness_row_text(session)
+        current = self._liveness_fill_text(source)
         if current == self._liveness_painted:
             return
         self._show_sidebar_connection(source)
@@ -10270,16 +10337,20 @@ class OperatorApp(App[None]):
         # so this branch never runs for them. A pending fork states a DIFFERENT
         # fact -- what you can do -- so the two compose, and the AGE STAYS LAST so
         # the row's ellipsis still eats the age rather than a word.
-        fork_probe = getattr(source.session, "has_pending_fork", None)
-        fork_pending = bool(fork_probe()) if callable(fork_probe) else False
         if not status and _is_viewer(source.session):
             verdict = owner_liveness(source.session)
             if verdict is not OwnerLiveness.LIVE:
-                text = liveness_text(
-                    verdict,
-                    verified_at=getattr(source.session, "verified_at", None),
-                )
-                status = f"{_FORK_PENDING_TEXT} · {text}" if fork_pending else text
+                # THE ONE COMPOSITION, asked of the helper the probe's gate also
+                # compares against (`_liveness_fill_text`), so the string
+                # remembered and the string painted cannot disagree -- including
+                # that reader's in-flight suppression, which yields an empty
+                # string while a bring-up for THIS conversation is arriving (see
+                # `_bring_up_in_flight`), AND the fork prefix that a pending fork
+                # keeps visible under it: a pending fork still renders while the
+                # liveness tail is suppressed, with no tail, because it states a
+                # DIFFERENT fact (what the user can do), and the precedence above
+                # is what keeps it visible next to a verdict of the same length.
+                status = self._liveness_fill_text(source, verdict=verdict)
                 # STALE is PROVISIONAL — a long turn ends, a SIGCONT lands, a
                 # starved loop catches up — so it takes the muted register and NOT
                 # `danger`, which stays the latch's terminal verdict. The same
@@ -10770,11 +10841,11 @@ class OperatorApp(App[None]):
                 if terminal_reason:
                     why.append(terminal_reason)
                 if source.connect_attempts > SIDEBAR_CONNECT_ATTEMPTS:
-                    why.append("retry budget exhausted")
+                    why.append(_t(_x.sidebar_why_retry_budget()))
                 if source.retired:
-                    why.append("source retired")
+                    why.append(_t(_x.sidebar_why_retired()))
                 if not self._is_current(source):
-                    why.append("source left the screen")
+                    why.append(_t(_x.sidebar_why_left_screen()))
                 logger.warning(
                     "sidebar connect latched (%s): %s",
                     ", ".join(why) or "not retryable",
@@ -20130,7 +20201,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("teams", style=section)]
+        rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for team in teams:
             # ``member_count()`` for the D2 reason the picker documents: the
             # manager is often ON the roster, so `len(members) + 1` overcounts,
@@ -20147,10 +20218,12 @@ class OperatorApp(App[None]):
             # row names the manager separately ("Led by <manager> · N
             # members"), so calling the roster count "roles" also double-counted
             # him in the reader's head.
-            member_word = "member" if slots == 1 else "members"
             rows.append(
                 Padding(
-                    Text(f"Led by {team.manager} · {slots} {member_word}", style=body),
+                    Text(
+                        _t(_x.skills_led_by(manager=team.manager, count=slots, shown=str(slots))),
+                        style=body,
+                    ),
                     (0, 0, 0, 4),
                 )
             )
@@ -21084,7 +21157,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        out: list[Any] = [Text("agents", style=section)]
+        out: list[Any] = [Text(_t(_x.skills_agents_heading()), style=section)]
         for name, label, facts, summary in rows:
             out.append(
                 Padding(Text(self._agent_listing_form(name, label), style=heading), (0, 0, 0, 2))
@@ -21106,11 +21179,11 @@ class OperatorApp(App[None]):
         # it is keyed to the same seam rather than left to be re-noticed.
         if callable(getattr(self._session, "attach_agent_profile", None)):
             out.append(Text())
-            out.append(Text("Send: /agent <name> <message>", style=body))
+            out.append(Text(_t(_x.skills_send_agent()), style=body))
             # The detach verb belongs in the listing so a user who attached a
             # profile can find their way back to base instructions without
             # guessing.
-            out.append(Text("Detach: /agent clear", style=body))
+            out.append(Text(_t(_x.skills_detach_agent()), style=body))
         return RichBlock(Group(*out))
 
     def _sync_agent_band(self) -> None:
@@ -24347,8 +24420,48 @@ class OperatorApp(App[None]):
         self._starting_runtime = starting
         self._push_starting_band()
 
+    def _bring_up_in_flight(self, source: SessionInteraction | None) -> bool:
+        """Whether a runtime is being brought up FOR this conversation now.
+
+        THE ONE COMPOSITION OF THE BRING-UP FACTS, because two surfaces must
+        agree about this window and a second copy is how they drift: the band
+        narrates it with ``starting…`` (:meth:`_push_starting_band`), and the
+        liveness reader must not paint its NEVER verdict over a runtime that IS
+        arriving — a probe tick landing in the mount engage's spawn phase (no
+        dial retained yet, so the reader honestly reads NEVER) painted a false
+        row ~2 s before the bind landed, which is the startup flash.
+
+        The facts, and what each one is:
+
+        * the engage running (``_starting_runtime``): the mount/draft/slash
+          engage has been started and has not reached its bind or failure;
+        * THIS conversation's paint-first attach (``_attach_behind_attempts``)
+          still in its pending or narrated phase. A JUDGED or UNSENT attempt
+          (``silences_cue``) states its outcome in the conversation's own row
+          — that is an answer, not a wait — so it is NOT in flight here: the
+          cue stays down AND the reader is free to paint what the state says;
+        * a prompt this conversation sent while cold
+          (``_prompts_awaiting_bind``): its send BINDS first, and until it
+          returns nothing has reached the owner.
+
+        Keyed by ``source.token`` like the cue itself: a bring-up left in
+        flight by a swap belongs to the conversation that left, not to the one
+        on screen.
+        """
+        attempt = self._attach_behind_attempts.get(source.token) if source is not None else None
+        if attempt is not None and attempt.silences_cue:
+            # THIS conversation's attach ended in an outcome its row states; an
+            # optimistic `starting…` beside it — or a reader that stayed silent
+            # through the verdict that answers it — would contradict it.
+            return False
+        if self._starting_runtime:
+            return True
+        if source is None:
+            return False
+        return attempt is not None or source.token in self._prompts_awaiting_bind.values()
+
     def _push_starting_band(self) -> None:
-        """Show ``starting…`` while the engage runs OR a prompt waits on the bind.
+        """Show ``starting…`` while a bring-up is in flight for this conversation.
 
         Two sources, one cue (UX round 1, U4). The engage alone ended it too
         early: the moment a prompt is accepted the background engage SURRENDERS
@@ -24361,17 +24474,14 @@ class OperatorApp(App[None]):
 
         Counted per BINDING, so a prompt left in flight by a swap cannot hold
         the cue up over the conversation that replaced it.
+
+        THE FACTS COME FROM :meth:`_bring_up_in_flight`, not a copy of them
+        kept here: the liveness reader suppresses its NEVER verdict on exactly
+        the window this cue narrates (``_liveness_row_text``), and two
+        compositions of "a bring-up is in flight" is how the cue and the
+        reader would drift.
         """
-        source = self._interaction
-        attempt = self._attach_behind_attempts.get(source.token) if source else None
-        if attempt is not None and attempt.silences_cue:
-            # THIS conversation's attach ended in an outcome its row states; an
-            # optimistic `starting…` beside it would contradict it.
-            shown = False
-        else:
-            shown = self._starting_runtime or (
-                source is not None and source.token in self._prompts_awaiting_bind.values()
-            )
+        shown = self._bring_up_in_flight(self._interaction)
         if shown == self._starting_shown:
             return
         self._starting_shown = shown
@@ -25854,6 +25964,8 @@ class OperatorApp(App[None]):
         # owns itself: its OWN Esc handler runs the ladder first (editor, then
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
+        if self._close_import_view():
+            return
         if self._close_settings_view():
             return
         # The projects page sits at the same precedence, and owns no ladder of
@@ -26922,8 +27034,9 @@ class OperatorApp(App[None]):
             return
         answerable = self._open_ask_rows()
         # LAPSED rows are named to the reading but never counted as pending (D12):
-        # the wire's tally includes them, so leaving them out would read a
-        # lapsed-only queue as a dropped row and wait instead of settling.
+        # a runtime from before #2388 still counts them in the wire's tally (a
+        # current one does not), so leaving them out would read a lapsed-only
+        # queue from such a runtime as a dropped row and wait instead of settling.
         lapsed = sum(1 for row in self._ask_rows if row.lapsed)
         reading = read_queue(
             published=len(self._ask_rows),
@@ -27024,8 +27137,9 @@ class OperatorApp(App[None]):
 
         The rule is ``AskRow.answerable``, which reads the fold's own
         ``OUTSTANDING_STATUSES`` — the same set the wire's tally and the index
-        use, so a timed-out-but-answerable ask can never be counted by one
-        surface and dropped by another.
+        use, so an ask can never be counted by one surface and dropped by
+        another. Since #2388 that set is ``open`` alone: a timed-out ask is
+        settled, shown but neither offered nor counted.
         """
         return [row for row in self._ask_rows if row.answerable]
 
@@ -27061,9 +27175,9 @@ class OperatorApp(App[None]):
     def _paint_sidebar_asks(self) -> None:
         """Paint the outstanding-asks marks, unioned across the fleet and the wire.
 
-        THE MARK PREDICATE (amendment A3) is the OUTSTANDING set — ``open`` and
-        ``timed_out``, exactly what ``session_sidebar.set_asking``'s docstring
-        argues — over EVERY session, not only the current one. The source is the
+        THE MARK PREDICATE (amendment A3) is the OUTSTANDING set — ``open`` only
+        since #2388, a timed-out ask being settled; ``session_sidebar.set_asking``'s
+        docstring argues it — over EVERY session, not only the current one. The source is the
         index tally (``asks.store.read_index``), refreshed by the sidebar's own
         poll; the CURRENT session's live wire count is unioned in so an ask
         queued a moment ago marks immediately, before any index write.
@@ -27883,13 +27997,16 @@ class OperatorApp(App[None]):
     def _run_fleet_ask_op(
         self, row: AskRow, op: str, *, answers: dict[str, list[str]] | None = None
     ) -> None:
-        """Send ``op`` for ``row`` through the engage seam, in a worker (A7).
+        """Send ``op`` for ``row``, in a worker (A7).
 
         The chain is the phone daemon's cold arm exactly — engage with an
-        ``AskErrand``, send the op, close in a ``finally`` — and it runs in a
-        Textual worker because the window it must live with is the phone's own
-        (engage 30 s + ack 15 s). The row is marked IN FLIGHT for that window so
-        a second gesture cannot send the same answer twice.
+        ``AskErrand``, send the op, close in a ``finally`` — for the three ops that
+        must REACH a runtime, and for a DISMISSAL it is that same arm's no-boot door
+        (``dismiss_cold``, fork A §14): the row is settled against the log with
+        nothing dialled, so the worker returns in the time one append takes. It runs
+        in a Textual worker because the dial's window is the phone's own (engage 30 s
+        + ack 15 s); the IN FLIGHT mark covers whatever this op takes, so a second
+        gesture cannot send the same thing twice.
 
         A SECOND GESTURE IS DROPPED, NEVER RE-RUN (round 2: F2). The worker's
         group is ``exclusive=True``, so starting it again would CANCEL the
@@ -27929,42 +28046,73 @@ class OperatorApp(App[None]):
     async def _fleet_ask_worker(
         self, row: AskRow, op: str, answers: dict[str, list[str]] | None
     ) -> None:
-        """The engage-and-dial, off the UI thread's critical path (A7)."""
+        """The engage-and-dial, off the UI thread's critical path (A7).
+
+        A DISMISSAL DOES NOT ENGAGE (fork A, §14). This list's rows belong to
+        conversations that are not running — that is why they are in the FLEET — so
+        the chain below would BOOT one of them to record a view action the user made
+        on a row whose own button says "send no reply". ``dismiss_cold`` settles it
+        against the log instead, and only a live owner (one the engage seam can see
+        but this list's snapshot could not) falls back to the dial, because that
+        owner is the thing that settles the ask.
+        """
+        from local_operator.asks.dismiss import dismiss_cold
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
         from local_operator.session.runtime.launch import AskErrand
 
         failed = ""
+        settled_cold = False
         try:
-            client, _detail = await engage_session_client(
-                config_dir(), row.session_id, AskErrand(ask_id=row.ask_id)
-            )
-            try:
-                if op == "respond":
-                    target = bridge_decision_target(row, answers or {})
-                    if target is not None:
-                        # An agent-messages request: the card's answer IS a
-                        # decision and rides the verified door (`bridge_decide`
-                        # — authority-admitted, grant-bearing). The plain ask
-                        # door refuses these asks by construction, so sending it
-                        # here would leave the human with a card that cannot
-                        # answer (TB-02 wiring, PR #2378).
-                        await client.bridge_decide(*target)
+            if op == "dismiss":
+                outcome = await dismiss_cold(
+                    config_dir(), row.session_id, row.ask_id, by="terminal"
+                )
+                if outcome.get("ok"):
+                    settled_cold = True
+                elif outcome.get("code") != "ask_owner_present":
+                    # A refusal IS the message — in the queue's own words, the same
+                    # sentence the live op raises — and it must not turn into a boot
+                    # (``_ask_gesture_refusal`` renders it below, like any refusal).
+                    raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
+            if not settled_cold:
+                client, _detail = await engage_session_client(
+                    config_dir(), row.session_id, AskErrand(ask_id=row.ask_id)
+                )
+                try:
+                    if op == "respond":
+                        target = bridge_decision_target(row, answers or {})
+                        if target is not None:
+                            # An agent-messages request: the card's answer IS a
+                            # decision and rides the verified door (`bridge_decide`
+                            # — authority-admitted, grant-bearing). The plain ask
+                            # door refuses these asks by construction, so sending it
+                            # here would leave the human with a card that cannot
+                            # answer (TB-02 wiring, PR #2378).
+                            await client.bridge_decide(*target)
+                        else:
+                            await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                    elif op == "decline":
+                        await client.ask_decline(row.ask_id, by="terminal")
                     else:
-                        await client.ask_respond(row.ask_id, answers or {}, by="terminal")
-                elif op == "decline":
-                    await client.ask_decline(row.ask_id, by="terminal")
-                else:
-                    await client.ask_dismiss(row.ask_id, by="terminal")
-            finally:
-                client.close()
+                        await client.ask_dismiss(row.ask_id, by="terminal")
+                finally:
+                    client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message
             # `AttachClient` raises with `asks/render.refusal_copy`'s own
             # sentence, so the ask says why in its own words rather than in a
             # generic notice; anything else (a dial that timed out) is passed
-            # through as it came.
-            failed = str(exc) or "the answer could not be delivered"
-            logger.warning("could not deliver a fleet answer", exc_info=True)
+            # through as it came. THE FALLBACK IS THE OP'S OWN (design round 1,
+            # D2): every refusal carries a sentence, so this only fires on a
+            # failure that said nothing — and "the answer could not be delivered"
+            # names an answer nobody was ever asked for on a dismissal, whose
+            # whole promise is that nothing is sent.
+            if op == "dismiss":
+                failed = str(exc) or "the dismissal could not be recorded."
+                logger.warning("could not record a fleet dismissal", exc_info=True)
+            else:
+                failed = str(exc) or "the answer could not be delivered."
+                logger.warning("could not deliver a fleet answer", exc_info=True)
         finally:
             self._mark_ask_in_flight(row.ask_id, False)
             await self._reload_fleet_rows()
@@ -28418,7 +28566,13 @@ class OperatorApp(App[None]):
             self._system_notice(text, "warning")
 
     def _dismiss_ask(self, ask_id: str) -> None:
-        """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+        """Take a TIMED-OUT ask out of the view.
+
+        The dismissal's own act asks the model nothing and buys no turn; what it can
+        still OWE is the deadline notice the ask never got (fork A, §14), which the
+        next run's reconcile delivers in its dismissed wording. Its twin in
+        ``asks/queue.py`` and ``serving.py`` says the same thing for the same reason.
+        """
         fleet_row = self._fleet_row_for(ask_id)
         if fleet_row is not None and self._fleet_answer_starts_here(fleet_row):
             self._run_fleet_ask_op(fleet_row, "dismiss")
@@ -29884,10 +30038,10 @@ class OperatorApp(App[None]):
         stale while the page was open — a ``/clear`` or a session swap behind
         the page moves ``_welcome_visible`` under it.
 
-        EVERY full-page mode counts, not just ``/settings``. All four replace
+        EVERY full-page mode counts, not just ``/settings``. All five replace
         the transcript region through the same three lines (hide the
         transcript, mount before ``#input-dock``, add the mode's class), so all
-        four collide with the boot layout the same way — measured from the
+        five collide with the boot layout the same way — measured from the
         splash before this term was generalised: the subagent view took 21 of
         28 rows at 100x30 and the org chart 26 of 38 at 140x40, both with the
         card still clamped. Keying on ``_settings_view`` alone made the siblings
@@ -29909,6 +30063,7 @@ class OperatorApp(App[None]):
             and self._subagent_view is None
             and self._org_chart_view is None
             and self._projects_view is None
+            and self._import_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -36187,6 +36342,99 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_org_chart_view()
 
+    def _cmd_import(self, arg: str, notice: NoticeFn) -> None:
+        """``/import`` — open the full-page import mode.
+
+        Parsing lives here so the page receives ONE small launch record; the
+        page itself owns loading, previewing and the two-step confirm. A bare
+        form opens the source list, and a malformed form is refused on the
+        notice line rather than opening a page whose next key would fail.
+        """
+        from local_operator.i18n.keys import tui_import
+        from local_operator.i18n.text import tr
+
+        text = tr("tui.import")
+        pieces = arg.split()
+        form = pieces[0].casefold() if pieces else ""
+        if form in ("", "list"):
+            launch = ImportLaunch()
+        elif form in ("preview", "run"):
+            if len(pieces) < 2:
+                notice(text(tui_import.error_source_required()), "warning")
+                return
+            source = pieces[1]
+            session_id = pieces[2] if len(pieces) > 2 else ""
+            all_sessions = session_id.casefold() == "all"
+            launch = ImportLaunch(
+                action="preview" if form == "preview" else "run",
+                source=source,
+                session_id="" if all_sessions else session_id,
+                all=all_sessions,
+            )
+        elif form == "status":
+            launch = ImportLaunch(action="status")
+        elif form == "cancel":
+            launch = ImportLaunch(action="cancel")
+        else:
+            notice(text(tui_import.error_unknown_subcommand(form=form)), "warning")
+            return
+        self._open_import_view(launch)
+
+    def _open_import_view(self, launch: ImportLaunch) -> None:
+        """Enter the full-page import mode.
+
+        Same MODE contract as :meth:`_open_settings_view`: the transcript is
+        hidden, the dock stays in place and inert, and the page owns focus.
+        Its data loading is async in the widget's own worker, so the first
+        frame is the loading state rather than a blocked app.
+        """
+        if self._import_view is not None:
+            return
+        if self._settings_view is not None:
+            self._close_settings_view()
+        self._import_focus_restore = self.focused
+        view = HarnessImportView(launch)
+        self._import_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        # The import page shares the settings page's region contract, so it
+        # reuses that layout class (the same greyed dock, the same transcript
+        # slot) rather than introducing a second full-page skeleton.
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_import_view(self) -> bool:
+        """Leave the import mode and restore the conversation. True if open."""
+        view = self._import_view
+        if view is None:
+            return False
+        self._import_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._import_focus_restore
+        self._import_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass
+        return True
+
+    def on_harness_import_view_dismissed(self, message: HarnessImportViewDismissed) -> None:
+        """The page's esc hint/key — same exit as the mode's own Esc chain."""
+        message.stop()
+        self._close_import_view()
+
     def _cmd_settings(self, notice: NoticeFn) -> None:
         """``/settings`` — open the full-page settings surface.
 
@@ -36401,7 +36649,12 @@ class OperatorApp(App[None]):
         restored here and nowhere else. The transcript was only hidden, so it
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
+
+        The import page shares this region, so it is torn down here too: every
+        session-swap, /clear, approval and ctrl+C path already calls this
+        method, and a second copy of those nine call sites would drift.
         """
+        self._close_import_view()
         view = self._settings_view
         if view is None:
             return False
@@ -38333,7 +38586,7 @@ class OperatorApp(App[None]):
             # own line behind a dangling em-dash that read as truncation. This
             # also front-loads the answer to "did it take effect?" instead of
             # burying it after up to six key names.
-            parts.append(f"applied: {', '.join(live)}")
+            parts.append(_t(_x.config_applied(keys=", ".join(live))))
         # Verb agreement per clause (design review round 1, D7). Each of these
         # was only ever exercised with one key, and the multi-key form is the
         # COMMON one for at least `hosting, model_name` — the pair a user
@@ -38341,11 +38594,13 @@ class OperatorApp(App[None]):
         # is to be trusted about what did and did not happen cannot visibly
         # disagree with itself.
         if new_sessions:
-            verb = "takes" if len(new_sessions) == 1 else "take"
-            parts.append(f"{', '.join(new_sessions)} {verb} effect on /new")
+            parts.append(
+                _t(_x.config_effect_new(names=", ".join(new_sessions), count=len(new_sessions)))
+            )
         if relaunch:
-            verb = "needs" if len(relaunch) == 1 else "need"
-            parts.append(f"{', '.join(relaunch)} {verb} a relaunch")
+            parts.append(
+                _t(_x.config_needs_relaunch(names=", ".join(relaunch), count=len(relaunch)))
+            )
         if retired:
             tail = (
                 "is retired and does nothing" if len(retired) == 1 else "are retired and do nothing"
@@ -38404,18 +38659,19 @@ class OperatorApp(App[None]):
         # inventory reconciles at the turn boundary (`_reconcile_web_tools`),
         # and nothing on screen mentioned that lag.
         values = getattr(change, "values", {})
-        for key, label in (
-            ("web_search.enabled", "web search"),
-            ("web_fetch.enabled", "web fetch"),
+        for key, label_builder in (
+            ("web_search.enabled", _x.config_label_web_search),
+            ("web_fetch.enabled", _x.config_label_web_fetch),
         ):
             if key not in changed:
                 continue
             block = values.get(key.split(".")[0])
             enabled = bool(block.get("enabled", True)) if isinstance(block, Mapping) else True
+            label = _t(label_builder())
             parts.append(
-                f"{label} on — takes effect from your next turn"
+                _t(_x.config_toggle_on(label=label))
                 if enabled
-                else f"{label} off — calls will be refused until it is turned back on"
+                else _t(_x.config_toggle_off(label=label))
             )
         self._system_notice("config.yml changed: " + "; ".join(parts), kind)
 
@@ -39414,7 +39670,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("settled goals", style=section)]
+        rows: list[Any] = [Text(_t(_x.goals_settled_heading()), style=section)]
         for item in items:
             subject, facts = (list(item) + ["", ""])[:2]
             rows.append(Padding(Text(str(subject), style=heading), (0, 0, 0, 2)))
@@ -39434,7 +39690,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("teams", style=section)]
+        rows: list[Any] = [Text(_t(_x.skills_teams_heading()), style=section)]
         for item in items:
             name, facts, summary = (list(item) + ["", "", ""])[:3]
             rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
@@ -39462,7 +39718,7 @@ class OperatorApp(App[None]):
         section = Style(color=theme_mod.semantic_color("fg"), bold=True)
         heading = Style(color=theme_mod.semantic_color("muted"))
         body = Style(color=theme_mod.semantic_color("dim"))
-        rows: list[Any] = [Text("agents", style=section)]
+        rows: list[Any] = [Text(_t(_x.skills_agents_heading()), style=section)]
         for item in items:
             name, facts, summary = (list(item) + ["", "", ""])[:3]
             rows.append(Padding(Text(str(name), style=heading), (0, 0, 0, 2)))
@@ -39472,8 +39728,8 @@ class OperatorApp(App[None]):
                 rows.append(Padding(Text(str(summary), style=body), (0, 0, 0, 4)))
         if callable(getattr(self._session, "attach_agent_profile", None)):
             rows.append(Text())
-            rows.append(Text("Send: /agent <name> <message>", style=body))
-            rows.append(Text("Detach: /agent clear", style=body))
+            rows.append(Text(_t(_x.skills_send_agent()), style=body))
+            rows.append(Text(_t(_x.skills_detach_agent()), style=body))
         return RichBlock(Group(*rows))
 
     def _run_slash_command(
@@ -39888,6 +40144,8 @@ class OperatorApp(App[None]):
                 self.action_toggle_sidebar()
         elif command == "/settings":
             self._cmd_settings(notice)
+        elif command == "/import":
+            self._cmd_import(arg, notice)
         elif command == "/hub":
             # The Hub links surface. The action is SYNC and owns its own worker,
             # the fleet-door and usage-panel pattern: calling it directly keeps
@@ -40309,10 +40567,10 @@ class OperatorApp(App[None]):
         reopen = f"/resume {resumable_id}" if resumable_id else "/resume"
         parked: list[str] = []
         if wakes:
-            parked.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
+            parked.append(_t(_x.parked_wakes(count=wakes, shown=str(wakes))))
         if monitors:
-            parked.append(f"{monitors} monitor{'s' if monitors != 1 else ''}")
-        dormant_part = f" — {' and '.join(parked)} dormant until then" if parked else ""
+            parked.append(_t(_x.parked_monitors(count=monitors, shown=str(monitors))))
+        dormant_part = _t(_x.parked_dormant(parked=" and ".join(parked))) if parked else ""
         self._system_notice(f'stopped "{name}" — {reopen} reopens it{dormant_part}')
 
     def _mark_own_monitors_dormant(self, session: Any) -> int:
@@ -40805,7 +41063,7 @@ class OperatorApp(App[None]):
             # Named once, above the rows: every marked row below is a session the
             # press ASKS again and then leaves alone — the plain count would read
             # as "these will all be stopped".
-            qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
+            qualifiers.append(_t(_x.stop_all_already_leaving(shown=str(len(drained)))))
         if stalled_pids:
             # The other half: these are leaving too, but the press does NOT leave them
             # alone. CAUSE-NEUTRAL (design round 1 on #1541 D1, QA Q-1): the row tag
@@ -40813,10 +41071,7 @@ class OperatorApp(App[None]):
             # IS reporting — so a shared line naming one cause is false for the other.
             # FUTURE TENSE, because the identity gate can still refuse (QA Q-5 on #1527).
             n = len(stalled_pids)
-            qualifiers.append(
-                f"{n} leaving, but {'it' if n == 1 else 'they'} will be stopped, "
-                "not left to finish"
-            )
+            qualifiers.append(_t(_x.stop_all_will_be_stopped(count=n, shown=str(n))))
         # ONE LAYOUT, ONE QUALIFIER PER LINE, whenever any exists (design D2 on #1527 and
         # #1541, QA Q-2): folded into the header, the drained-only form alone was 72 cells
         # against the 70-cell notice body at 80 columns and wrapped, and a header wrap
@@ -40829,7 +41084,7 @@ class OperatorApp(App[None]):
             # never wrap off the row it qualifies.
             room = budget - len(lead) - len(tag)
             lines.append(f"{lead}{truncate_cells(name, room) if budget else name}{tag}")
-        lines.append(f"repeat /stop all within {STOP_ALL_WINDOW_S:g}s to stop them all")
+        lines.append(_t(_x.stop_all_repeat_hint(seconds=f"{STOP_ALL_WINDOW_S:g}")))
         self._stop_all_listed = frozenset(rec.pid for rec in targets)
         self._stop_all_listing = NoticeBlock("\n".join(lines), "warning")
         self._append_block(self._stop_all_listing)
@@ -43540,7 +43795,7 @@ class OperatorApp(App[None]):
                 current=self._current_selector(),
                 status=_status_line(
                     note,
-                    f"{STALE_LIST_LABEL} all providers — {error}",
+                    _t(_x.providers_stale_all_error(error=str(error))),
                     self._footer_persist_hint(),
                 ),
             )
@@ -47401,17 +47656,15 @@ class OperatorApp(App[None]):
     def _aside_can_fork(self) -> bool:
         """Whether ``^f`` would work right now — the card cannot know alone.
 
-        Two inputs, one on each side: the card must hold a settled exchange,
-        and the session must not be mid-turn. The second is not caution — the
-        loop owns the message list while it runs and pairs each tool call with
-        its result, so splicing a user message into a live batch produces a
-        request no provider will accept (``Session.adopt_aside`` refuses it).
+        The card must hold a settled exchange and a session must exist. A
+        running turn no longer disables it (decision D5): ``Session.adopt_aside``
+        QUEUES a mid-turn adopt and lands it at the turn's safe boundary, so the
+        key works whenever there is something to keep.
         """
         panel = self._aside_panel()
         if panel is None or not panel.is_open or not panel.fork_messages():
             return False
-        session = self._session
-        return session is not None and not session.is_streaming
+        return self._session is not None
 
     def _sync_aside_fork_hint(self) -> None:
         """Keep the card's footer honest about whether ``^f`` is live."""
@@ -47457,9 +47710,6 @@ class OperatorApp(App[None]):
         if session is None or not hasattr(session, "adopt_aside"):
             panel.set_notice("the session is still starting…")
             return
-        if session.is_streaming:
-            panel.set_notice("the agent is mid-turn — stop it first, then ^f")
-            return
         panel.set_notice("")
         self.run_worker(self._fork_aside_worker(session, pairs), thread=False, group="aside-fork")
 
@@ -47476,6 +47726,12 @@ class OperatorApp(App[None]):
         The card is closed BEFORE the rows are mounted so the conversation the
         user asked to keep is what they are left looking at, rather than a
         popup over it.
+
+        A QUEUED adopt (the session was mid-turn) mounts nothing here: the pair
+        lands at the turn's safe boundary and the session's ``history_delta``
+        paints it then, in its real place after the turn. Mounting it now would
+        draw the exchange above the turn's still-arriving output and then a
+        second time when the delta lands.
         """
         if session is not self._session or not self._source_commands_ready():
             return
@@ -47484,7 +47740,7 @@ class OperatorApp(App[None]):
             messages.append(Message.user(question))
             messages.append(Message.assistant(answer))
         try:
-            await session.adopt_aside(messages)
+            state = await session.adopt_aside(messages)
         except Exception as error:  # noqa: BLE001 — surfaced, never swallowed
             if session is self._session:
                 self._system_notice(f"could not fork the aside: {error}", "warning")
@@ -47492,6 +47748,9 @@ class OperatorApp(App[None]):
         if session is not self._session:
             return
         self._close_aside()
+        if state == "queued":
+            self._notice("aside queued — joins the chat when this turn ends")
+            return
         for question, answer in pairs:
             self._append_block(UserBlock(question))
             block = AssistantBlock()
@@ -49113,7 +49372,7 @@ class OperatorApp(App[None]):
         parts = [f"{AIDA_MARKER} {name}: {word}"]
         when = OperatorApp._aida_when(st)
         if when:
-            parts.append(f"next check-in {when}")
+            parts.append(_t(_x.aida_next_checkin(when=when)))
         # PLAIN COPY, not budget jargon (design round 1, D3): "0/2" never said
         # what counted as extra or what the ceiling was. The sentence keeps the
         # status line's label voice.
@@ -49122,8 +49381,12 @@ class OperatorApp(App[None]):
         # column a sidebar-open layout leaves, and "0 of\n2" split the pair
         # that D3's copy exists to make plain.
         parts.append(
-            f"extra check-ins used today: {int(st.get('extras_today', 0))}\u00a0"
-            f"of\u00a0{int(st.get('max_extra_per_day', 0))}"
+            _t(
+                _x.aida_extras_used(
+                    used=str(int(st.get("extras_today", 0))),
+                    maximum=str(int(st.get("max_extra_per_day", 0))),
+                )
+            )
         )
         return " — ".join(parts)
 
@@ -50722,7 +50985,7 @@ class OperatorApp(App[None]):
             short, rest = _split_launch_line(instructions)
             muted = Style(color=theme_mod.semantic_color("muted"))
             dim = Style(color=theme_mod.semantic_color("dim"))
-            lines = [Text(f"Opening your browser to sign in to {label}…", style=muted)]
+            lines = [Text(_t(_x.signin_opening(label=label)), style=muted)]
             if short:
                 lines.append(
                     Text.assemble(
@@ -50760,7 +51023,7 @@ class OperatorApp(App[None]):
             # user does not know: nothing to do here once the browser is done.
             lines.append(
                 Text(
-                    "Finished in the browser? This window continues on its own" " · ctrl+c cancels",
+                    _t(_x.signin_finished_hint()),
                     style=dim,
                 )
             )
@@ -50772,7 +51035,7 @@ class OperatorApp(App[None]):
                 # the screen — three wrapped lines of ~230 cells, uncopyable
                 # across the wrap — and it asked the user to choose between two
                 # URLs for one flow. The short link above already 302s here.
-                lines.append(Text(f"Full link: {url}", style=dim))
+                lines.append(Text(_t(_x.signin_full_link(url=url)), style=dim))
             self._append_block(RichBlock(Group(*lines)))
 
         def on_progress(message: str) -> None:
@@ -51464,7 +51727,7 @@ class OperatorApp(App[None]):
         paste_note = Text()
         paste_note.append("ctrl+v".ljust(name_width), style=muted)
         paste_note.append(
-            "attaches an image or file from the system clipboard",
+            _t(_x.help_paste_note()),
             style=dim,
         )
         # `ctrl+c` is documented for the same reason as `ctrl+v` above, and has
@@ -51512,11 +51775,11 @@ class OperatorApp(App[None]):
         # 74, and the bound is mutation-checked: a row padded to 75 fails it.
         copy_note = Text()
         copy_note.append("ctrl+c".ljust(name_width), style=muted)
-        copy_note.append("copies the highlighted range in the composer", style=dim)
+        copy_note.append(_t(_x.help_copy_note()), style=dim)
         copy_note_more = Text()
         copy_note_more.append("".ljust(name_width), style=muted)
         copy_note_more.append(
-            "move the caret to hand the key back; esc interrupts",
+            _t(_x.help_copy_note_more()),
             style=dim,
         )
         # The key reference joins the COMMAND TABLE directly, with no blank line
@@ -51541,7 +51804,7 @@ class OperatorApp(App[None]):
         # 63 — inside the bound with headroom, and pinned by the same test.
         skill_note = Text()
         skill_note.append("$<skill>".ljust(name_width), style=muted)
-        skill_note.append("runs a named skill on the rest of the line", style=dim)
+        skill_note.append(_t(_x.help_skill_note()), style=dim)
         # `/model saved` is documented here for the same reason as the rows
         # above: nothing else durable advertises it. The command table's
         # `/model` row is sized to 49 cells to stay whole at 80 columns and
@@ -51563,7 +51826,7 @@ class OperatorApp(App[None]):
         # composing to 61.
         model_saved_note = Text()
         model_saved_note.append("/model saved".ljust(name_width), style=muted)
-        model_saved_note.append("switches back to the config.yml default", style=dim)
+        model_saved_note.append(_t(_x.help_model_saved_note()), style=dim)
         lines.append(model_saved_note)
         lines.append(copy_note)
         lines.append(copy_note_more)
@@ -51614,7 +51877,7 @@ class OperatorApp(App[None]):
         cmd_paste_note = Text()
         cmd_paste_note.append("cmd+v".ljust(name_width), style=muted)
         cmd_paste_note.append(
-            "same, where the terminal forwards it; not Terminal.app",
+            _t(_x.help_cmd_paste_note()),
             style=dim,
         )
         lines.append(cmd_paste_note)
@@ -51761,15 +52024,13 @@ class OperatorApp(App[None]):
         title_note = Text()
         title_note.append("window title".ljust(name_width), style=muted)
         title_note.append(
-            "shows session state outside the app; shell: "
-            "`lop config edit display.terminal_title false`",
+            _t(_x.help_title_note()),
             style=dim,
         )
         title_note_more = Text()
         title_note_more.append("".ljust(name_width), style=muted)
         title_note_more.append(
-            "or set `LOCAL_OPERATOR_NO_TERMINAL_TITLE=1`; legend: "
-            "`lo ›` idle, `lo ⣾` running, `lo !` waiting for approval",
+            _t(_x.help_title_note_more()),
             style=dim,
         )
         # The notification note sits beside the title's for a reason: they are
@@ -51791,15 +52052,13 @@ class OperatorApp(App[None]):
             # the terminal is unfocused" describes the in-band focus gate,
             # which a detached runtime has no terminal to consult: it sends
             # precisely when NO terminal is watching.
-            "desktop toast when a turn finishes here, or when a detached "
-            "session needs you; shell: `lop config edit display.notifications false`",
+            _t(_x.help_notify_note()),
             style=dim,
         )
         notify_note_more = Text()
         notify_note_more.append("".ljust(name_width), style=muted)
         notify_note_more.append(
-            "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for "
-            "the terminal to be unfocused, detached ones click to reopen",
+            _t(_x.help_notify_note_more()),
             style=dim,
         )
         if not lines or lines[-1].plain:
@@ -59093,17 +59352,17 @@ def _notifications_listing(
     if total > NOTIFICATIONS_LISTING_ROWS:
         # The count of what is hidden, in BOTH forms: it is what lets the reader
         # reconcile the rows above with the number the receipt will name.
-        bound = f"  …{total - NOTIFICATIONS_LISTING_ROWS} more"
-        lines.append(bound if clearing else f"{bound} — ctrl+b shows or hides the sidebar")
+        bound = _t(_x.notifications_more(shown=str(total - NOTIFICATIONS_LISTING_ROWS)))
+        lines.append(bound if clearing else _t(_x.notifications_sidebar_hint(bound=bound)))
     if not clearing:
         # "all N" once the bound bites, "these" only when every row is on screen:
         # at 38 unread the short form named the ten rows above it while the write
         # covered all 38, one Enter away from a permanent clear of rows nobody
         # had seen (design round 1, D2).
         if total > NOTIFICATIONS_LISTING_ROWS:
-            lines.append(f"/notifications read marks all {total} read")
+            lines.append(_t(_x.notifications_mark_all_read(count=str(total))))
         else:
-            lines.append("/notifications read marks these read")
+            lines.append(_t(_x.notifications_mark_these_read()))
     return "\n".join(lines)
     return "\n".join(lines)
 
@@ -59310,7 +59569,7 @@ def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
     row = Text()
     legs = [status for status in statuses if status.enabled]
     if not legs:
-        row.append("(none)", style=dim)
+        row.append(_t(_x.providers_none()), style=dim)
         return row
     for index, status in enumerate(legs):
         if index:
@@ -59687,11 +59946,11 @@ def _catalogue_status(statuses: dict[str, str]) -> str:
     listed = sum(1 for s in statuses.values() if s in LISTED_STATUSES)
     bits: list[str] = []
     if len(stale) > 1 and len(stale) == listed:
-        bits.append(f"{STALE_LIST_LABEL} all providers")
+        bits.append(_t(_x.providers_stale_all()))
     elif stale:
-        bits.append(f"{STALE_LIST_LABEL} {', '.join(stale)}")
+        bits.append(_t(_x.providers_stale_named(names=", ".join(stale))))
     if empty:
-        bits.append(f"no live list: {', '.join(empty)}")
+        bits.append(_t(_x.providers_no_live_list(names=", ".join(empty))))
     return " · ".join(bits)
 
 

@@ -1,0 +1,62 @@
+{
+  "cli.hub_help.hub": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "`Agent Hub` is the product name for this surface"
+  },
+  "cli.hub_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.status_json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "desktop route payload is a product concept"
+  },
+  "cli.hub_help.links": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'links' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.links_json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'links_json' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.link": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.link_set": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_set' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.link_set_link_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_set_link_id' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.link_set_subscribe": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_set_subscribe' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.link_set_auto_push": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'link_set_auto_push' argument; flag/command tokens stay in situ"
+  },
+  "cli.hub_help.link_set_expected_revision": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "CAS semantics; abbreviation stays"
+  },
+  "cli.hub_help.link_set_confirm_public_egress": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "PUBLIC is a qualifier of origin; keep"
+  }
+}

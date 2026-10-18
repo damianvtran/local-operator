@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -123,6 +124,49 @@ def _mounted_panel(app: OperatorApp) -> HubLinksPanel:
     panel = app._hub_links_panel()
     assert panel is not None
     return panel
+
+
+#: Backstop for :func:`_await_settle`: how long a settle (a policy write+reread,
+#: a fetch, a thread-landed notice) may run before the wait calls it wedged.
+#: Generous on purpose -- it only ever fires on a genuine hang, and a hang must
+#: fail the test, not take the shard's job ceiling with it (the conftest's
+#: ``BOOT_DEADLOCK_GUARD_S`` is the same shape for the boot worker).
+SETTLE_GUARD_S = 30.0
+
+
+async def _await_settle(
+    pilot: Any,
+    predicate: Callable[[], bool],
+    *,
+    what: str,
+    guard: float = SETTLE_GUARD_S,
+) -> None:
+    """Pump until ``predicate`` holds; the deadline is a deadlock backstop only.
+
+    WHY THIS EXISTS. Every settle this file waits on (a policy write + its
+    post-write re-read, a fetch, a thread-landed refusal notice) crosses real
+    ``asyncio.to_thread`` hops, and ``pilot.pause()`` drains the message pump --
+    it does NOT wait for a thread (the conftest's ``await_session_boot``
+    documents the same reading for the boot worker's warm-up thread). A fixed
+    pause count was therefore a bet on thread scheduling, and it lost on a
+    loaded shard: CI run 38964693363, shard (3.13, 0), read
+    ``test_double_press_is_inert_until_the_write_settles`` after 8 pauses and
+    failed "the write must settle" with nothing wrong in the write. The
+    reference fix (301153e7d, "wait on the facts the cells assert, not pause
+    counts") established the shape: poll the FACT each turn and keep a bounded
+    backstop so a genuinely wedged worker still fails loudly. This helper is
+    that shape with the backstop in wall-clock time -- the unit the true wait is
+    in -- rather than a frame count: ``pause()`` already sleeps ~20 ms of wall
+    time per turn (``wait_for_idle``'s granularity), so a frame count is a clock
+    bet in disguise. Callers keep their own assertions on the same predicate,
+    which is true on return.
+    """
+
+    deadline = time.monotonic() + guard
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"the deadlock backstop ({guard:.0f}s) fired waiting for {what}")
+        await pilot.pause()
 
 
 @pytest.mark.asyncio
@@ -1048,10 +1092,9 @@ async def test_tui_second_write_after_the_grant_uses_the_served_revision(
         # test letting `s` fire mid-write: the exclusive hub-links worker
         # cancelled the confirm worker's re-read and a write CAS'd against the
         # stale revision (`link policy changed`).
-        for _ in range(12):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        # The settle crosses the grant's `to_thread` write AND the re-read that
+        # installs it -- wait on the fact, not a pause count (see `_await_settle`).
+        await _await_settle(pilot, lambda: not panel._refreshing, what="the grant write to settle")
         assert not panel._refreshing, "the grant write must settle"
         # The app re-read the inventory; `s` now uses the freshly served revision.
         await pilot.press("s")
@@ -1110,10 +1153,7 @@ async def test_second_press_during_the_grant_write_cannot_cancel_its_reread(
         await pilot.press("s")  # the racing press: inert, must not cancel the worker
         await pilot.pause()
         gate.set()
-        for _ in range(12):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        await _await_settle(pilot, lambda: not panel._refreshing, what="the grant write to settle")
         assert not panel._refreshing, "the grant write must settle"
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert "link policy changed" not in painted, painted
@@ -1291,10 +1331,10 @@ async def test_double_press_is_inert_until_the_write_settles(
         await pilot.press("s")  # the double press: inert while unsettled
         await pilot.pause()
         gate.set()
-        for _ in range(8):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        # This cell is the one CI 38964693363 (shard 3.13/0) lost to an 8-pause
+        # bet: the settle crosses the write's thread hop AND the re-read's --
+        # wait on the fact, not a pause count (see `_await_settle`).
+        await _await_settle(pilot, lambda: not panel._refreshing, what="the write to settle")
         assert not panel._refreshing, "the write must settle"
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert "link policy changed" not in painted, painted
@@ -1420,10 +1460,9 @@ async def test_a_cas_refusal_keeps_the_actions_blocked_until_the_reread_installs
             dataclasses.replace(row, policy_revision="stale-revision") for row in panel._rows
         ]
         await pilot.press("s")
-        for _ in range(40):
-            await pilot.pause()
-            if panel._notice:
-                break
+        # The refusal notice is painted only after the worker's `to_thread` write
+        # returns -- wait on the fact, not a pause count (see `_await_settle`).
+        await _await_settle(pilot, lambda: bool(panel._notice), what="the CAS refusal notice")
         assert panel._notice, "the CAS refusal must be on the card"
         assert "changed" in panel._notice.lower(), panel._notice
         # R1/U7 premise: the refusal painted while the re-read is still blocked.
@@ -1436,17 +1475,11 @@ async def test_a_cas_refusal_keeps_the_actions_blocked_until_the_reread_installs
         await pilot.pause()
         assert intents == [], "no new intent may post while the re-read is pending"
         release.set()
-        for _ in range(40):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        await _await_settle(pilot, lambda: not panel._refreshing, what="the installed re-read")
         assert not panel._refreshing, "the installed re-read settles the lifetime"
         # The installed revision is live: the same key now writes, no stale CAS.
         await pilot.press("s")
-        for _ in range(40):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        await _await_settle(pilot, lambda: not panel._refreshing, what="the second flip to settle")
     values = _policy_values(tmp_path, identity.link_id)
     assert values["subscribe"] is False, "the post-settle flip must land on the moved revision"
 
@@ -1502,16 +1535,12 @@ async def test_refresh_defers_while_the_write_is_pending_and_the_fresh_revision_
         assert started == [], "no refresh worker may start while the write+reread is pending"
         assert panel._refreshing, "the pending worker is untouched"
         gate.set()
-        for _ in range(40):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        await _await_settle(
+            pilot, lambda: not panel._refreshing, what="the pending worker's re-read"
+        )
         assert not panel._refreshing, "the pending worker must settle via its own re-read"
         await pilot.press("s")  # the served revision accepts the next flip
-        for _ in range(40):
-            await pilot.pause()
-            if not panel._refreshing:
-                break
+        await _await_settle(pilot, lambda: not panel._refreshing, what="the second flip to settle")
     values = _policy_values(tmp_path, identity.link_id)
     assert values["subscribe"] is True, "two clean flips: False on the gated write, True after"
 
@@ -1553,10 +1582,13 @@ async def test_reopening_during_a_pending_write_does_not_resurrect_a_stale_inten
         await pilot.pause()
         await pilot.pause()
         app.action_hub_links()  # reopen starts a NEW lifecycle
-        for _ in range(10):
-            await pilot.pause()
-            if not _mounted_panel(app)._refreshing and _mounted_panel(app)._rows:
-                break
+        # The reopen's fetch crosses a `to_thread` snapshot read -- wait on the
+        # fact (rows installed, no stale Saving... state), not a pause count.
+        await _await_settle(
+            pilot,
+            lambda: not _mounted_panel(app)._refreshing and bool(_mounted_panel(app)._rows),
+            what="the reopen's fetch to install rows",
+        )
         panel = _mounted_panel(app)
         assert not panel._refreshing, "the reopen must not inherit the stale Saving… state"
         assert panel._consent_link_id is None, "no stale intent survives a reopen"
@@ -1565,15 +1597,21 @@ async def test_reopening_during_a_pending_write_does_not_resurrect_a_stale_inten
         await pilot.press("down")
         await pilot.pause()
         gate.set()  # the orphaned thread write lands now
-        for _ in range(40):
-            await pilot.pause()
-            if _policy_values(tmp_path, identity.link_id).get("subscribe") is False:
-                break
+        # The landed write is observed IN THE FILE it writes; poll that fact, not
+        # a pause count (see `_await_settle`).
+        await _await_settle(
+            pilot,
+            lambda: _policy_values(tmp_path, identity.link_id).get("subscribe") is False,
+            what="the orphaned write to land",
+        )
         await pilot.press("r")  # the next read shows the landed write
-        for _ in range(40):
-            await pilot.pause()
-            if panel._rows and panel._rows[0].subscribe is False:
-                break
+        # The `r` re-read crosses another `to_thread` snapshot read -- wait on
+        # the fact the assertion reads, not a pause count (see `_await_settle`).
+        await _await_settle(
+            pilot,
+            lambda: bool(panel._rows) and panel._rows[0].subscribe is False,
+            what="the reopened panel to settle on the landed state",
+        )
         assert (
             panel._rows and panel._rows[0].subscribe is False
         ), "the reopened panel must settle on the landed state"
