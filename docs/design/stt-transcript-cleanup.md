@@ -29,8 +29,11 @@ surface sees it. Two levers exist, and the evidence says they are not equal:
    languages where the candidate token is a real word, a closed cue lexicon instead
    of generic bracketed-text removal, and a hard no-op on unknown languages. In v1
    this covers English and French only; CJK, Arabic, Hindi/Urdu and other scripts are
-   deliberately untouched by client rules. This is the only lever that helps the
-   **Radient** rung, which is the rung this machine actually runs today.
+   deliberately untouched by client rules. This is the only lever that can help the
+   **Radient** rung, and it needs a language hint to remove fillers; the phone web
+   client supplies `navigator.language` in slice 3 (the daemon already accepts the
+   form field). Without a hint the token rules no-op, while the closed cue lexicon
+   still removes non-text cues because cue labels are provider vocabulary.
 
 The first implementation slice is the shared cleanup module plus the provider-native
 ElevenLabs request fields, provenance and raw-text carrying, with tests. It does not
@@ -219,27 +222,30 @@ From the live API reference and guides fetched 2026-10-18:
 No blanket ASCII regex. No Unicode normalisation (`unicodedata.normalize` is not
 called; NFC/NFD changes are forbidden). No removal of combining marks, bidi controls,
 zero-width joiners, Arabic diacritics, or any script's characters except the exact
-matched filler/cue lexeme. The engine never rewrites, reorders or re-encodes text; it
-deletes matched spans from the original string and returns the original string
-untouched when no rule applies.
+matched filler/cue lexeme. The engine deletes matched spans from the original
+string; the only non-deletion edit is the sentence-initial capitalization rule in
+§4.3 (a removed sentence-initial filler leaves the next word's first letter
+upper-cased). It never otherwise rewrites, reorders or re-encodes text, and returns
+the original string untouched when no rule applies.
 
 ## 4. Design
 
 ### 4.1 One cleanup point
 
 Add `local_operator/stt/cleanup.py` (pure, no I/O, import-light). The functions
-are called from **every serving path**, not only the cascade:
+are called from **every path that serves the phone and the cascade**:
 
 * `stt/cascade.py::_run_radient_rung` — the desktop cascade's Radient rung;
 * `clients/stt.py::_transcribe_radient_sync` — the phone's live Radient adapter,
   which does not go through the cascade at all;
 * `stt/cascade.py::_run_elevenlabs_rung` and `_run_openai_rung` — provider options
-  before the call, client rules after it.
+  before the call, then client rules after it **only where the mode permits**
+  (Radient/OpenAI; `auto` on ElevenLabs is provider-native only, per §4.2).
 
 This is what makes the phone and desktop answers identical. The legacy
-Radient-only route (`server/routes/transcription.py`) is wired to the same pure
-function in a later slice if it still has callers; it is not allowed to drift
-silently.
+Radient-only route (`server/routes/transcription.py`) is outside this set until
+slice 3, which must either wire it to the same pure function or declare it
+deprecated; it is not allowed to drift silently.
 
 Why the pure function lives in `stt/cleanup.py` and not in the phone client: the
 phone is one surface, the daemon holds the provider keys and sees the provider's
@@ -273,8 +279,10 @@ threshold (0.8) and the transcript's script is compatible with the rule set;
 applies because the cue labels are provider vocabulary, not natural language.
 The probability gate is not optional: the live Hindi probe returned `hin` once
 and `por` twice for the same voice, so a bare label is not trustworthy. On the
-Radient path the response may omit language entirely; without a caller-supplied
-`language`, client rules do nothing. Cue removal still runs.
+Radient path the response may omit language entirely; slice 3 therefore has the
+phone web client send `navigator.language` as the caller-supplied hint (the daemon
+form field already exists). Without any hint, token rules do nothing; the cue
+lexicon still runs because its labels are provider vocabulary.
 
 Token sets (v1):
 
@@ -353,8 +361,9 @@ message and its `input_path`; changing that is a separate data-retention decisio
 
 The full design adds one `/settings` key under the existing `speech` section:
 
-`speech.transcription.cleanup` — enum `auto` (default), `provider`, `client`, `off`,
-`edit`; scope LIVE (the route reads it per request); per user/installation via
+`speech.transcription.cleanup` — enum `auto` (default), `provider`, `client`, `off`
+through slice 4; `edit` is added to the enum only in slice 5, when the code can
+accept it. Scope LIVE (the route reads it per request); per user/installation via
 `config.yml`. The first implementation slice uses the same vocabulary as a request
 field with a module-level default so the API is usable before the settings surface
 lands. A team-level default is out of scope; a team brief can select the per-user
@@ -367,6 +376,7 @@ default later without a new config mechanism.
 | Case | Expectation |
 |---|---|
 | `auto` on ElevenLabs | multipart has `no_verbatim=true`, `tag_audio_events=false`, `model_id=scribe_v2`; no `prompt`; no `transcript_edit` |
+| `auto` provenance | `outcome.cleanup == "elevenlabs.no_verbatim"`; `outcome.raw_text is None`; `outcome.raw_unavailable == "provider_no_verbatim"`; `outcome.language` is the provider's `language_code` |
 | `provider` | same as `auto`, no client rules run |
 | `client` | `no_verbatim=false`, `tag_audio_events=false`; client rules run |
 | `off` | neither `no_verbatim` nor `tag_audio_events` sent; text returned byte-identical |
@@ -386,13 +396,13 @@ Fixtures per language, each with a positive and a negative control:
 | en negative | `The album is in the sum. Hum a tune.` | byte-identical |
 | en `um` | `Um, the album is in the sum.` | byte-identical — `um` is not in the English set (Portuguese collision) |
 | en hyphen | `uh-huh, that works` | byte-identical (hyphen guard) |
-| NFD accent | `cafe\u0301 um` | byte-identical codepoints; the combining mark is not split from `e` |
+| NFD accent | `uh\u0301` | byte-identical; the combining mark blocks the token boundary (no split) |
 | ZWJ/ZWNJ | `uh\u200d` / `\u200cuh` | byte-identical; joiners preserved |
-| RTL control | `\u200fuh\u200f` | token may be removed if standalone; RLM/LRM controls preserved |
+| RTL control | `U+200F uh U+200F` (RLM around the token) | token may be removed if standalone; both U+200F controls preserved |
 | Arabic diacritic | `أُمّي` (with harakat) | byte-identical; no mark or letter removed |
 | en abbreviations | `UM and UH are universities.` | byte-identical (all-caps guard) |
-| en quote | `He said "um" and left.` | byte-identical inside quotes |
-| en code | `` `um = 1` `` / fenced block | byte-identical |
+| en quote | `He said "uh" and left.` | byte-identical inside quotes |
+| en code | `` `uh = 1` `` / fenced block | byte-identical |
 | fr | `Euh, je ne sais pas.` | `Je ne sais pas.` |
 | pt | `Um livro, por favor. Um momento.` | byte-identical |
 | ar | `أمي في البيت، وأمي تحب القراءة.` | byte-identical; bidi marks/diacritics preserved |
@@ -453,8 +463,11 @@ Fixtures per language, each with a positive and a negative control:
    quote/code/all-caps guards, span deletion, multilingual fixtures and negative
    controls, idempotency, `off` byte-equality. Wire into `auto`/`client` for **both
    Radient adapters** (`_run_radient_rung` and `_transcribe_radient_sync`) and the
-   OpenAI rung; carry `language_probability` so the language gate is real, and
-   no-op when the caller supplied no language and the provider's label is weak.
+   OpenAI rung; have the phone web client send `navigator.language` as the caller
+   hint; carry `language_probability` so the language gate is real, and no-op when
+   the caller supplied no language and the provider's label is weak. Add a
+   `POST /api/transcribe` Radient-rung integration test for both the hinted and
+   unhinted cases.
 4. **Settings surface.** `speech.transcription.cleanup` in `/settings` (enum,
    LIVE), i18n source + generated keys, consumer-default test, route reads the
    config, per-user opt-out. Design/UX review only if a visible control is added;
@@ -468,10 +481,11 @@ Fixtures per language, each with a positive and a negative control:
    workstream's.
 
 Slices 2 and 3 are the minimum that changes what this machine's users see: slice 2
-makes the ElevenLabs rung correct when it is used, slice 3 cleans the Radient rung
-that is used today. Slice 4 makes the behaviour optional per user. Slice 5 is the
-multilingual completeness path and stays opt-in because its evidence includes a
-real negative control.
+makes the ElevenLabs rung correct when it is used; slice 3 cleans the Radient rung
+that is used today by having the phone send its language hint and applying the
+same pure rules, with cue removal working even when no hint is present. Slice 4
+makes the behaviour optional per user. Slice 5 is the multilingual completeness path
+and stays opt-in because its evidence includes a real negative control.
 
 ## 7. Risks and open questions
 
@@ -536,17 +550,25 @@ for _, path in files:
             if b'"input_mode"' not in line or b"dictated" not in line:
                 continue
             entry = json.loads(line)
-            message = (entry.get("payload") or {}).get("message") or {}
+            payload = entry.get("payload") or {}
+            message = payload.get("message") or payload
             if message.get("input_mode") == "dictated":
                 n += 1
                 with_path += bool(message.get("input_path"))
 print({"dictated": n, "with_input_path": with_path, "scanned": len(files)})
 PY
 
-# ElevenLabs live probe (synthetic audio; repeat the Python block per clip)
-say -v Samantha -o en.aiff "Um, so I, uh, think we should ship the change."
+# ElevenLabs live probe (synthetic audio; this reproduces the `en` row only,
+# as a smoke test of the request shape — §2.5 is a sample, not a whole-table
+# replay. Repeat with the other `say` voices/texts to reproduce the rest.)
+# Writes only into a temporary directory; the repository is untouched.
+TMP="$(mktemp -d)"
+REPO="$HOME/local-operator"
+trap 'rm -rf "$TMP"' EXIT
+cd "$TMP"
+say -v Samantha -o en.aiff "Um, so I, uh, think we should ship the change. Uh, can you check the build?"
 afconvert -f WAVE -d LEI16 en.aiff en.wav
-.venv/bin/python - <<'PY'
+"$REPO/.venv/bin/python" - <<'PY'
 import json, subprocess
 import httpx
 
