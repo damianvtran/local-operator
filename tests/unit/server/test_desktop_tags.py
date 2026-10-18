@@ -211,3 +211,29 @@ def test_route_schema_publishes_store_caps() -> None:
 
     assert TagRegistry.model_json_schema()["properties"]["tags"]["maxItems"] == 32
     assert TagAssignment.model_json_schema()["properties"]["tags"]["maxItems"] == 8
+
+
+@pytest.mark.asyncio
+async def test_buffered_rename_and_old_name_creation_replays_without_regrouping(api) -> None:
+    client, root = api
+    first = await client.put("/v1/desktop/tags", json={"tags": [{"name": "Review"}]})
+    old_id = first.json()["result"]["tags"][0]["id"]
+    sid = "aaaaaaaaaaa1"
+    seed(root, sid)
+    assignment = await client.put(
+        f"/v1/desktop/sessions/{sid}/tags", json={"tags": [old_id], "primary": old_id}
+    )
+    assert assignment.status_code == 200, assignment.text
+    body = {"tags": [{"id": old_id, "name": "Renamed"}, {"name": "Review"}]}
+    response = await client.put("/v1/desktop/tags", json=body)
+    assert response.status_code == 200, response.text
+    renamed, fresh = response.json()["result"]["tags"]
+    assert renamed["id"] == old_id and renamed["conversations"] == 1
+    assert fresh["id"] != old_id and fresh["conversations"] == 0
+    replay = await client.put("/v1/desktop/tags", json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["result"] == response.json()["result"]
+    rows = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"]
+    row = next(row for row in rows if row["id"] == sid)
+    assert row["primary"] == old_id
+    assert row["tags"] == [{"id": old_id, "name": "Renamed"}]

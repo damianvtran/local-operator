@@ -9,6 +9,10 @@ Existing assignments retain their original order on a PUT; newly added tags
 append in caller order. Changing primary or reordering a request cannot rewrite
 assignment history. Usage counts include hidden/archived sessions, but not
 assignment files whose session directory has been deleted.
+Name-only entries reuse live category IDs for retry safety, except IDs explicitly
+claimed by another entry in the same draft (rename plus old-name creation).
+Consequently one PUT cannot express delete-and-recreate of the same live name;
+the UI must delete and create in separate writes to obtain a new identity.
 """
 
 from __future__ import annotations
@@ -85,6 +89,7 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
     existing = read_categories(root)
     known = {item["id"] for item in existing}
     by_name = {item["name"].casefold(): item["id"] for item in existing}
+    explicit_ids = {key for key, _ in desired if key is not None}
     ids: set[str] = set()
     names: set[str] = set()
     categories = []
@@ -100,7 +105,10 @@ def write_categories(root: Path, desired: list[tuple[str | None, str]]) -> list[
         if key is None:
             # A dropped PUT response may be retried without server-generated
             # IDs. Match the existing vocabulary rather than orphan assignments.
-            key = by_name.get(folded)
+            candidate = by_name.get(folded)
+            # Reserve explicit identities across the whole draft, regardless of
+            # row order: renaming X must permit a fresh tag with X's old name.
+            key = candidate if candidate not in explicit_ids else None
         if key is None:
             key = uuid4().hex[:10]
             while key in known or key in ids:
