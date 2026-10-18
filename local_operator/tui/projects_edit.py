@@ -196,17 +196,20 @@ def build_edit_plan(initial: ProjectEditState, final: ProjectEditState) -> EditP
 
     if not changed:
         return EditPlan(no_change=True)
-    # The store's Project validator refuses an inverted range on the MERGED
-    # row; checking the final state here is the same test one step earlier, so
-    # the refusal lands under a field instead of coming back from the app.
-    if start and target and target < start:
-        return _refusal("target_date", _t(_x.refusal_date_order()))
     try:
         edit = ProjectEdit(**changed)
     except ValidationError as exc:
         first = exc.errors()[0]
         field = str(first["loc"][0]) if first.get("loc") else "key"
         return _refusal(field, _sentence(ValueError(first["msg"])))
+    # FORMAT before ORDER (agent review round 1, R2): the store's date
+    # validators must speak first, or a malformed start date is reported as an
+    # inverted range under the untouched target field — the reader is sent to
+    # repair a value they never typed. Only a validated pair reaches the
+    # ordering rule, which is the same test the store's Project validator runs
+    # on the MERGED row, one step earlier so the refusal lands on a field.
+    if start and target and target < start:
+        return _refusal("target_date", _t(_x.refusal_date_order()))
     return EditPlan(edit=edit)
 
 

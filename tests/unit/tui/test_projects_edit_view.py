@@ -714,16 +714,17 @@ async def test_the_detail_footer_advertises_edit_add_and_remove_at_100_columns(
         assert _hint_width(view) <= view.size.width - 2, _hint_width(view)
 
 
-async def test_the_detail_footer_keeps_edit_and_add_at_the_60_column_floor(
+async def test_the_detail_footer_keeps_every_key_at_the_60_column_floor(
     tmp_path: Path,
 ) -> None:
-    """At 60x24 the named context sheds first, never the keys.
+    """At 60x24 the context sheds, never a write key (design D2 / UX U3 r1).
 
-    The page measures 56 cells, so the footer has 54. With the named context
-    the row needs 57; the bare verb brings it to
-    `↑↓ move · ↵ toggle · e edit · a add · esc back` = 46. `x remove` needs 11
-    more cells and genuinely does not fit there — it is unadvertised and
-    still works.
+    The page measures 56 cells, so the footer has 54. The named context cannot
+    coexist with the writes there; the bare verb plus a label-less `esc` buys
+    the cells for the page's newest action:
+    `↑↓ move · ↵ toggle · e edit · a add · x remove · esc` = 52. Removal is a
+    P2 capability, not an optional extra — hiding it at a supported size made
+    the feature undiscoverable.
     """
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path)
@@ -737,12 +738,16 @@ async def test_the_detail_footer_keeps_edit_and_add_at_the_60_column_floor(
         assert "e edit" in row, row
         assert "a add" in row, row
         assert "↵ toggle" in row, row
+        assert "x remove" in row, row
         assert "toggle groundwork" not in row, row
-        assert "x remove" not in row, row
+        assert "back" not in row, row
         assert view._move_hint.rendered() == "↑↓ move"
         assert view._edit_hint.rendered() == " · e edit"
         assert view._add_hint.rendered() == " · a add"
+        assert view._remove_hint.rendered() == " · x remove"
         assert view._open_hint.rendered() == " · ↵ toggle"
+        assert view._exit_hint.rendered() == " · esc"
+        assert _hint_width(view) == 52, _hint_width(view)
         assert _hint_width(view) <= view.size.width - 2, _hint_width(view)
 
 
@@ -806,3 +811,448 @@ async def test_enter_still_toggles_a_milestone_after_the_new_keys(
         project = _store(tmp_path).get_project_by_name("parity-spec")
         assert project is not None
         assert project.milestones[0].completed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Provenance and teardown (agent review round 1, R1)
+# ---------------------------------------------------------------------------
+
+
+def _without_project(view: Any, name: str) -> list[dict[str, Any]]:
+    """The composed rows with one project removed — a vanished/recomposed store."""
+    return [row for row in view._views if row["project"]["name"] != name]
+
+
+async def test_an_orphaned_milestone_prompt_never_writes_another_project(
+    tmp_path: Path,
+) -> None:
+    """R1's measured bug: a draft typed for A persisted on B after a recompose.
+
+    The prompt is anchored on the project it OPENED on, and every way out of
+    the detail disarms it. A submission that outlives its page is discarded —
+    never re-aimed at whatever project the detail shows now.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        await pilot.press("a")
+        await pilot.pause()
+        _prompt(view)._name_input.value = "belongs to parity"
+        assert view._mode == "milestone" and view._milestone_project_id
+
+        # The project the prompt was opened on leaves the composition.
+        view.load(views=_without_project(view, "parity-spec"), updated_at=0.0)
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "canvas", "an orphaned prompt must not survive a recompose"
+        assert view._milestone_prompt.display is False
+
+        # Even a forced submission is discarded rather than sent anywhere.
+        view._milestone_submitted("belongs to parity", "")
+        await pilot.pause()
+        await pilot.pause()
+        for name in ("parity-spec", "board-entry"):
+            project = _store(tmp_path).get_project_by_name(name)
+            assert project is not None
+            assert "belongs to parity" not in [m.name for m in project.milestones]
+
+
+async def test_an_explicit_canvas_load_closes_the_prompt_and_the_question(
+    tmp_path: Path,
+) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        await pilot.press("a")
+        await pilot.pause()
+        view.load(views=view._views, view="board", updated_at=0.0)
+        await pilot.pause()
+        assert view._mode == "canvas" and not view._milestone_prompt.display
+
+        await _detail(pilot, app, view)
+        await pilot.press("x")
+        await pilot.pause()
+        assert view._detail_page.confirming
+        view.load(views=view._views, view="board", updated_at=0.0)
+        await pilot.pause()
+        assert view._mode == "canvas"
+        assert not view._detail_page.confirming
+        assert view._confirm_row.display is False, "a stale question must not paint on the canvas"
+
+        # Reopening the detail must NOT resurrect the question armed.
+        await _detail(pilot, app, view)
+        assert not view._detail_page.confirming
+        assert view._confirm_row.display is False
+
+
+async def test_a_vanished_project_never_leaves_a_question_behind(
+    tmp_path: Path,
+) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        await pilot.press("x")
+        await pilot.pause()
+        assert view._detail_page.confirming
+
+        view.load(views=_without_project(view, "parity-spec"), updated_at=0.0)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert view._mode == "canvas"
+        assert not view._detail_page.confirming
+        assert view._confirm_row.display is False
+        assert view._notice and "no longer in the store" in view._notice
+
+
+# ---------------------------------------------------------------------------
+# Read-only sessions (QA round 1, Q1)
+# ---------------------------------------------------------------------------
+
+
+async def _read_only_page(tmp_path: Path) -> tuple[OperatorApp, Any, Any]:
+    """Boot a FOLLOWER session on a seeded store and open a project's detail.
+
+    The store is this machine's (the test host has no other), which is exactly
+    the mismatch the guard exists for: a page that can READ the owner's
+    projects must not write them from a non-owning session.
+    """
+    session = _ProjectSession()
+    session.owns_runtime = False
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    return app, session, None
+
+
+async def test_a_follower_session_cannot_write_any_project_or_milestone(
+    tmp_path: Path,
+) -> None:
+    """All five write paths refuse, say why, and leave the store byte-unchanged."""
+    session = _ProjectSession()
+    session.owns_runtime = False
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.pause()
+        before = _dump(tmp_path)
+        assert view._read_only is True
+        assert view._notice and "Read-only" in view._notice, (
+            "the state must be visible on entry"
+        )
+
+        # `c` must not open the create form.
+        await pilot.press("c")
+        await pilot.pause()
+        assert view._mode == "canvas" and not view._form_page.display
+        assert any("Read-only" in row for row in view.rendered_rows())
+
+        await _detail(pilot, app, view)
+        assert "e edit" not in _hint_text(view)
+        assert "a add" not in _hint_text(view)
+        assert "x remove" not in _hint_text(view)
+
+        # `e` must not open the edit form.
+        await pilot.press("e")
+        await pilot.pause()
+        assert view._mode == "detail"
+        assert any("Read-only" in row for row in view.rendered_rows())
+
+        # `a` must not open the prompt.
+        await pilot.press("a")
+        await pilot.pause()
+        assert view._mode == "detail" and not view._milestone_prompt.display
+
+        # `x` must not arm the question.
+        await pilot.press("x")
+        await pilot.pause()
+        assert not view._detail_page.confirming
+
+        # `↵` on the milestone must not toggle completion.
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "detail"
+
+        assert _dump(tmp_path) == before, "a follower's page must not write the store"
+
+
+async def test_a_queued_message_from_a_follower_cannot_reach_the_store(
+    tmp_path: Path,
+) -> None:
+    """The APP boundary refuses too, not only the page's keys (QA round 1, Q1).
+
+    A message already in flight (or posted by a host that skipped the page)
+    must not write anything for a follower session. Each of the five write
+    messages is delivered directly and the store is compared in full.
+    """
+    from local_operator.tui.widgets.projects_view import (
+        ProjectsViewEditSubmitted,
+        ProjectsViewFormSubmitted,
+        ProjectsViewMilestoneAddedRequested,
+        ProjectsViewMilestoneRemoved,
+        ProjectsViewMilestoneToggled,
+    )
+
+    session = _ProjectSession()
+    session.owns_runtime = False
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+        before = _dump(tmp_path)
+        project_id = before["id"]
+
+        for message in (
+            ProjectsViewFormSubmitted(edit=ProjectEdit(name="follower-created")),
+            ProjectsViewEditSubmitted(
+                project_id=project_id,
+                edit=ProjectEdit(title="FOLLOWER WRITE"),
+                project_name="parity-spec",
+            ),
+            ProjectsViewMilestoneToggled(
+                project_id, "groundwork", True, project_name="parity-spec"
+            ),
+            ProjectsViewMilestoneAddedRequested(
+                project_id=project_id, name="follower-added", project_name="parity-spec"
+            ),
+            ProjectsViewMilestoneRemoved(
+                project_id=project_id, name="groundwork", project_name="parity-spec"
+            ),
+        ):
+            app.post_message(message)
+            await pilot.pause()
+            await pilot.pause()
+
+        assert _dump(tmp_path) == before, "no queued write may land for a follower"
+        assert any("Read-only" in row for row in view.rendered_rows())
+
+
+async def test_a_normal_session_still_writes_after_the_read_only_guard(
+    tmp_path: Path,
+) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+        assert view._read_only is False
+        assert "e edit" in _hint_text(view)
+
+        await pilot.press("e")
+        await pilot.pause()
+        page = _form(view)
+        page._title_input.focus()
+        page._title_input.cursor_position = len(page._title_input.value)
+        await pilot.press(*" ok")
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert _dump(tmp_path)["title"] == "TUI parity spec ok"
+
+
+async def test_a_bare_terminal_with_no_session_stays_writable(tmp_path: Path) -> None:
+    """No session is not a follower: the local store is this terminal's own.
+
+    The boot factory is HELD unresolved rather than returning ``None``: a
+    factory that resolves to ``None`` is a pre-existing failed boot, while a
+    terminal that has not (yet) adopted a session is the real state this rule
+    is about. The page must be writable there.
+    """
+    import asyncio
+
+    _store(tmp_path).create_project(ProjectEdit(name="parity-spec", title="TUI parity spec"))
+    release = asyncio.Event()
+
+    async def held_factory() -> Any:
+        await release.wait()
+        return None
+
+    app = OperatorApp(held_factory)  # type: ignore[arg-type]
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+            if app._projects_view is not None:
+                break
+        assert app._session is None, "no session was adopted"
+        assert app._projects_read_only() is False
+        app._open_projects_view()
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        assert view._read_only is False
+        view.action_create()
+        await pilot.pause()
+        assert view._mode == "form", "a bare terminal keeps the create page"
+        release.set()
+
+
+# ---------------------------------------------------------------------------
+# The remove question owns the keyboard (UX round 1, U1)
+# ---------------------------------------------------------------------------
+
+
+async def test_tab_does_not_escape_the_remove_question(tmp_path: Path) -> None:
+    """`x → Tab → Enter` used to TOGGLE the milestone under the open question."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+        before = _dump(tmp_path)
+
+        await pilot.press("x")
+        await pilot.pause()
+        assert view._detail_page.confirming
+        await pilot.press("tab")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert not view._detail_page.confirming, "enter answers KEEP, it does not toggle"
+        assert view._mode == "detail"
+        assert _dump(tmp_path) == before, "nothing behind the question may be mutated"
+
+        # The advertised yes still works after the tab trap.
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        await pilot.pause()
+        project = _store(tmp_path).get_project_by_name("parity-spec")
+        assert project is not None
+        assert "groundwork" not in [m.name for m in project.milestones]
+
+
+# ---------------------------------------------------------------------------
+# A stale receipt and the done-gate copy (UX round 1, U2/U4)
+# ---------------------------------------------------------------------------
+
+
+async def test_typing_clears_the_no_change_receipt(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        await pilot.press("e")
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert view._mode == "form"
+        assert view._notice == "no changes to save"
+
+        page = _form(view)
+        page._title_input.focus()
+        page._title_input.cursor_position = len(page._title_input.value)
+        await pilot.press(*"!")
+        await pilot.pause()
+
+        assert view._notice is None, "a dirty draft must not keep the no-change receipt"
+
+
+async def test_the_done_gate_copy_names_no_force_done(tmp_path: Path) -> None:
+    """The form has no force_done control; its refusal must not send readers there."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+
+        await pilot.press("e")
+        await pilot.pause()
+        _form(view)._status_row.set_value("done")
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        rows = view.rendered_rows()
+        text = " ".join(rows)
+        assert "cannot mark done while these milestones are open" in text, rows
+        assert "groundwork" in text, rows
+        assert "force_done" not in text, rows
+        assert _dump(tmp_path)["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# A long milestone name keeps both answers (design round 1, D1)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_long_milestone_name_keeps_both_confirm_answers_visible(
+    tmp_path: Path,
+) -> None:
+    """A legal 67-cell name at 60x24: the question WRAPS, it is not truncated.
+
+    The old single-cell painter cut the whole sentence, so the destructive
+    question showed neither `y` nor `n`. The row may take two or three lines;
+    both answers and the name must be on screen.
+    """
+    long_name = "Release production migration and validate all customer integrations"
+    from rich.cells import cell_len
+
+    assert cell_len(long_name) == 67
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(
+        ProjectEdit(
+            name="parity-spec",
+            title="TUI parity spec",
+            milestones=[ProjectMilestone(name=long_name)],
+        )
+    )
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert view._detail_page.confirming
+        assert view._confirm_row.display
+        rendered = "\n".join(view.rendered_rows())
+        assert long_name in rendered, rendered
+        assert "y remove" in rendered, rendered
+        assert "n keep" in rendered, rendered
+        assert view._confirm_row.size.height >= 2, view._confirm_row.size
+        assert view._confirm_row.size.width <= view.size.width
+        # Both answer keys are still live.
+        await pilot.press("n")
+        await pilot.pause()
+        assert not view._detail_page.confirming
+        project = _store(tmp_path).get_project_by_name("parity-spec")
+        assert project is not None and project.milestones[0].name == long_name

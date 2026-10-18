@@ -95,10 +95,11 @@ from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 VIEWS: tuple[str, ...] = ("list", "board", "timeline")
 
 _t = tr("tui.projects")
-#: The edit form and the milestone prompt's copy (LOH-19 P2) live in their own
-#: namespace: ``tui.projects``' English hash is pinned by six shipped ledger
-#: rows, and adding a key there would un-ship them until every translator and
-#: auditor re-ran. New copy only.
+#: The edit form and the milestone prompt's copy (LOH-19 P2) lives in its own
+#: namespace so the new surface's sentences can be translated and audited as
+#: one unit. Shared page vocabulary stays in ``tui.projects`` — e.g. the
+#: read-only notice and the done-gate refusal this slice added — because it is
+#: the page's standing state, not the form's private copy.
 _te = tr("tui.projects_edit")
 # View identifiers drive routing and must stay stable; only their displayed
 # names move with the locale. Weak references never retain dismissed pages.
@@ -586,6 +587,26 @@ class ProjectsView(Vertical):
         #: The project the EDIT form was opened on, by id — the write's
         #: provenance while the form is up (the canvas cursor may move).
         self._edit_project_id: str | None = None
+        #: Whether this page may WRITE (QA round 1, Q1). A follower session's
+        #: runtime lives on another device, so the store this page reads is not
+        #: the one that owns the project; the app supplies the state on every
+        #: ``load`` and guards the write handlers as well (the page must never
+        #: be the only lock). A bare terminal with no session stays writable.
+        self._read_only: bool = False
+        #: Provenance of the open add-milestone prompt and the armed remove
+        #: question. Both name a project when they open, and a later page
+        #: change must never redirect their answer: a submission is ignored
+        #: unless the anchor is still the detail page's project (agent review
+        #: round 1, R1).
+        self._milestone_project_id: str | None = None
+        self._milestone_project_name = ""
+        self._confirm_project_id: str | None = None
+        self._confirm_project_name = ""
+        #: True while the pinned notice is the EDIT form's no-change receipt.
+        #: That sentence states a fact about the LAST save, so the next field
+        #: change invalidates it — a dirty form must not keep saying there is
+        #: nothing to save (UX round 1, U2).
+        self._notice_is_no_change_receipt = False
         self._tier: str = "month"
         #: Whether the tier above was chosen by hand (``+``/``-``) and, if so,
         #: the dated span it was chosen for. A manual zoom survives a
@@ -737,6 +758,7 @@ class ProjectsView(Vertical):
         view: str | None = None,
         associated: frozenset[str] | None = None,
         own_session: str | None = None,
+        read_only: bool | None = None,
     ) -> None:
         """Point the page at a fresh composition and paint it.
 
@@ -750,11 +772,19 @@ class ProjectsView(Vertical):
         the cursor onto it (an entry), while one that carries none (a refresh)
         never moves the reader. ``own_session`` is THIS process's session id,
         used by the detail page's `◆`/`own session` labels; sticky, so a
-        refresh load may omit it.
+        refresh load may omit it. ``read_only`` states whether writes are
+        available here (a follower session's runtime is elsewhere); ``None``
+        KEEPS the state, so a refresh that omits it cannot silently re-enable
+        writes, and the app passes it on every load it makes.
         """
+        if read_only is not None:
+            self._read_only = bool(read_only)
         # A recompose answers whatever the last notice said; `_resync_detail`
         # below may set its own (the vanished-project pop, UX round 1, U5).
-        self._notice = None
+        # The read-only sentence is the page's STANDING state, so it is
+        # re-stated first and a landed pop notice may still answer it.
+        self._notice = _t(copy.notice_read_only()) if self._read_only else None
+        self._notice_is_no_change_receipt = False
         self._views = list(views)
         if own_session is not None:
             self._own_session = own_session
@@ -763,9 +793,11 @@ class ProjectsView(Vertical):
             # outranks the open form. A plain recomposition (no `view`) leaves
             # the form — and the draft in it — exactly as it is.
             self._exit_form()
-        if view is not None and self._mode == "detail":
+        if view is not None and self._mode in ("detail", "milestone"):
             # An EXPLICIT canvas request outranks the open detail: the reader
-            # asked for the board/timeline, not the page they were on.
+            # asked for the board/timeline, not the page they were on. It also
+            # closes the add-milestone prompt and the remove question, which
+            # name a project this load is leaving (agent review round 1, R1).
             self._exit_detail()
         if associated is not None:
             self._associated = frozenset(str(pid) for pid in associated)
@@ -830,9 +862,7 @@ class ProjectsView(Vertical):
                 # A retarget is a fresh intent: whatever the last notice said
                 # belonged to the project being left (UX round 1).
                 self._notice = None
-                if self._mode == "milestone":
-                    self._close_milestone_prompt()
-                if self._mode == "detail":
+                if self._mode in ("detail", "milestone"):
                     # A named show is a CANVAS retarget, obeying the same rule
                     # `load` states for an explicit canvas request: the reader
                     # asked to be shown a project, not the page they were on.
@@ -976,7 +1006,22 @@ class ProjectsView(Vertical):
         back rather than blank the row (caught in the pass-5 frame).
         """
         self._notice = text or None
+        self._notice_is_no_change_receipt = False
         self._paint_chrome()
+
+    def refuse_read_only(self) -> bool:
+        """True when a write must be refused, saying why (QA round 1, Q1).
+
+        The ONE guard both layers call: the page's actions so a keypress or a
+        hint click cannot open a form/prompt/confirm, and the app's message
+        handlers so a message already in flight (or posted by a host that
+        skipped the page) cannot reach the store. It lives on the page because
+        the sentence is the page's own copy and the notice is its own row.
+        """
+        if not self._read_only:
+            return False
+        self.show_notice(_t(copy.notice_read_only()))
+        return True
 
     def _notice_text(self, width: int) -> Text:
         """The footer's notice line: warning ink, fitted to the MEASURED box.
@@ -1205,30 +1250,27 @@ class ProjectsView(Vertical):
     def _paint_confirm_row(self, width: int) -> None:
         """Paint the remove-milestone question, or hide it.
 
-        The question is one pinned line ABOVE the footer (the page is the
-        scroll container, so a row inside it would scroll away from the reader
-        answering it). The keys are the page's; this only states them.
+        The question is pinned ABOVE the footer (the page is the scroll
+        container, so a row inside it would scroll away from the reader
+        answering it). It WRAPS rather than truncating: a legal milestone name
+        is up to 80 characters, and the old single-cell painter cut the whole
+        sentence — in English and in Spanish alike — so the destructive
+        question lost both `y` and `n` at 60 columns (design round 1, D1). The
+        row may take two or three lines while confirming; the keys stay on
+        screen. ``width`` is accepted for the chrome's one geometry contract
+        but no longer used: the layout owns the wrapping.
         """
         name = self._detail_page.confirm_name if self._detail_page.confirming else ""
         if not name:
             self._confirm_row.display = False
             return
-        from rich.cells import cell_len
-
         sentence = _te(copy_edit.confirm_remove(name=name))
-        if cell_len(sentence) > width:
-            budget = max(width - 1, 1)
-            kept: list[str] = []
-            used = 0
-            for char in sentence:
-                size = cell_len(char)
-                if used + size > budget:
-                    break
-                kept.append(char)
-                used += size
-            sentence = "".join(kept).rstrip() + "…"
         self._confirm_row.update(
-            Text(sentence, style=Style(color=theme_mod.semantic_color("warning")), no_wrap=True)
+            Text(
+                sentence,
+                style=Style(color=theme_mod.semantic_color("warning")),
+                no_wrap=False,
+            )
         )
         self._confirm_row.display = True
 
@@ -1784,8 +1826,9 @@ class ProjectsView(Vertical):
         The page's OWN keys lead at the standard sizes: at 100x30 the row is
         ``↑↓ move · pgup/pgdn page · ↵ <context> · e edit · a add · x remove ·
         esc back`` (85 cells against the 94 the footer offers), and at 60x24
-        the context sheds its NAME so ``e edit · a add`` still fit
-        (``↑↓ move · ↵ toggle · e edit · a add · esc back`` = 46 against 54).
+        the context sheds its NAME and `esc` its label so the page's newest
+        action survives: ``↑↓ move · ↵ toggle · e edit · a add · x remove ·
+        esc`` = 52 against 54 (design D2 / UX U3 round 1).
         The canvas-era extras (``m message``, ``s start``, ``r refresh``) then
         ride only the widths where they still fit: they are additions to the
         detail page, not its reason. Only keys that WORK are hinted (a hinted
@@ -1867,12 +1910,13 @@ class ProjectsView(Vertical):
         #     cells, so it fits; the same row with `m message` is 97 and must
         #     shed it, and the long `add milestone` word alone brings it to 95.
         #     The SHORT `add` word is load-bearing at this width.
-        #   * 60 columns, 54 available: the named context (23 cells) cannot
-        #     coexist with both keys, so it sheds to the bare verb and the row
-        #     reads `↑↓ move · ↵ toggle · e edit · a add · esc back` = 46.
-        #     `x remove` (11 more) genuinely does not fit there and stays
-        #     unadvertised; it still WORKS, and the narrowest rung carrying it
-        #     measures 68 cells, so it appears from a 70-column page up.
+        #   * 60 columns, 54 available: the named context cannot coexist with
+        #     the writes, so it sheds to the bare verb and `esc` to its key.
+        #     Two rungs carry `x remove` there — 63 with the named context
+        #     and a bare `esc`, 52 with the bare verb — and the row reads
+        #     `↑↓ move · ↵ toggle · e edit · a add · x remove · esc` = 52. The
+        #     removal key must not be invisible at a supported size (design
+        #     D2).
         # `x` is carried only while a milestone row is selected — it removes
         # what the cursor names; `e`/`a` act on the page itself. The wider
         # rungs keep the long `add milestone` word so the key's fuller name is
@@ -1903,9 +1947,18 @@ class ProjectsView(Vertical):
         # `e`, the context's NAME, the context key, `↑↓ move`, `esc`'s label —
         # so a key never returns as the terminal narrows and every rung is a
         # superset of the one after it.
-        has_remove = self._detail_page.selected_milestone() is not None
-        short: list[tuple[HintButton, str, bool]] = [edit, add]
-        wide: list[tuple[HintButton, str, bool]] = [edit, add_long]
+        # A read-only page advertises no write key: `e`/`a`/`x` would open a
+        # form or a question the app then refuses, and a hint that promises an
+        # action the page cannot perform is the "nothing happens" bug one step
+        # earlier. The keys themselves stay bound, so a press still explains
+        # WHY via the notice (QA round 1, Q1).
+        has_remove = (
+            self._detail_page.selected_milestone() is not None and not self._read_only
+        )
+        short: list[tuple[HintButton, str, bool]] = [] if self._read_only else [edit, add]
+        wide: list[tuple[HintButton, str, bool]] = (
+            [] if self._read_only else [edit, add_long]
+        )
         if has_remove:
             short.append(remove)
             wide.append(remove)
@@ -1936,7 +1989,13 @@ class ProjectsView(Vertical):
                     # first.
                     rows.extend(
                         [
-                            rung([move, open_hint, edit, add], "back"),
+                            # 58 cells: the named context and both keys at 60
+                            # columns, where the extra `x remove` still fits
+                            # once `esc` sheds its label (design D2 / UX U3
+                            # round 1: a new primary action must not be
+                            # invisible at a supported size).
+                            rung([move, open_hint, edit, add, remove], ""),
+                            rung([move, open_bare, edit, add, remove], ""),
                             rung([move, open_bare, edit, add], "back"),
                             rung([move, open_bare, edit], ""),
                             rung([move, open_bare], ""),
@@ -2667,6 +2726,8 @@ class ProjectsView(Vertical):
     # -- the form state (S6d parity P4) -------------------------------------
     def action_create(self) -> None:
         """``c``: open the create form (spec §3), from the canvas or the detail."""
+        if self.refuse_read_only():
+            return
         if self._mode in ("canvas", "detail"):
             self._enter_form()
 
@@ -2713,6 +2774,11 @@ class ProjectsView(Vertical):
         canvas and says why.
         """
         destination = back or self._form_from
+        # A save/cancel also ends any detail-page question or prompt: the form
+        # can only have been opened over a detail page, and returning must not
+        # resurrect a question the reader left behind.
+        self._clear_detail_write_state()
+        self._notice_is_no_change_receipt = False
         self._form_page.disarm_confirm()
         self._form_page.display = False
         self._mode = "canvas"
@@ -2797,7 +2863,16 @@ class ProjectsView(Vertical):
         self.post_message(ProjectsViewFormSubmitted(edit=edit))
 
     def _form_state_changed(self) -> None:
-        """The form changed something the chrome states: re-arm it."""
+        """The form changed something the chrome states: re-arm it.
+
+        A field change also invalidates the no-change RECEIPT: that sentence
+        says the last save sent nothing, and leaving it pinned over a draft
+        that is dirty again tells the reader the opposite of the truth
+        (UX round 1, U2).
+        """
+        if self._notice_is_no_change_receipt:
+            self._notice = None
+            self._notice_is_no_change_receipt = False
         self.call_after_refresh(self._paint_chrome)
 
     def _form_focus_next(self) -> None:
@@ -2825,6 +2900,8 @@ class ProjectsView(Vertical):
         from), not the canvas cursor: a recomposition while the page is open
         may move the cursor, and an edit must land on what the reader saw.
         """
+        if self.refuse_read_only():
+            return
         if self._mode != "detail" or self._detail_page.confirming:
             # The y/n question owns the page; a hint click must not open a
             # form over an unanswered question.
@@ -2883,6 +2960,9 @@ class ProjectsView(Vertical):
         the silent success this page's rules forbid.
         """
         self.show_notice(_te(copy_edit.no_changes()))
+        # Only the FORM-side receipt is invalidated by later typing; the same
+        # sentence after a landed write belongs to the detail page.
+        self._notice_is_no_change_receipt = True
 
     def form_edited(self, *, changed: bool) -> None:
         """The app's edit write returned: back to the page, with the receipt.
@@ -2898,8 +2978,17 @@ class ProjectsView(Vertical):
 
     def action_add_milestone(self) -> None:
         """``a``: open the add-milestone prompt over the detail page."""
+        if self.refuse_read_only():
+            return
         if self._mode != "detail" or self._detail_page.confirming:
             return
+        project_id = self._detail_page.project_id or ""
+        if not project_id:
+            # No provenance, no prompt: an add that cannot name its project
+            # is the R1 write-to-another-project bug waiting to happen.
+            return
+        self._milestone_project_id = project_id
+        self._milestone_project_name = self._detail_page.project_name
         self._notice = None
         self._milestone_prompt.restyle(_style_resolver())
         self._milestone_prompt.clear()
@@ -2918,6 +3007,8 @@ class ProjectsView(Vertical):
         if self._mode != "milestone":
             return
         self._milestone_prompt.display = False
+        self._milestone_project_id = None
+        self._milestone_project_name = ""
         self._mode = "detail"
         self.refresh_bindings()
         self._paint_chrome()
@@ -2928,13 +3019,27 @@ class ProjectsView(Vertical):
             pass
 
     def _milestone_submitted(self, name: str, target_date: str) -> None:
-        """The prompt's local validation passed — the APP performs the write."""
+        """The prompt's local validation passed — the APP performs the write.
+
+        Anchored on the project the prompt OPENED on (agent review round 1,
+        R1): the live detail page can be retargeted underneath an orphaned
+        prompt, and a draft typed for A must never persist on B. A submission
+        whose mode or anchor no longer matches is discarded with the prompt,
+        not sent.
+        """
+        anchor = self._milestone_project_id or ""
+        if self._mode != "milestone" or not anchor:
+            self._close_milestone_prompt()
+            return
+        if anchor != (self._detail_page.project_id or ""):
+            self._close_milestone_prompt()
+            return
         self.post_message(
             ProjectsViewMilestoneAddedRequested(
-                project_id=self._detail_page.project_id or "",
+                project_id=anchor,
                 name=name,
                 target_date=target_date,
-                project_name=self._detail_page.project_name,
+                project_name=self._milestone_project_name,
             )
         )
 
@@ -2959,7 +3064,12 @@ class ProjectsView(Vertical):
 
     def action_remove_milestone(self) -> None:
         """``x``: ask the inline y/n question about the SELECTED milestone."""
-        if self._mode != "detail":
+        if self.refuse_read_only():
+            return
+        if self._mode != "detail" or self._detail_page.confirming:
+            # An unanswered question owns the page; re-arming it with a
+            # different row's name would move the destructive target under the
+            # reader's hands (UX round 1, U1).
             return
         milestone = self._detail_page.selected_milestone()
         if milestone is None:
@@ -2968,20 +3078,33 @@ class ProjectsView(Vertical):
             self.show_notice(_te(copy_edit.remove_needs_row()))
             return
         name = str(milestone.get("name") or "")
-        if not name:
+        anchor = self._detail_page.project_id or ""
+        if not name or not anchor:
             return
         self._notice = None
+        # The question is anchored on the project it was armed on: a retarget
+        # must never re-aim a same-named removal (agent review round 1, R1).
+        self._confirm_project_id = anchor
+        self._confirm_project_name = self._detail_page.project_name
         self._detail_page.arm_confirm(name)
 
     def _detail_remove_confirmed(self, remove: bool, name: str) -> None:
-        """The page's y/n answer: yes posts the write, no keeps the milestone."""
+        """The page's y/n answer: yes posts the write, no keeps the milestone.
+
+        Anchored on the project the question was ARMED on, never the live page.
+        """
+        anchor = self._confirm_project_id or ""
+        project_name = self._confirm_project_name
         if not remove:
+            return
+        if not anchor or anchor != (self._detail_page.project_id or ""):
+            self._clear_detail_write_state()
             return
         self.post_message(
             ProjectsViewMilestoneRemoved(
-                project_id=self._detail_page.project_id or "",
+                project_id=anchor,
                 name=name,
-                project_name=self._detail_page.project_name,
+                project_name=project_name,
             )
         )
 
@@ -3010,7 +3133,9 @@ class ProjectsView(Vertical):
         received the bound METHOD — always truthy — so the claim was never the
         one asked about (QA round 1, Q-2).
         """
-        return self._mode in ("form", "milestone")
+        return self._mode in ("form", "milestone") or (
+            self._mode == "detail" and self._detail_page.confirming
+        )
 
     def form_focus_previous(self) -> None:
         """``shift+tab`` — the app's priority binding delegates here.
@@ -3022,11 +3147,53 @@ class ProjectsView(Vertical):
         page first — the one key, delegated — which leaves ctrl+c and the rest
         of the app's bindings exactly where they were.
         """
+        if self._detail_page.confirming:
+            # The remove question owns shift+tab wherever focus went: the app
+            # delegated it here, and there is no field to move to — returning
+            # without the effort cycle is the whole answer (UX round 1, U1).
+            return
         if self._mode == "milestone":
             self._milestone_prompt.focus_prev_field()
             return
         if self._mode == "form" and not self._form_page.confirming:
             self._form_page.focus_prev_field()
+
+    def _answer_confirm(self, remove: bool) -> None:
+        """Answer the armed question once, through the one confirm path."""
+        name = self._detail_page.confirm_name
+        if not name:
+            return
+        self._detail_page.disarm_confirm()
+        self._detail_remove_confirmed(remove, name)
+
+    def on_key(self, event: Any) -> None:
+        """The remove question owns the keyboard wherever focus went.
+
+        The question is painted and armed by the VIEW, but its key discipline
+        lived on the detail page — so Tab (a focus move the page never sees)
+        took the reader off it, and the next Enter ran the view's own jump or
+        toggle binding while the question stayed up. Measured: `x → Tab →
+        Enter` marked a milestone completed with the destructive question
+        still on screen (UX round 1, U1). This handler is found before the
+        view's bindings, so once the question is up it owns y/n/enter/escape
+        and swallows Tab, Shift+Tab and every other printable key — no
+        background action can fire under an unanswered question.
+        """
+        if self._mode != "detail" or not self._detail_page.confirming:
+            return
+        if event.key == "y":
+            event.stop()
+            event.prevent_default()
+            self._answer_confirm(True)
+            return
+        if event.key in ("n", "enter", "escape"):
+            event.stop()
+            event.prevent_default()
+            self._answer_confirm(False)
+            return
+        if event.key in ("tab", "shift+tab") or event.is_printable:
+            event.stop()
+            event.prevent_default()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Disarm the canvas actions while the FORM owns the page.
@@ -3528,7 +3695,28 @@ class ProjectsView(Vertical):
         except Exception:
             pass  # focus is a nicety; the keys bubble to this view either way
 
+    def _clear_detail_write_state(self) -> None:
+        """Drop every page-scoped write draft and question (review round 1, R1).
+
+        ONE teardown for the remove question and the add-milestone prompt. Both
+        name a project, and every way out of the detail — project retarget, an
+        explicit canvas load, the project vanishing, or a plain mode exit —
+        must leave neither behind: a stale question must not be painted on the
+        canvas (or reopen armed on `d`), and an orphaned prompt must never
+        submit a draft into a project it was not opened on.
+        """
+        self._detail_page.disarm_confirm()
+        if self._milestone_prompt.display or self._mode == "milestone":
+            self._milestone_prompt.display = False
+        if self._mode == "milestone":
+            self._mode = "detail"
+        self._milestone_project_id = None
+        self._milestone_project_name = ""
+        self._confirm_project_id = None
+        self._confirm_project_name = ""
+
     def _exit_detail(self) -> None:
+        self._clear_detail_write_state()
         self._mode = "canvas"
         self._detail_page.display = False
         self._body.display = True
@@ -3634,6 +3822,8 @@ class ProjectsView(Vertical):
             )
             return
         if kind == "milestone":
+            if self.refuse_read_only():
+                return
             name = str(row.get("name") or "")
             if not name:
                 return

@@ -2557,10 +2557,19 @@ Screen.settings #input-dock #prompt-chevron {
 /* The discard confirm: one line that OWNS the keyboard while it is up (the
  * page hands it focus), so it reads as a question rather than as another
  * field. No box — the transcript's own inline-confirm grammar. */
-.projects-form-confirm,
-.projects-detail-confirm {
+.projects-form-confirm {
     width: 1fr;
     height: 1;
+}
+
+/* The remove question WRAPS instead of truncating: it interpolates a milestone
+ * name of up to 80 characters, and a one-cell row cut the WHOLE sentence at 60
+ * columns — both `y` and `n` disappeared from a destructive confirmation
+ * (design round 1, D1). Two or three lines while confirming is the intended
+ * state; the body above gives the height back. */
+.projects-detail-confirm {
+    width: 1fr;
+    height: auto;
 }
 
 /* The add-milestone prompt (LOH-19 P2): two of the form's field blocks,

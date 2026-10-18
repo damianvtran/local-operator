@@ -257,6 +257,22 @@ def test_an_inverted_range_is_refused_on_the_target_date() -> None:
     assert "before the start date" in plan.refusal
 
 
+def test_a_malformed_start_date_is_refused_under_the_start_field() -> None:
+    """FORMAT is checked before ORDER (agent review round 1, R2).
+
+    The raw lexicographic comparison used to run first, so typing a malformed
+    start date against an untouched target reported ``the target date is before
+    the start date`` and focused the field the reader never touched. The
+    store's validators now speak first, and the refusal names the start field
+    with the grammar the reader has to repair.
+    """
+    plan = build_edit_plan(_state(), _state(start_date="not-a-date"))
+    assert plan.edit is None
+    assert plan.field == "start_date", plan.field
+    assert "YYYY-MM-DD" in plan.refusal
+    assert "before the start date" not in plan.refusal
+
+
 def test_clearing_the_target_date_leaves_a_late_start_legal() -> None:
     plan = build_edit_plan(_state(), _state(start_date="2026-11-01", target_date=""))
     assert plan.edit is not None

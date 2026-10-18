@@ -131,6 +131,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
@@ -567,6 +568,10 @@ _t = tr("tui.app")
 #: its sentences — the "project vanished mid-write" refusals that only the
 #: write's own KeyError can produce; every other sentence belongs to the page.
 _te_projects_edit = tr("tui.projects_edit")
+#: The projects page's shared vocabulary. The app composes exactly one of its
+#: sentences — the EDIT form's done-gate refusal — because the store's own
+#: exception is raised HERE, in the write handler (UX round 1, U4).
+_te_projects = tr("tui.projects")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
@@ -20533,6 +20538,18 @@ class OperatorApp(App[None]):
             logger.debug("projects: associated set failed", exc_info=True)
             return frozenset()
 
+    def _projects_read_only(self) -> bool:
+        """Whether this session may WRITE projects (QA round 1, Q1).
+
+        A follower's runtime lives on another device: the projects this page
+        lists come from the OWNER's machine, and a write from here would land
+        in a store that does not own the project (measured: a follower edit,
+        add and remove all persisted). ``_is_viewer`` is the same predicate the
+        rest of the app uses for a non-owning session, and a bare terminal
+        with no session is False — locally writable, as it always was.
+        """
+        return _is_viewer(self._session)
+
     def _projects_payload(self) -> list[Any]:
         """Compose every project's view ONCE — the page's whole data input.
 
@@ -36947,6 +36964,7 @@ class OperatorApp(App[None]):
                     associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
                     own_session=self._own_session_id(),
+                    read_only=self._projects_read_only(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
@@ -36982,6 +37000,7 @@ class OperatorApp(App[None]):
             associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         # The start picker's rows ride the same seed (P5b): the page never reads
         # a registry, so the host hands them over while it is still building the
@@ -37083,6 +37102,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.set_start_rows(self._start_picker_rows())
 
@@ -37303,6 +37323,11 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        # The page already refuses the key; this is the boundary check that
+        # holds for a message already in flight (QA round 1, Q1) — a follower
+        # must not reach the store through ANY of this page's write paths.
+        if view.refuse_read_only():
+            return
         from local_operator.projects import MilestoneEdit, store_error_text
 
         try:
@@ -37328,6 +37353,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
 
     def _projects_manager_target(self) -> SendTarget | None:
@@ -37900,6 +37926,8 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        if view.refuse_read_only():
+            return
         import time as _time
 
         from local_operator.projects import store_error_text
@@ -37923,6 +37951,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.form_created(project.id, project.title or project.name)
 
@@ -37940,9 +37969,11 @@ class OperatorApp(App[None]):
         registry = self._project_registry()
         if view is None or registry is None:
             return
+        if view.refuse_read_only():
+            return
         import time as _time
 
-        from local_operator.projects import store_error_text
+        from local_operator.projects import ProjectDoneGateError, store_error_text
         from local_operator.tui.projects_edit import refusal_field
 
         try:
@@ -37953,6 +37984,16 @@ class OperatorApp(App[None]):
                 _te_projects_edit(_pe.refusal_project_gone_edit(name=name)), field="key"
             )
             return
+        except ProjectDoneGateError as exc:
+            # The store's own sentence ends with `pass force_done=true`, a
+            # parameter this form has no field for: a reader sent there has no
+            # route on this surface (UX round 1, U4). The form's copy names
+            # the milestones and stops at the actionable rule.
+            view.show_form_refusal(
+                _te_projects(_pc.refusal_done_gate(names=", ".join(exc.incomplete))),
+                field="status",
+            )
+            return
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
             view.show_form_refusal(store_error_text(exc), field=refusal_field(exc))
             return
@@ -37960,6 +38001,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.form_edited(changed=result.changed)
 
@@ -37978,6 +38020,8 @@ class OperatorApp(App[None]):
         view = self._projects_view
         registry = self._project_registry()
         if view is None or registry is None:
+            return
+        if view.refuse_read_only():
             return
         import time as _time
 
@@ -38008,6 +38052,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.milestone_added(message.name, action)
 
@@ -38022,6 +38067,8 @@ class OperatorApp(App[None]):
         view = self._projects_view
         registry = self._project_registry()
         if view is None or registry is None:
+            return
+        if view.refuse_read_only():
             return
         import time as _time
 
@@ -38043,6 +38090,7 @@ class OperatorApp(App[None]):
             views=self._projects_payload(),
             updated_at=_time.time(),
             own_session=self._own_session_id(),
+            read_only=self._projects_read_only(),
         )
         view.milestone_removed(message.name)
 

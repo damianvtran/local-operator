@@ -93,5 +93,7 @@
   "tui.projects.start.title": "start session",
   "tui.projects.start.filter_placeholder": "type to filter",
   "tui.projects.start.legend": "type to filter · ↑↓ move · ↵ select · esc close",
-  "tui.projects.start.more": "+{count} more"
+  "tui.projects.start.more": "+{count} more",
+  "tui.projects.notice_read_only": "Read-only: this conversation's runtime is on another device, so project changes are not available here.",
+  "tui.projects.refusal_done_gate": "cannot mark done while these milestones are open: {names}"
 }
