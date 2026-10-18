@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
+from rich.cells import cell_len
+
 from local_operator.i18n import keys as i18n_keys
 from local_operator.i18n.text import tr
 
@@ -37,6 +39,13 @@ _kt = i18n_keys.tui_review
 #: serves, in wire order, so an unknown lane is shown after the known four
 #: rather than dropped.
 LANE_ORDER = ("agent", "design", "qa", "ux")
+
+#: The lane-name column's fixed cell budget. A MINIMUM-width format
+#: (``f"{name:<6}"``) is not a clamp: a translated name wider than the budget
+#: pushes its clause right, so the two lane columns stop lining up in Hindi and
+#: every later locale that runs long. Measuring and padding to one budget keeps
+#: the clause's start column identical everywhere.
+LANE_NAME_CELLS = 8
 
 FETCH_STATES = (
     "pending",
@@ -244,6 +253,25 @@ def lane_display_name(lane: str) -> str:
     if lane == "ux":
         return _t(_kt.lane_ux())
     return lane
+
+
+def lane_name_cell(name: str) -> str:
+    """A lane name in EXACTLY :data:`LANE_NAME_CELLS` cells.
+
+    Cell-aware truncation, not a character count, because a Devanagari cluster
+    and a Latin letter are different widths. No ellipsis: the name is a column
+    label, and the full clause beside it is what a reader acts on. The view uses
+    this for both the list row and the detail pane, so the two columns cannot
+    disagree about where the clause starts.
+
+    ``truncate_cells`` (``tool_card``) is deliberately not reused here: that
+    helper lives in a widget module, and this module's whole constraint is that
+    it imports no Textual — the model is read by tests and (later) any surface.
+    """
+    clipped = name
+    while clipped and cell_len(clipped) > LANE_NAME_CELLS:
+        clipped = clipped[:-1]
+    return clipped + " " * (LANE_NAME_CELLS - cell_len(clipped))
 
 
 def lane_state_clause(lane: Mapping[str, Any]) -> str:
@@ -587,6 +615,7 @@ def row_notice(row: Mapping[str, Any]) -> str | None:
 
 __all__ = [
     "FETCH_STATES",
+    "LANE_NAME_CELLS",
     "LANE_ORDER",
     "CiClause",
     "Groups",
@@ -602,6 +631,7 @@ __all__ = [
     "lane_display_name",
     "lane_freshness_clause",
     "lane_lines",
+    "lane_name_cell",
     "lane_segment_tone",
     "lane_state_clause",
     "link_only_remedy",

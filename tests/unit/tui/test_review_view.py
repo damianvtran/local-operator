@@ -16,15 +16,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 from rich.text import Text
 
 from local_operator.code_requests import cache as fetch_cache
 from local_operator.code_requests import ledger, service
 from local_operator.code_requests.refs import Ref
 from local_operator.i18n import catalogues
+from local_operator.i18n import text as i18n_text
 from local_operator.paths import config_dir
 from local_operator.session.frontend_state import CommandScope, _slash_capabilities
 from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
+from local_operator.tui import review
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.review_view import ReviewView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -415,6 +418,35 @@ def test_the_namespace_has_key_parity_across_shipped_locales() -> None:
         if not path.is_file():
             continue
         assert set(catalogues.load_catalogue(locale, "tui.review")) == set(english), locale
+
+
+@pytest.mark.parametrize("locale", ["en", "fr", "es", "ru", "vi", "hi"])
+def test_the_lane_name_column_is_fixed_in_every_shipped_locale(locale: str) -> None:
+    """A longer translated lane name must not shift its clause.
+
+    The body line is ``"  " + lane_name_cell(name) + " " + clause``, so a fixed
+    cell here is what keeps that clause's start column identical in all six
+    shipped locales — the defect a minimum-width ``f"{name:<6}"`` would ship
+    silently the first time a translation ran past the budget.
+    """
+    assert catalogues.load_catalogue(locale, "tui.review")
+    previous = i18n_text.active_locale()
+    i18n_text.set_active_locale(locale)
+    try:
+        for lane in review.LANE_ORDER:
+            name = review.lane_display_name(lane)
+            cell = review.lane_name_cell(name)
+            assert cell_len(cell) == review.LANE_NAME_CELLS, (locale, lane, name)
+            # Body clause start: 2-cell indent + the name cell + 1 seam space.
+            assert 2 + cell_len(cell) + 1 == 2 + review.LANE_NAME_CELLS + 1
+    finally:
+        i18n_text.set_active_locale(previous)
+
+
+def test_lane_name_cell_truncates_an_overlong_name_without_moving_the_column() -> None:
+    cell = review.lane_name_cell("x" * 40)
+    assert cell == "x" * review.LANE_NAME_CELLS
+    assert cell_len(cell) == review.LANE_NAME_CELLS
 
 
 def test_the_view_does_not_shadow_textual_s_api() -> None:

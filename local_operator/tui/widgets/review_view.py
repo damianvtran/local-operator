@@ -433,7 +433,13 @@ class ReviewView(Vertical):
         if self._state == "error":
             text.append(_t(_kt.error_header()) + "\n\n", style="bold")
             text.append(_t(_kt.error_body()) + "\n")
-            text.append(_t(_kt.error_detail(error=self._error)) + "\n", style="dim")
+            # The technical detail can be a long path. It is one diagnostic
+            # line, not prose: letting it wrap pushed a scrollbar into an
+            # otherwise empty page at 60 columns.
+            text.append(
+                truncate_cells(_t(_kt.error_detail(error=self._error)), self._line_width()) + "\n",
+                style="dim",
+            )
             text.append(_t(_kt.error_retry()) + "\n", style="dim")
             return text
         if not self._visible_rows:
@@ -544,7 +550,7 @@ class ReviewView(Vertical):
         dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
         muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
         text.append("  ", style=dim)
-        text.append(f"{line.name:<6} ", style=dim)
+        text.append(review_model.lane_name_cell(line.name) + " ", style=dim)
         for tone in line.segments:
             text.append(
                 _SEGMENT_GLYPH[tone],
@@ -552,7 +558,7 @@ class ReviewView(Vertical):
             )
         strip_width = len(line.segments)
         gap = 1 if strip_width else 0
-        room = max(6, width - 2 - 7 - strip_width - gap)
+        room = max(6, width - 2 - review_model.LANE_NAME_CELLS - 1 - strip_width - gap)
         text.append(" " * gap, style=dim)
         text.append(truncate_cells(line.clause, room), style=muted)
         text.append("\n")
@@ -634,10 +640,11 @@ class ReviewView(Vertical):
             if lanes:
                 text.append("\n")
                 for line in lanes:
-                    first = f"{line.name:<7}"
-                    clause_lines = _wrap(line.clause, max(6, width - 7))
+                    cells = review_model.LANE_NAME_CELLS + 1
+                    first = review_model.lane_name_cell(line.name) + " "
+                    clause_lines = _wrap(line.clause, max(6, width - cells))
                     for position, clause in enumerate(clause_lines):
-                        text.append(first if position == 0 else " " * 7, style=dim)
+                        text.append(first if position == 0 else " " * cells, style=dim)
                         text.append(clause + "\n", style=muted)
         tags = [tag for tag in (review_model.relation_tag(row), review_model.acted_tag(row)) if tag]
         if tags:
