@@ -73,6 +73,53 @@ REPLACED_LITERALS = {
         "This turn was stopped because it kept being asked to keep going; the pending "
         "message was dropped. Reply with what to do next."
     ),
+    # session/session.py (enforcement slice C)
+    "image_unsupported": (
+        "{model} does not accept images — the images in this conversation are omitted "
+        "from its context. Switch to a model that accepts images to see them again."
+    ),
+    "request_too_large_dropped": (
+        "The provider refused the request as too large. Some screenshots have been "
+        "dropped from the context and the size limit tightened — send your message again."
+    ),
+    "too_large_run_compact": (
+        "This conversation is too large for the provider to accept. Run /compact to "
+        "summarise it, or start a new conversation."
+    ),
+    "too_large_images_removed": (
+        "The conversation is too large for this provider even after dropping screenshots, "
+        "so images have been removed from the context to keep the session working. If it "
+        "still fails, run /compact or start a new conversation."
+    ),
+    "image_rejected_history": (
+        "The provider rejected an image in this conversation's history. Images have been "
+        "dropped from the context so the session keeps working — send your message again."
+    ),
+    "stopped_session_held": (
+        "Work arriving into this stopped session is being held, not run. The held items "
+        "are read on the next turn."
+    ),
+    "auto_continuation_limit": "Auto-continuation limit ({limit}) reached; stopping.",
+    "steering_not_saved": (
+        "steering command {command_id} was not saved: {reason}; retry with the same " "command ID"
+    ),
+    "unsaved_asides": "{count} aside(s) you added to the conversation",
+    "unsaved_receipts": "{count} shell command record(s)",
+    "unsaved_records": "{summary} could not be saved before the conversation closed",
+    "model_info_incomplete": (
+        "Saved model information is incomplete; using {model}. This selection is now "
+        "saved for future resumes."
+    ),
+    "model_info_incomplete_headline": "Model selected",
+    "model_default_changed": (
+        "keeping {model}; default changed for new sessions. /model saved adopts it here"
+    ),
+    "model_default_changed_headline": "Model unchanged",
+    "effort_default_changed": (
+        "reasoning effort default changed for new sessions ({effort}); /model saved "
+        "adopts it here"
+    ),
+    "effort_default_changed_headline": "Effort default changed",
 }
 
 
@@ -111,6 +158,15 @@ def test_notice_event_carries_code_and_params_beside_text() -> None:
 _SAMPLE_PARAMS = {
     "budget_exhausted_retry": {"effort": "low"},
     "budget_exhausted_no_output": {"cause": "a stop was requested"},
+    "image_unsupported": {"model": "gpt-x"},
+    "auto_continuation_limit": {"limit": 8},
+    "steering_not_saved": {"command_id": "c1", "reason": "busy"},
+    "unsaved_asides": {"count": 2},
+    "unsaved_receipts": {"count": 1},
+    "unsaved_records": {"summary": "2 aside(s) you added to the conversation"},
+    "model_info_incomplete": {"model": "gpt-x"},
+    "model_default_changed": {"model": "gpt-x"},
+    "effort_default_changed": {"effort": "high"},
 }
 
 
