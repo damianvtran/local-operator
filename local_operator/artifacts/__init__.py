@@ -64,12 +64,15 @@ class ArtifactKind(StrEnum):
 
     ``video`` is DECLARED, not built (media wave-2): the kind is the
     designated additive field for a future payload and the seam-proof test
-    exercises the walk against it today. Only kinds with a real rung set are
+    exercises the walk against it today. ``audio`` is BUILT by the audio lane
+    (voiceover / sound effects): one artifact per job, an ``AudioAsset``
+    carrying the kind's own extra facts. Only kinds with a real rung set are
     ever EMITTED on a wire.
     """
 
     IMAGE = "image"
     VIDEO = "video"
+    AUDIO = "audio"
 
 
 #: One rung's outcome in an executor attempt. ``skipped`` is not "not
@@ -181,7 +184,11 @@ class JobAttempt:
     ``reason_class`` is a small closed token (see
     :data:`local_operator.artifacts.errors.REASON_CLASSES`) so consumers can
     group failures without parsing prose; ``message`` is the human-facing
-    sentence.
+    sentence. ``error_type`` is the WIRE's own structured code when the
+    provider sent one, which a surface branches on instead of the retryability
+    class — the audio contract's ``audio_rate_limited`` arriving on a
+    ``transient`` failure is the case that made the two distinct (a 429 is
+    retryable AND a quota-ish signal, and a card must say which).
     """
 
     route: str
@@ -189,6 +196,7 @@ class JobAttempt:
     reason_class: str = ""
     message: str = ""
     status_code: int | None = None
+    error_type: str | None = None
 
 
 @dataclass(frozen=True)

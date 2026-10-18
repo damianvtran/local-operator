@@ -720,6 +720,66 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "per-mode examples: `guide://video-generation`."
         ),
     ),
+    "generate_voiceover": ToolDocNotes(
+        notes=(
+            "Providers, in fixed priority order: Radient (signed-in account), "
+            "then ElevenLabs (stored key), then OpenAI (stored platform key). "
+            "Failover is automatic — if one refuses, the next runs, and the "
+            "result's `details.attempts` lists what each provider said. "
+            "Setup for every rung: `guide://sound-generation`.\n"
+            "\n"
+            "Cost: a Radient call is quoted by the server when it runs and "
+            "settles at billing; a BYOK (ElevenLabs / OpenAI) call reports no "
+            "per-call figure, so the harness estimates from its central rate "
+            "table and the receipt says so — `details.billing_basis` is "
+            "`estimated` and never a charge. The harness prompts for approval "
+            "(write tier) with a pre-spend estimate where one is knowable.\n"
+            "\n"
+            "The text may be anything from a word to 10,000 characters; "
+            "`voice` takes `female`, `male` or a provider voice id. "
+            "`language` is honoured only on the flash model "
+            "(`radient/voiceover-flash`, `eleven_flash_v2_5`); the "
+            "multilingual default pronounces whatever it is given and the "
+            "receipt's voicing notes say what was ignored. There are no "
+            "pronunciation dictionaries. Output is MP3.\n"
+            "\n"
+            "Cancelling (Esc / steering) stops the wait and best-effort "
+            "cancels the server job: it says what the server said — the "
+            "vendor may not be stoppable once it is running "
+            "(`cancellation.vendor_stopped: false` is a normal answer), and a "
+            "BYOK call may still bill on your provider account. Call again "
+            "for a fresh generation; nothing resumes.\n"
+            "\n"
+            "The generated audio is attached to the session — that IS the "
+            "delivery; do not re-save it to disk unless the user asks for a "
+            "file."
+        ),
+    ),
+    "generate_sound_effect": ToolDocNotes(
+        notes=(
+            "Providers, in fixed priority order: Radient (signed-in account), "
+            "then ElevenLabs (stored key). There is no OpenAI path for sound "
+            "effects. Failover is automatic; `details.attempts` lists what "
+            "each provider said. Setup: `guide://sound-generation`.\n"
+            "\n"
+            "`duration_s` is REQUIRED (0.5–30 seconds; no auto-duration) and "
+            "is the spend knob: an ElevenLabs estimate is priced per second "
+            "of generated audio, and a Radient call is quoted by the server. "
+            "`prompt_influence` (0–1) steers how literally the prompt is "
+            "followed; `loop` asks for a seamless loop. Output is MP3.\n"
+            "\n"
+            "Cost rules and the approval prompt are the same as "
+            "`generate_voiceover`: a BYOK figure is an `estimated` figure "
+            "from the central rate table, never a written charge.\n"
+            "\n"
+            "Cancelling is best-effort exactly as for `generate_voiceover`: "
+            "the receipt says whether the server could stop the vendor, and "
+            "a BYOK call may still bill. Call again for a fresh generation.\n"
+            "\n"
+            "The generated audio is attached to the session; do not re-save "
+            "it to disk unless the user asks for a file."
+        ),
+    ),
     "video_status": ToolDocNotes(
         notes=(
             "Answers the state of one video job (omit `job_id` for the "

@@ -2618,6 +2618,11 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     # availability signal (the ``generate_image`` rule above).
     "generate_video",
     "video_status",
+    # The audio pair (the frozen sound/voice contract): both are
+    # createIf-gated per direction (no OpenAI sound-effect path), so their
+    # presence in the built list is again the availability signal.
+    "generate_voiceover",
+    "generate_sound_effect",
     "code_requests",
 )
 

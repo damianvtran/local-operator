@@ -10,6 +10,7 @@ a lost message), and replay after externalization produces the same
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
@@ -296,3 +297,91 @@ async def test_an_audio_block_externalizes_with_its_type_and_default_mime(tmp_pa
     (audio,) = [b for b in replayed.content if isinstance(b, AudioContent)]
     assert base64.b64decode(audio.data) == WAV_BYTES
     assert audio.mime_type == "audio/wav"
+
+
+# ---------------------------------------------------------------------------
+# Waveform peaks (the audio lane's sidecar)
+# ---------------------------------------------------------------------------
+
+
+def test_put_then_get_peaks_round_trips(tmp_path):
+    store = AttachmentStore(tmp_path)
+    ref = store.put_bytes(b"ID3audio-bytes", "audio/mpeg")
+    assert ref is not None
+    from local_operator.audiogen.peaks import PEAK_BARS
+
+    bars = [round((i % 10) / 10.0, 4) for i in range(PEAK_BARS)]
+    assert store.put_peaks(ref.digest, bars) is True
+    payload = store.get_peaks(ref.digest)
+    assert payload is not None
+    assert payload["version"] == 1 and payload["bars"] == PEAK_BARS
+    assert payload["peaks"] == bars
+    # Idempotent: a second write keeps the first payload (the digest names
+    # the content the peaks summarise).
+    assert store.put_peaks(ref.digest, [0.0] * PEAK_BARS) is True
+    again = store.get_peaks(ref.digest)
+    assert again is not None and again["peaks"] == bars
+
+
+def test_get_peaks_misses_are_none_not_an_error(tmp_path):
+    store = AttachmentStore(tmp_path)
+    assert store.get_peaks("f" * 32) is None
+    ref = store.put_bytes(b"ID3audio-bytes", "audio/mpeg")
+    assert ref is not None
+    assert store.get_peaks(ref.digest) is None, "no sidecar yet"
+    # A damaged sidecar degrades exactly like an absent one.
+    (tmp_path / f"{ref.digest}.peaks.json").write_text("{not json")
+    assert store.get_peaks(ref.digest) is None
+    (tmp_path / f"{ref.digest}.peaks.json").write_text(
+        json.dumps({"version": 1, "bars": 240, "peaks": [0.1] * 10})
+    )
+    assert store.get_peaks(ref.digest) is None, "bars/peaks length mismatch is a miss"
+
+
+def test_cache_media_writes_the_audio_sidecar_once(tmp_path, monkeypatch, _isolate_attachments):
+    from local_operator.audiogen import peaks as peaks_module
+    from local_operator.session.attachments import cache_media
+
+    calls: list[int] = []
+    bars = [0.5] * peaks_module.PEAK_BARS
+    monkeypatch.setattr(peaks_module, "compute_peaks", lambda raw: calls.append(len(raw)) or bars)
+
+    block = cache_media(b"ID3audio-bytes", "audio/mpeg", kind="audio")
+    assert block is not None and block.kind == "audio"
+    assert block.attachment is not None
+    assert calls == [len(b"ID3audio-bytes")], "peaks computed once at creation"
+    payload = AttachmentStore(_isolate_attachments).get_peaks(block.attachment)
+    assert payload is not None and payload["peaks"] == bars
+
+    # Re-registering the same bytes pays NO second decode (the sidecar is the
+    # guard) and the block is unchanged — dedup, one copy, one computation.
+    again = cache_media(b"ID3audio-bytes", "audio/mpeg", kind="audio")
+    assert again is not None and again.attachment == block.attachment
+    assert len(calls) == 1
+
+
+def test_cache_media_leaves_images_without_a_sidecar(_isolate_attachments, monkeypatch):
+    from local_operator.audiogen import peaks as peaks_module
+    from local_operator.session.attachments import cache_media
+
+    def boom(raw):  # pragma: no cover - must never run for an image
+        raise AssertionError("images have no waveform")
+
+    monkeypatch.setattr(peaks_module, "compute_peaks", boom)
+    block = cache_media(PNG_BYTES, "image/png", kind="image")
+    assert block is not None
+    assert not list(_isolate_attachments.glob("*.peaks.json"))
+
+
+def test_a_host_without_the_decoder_writes_no_sidecar_but_keeps_the_audio(
+    _isolate_attachments, monkeypatch
+):
+    from local_operator.audiogen import peaks as peaks_module
+    from local_operator.session.attachments import cache_media
+
+    monkeypatch.setattr(peaks_module, "compute_peaks", lambda raw: None)
+    block = cache_media(b"ID3audio-bytes", "audio/mpeg", kind="audio")
+    assert block is not None and block.kind == "audio"
+    assert block.attachment is not None
+    assert AttachmentStore(_isolate_attachments).get_peaks(block.attachment) is None
+    assert not list(_isolate_attachments.glob("*.peaks.json"))
