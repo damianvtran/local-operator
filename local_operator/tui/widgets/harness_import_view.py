@@ -469,6 +469,8 @@ class HarnessImportView(Vertical):
             return _t(_kt.selected_count(count=str(len(self._selected))))
         if self._state == "preview":
             if self._narrow:
+                if self._only_metadata_only():
+                    return _t(_kt.preview_narrow_metadata(count=len(self._selected)))
                 return _t(_kt.preview_narrow(count=len(self._selected)))
             return _t(_kt.selected_count(count=str(len(self._selected))))
         if self._state == "progress" and self._job is not None and self._narrow:
@@ -503,10 +505,9 @@ class HarnessImportView(Vertical):
     def _hint_labels(self) -> dict[HintButton, str]:
         state = self._state
         labels: dict[HintButton, str] = {}
-        if self._narrow:
-            show_move = False
-        else:
-            show_move = state in ("sources", "sessions")
+        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+        # to shed it. Gate on the measured page width, not the pane breakpoint.
+        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
         if show_move:
             labels[self._hint_move] = _t(_kt.hint_move())
         if state == "sources":
@@ -517,7 +518,9 @@ class HarnessImportView(Vertical):
             labels[self._hint_all] = _t(_kt.all_none())
             labels[self._hint_enter] = _t(_kt.hint_preview())
         elif state == "preview":
-            labels[self._hint_enter] = _t(_kt.hint_import())
+            labels[self._hint_enter] = (
+                _t(_kt.hint_confirm()) if self._only_metadata_only() else _t(_kt.hint_import())
+            )
         elif state == "progress":
             labels[self._hint_cancel] = _t(_kt.hint_cancel())
         elif state == "result":
@@ -629,8 +632,12 @@ class HarnessImportView(Vertical):
         checked: bool = False,
     ) -> None:
         background = theme_mod.semantic_color("tint-select") if selected else None
+        # The row GROUND already says "selected"; the caret only points, so it
+        # uses muted ink. The accent remains on the checked box. This is the
+        # /resume rule and clears the light ramp's 4.29:1 accent-on-tint floor
+        # (D7).
         cursor_style = Style(
-            color=theme_mod.semantic_color("accent") if selected else None, bgcolor=background
+            color=theme_mod.semantic_color("muted") if selected else None, bgcolor=background
         )
         text.append("› " if selected else "  ", style=cursor_style)
         if marker:
@@ -658,6 +665,35 @@ class HarnessImportView(Vertical):
             return Style(color=theme_mod.semantic_color("dim")) if dim else None
         return Style(bgcolor=theme_mod.semantic_color("tint-select"))
 
+    def _body_leading_lines(self) -> int:
+        """Rendered lines above the first clickable row.
+
+        Both list renderers write a one-line heading followed by a blank line.
+        Sources additionally write the no-sources block (two more lines) when
+        no harness was detected. Click and scroll arithmetic must subtract
+        this prefix or every hit lands one row late.
+        """
+        if self._state == "sources":
+            no_sources = not self._sources or not any(info.detected for info in self._sources)
+            return 2 + (2 if no_sources else 0)
+        if self._state == "sessions":
+            return 2
+        return 0
+
+    def _only_metadata_only(self) -> bool:
+        selected = [row for row in self._sessions if row.source_id in self._selected]
+        return bool(selected) and all(row.availability != "full" for row in selected)
+
+    def _append_warning(self, text: Text, message: Any, width: int, *, prefix: str = "· ") -> None:
+        body = " ".join(str(message).split())
+        lines = _wrap_words(prefix + body, max(10, width)).splitlines() or [prefix]
+        for line in lines:
+            text.append(line + "\n", style="yellow")
+
+    def _append_result_row(self, text: Text, row: dict[str, Any], width: int) -> None:
+        for line in self._result_row(row).splitlines():
+            text.append(truncate_cells(line, width) + "\n")
+
     def _preview_rich(self) -> Text:
         text = Text()
         width = self._line_width()
@@ -679,13 +715,11 @@ class HarnessImportView(Vertical):
         )
         if self._preview.warnings:
             for warning in self._preview.warnings[:4]:
+                self._append_warning(text, warning.message, width)
+            if len(self._preview.warnings) > 4:
                 text.append(
-                    truncate_cells(
-                        _t(_kt.preview_warning_row(message=" ".join(str(warning.message).split()))),
-                        width,
-                    )
-                    + "\n",
-                    style="yellow",
+                    _t(_kt.preview_warnings(count=len(self._preview.warnings))) + "\n",
+                    style="dim",
                 )
         if self._request is not None and self._request.include_memory:
             text.append(
@@ -706,12 +740,19 @@ class HarnessImportView(Vertical):
             text.append(
                 "\n" + _wrap_words(_t(_kt.metadata_only_explain()), width) + "\n", style="dim"
             )
+        only_metadata = self._only_metadata_only()
         if self._narrow:
-            text.append(
-                "\n" + _t(_kt.selected_count(count=str(len(self._selected)))) + "\n", style="dim"
+            detail = (
+                _t(_kt.preview_narrow_metadata(count=len(self._selected)))
+                if only_metadata
+                else _t(_kt.preview_narrow(count=len(self._selected)))
             )
+            text.append("\n" + detail + "\n", style="dim")
         else:
-            text.append("\n" + _wrap_words(_t(_kt.preview_confirm()), width) + "\n", style="dim")
+            confirm = (
+                _t(_kt.preview_confirm_metadata()) if only_metadata else _t(_kt.preview_confirm())
+            )
+            text.append("\n" + _wrap_words(confirm, width) + "\n", style="dim")
         return text
 
     def _has_metadata_only(self) -> bool:
@@ -746,7 +787,7 @@ class HarnessImportView(Vertical):
                 for session_id in wanted:
                     row = done.get(session_id)
                     if row is not None:
-                        text.append(truncate_cells(self._result_row(row), width) + "\n")
+                        self._append_result_row(text, row, width)
                     elif progress.session_id == session_id:
                         text.append(
                             truncate_cells(_t(_kt.session_importing(session=session_id)), width)
@@ -759,7 +800,7 @@ class HarnessImportView(Vertical):
                         )
             else:
                 for row in progress.results:
-                    text.append(truncate_cells(self._result_row(row), width) + "\n")
+                    self._append_result_row(text, row, width)
                 if progress.session_id and progress.session_id not in done:
                     text.append(
                         truncate_cells(
@@ -794,7 +835,7 @@ class HarnessImportView(Vertical):
             + "\n",
         )
         for row in result.sessions:
-            text.append(truncate_cells(self._result_row(row.to_dict()), width) + "\n")
+            self._append_result_row(text, row.to_dict(), width)
         if (
             result.memory_imported
             or result.memory_skipped
@@ -815,30 +856,9 @@ class HarnessImportView(Vertical):
                 + "\n",
                 style="dim",
             )
-        for warning in result.warnings[:4]:
-            text.append(
-                truncate_cells(
-                    _t(_kt.result_warning_row(message=" ".join(str(warning.message).split()))),
-                    width,
-                )
-                + "\n",
-                style="yellow",
-            )
-        for session_result in result.sessions:
-            for warning in session_result.warnings[:3]:
-                text.append(
-                    truncate_cells(
-                        _t(
-                            _kt.result_session_warning(
-                                session=session_result.source_id,
-                                message=" ".join(str(warning).split()),
-                            )
-                        ),
-                        width,
-                    )
-                    + "\n",
-                    style="yellow",
-                )
+        warning_entries = _result_warning_entries(result)
+        for prefix, message in warning_entries[:4]:
+            self._append_warning(text, message, width, prefix=prefix)
         if any(row.outcome == "metadata_only" for row in result.sessions):
             text.append(
                 "\n" + _wrap_words(_t(_kt.metadata_only_explain()), width) + "\n", style="dim"
@@ -851,15 +871,9 @@ class HarnessImportView(Vertical):
                     else _kt.review_memory
                 )
                 text.append(_wrap_words(_t(key(path=path)), width) + "\n", style="dim")
-        if result.warnings or any(row.warnings for row in result.sessions):
+        if warning_entries:
             text.append(
-                _t(
-                    _kt.result_warnings(
-                        count=len(result.warnings)
-                        + sum(len(row.warnings) for row in result.sessions)
-                    )
-                )
-                + "\n",
+                _t(_kt.result_warnings(count=len(warning_entries))) + "\n",
                 style="yellow",
             )
         text.append("\n" + _wrap_words(_t(_kt.rerun_hint()), width) + "\n", style="dim")
@@ -877,23 +891,24 @@ class HarnessImportView(Vertical):
             and "import cancelled" in warnings
         ):
             outcome = "cancelled"
+        source_id = str(row.get("source_id", ""))
         target = str(row.get("target_session_id", "") or "")
-        if target:
-            return _t(
-                _kt.result_row(
-                    source_id=str(row.get("source_id", "")),
-                    target=target,
-                    outcome=_outcome_label(outcome),
-                    messages=int(row.get("messages", 0)),
-                )
-            )
-        return _t(
-            _kt.result_row_no_target(
-                source_id=str(row.get("source_id", "")),
+        head = (
+            _t(_kt.result_head(source_id=source_id, target=target))
+            if target
+            else _t(_kt.result_head_no_target(source_id=source_id))
+        )
+        detail = _t(
+            _kt.result_detail(
                 outcome=_outcome_label(outcome),
                 messages=int(row.get("messages", 0)),
             )
         )
+        # At 60x20 the body fits only the summary and one row line, so the
+        # part a user must read (outcome + message count) leads; the target is
+        # the second line and stays reachable by scrolling. Wide layouts keep
+        # the natural source → target reading order.
+        return detail + "\n" + head if self._narrow else head + "\n" + detail
 
     def _pane_text(self) -> str:
         if self._state == "preview" and self._preview is not None:
@@ -921,7 +936,7 @@ class HarnessImportView(Vertical):
             return
         if not offsets:
             return
-        top = sum(offsets[:index])
+        top = self._body_leading_lines() + sum(offsets[:index])
         height = max(1, self._body.size.height or 1)
         y = self._body.scroll_offset.y
         if top < y:
@@ -940,7 +955,14 @@ class HarnessImportView(Vertical):
             return
         if not self._body.region.contains(event.screen_x, event.screen_y):
             return
-        line = event.screen_y - self._body.region.y + self._body.scroll_offset.y
+        line = (
+            event.screen_y
+            - self._body.region.y
+            + self._body.scroll_offset.y
+            - self._body_leading_lines()
+        )
+        if line < 0:
+            return
         if self._state == "sources":
             index = line // 2
             if index < len(self._sources):
@@ -958,6 +980,34 @@ class HarnessImportView(Vertical):
                     event.stop()
                     return
                 offset += height
+
+
+def _result_warning_entries(result: Any) -> list[tuple[str, str]]:
+    """Deduplicate the same failure recorded at result and session level.
+
+    The core's failure path appends one ``ImportWarning`` to the result and the
+    same text to ``SessionResult.warnings``. Rendering both made one failure
+    read as two and doubled the count (R2-4). Dedupe on the source/session and
+    normalized message, keeping the first (result-level) copy.
+    """
+    entries: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for warning in result.warnings:
+        message = " ".join(str(warning.message).split())
+        key = (str(warning.session_id), message)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(("· ", message))
+    for session in result.sessions:
+        for warning in session.warnings:
+            message = " ".join(str(warning).split())
+            key = (str(session.source_id), message)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append((f"{session.source_id}: ", message))
+    return entries
 
 
 def _availability_label(info: Any) -> str:

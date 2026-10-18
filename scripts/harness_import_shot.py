@@ -129,13 +129,13 @@ def seed_long_omp() -> None:
             handle.write(json.dumps(record) + "\n")
 
 
-def seed_many_omp() -> None:
-    """Twelve synthetic sessions, for the list's scrollbar/truncation check."""
+def seed_many_omp(count: int = 12) -> None:
+    """Synthetic sessions, for the list's scrollbar/truncation/End checks."""
     source = FIXTURES / "omp" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
     records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
     root = Path.home() / ".omp" / "agent" / "sessions" / "--many--"
     root.mkdir(parents=True)
-    for index in range(12):
+    for index in range(count):
         copy = [dict(record) for record in records]
         copy[0]["title"] = f"Synthetic omp session {index:02d}"
         copy[1]["id"] = f"omp-synthetic-{index:02d}"
@@ -216,6 +216,8 @@ async def capture(pilot, state: str, out: Path) -> None:
             seed_many_omp()
         elif state == "long":
             seed_long_omp()
+        elif state == "long_end":
+            seed_many_omp(41)
         elif state in ("metadata_preview", "metadata_result"):
             seed_metadata_codex()
         else:
@@ -241,6 +243,8 @@ async def capture(pilot, state: str, out: Path) -> None:
             view = await open_omp(pilot)
             if state == "checked":
                 await pilot.press("space")
+            if state == "long_end":
+                view.action_jump(1)
             if state in ("preview", "progress", "cancel", "result"):
                 if state == "progress":
                     original_import = HarnessImportService._import_one
@@ -267,7 +271,7 @@ async def capture(pilot, state: str, out: Path) -> None:
     assert view is not None
     if state == "sessions":
         assert view._state == "sessions"
-    if state in ("many", "long", "checked"):
+    if state in ("many", "long", "long_end", "checked"):
         assert view._state == "sessions"
     if state == "metadata_preview":
         assert view._state == "preview"
@@ -302,9 +306,10 @@ async def main() -> None:
     parser.add_argument(
         "--before", action="store_true", help="base-commit frame: /import is absent"
     )
+    parser.add_argument("--theme", default="dark", help="OperatorApp theme name")
     args = parser.parse_args()
     columns, rows = (int(value) for value in args.size.lower().split("x"))
-    app = OperatorApp(lambda: _factory(FakeSession()))
+    app = OperatorApp(lambda: _factory(FakeSession()), theme_name=args.theme)
     async with app.run_test(size=(columns, rows)) as pilot:
         await pilot.pause()
         if args.before:
