@@ -3412,193 +3412,211 @@ class OpenAICompatClient:
                 or _effective_max_tokens(request)
             )
         )
-        async with self._http.stream(
-            "POST",
-            url,
-            json=body,
-            headers=headers,
-        ) as response:
-            if response.status_code >= 400:
-                await response.aread()
-                raise_for_status(response)
-            payloads = (
-                _iter_deepseek_sse_events(response)
-                if direct_deepseek
-                else _iter_sse_lines(response)
-            )
-            async for data in payloads:
-                if data == "[DONE]":
-                    done_received = True
-                    break
-                try:
-                    chunk = (
-                        json.loads(data, parse_constant=_reject_json_constant)
-                        if direct_deepseek
-                        else json.loads(data)
-                    )
-                except ValueError as exc:
-                    if direct_deepseek:
-                        raise ProviderError(
-                            502, "DeepSeek returned malformed SSE JSON", retryable=True
-                        ) from exc
-                    continue
-                if direct_deepseek and not isinstance(chunk, Mapping):
-                    raise ProviderError(
-                        502, "DeepSeek returned a non-object SSE chunk", retryable=True
-                    )
-                if isinstance(chunk.get("error"), (Mapping, str)):
-                    # In-band mid-stream failure: the status line already said
-                    # 200, so this chunk is the only channel the failure has.
-                    # Raise it NAMED; swallowing it left turns dying as
-                    # wordless interruptions (see _compat_stream_error).
-                    raise _compat_stream_error(chunk)
-                if not started:
-                    # First decoded chunk: the request is on the wire and the
-                    # provider is generating. Announce the boundary HERE rather
-                    # than at the end, because a supervisor commits no-replay
-                    # proof against it (see StreamStartEvent) and must not learn
-                    # the turn was accepted only once it has already finished.
-                    started = True
-                    yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
-                if isinstance(chunk.get("usage"), Mapping):
-                    raw = chunk["usage"]
-                    cache_read, cache_write = _compat_cache_usage(raw)
-                    completion_details = raw.get("completion_tokens_details") or {}
-                    usage = Usage(
-                        input_tokens=int(raw.get("prompt_tokens", 0)),
-                        output_tokens=int(raw.get("completion_tokens", 0)),
-                        cache_read_tokens=cache_read,
-                        cache_write_tokens=cache_write,
-                        # The thinking slice of the completion, when the wire
-                        # separates it. A SUBSET of ``completion_tokens`` (see
-                        # ``Usage.reasoning_tokens``), so analytics can split
-                        # output into thinking vs generation.
-                        reasoning_tokens=int(
-                            completion_details.get("reasoning_tokens", 0)
-                            if isinstance(completion_details, Mapping)
-                            else 0
-                        ),
-                        # Prompt tokens ARE the context the provider just read:
-                        # this is the authoritative context size the compaction
-                        # trigger prefers over its own estimate, and what the
-                        # TUI status line reports.
-                        context_tokens=int(raw.get("prompt_tokens", 0)) or None,
-                        # OpenRouter (and any OpenAI-compatible aggregator that
-                        # precomputes billing) reports the dollar amount it
-                        # actually charged here. Prefer it over the token×rate
-                        # estimate: the routed provider's own price, reasoning-
-                        # token split, cache discount and any override are all
-                        # already baked in, and none of them are recoverable from
-                        # the flat per-model table price.
-                        usd_cost=_usd_cost(raw),
-                        # WHEN the provider reported this usage, so a tariff row's
-                        # rates are evaluated in the window the CALL ran in rather
-                        # than in whichever window somebody reads the session back
-                        # in (see ``model/tariff.moment_for``).
-                        at_ms=tariff.now_ms(),
-                    )
-                    yield StreamUsageEvent(usage=usage)
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta") or {}
-                if direct_deepseek:
-                    # A finish seals the completion. Usage-only trailers may
-                    # still arrive before DONE, but later executable tools (or
-                    # text/reasoning) must never enter the assembled turn.
-                    if finish_reason is not None:
-                        new_finish = choice.get("finish_reason")
-                        if any(
-                            delta.get(field)
-                            for field in (
-                                "content",
-                                "reasoning_content",
-                                "reasoning",
-                                "reasoning_details",
-                                "tool_calls",
-                                "refusal",
-                            )
-                        ) or (new_finish is not None and new_finish != finish_reason):
+        try:
+            async with self._http.stream(
+                "POST",
+                url,
+                json=body,
+                headers=headers,
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    raise_for_status(response)
+                payloads = (
+                    _iter_deepseek_sse_events(response)
+                    if direct_deepseek
+                    else _iter_sse_lines(response)
+                )
+                async for data in payloads:
+                    if data == "[DONE]":
+                        done_received = True
+                        break
+                    try:
+                        chunk = (
+                            json.loads(data, parse_constant=_reject_json_constant)
+                            if direct_deepseek
+                            else json.loads(data)
+                        )
+                    except ValueError as exc:
+                        if direct_deepseek:
                             raise ProviderError(
-                                502,
-                                "DeepSeek returned completion data after its finish reason",
+                                502, "DeepSeek returned malformed SSE JSON", retryable=True
+                            ) from exc
+                        continue
+                    if direct_deepseek and not isinstance(chunk, Mapping):
+                        raise ProviderError(
+                            502, "DeepSeek returned a non-object SSE chunk", retryable=True
+                        )
+                    if isinstance(chunk.get("error"), (Mapping, str)):
+                        # In-band mid-stream failure: the status line already said
+                        # 200, so this chunk is the only channel the failure has.
+                        # Raise it NAMED; swallowing it left turns dying as
+                        # wordless interruptions (see _compat_stream_error).
+                        raise _compat_stream_error(chunk)
+                    if not started:
+                        # First decoded chunk: the request is on the wire and the
+                        # provider is generating. Announce the boundary HERE rather
+                        # than at the end, because a supervisor commits no-replay
+                        # proof against it (see StreamStartEvent) and must not learn
+                        # the turn was accepted only once it has already finished.
+                        started = True
+                        yield StreamStartEvent(response_id=_stream_id(chunk.get("id")))
+                    if isinstance(chunk.get("usage"), Mapping):
+                        raw = chunk["usage"]
+                        cache_read, cache_write = _compat_cache_usage(raw)
+                        completion_details = raw.get("completion_tokens_details") or {}
+                        usage = Usage(
+                            input_tokens=int(raw.get("prompt_tokens", 0)),
+                            output_tokens=int(raw.get("completion_tokens", 0)),
+                            cache_read_tokens=cache_read,
+                            cache_write_tokens=cache_write,
+                            # The thinking slice of the completion, when the wire
+                            # separates it. A SUBSET of ``completion_tokens`` (see
+                            # ``Usage.reasoning_tokens``), so analytics can split
+                            # output into thinking vs generation.
+                            reasoning_tokens=int(
+                                completion_details.get("reasoning_tokens", 0)
+                                if isinstance(completion_details, Mapping)
+                                else 0
+                            ),
+                            # Prompt tokens ARE the context the provider just read:
+                            # this is the authoritative context size the compaction
+                            # trigger prefers over its own estimate, and what the
+                            # TUI status line reports.
+                            context_tokens=int(raw.get("prompt_tokens", 0)) or None,
+                            # OpenRouter (and any OpenAI-compatible aggregator that
+                            # precomputes billing) reports the dollar amount it
+                            # actually charged here. Prefer it over the token×rate
+                            # estimate: the routed provider's own price, reasoning-
+                            # token split, cache discount and any override are all
+                            # already baked in, and none of them are recoverable from
+                            # the flat per-model table price.
+                            usd_cost=_usd_cost(raw),
+                            # WHEN the provider reported this usage, so a tariff row's
+                            # rates are evaluated in the window the CALL ran in rather
+                            # than in whichever window somebody reads the session back
+                            # in (see ``model/tariff.moment_for``).
+                            at_ms=tariff.now_ms(),
+                        )
+                        yield StreamUsageEvent(usage=usage)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    if direct_deepseek:
+                        # A finish seals the completion. Usage-only trailers may
+                        # still arrive before DONE, but later executable tools (or
+                        # text/reasoning) must never enter the assembled turn.
+                        if finish_reason is not None:
+                            new_finish = choice.get("finish_reason")
+                            if any(
+                                delta.get(field)
+                                for field in (
+                                    "content",
+                                    "reasoning_content",
+                                    "reasoning",
+                                    "reasoning_details",
+                                    "tool_calls",
+                                    "refusal",
+                                )
+                            ) or (new_finish is not None and new_finish != finish_reason):
+                                raise ProviderError(
+                                    502,
+                                    "DeepSeek returned completion data after its finish reason",
+                                    retryable=True,
+                                )
+                    for reasoning_key in ("reasoning_content", "reasoning"):
+                        fragment = delta.get(reasoning_key)
+                        if isinstance(fragment, str) and fragment:
+                            envelope.charge(fragment)
+                            reasoning_parts.setdefault(reasoning_key, []).append(fragment)
+                            # SURFACED as well as collected. The reasoning is kept
+                            # for replay whether or not anyone listens, but a
+                            # caller that sees no ``text_delta`` has no way to tell
+                            # "the model thought and said nothing" from "the client
+                            # threw away what it said" without this event -- the
+                            # ambiguity behind a "reply carried no tool call and no
+                            # text" rejection that could as easily have been ours.
+                            # Emitted on the reasoning channel only, so every
+                            # consumer that ignores it renders exactly the turn it
+                            # rendered before.
+                            yield StreamReasoningDelta(delta=fragment)
+                    text = delta.get("content")
+                    if text:
+                        # The envelope bounds what the WIRE sent, so it is charged
+                        # the raw delta, markup included.
+                        envelope.charge(text)
+                        visible = markup_filter.feed(text)
+                        if visible:
+                            replay_text.append(visible)
+                            streamed_text = True
+                            yield StreamTextDelta(delta=visible)
+                    refusal = delta.get("refusal")
+                    if refusal:
+                        envelope.charge(str(refusal))
+                        refusal_parts.append(str(refusal))
+                    for tool_delta in delta.get("tool_calls") or []:
+                        index = int(tool_delta.get("index", 0))
+                        function = tool_delta.get("function") or {}
+                        call_id = tool_delta.get("id")
+                        name = function.get("name")
+                        saved = replay_calls.setdefault(
+                            index, {"id": "", "name": "", "arguments": ""}
+                        )
+                        if call_id:
+                            saved["id"] = call_id
+                        if name:
+                            envelope.charge(name)
+                            saved["name"] += name
+                        envelope.charge(function.get("arguments") or "")
+                        saved["arguments"] += function.get("arguments") or ""
+                        if call_id:
+                            yield StreamToolCallDelta(index=index, id=call_id)
+                        if name:
+                            yield StreamToolCallDelta(index=index, name=name)
+                        argument_delta = function.get("arguments")
+                        if argument_delta:
+                            yield StreamToolCallDelta(index=index, argument_delta=argument_delta)
+                    if choice.get("finish_reason"):
+                        finish_reason = str(choice["finish_reason"])
+                        if direct_deepseek and finish_reason == "insufficient_system_resource":
+                            raise ProviderError(
+                                503,
+                                "DeepSeek reported insufficient_system_resource",
                                 retryable=True,
                             )
-                for reasoning_key in ("reasoning_content", "reasoning"):
-                    fragment = delta.get(reasoning_key)
-                    if isinstance(fragment, str) and fragment:
-                        envelope.charge(fragment)
-                        reasoning_parts.setdefault(reasoning_key, []).append(fragment)
-                        # SURFACED as well as collected. The reasoning is kept
-                        # for replay whether or not anyone listens, but a
-                        # caller that sees no ``text_delta`` has no way to tell
-                        # "the model thought and said nothing" from "the client
-                        # threw away what it said" without this event -- the
-                        # ambiguity behind a "reply carried no tool call and no
-                        # text" rejection that could as easily have been ours.
-                        # Emitted on the reasoning channel only, so every
-                        # consumer that ignores it renders exactly the turn it
-                        # rendered before.
-                        yield StreamReasoningDelta(delta=fragment)
-                text = delta.get("content")
-                if text:
-                    # The envelope bounds what the WIRE sent, so it is charged
-                    # the raw delta, markup included.
-                    envelope.charge(text)
-                    visible = markup_filter.feed(text)
-                    if visible:
-                        replay_text.append(visible)
-                        streamed_text = True
-                        yield StreamTextDelta(delta=visible)
-                refusal = delta.get("refusal")
-                if refusal:
-                    envelope.charge(str(refusal))
-                    refusal_parts.append(str(refusal))
-                for tool_delta in delta.get("tool_calls") or []:
-                    index = int(tool_delta.get("index", 0))
-                    function = tool_delta.get("function") or {}
-                    call_id = tool_delta.get("id")
-                    name = function.get("name")
-                    saved = replay_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-                    if call_id:
-                        saved["id"] = call_id
-                    if name:
-                        envelope.charge(name)
-                        saved["name"] += name
-                    envelope.charge(function.get("arguments") or "")
-                    saved["arguments"] += function.get("arguments") or ""
-                    if call_id:
-                        yield StreamToolCallDelta(index=index, id=call_id)
-                    if name:
-                        yield StreamToolCallDelta(index=index, name=name)
-                    argument_delta = function.get("arguments")
-                    if argument_delta:
-                        yield StreamToolCallDelta(index=index, argument_delta=argument_delta)
-                if choice.get("finish_reason"):
-                    finish_reason = str(choice["finish_reason"])
-                    if direct_deepseek and finish_reason == "insufficient_system_resource":
-                        raise ProviderError(
-                            503, "DeepSeek reported insufficient_system_resource", retryable=True
-                        )
-                if chunk.get("id") or chunk.get("system_fingerprint"):
-                    provider_payload = {
-                        "id": chunk.get("id"),
-                        "system_fingerprint": chunk.get("system_fingerprint"),
-                    }
-                    if not response_id:
-                        response_id = _stream_id(chunk.get("id"))
-                # Overwritten by every chunk that carries it rather than being
-                # read once: the field is repeated on every chunk, and the LAST
-                # one is the host that finished the turn. Non-aggregator wires
-                # simply never send it, so this stays None and nothing pins.
-                # Bounded and control-character-free or not taken at all — see
-                # ``_served_provider_name``. A refused name leaves the previous
-                # chunk's value standing rather than clearing it: the turn was
-                # still served by whoever the earlier chunks named.
-                candidate = _served_provider_name(chunk.get("provider"))
-                if candidate:
-                    served_provider = candidate
+                    if chunk.get("id") or chunk.get("system_fingerprint"):
+                        provider_payload = {
+                            "id": chunk.get("id"),
+                            "system_fingerprint": chunk.get("system_fingerprint"),
+                        }
+                        if not response_id:
+                            response_id = _stream_id(chunk.get("id"))
+                    # Overwritten by every chunk that carries it rather than being
+                    # read once: the field is repeated on every chunk, and the LAST
+                    # one is the host that finished the turn. Non-aggregator wires
+                    # simply never send it, so this stays None and nothing pins.
+                    # Bounded and control-character-free or not taken at all — see
+                    # ``_served_provider_name``. A refused name leaves the previous
+                    # chunk's value standing rather than clearing it: the turn was
+                    # still served by whoever the earlier chunks named.
+                    candidate = _served_provider_name(chunk.get("provider"))
+                    if candidate:
+                        served_provider = candidate
+        except Exception:
+            # A provider error or a dropped connection ends the turn here, and
+            # no tool call can be acted on, so nothing still held is residue
+            # of a parsed call: release it (DSML-led lines still go) before the
+            # error, or the partial prose the operator was reading loses its
+            # last words. A consumer closing the stream (``GeneratorExit``) or
+            # a cancellation is not caught: nobody is left to receive text.
+            held = markup_filter.finish(has_tool_calls=False)
+            if held:
+                replay_text.append(held)
+                streamed_text = True
+                yield StreamTextDelta(delta=held)
+            raise
 
         # Only now is it known whether the turn carried structured calls, which
         # decides whether a held bare-parameter tail is residue or prose. A
