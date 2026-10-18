@@ -661,7 +661,17 @@ async def test_a_busy_failure_surfaces_the_wire_word_beside_the_retry_class(monk
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    [None, "sha", "download", "store", "vendor_zero", "status_billed", "immediate_billed"],
+    [
+        None,
+        "sha",
+        "download",
+        "store",
+        "vendor_zero",
+        "status_billed",
+        "immediate_billed",
+        "partial_receipt",
+        "changed_receipt",
+    ],
 )
 async def test_accepted_radient_charge_survives_artifact_delivery(monkeypatch, tmp_path, failure):
     """Exercise the real tool -> cascade -> HTTP rung, never a paid service."""
@@ -715,7 +725,11 @@ async def test_accepted_radient_charge_survives_artifact_delivery(monkeypatch, t
                 200,
                 json={
                     "status": "COMPLETED",
-                    **({"cost": terminal_cost} if failure == "status_billed" else {}),
+                    **(
+                        {"cost": terminal_cost}
+                        if failure in {"status_billed", "partial_receipt", "changed_receipt"}
+                        else {}
+                    ),
                 },
             )
         if request.url.path.endswith("/result"):
@@ -723,7 +737,15 @@ async def test_accepted_radient_charge_survives_artifact_delivery(monkeypatch, t
                 200,
                 json={
                     "status": "COMPLETED",
-                    "cost": terminal_cost,
+                    "cost": (
+                        {k: v for k, v in terminal_cost.items() if k != "usage_record_id"}
+                        if failure == "partial_receipt"
+                        else (
+                            {**terminal_cost, "usage_record_id": "usage-revised"}
+                            if failure == "changed_receipt"
+                            else terminal_cost
+                        )
+                    ),
                     "audio": {
                         "url": "https://fixture.invalid/audio",
                         "content_type": "audio/mpeg",
@@ -735,7 +757,7 @@ async def test_accepted_radient_charge_survives_artifact_delivery(monkeypatch, t
             )
         assert spent[-1].amount_micro == 42000, "billed money exists before the CDN read"
         return httpx.Response(
-            403 if failure == "download" else 200,
+            403 if failure in {"download", "partial_receipt", "changed_receipt"} else 200,
             content=data,
             headers={"content-type": "audio/mpeg"},
         )
@@ -779,20 +801,30 @@ async def test_accepted_radient_charge_survives_artifact_delivery(monkeypatch, t
         )
     assert spent, (_text(result), calls)
     assert result.is_error == (failure not in {None, "status_billed", "immediate_billed"})
-    assert [row.rev for row in spent] == [0, 1]
+    if failure == "partial_receipt":
+        final_fold = ChannelSpend()
+        for row in spent:
+            final_fold.apply(row)
+        assert final_fold.rows()[0].amount_micro == 42000
+        assert final_fold.rows()[0].request_id == "accepted-42"
+        assert final_fold.rows()[0].usage_record_id == "usage-known"
+    assert [row.rev for row in spent] == ([0, 1, 2] if failure == "changed_receipt" else [0, 1])
     assert len({row.record_id for row in spent}) == 1
     assert all(row.request_id == "accepted-42" for row in spent)
     terminal = spent[-1]
     assert terminal.amount_micro == (0 if failure == "vendor_zero" else 42000)
     assert terminal.billing_basis == "billed" and terminal.cost_source == "server_reported"
-    assert terminal.usage_record_id == "usage-known" and terminal.units == 30
+    assert terminal.usage_record_id == (
+        "usage-revised" if failure == "changed_receipt" else "usage-known"
+    )
+    assert terminal.units == 30
     assert ChannelSpendRecord.from_details(terminal.to_details()) == terminal
     folded = ChannelSpend()
     for row in spent:
         folded.apply(row)
     assert folded.rows() == [terminal]
     assert folded.total_known_micro() == terminal.amount_micro
-    if failure in {"sha", "download", "store"}:
+    if failure in {"sha", "download", "store", "partial_receipt", "changed_receipt"}:
         assert "billed but the artifact could not be stored" in _text(result)
 
 

@@ -29,6 +29,8 @@ session can import it at module scope for free.
 from dataclasses import dataclass, field
 from typing import Any, Final, Iterable, Mapping
 
+from local_operator.supplements.contract import SupplementSound
+
 #: ``Session._run_last_trigger`` values. Wake / monitor deliveries use their own custom-type
 #: strings (``wake_prompt`` / ``monitor_prompt``); these two name the user-role classes.
 TRIGGER_TYPED: Final = "typed"
@@ -75,6 +77,8 @@ class TurnItem:
     tool_call_id: str = ""
     tool_name: str = ""
     is_error: bool = False
+    #: Bounded durable audio facts survive text reduction/compaction; no second inventory.
+    artifacts: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,6 +239,38 @@ def snapshot_message(
                 prepared_html=prepared,
             )
         )
+    artifacts: list[Mapping[str, Any]] = []
+    if getattr(message, "tool_name", "") in {"generate_voiceover", "generate_sound_effect"}:
+        import math
+
+        from local_operator.supplements.contract import is_digest
+
+        payload = getattr(message, "provider_payload", None)
+        details = payload.get("details") if isinstance(payload, Mapping) else None
+        raw = details.get("artifacts") if isinstance(details, Mapping) else None
+        for item in raw[:3] if isinstance(raw, (list, tuple)) else ():
+            if not isinstance(item, Mapping) or item.get("kind") != "audio":
+                continue
+            if not is_digest(item.get("digest")):
+                continue
+            duration = item.get("duration_s")
+            duration = (
+                float(duration)
+                if isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                and math.isfinite(duration)
+                and duration >= 0
+                else 0.0
+            )
+            artifacts.append(
+                {
+                    "kind": "audio",
+                    "digest": item["digest"],
+                    "content_type": _clip(item.get("content_type"), 128),
+                    "name": _clip(item.get("name"), 2048),
+                    "duration_s": duration,
+                }
+            )
     return TurnItem(
         id=str(getattr(message, "id", "") or ""),
         role=str(getattr(message, "role", "") or ""),
@@ -243,7 +279,40 @@ def snapshot_message(
         tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
         tool_name=str(getattr(message, "tool_name", "") or ""),
         is_error=bool(getattr(message, "is_error", False)),
+        artifacts=tuple(artifacts),
     )
+
+
+def turn_sounds(items: Iterable[TurnItem]) -> list["SupplementSound"]:
+    """Reuse current-turn result artifacts: generated audio has no filesystem candidate.
+
+    Deduplicate continuation snapshots by digest and cap the entire turn, not just
+    each result. Never inspect answer text or walk an unrelated attachment inventory.
+    """
+    sounds: list[SupplementSound] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.role != "tool" or item.tool_name not in {
+            "generate_voiceover",
+            "generate_sound_effect",
+        }:
+            continue
+        for artifact in item.artifacts:
+            digest = str(artifact["digest"])
+            if digest in seen:
+                continue
+            seen.add(digest)
+            sounds.append(
+                SupplementSound(
+                    attachment=digest,
+                    mime=str(artifact["content_type"]),
+                    title=str(artifact["name"] or "Generated audio"),
+                    duration_s=float(artifact["duration_s"]),
+                )
+            )
+            if len(sounds) == 3:
+                return sounds
+    return sounds
 
 
 #: Total text kept across one logical turn's snapshots (all items, all loop runs). Past it,

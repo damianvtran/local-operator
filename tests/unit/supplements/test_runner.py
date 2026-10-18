@@ -121,6 +121,7 @@ async def test_a_deliverable_turn_journals_a_done_row_under_the_answer(tmp_path:
         row = await _await_row(session.transcript)
         assert calls == ["reports/q3.md"]
         assert row["state"] == "done"
+        assert "sounds" not in row
         assert [f["path"] for f in row["files"]] == ["reports/q3.md"]
         assert row["files"][0]["name"] == "q3.md"
         assert row["files"][0]["why"] == "written by write"
@@ -217,9 +218,9 @@ async def test_a_running_job_never_reads_as_busy(tmp_path: Path) -> None:
     release = asyncio.Event()
     original = handle._supplements._write
 
-    async def hold(anchor: str, decision: Any) -> None:
+    async def hold(anchor: str, decision: Any, **kwargs: Any) -> None:
         await release.wait()
-        await original(anchor, decision)
+        await original(anchor, decision, **kwargs)
 
     handle._supplements._write = hold  # type: ignore[method-assign]
     try:
@@ -251,11 +252,11 @@ async def test_a_new_turn_supersedes_a_running_job(tmp_path: Path) -> None:
     original = handle._supplements._write
     gate = {"first": True}
 
-    async def hold(anchor: str, decision: Any) -> None:
+    async def hold(anchor: str, decision: Any, **kwargs: Any) -> None:
         if gate["first"]:
             gate["first"] = False
             await release.wait()
-        await original(anchor, decision)
+        await original(anchor, decision, **kwargs)
 
     handle._supplements._write = hold  # type: ignore[method-assign]
     try:
@@ -379,7 +380,7 @@ async def test_dispose_cancels_a_running_job(tmp_path: Path) -> None:
     handle.subscribe(lambda: None)
     release = asyncio.Event()
 
-    async def hold(anchor: str, decision: Any) -> None:
+    async def hold(anchor: str, decision: Any, **kwargs: Any) -> None:
         await release.wait()
 
     handle._supplements._write = hold  # type: ignore[method-assign]
@@ -432,6 +433,7 @@ async def test_a_files_only_finish_beats_done_with_its_files(tmp_path: Path) -> 
         # readable the beat is owed; give the emitter its turn.
         await wait_for(lambda: bool(beats), timeout=10)
         assert row["state"] == "done"
+        assert "sounds" not in row
         assert [(beat.state, [f["path"] for f in beat.files]) for beat in beats] == [
             ("done", ["reports/beats.md"])
         ], beats
