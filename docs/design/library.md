@@ -362,11 +362,21 @@ The Librarian is Aida's twin, not a new scheduler.
   search/sort header + asset grid/list + preview dock. Narrow widths collapse
   the rail into a sheet and the preview into the selected route.
 - Cards: thumbnail/kind icon, effective name, kind/size, source conversation,
-  tags, highlight mark, origin badge.
+  tags, highlight mark, origin badge. Every card/row carries a per-item
+  ellipsis menu: open the source conversation (one entry per occurrence,
+  deep-linked to the message sequence when available), ask about the asset,
+  copy path/id, reveal or save a copy, favorite, edit tags/metadata, and filter
+  the catalog to that conversation. Digest-only artifacts offer materialise/
+  save-a-copy.
 - Preview: reuse the existing canvas viewers for image/audio/video/PDF/HTML/
   markdown/spreadsheet/code; add a PPTX viewer using `pptx-browser` (MIT, zero
   dependencies) with slide navigation, thumbnail rail, fit/zoom, keyboard
-  arrows and honest progress/error states.
+  arrows and honest progress/error states. The occurrence/session link is the
+  provenance surface: the preview header names the source conversation and
+  links back to it.
+- The category model stays extensible for a future `music` kind (Suno/Radient
+  generation is a follow-up; no empty Music filter is shipped until it has
+  assets).
 - Metadata: inline name edit, description editor, tag chips, lock, favorite.
   User edits are optimistic but re-read after a refusal.
 - Composer: borderless, no divider above it, max width tied to the preview
