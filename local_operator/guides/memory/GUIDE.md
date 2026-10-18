@@ -54,7 +54,7 @@ Existing session rows are not promoted or rewritten. Guards, quotas, provenance 
 host approvals are shared. Explicit role allowlists are never widened; when the
 helper is absent, use read/write/edit URLs with the same scope boundaries.
 
-The human CLI verbs are `list`, `show`, `search`, `edit`, `forget`, `status` — there
+The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `status` — there
 are no `lop memory remember` or `recall` CLI commands.
 
 ## Existing read/write/edit tools
@@ -90,6 +90,13 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
 - Correct with `edit(path="memory://session/ID", old_text="REV",
   new_text=<replacement JSON string>)`. Read again on conflict; do not retry a
   stale version blindly. File hunks/replace-all do not apply to memory.
+- Move a fact between scopes instead of re-creating it: `lop memory move ID --to
+  session` (batch: several IDs before `--to`; an agent uses `edit(path="memory://SCOPE/ID",
+  old_text="REV", new_text='{"move":"session"}')`). The move is atomic, refuses when
+  the destination would exceed its cap, keeps the fact's text, provenance and
+  timestamps, and records the source as `moved_from` in the destination's history.
+  Moving to the scope it is already in is refused. Moved facts replicate to trusted
+  peers exactly like any other mutation.
 - Replace a separate old fact with `replaces:"OLD_ID"` on an explicit new store.
   Without that intent both facts stay visible, even near-duplicates. Superseded
   facts remain inspectable. Exact same-body/source repeats are idempotent;
@@ -108,7 +115,10 @@ Items cap at 256 tokens/8192 bytes including metadata. Global active quota is
 16k tokens; each session/team/agent owner 50k. Recall, suggestions (≤3/180 tokens)
 and compaction hints (≤80 tokens) have separate budgets. History, conflicts,
 tombstones, metadata, storage and WAL are bounded too. Overflow refuses with
-inventory/consolidation guidance; it never evicts explicit or pinned facts.
+inventory/consolidation guidance; it never evicts explicit or pinned facts. Every
+write reports the scope's headroom and percent, and crossing 80% or 90% warns
+once (in the write result) with the two relief actions: forget stale facts, or
+move work-state facts to session scope.
 
 ## Compaction and mobility
 
