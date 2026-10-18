@@ -15,6 +15,8 @@ parsing prose, and prose is the one thing this codebase keeps rewording.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from local_operator.clients._http import APIError
 
 #: The closed reason-class vocabulary. Keep in sync with :func:`failure_reason_class`
@@ -29,6 +31,12 @@ REASON_CLASSES = frozenset(
         "upstream",  # 5xx
         "network",  # transport failure, no response (timeouts: "timeout")
         "timeout",  # a wait or request exceeded its bound
+        # A RETRYABLE refusal that is not a credential or a balance problem —
+        # the audio contract's submit-time admission bound (HTTP 429,
+        # ``audio_rate_limited``) names itself ``transient`` so a caller knows
+        # to retry with backoff while the SURFACE still says "busy", not
+        # "quota". The wire code rides ``JobAttempt.error_type`` beside it.
+        "transient",
         "refused",  # any other 4xx
         "cancelled",  # the PROVIDER reported the job CANCELLED
         "invalid_response",  # unparseable / missing fields in a 2xx payload
@@ -41,14 +49,39 @@ REASON_CLASSES = frozenset(
         "media_failed",
         "media_rate_limited",
         "media_unavailable",
-        # The audio tools' own failure word (frozen server contract v1): a
-        # COMPLETED status carrying ``error_type: "audio_failed"`` is the
-        # audio lane's failure shape, branched on as a pair — never on the
-        # status alone.
+        # The audio tools' own failure words (frozen server contract v1): a
+        # COMPLETED status carrying ``error_type`` is the audio lane's failure
+        # shape, branched on as a pair — never on the status alone. The
+        # admission/refusal pair: ``audio_rate_limited`` is both the submit
+        # 429 (retried with backoff, then surfaced) and the admitted-job
+        # settlement (zero cost, no automatic retry).
         "audio_failed",
+        "audio_rate_limited",
         "unknown",
     }
 )
+
+
+def error_type_of(exc: BaseException) -> str | None:
+    """The WIRE's structured error code for a rung failure, when it sent one.
+
+    ``reason_class`` answers "how do I retry this?" (a small closed set);
+    ``error_type`` answers "what did the provider actually say?" and travels
+    verbatim so a surface can branch on the server's own token — the audio
+    contract's ``audio_rate_limited`` arriving on a ``transient`` failure is
+    the case that made the two distinct. The details map wins when it carries
+    one (a raising site that mapped a status onto a wire code), else the
+    ``code`` attribute. Never raises.
+    """
+    details = getattr(exc, "details", None)
+    if isinstance(details, Mapping):
+        value = details.get("error_type")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.strip():
+        return code.strip()
+    return None
 
 
 def failure_reason_class(exc: BaseException) -> str:

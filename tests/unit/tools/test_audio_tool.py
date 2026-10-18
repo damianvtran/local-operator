@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from local_operator.artifacts import ArtifactKind, JobAttempt, JobOutcome
 from local_operator.audiogen import AudioRoute
@@ -49,11 +50,23 @@ def _details(result) -> dict[str, Any]:
     return result.details
 
 
-def _context(tmp_path, spent: list[Any] | None = None) -> ToolContext:
+def _context(
+    tmp_path,
+    spent: list[Any] | None = None,
+    *,
+    spawn_background=None,
+    journal_audio_settle=None,
+) -> ToolContext:
+    """A context with the audio hooks a real session binds."""
     context = ToolContext(cwd=str(tmp_path))
+    updates: dict[str, Any] = {}
     if spent is not None:
-        context = context.model_copy(update={"record_channel_spend": spent.append})
-    return context
+        updates["record_channel_spend"] = spent.append
+    if spawn_background is not None:
+        updates["spawn_background"] = spawn_background
+    if journal_audio_settle is not None:
+        updates["journal_audio_settle"] = journal_audio_settle
+    return context.model_copy(update=updates) if updates else context
 
 
 def _asset(duration_s: float | None = 12.5) -> AudioAsset:
@@ -392,33 +405,133 @@ async def test_a_cache_refusal_degrades_to_a_note_never_a_raise(monkeypatch, tmp
     assert "could not be registered" in _text(result)
 
 
-@pytest.mark.asyncio
-async def test_the_cancel_receipt_quotes_the_server_and_records_the_row(monkeypatch, tmp_path):
-    spent: list[Any] = []
-    filled: dict[str, Any] = {}
+def _cancelled_run(*, request_id: str | None = "req-cancel"):
+    """A cascade that fills the Radient handle and raises the user's stop."""
 
     async def fake_run(**kwargs):
         handle = kwargs["handle"]
         handle.provider = AudioRoute.RADIENT
-        handle.request_id = "req-cancel"
+        handle.request_id = request_id
         handle.model = "radient/voiceover"
-        filled["handle"] = handle
+        # A real Radient handle carries the destination and the resolved
+        # bearer: the settle poll cannot reach the job without them.
+        handle.base_url = "https://hub.example/v1"
+        handle.credential = SecretStr("tok")
         raise AudioGenerationCancelled()
+
+    return fake_run
+
+
+@pytest.mark.asyncio
+async def test_a_queued_stop_says_no_charge_and_starts_no_watch(monkeypatch, tmp_path):
+    """`vendor_stopped: true` is the ONE branch allowed to promise no charge."""
+    spent: list[Any] = []
+    spawned: list[Any] = []
+
+    async def fake_cancel(handle):
+        return audio_rungs.AudioCancelReceipt(outcome="cancelled", vendor_stopped=True)
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", _cancelled_run())
+    monkeypatch.setattr(audio_rungs, "best_effort_cancel", fake_cancel)
+    result = await audio_tool.execute_generate_voiceover(
+        "call-7",
+        {"text": "Hello there."},
+        None,
+        None,
+        _context(tmp_path, spent, spawn_background=spawned.append),
+    )
+    assert result.is_error
+    text = _text(result)
+    assert "stopped before the provider was called" in text
+    assert "you will not be charged" in text
+    assert "Checking for settlement" not in text
+    assert spawned == [], "a guaranteed stop has nothing to observe"
+    assert _details(result)["stage"] == "cancelled"
+    assert _details(result)["vendor_stopped"] is True
+    assert _details(result)["cancel_handle"]["request_id"] == "req-cancel"
+    assert spent[0].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_running_stop_starts_the_bounded_settlement_poll(monkeypatch, tmp_path):
+    """The receipt says "checking", and a session-owned task is actually started."""
+    spent: list[Any] = []
+    spawned: list[Any] = []
+    journaled: list[dict[str, Any]] = []
+
+    async def fake_cancel(handle):
+        return audio_rungs.AudioCancelReceipt(
+            outcome="cancelled",
+            vendor_stopped=False,
+            reason="provider_has_no_cancel_api",
+        )
+
+    async def fake_settle(payload, *, record_spend, journal):
+        journaled.append({"payload": payload, "record_spend": record_spend, "journal": journal})
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", _cancelled_run())
+    monkeypatch.setattr(audio_rungs, "best_effort_cancel", fake_cancel)
+    from local_operator.audiogen import settle as audio_settle
+
+    monkeypatch.setattr(audio_settle, "settle_cancelled_audio", fake_settle)
+
+    result = await audio_tool.execute_generate_voiceover(
+        "call-7b",
+        {"text": "Hello there."},
+        None,
+        None,
+        _context(tmp_path, spent, spawn_background=spawned.append, journal_audio_settle=None),
+    )
+    assert result.is_error
+    text = _text(result)
+    assert "no cancellation endpoint" in text
+    assert "charged if it produces audio" in text
+    assert text.endswith("Checking for settlement.")
+    assert _details(result)["settling"] is True
+    assert _details(result)["cancel_reason"] == "provider_has_no_cancel_api"
+    assert len(spawned) == 1
+    # The coroutine handed to the session carries the same record id as the
+    # cancel row, so a settled charge supersedes it rather than doubling up.
+    await spawned[0]
+    assert journaled and journaled[0]["payload"]["request_id"] == "req-cancel"
+    assert spent[0].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_settle_payload_carries_the_same_ledger_key_as_the_cancel_row(
+    monkeypatch, tmp_path
+):
+    spent: list[Any] = []
+    payloads: list[dict[str, Any]] = []
 
     async def fake_cancel(handle):
         return audio_rungs.AudioCancelReceipt(outcome="cancelled", vendor_stopped=False)
 
-    monkeypatch.setattr(audio_tool, "run_audio_cascade", fake_run)
+    async def fake_settle(payload, *, record_spend, journal):
+        payloads.append(payload)
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", _cancelled_run())
     monkeypatch.setattr(audio_rungs, "best_effort_cancel", fake_cancel)
-    result = await audio_tool.execute_generate_voiceover(
-        "call-7", {"text": "Hello there."}, None, None, _context(tmp_path, spent)
+    from local_operator.audiogen import settle as audio_settle
+
+    monkeypatch.setattr(audio_settle, "settle_cancelled_audio", fake_settle)
+    spawned: list[Any] = []
+    await audio_tool.execute_generate_voiceover(
+        "call-7c",
+        {"text": "Hello there."},
+        None,
+        None,
+        _context(tmp_path, spent, spawn_background=spawned.append),
     )
-    assert result.is_error
-    text = _text(result)
-    assert "could NOT be stopped" in text and "best-effort" in text
-    assert _details(result)["stage"] == "cancelled"
-    assert _details(result)["cancel_handle"]["request_id"] == "req-cancel"
-    assert spent[0].status == "cancelled"
+    assert len(spawned) == 1
+    await spawned[0]
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["record_id"] == spent[0].record_id
+    assert payload["units"] == float(len("Hello there.")) and payload["unit"] == "chars"
+    assert payload["request_id"] == "req-cancel"
+    assert payload["provider"] == "radient"
+    assert payload["rev"] == 0
 
 
 @pytest.mark.asyncio
@@ -475,3 +588,54 @@ async def test_invalid_arguments_are_a_model_fault(monkeypatch, tmp_path):
         "call-11", {"text": "ok", "tone": "shouty"}, None, None, _context(tmp_path)
     )
     assert unknown_tone.is_error and "invalid arguments" in _text(unknown_tone)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_job_cancel_renders_the_already_completed_pair(monkeypatch, tmp_path):
+    """A 409 refusal is "already finished" ink, never an error's ink."""
+    spent: list[Any] = []
+    spawned: list[Any] = []
+
+    async def fake_cancel(handle):
+        return audio_rungs.AudioCancelReceipt(outcome="already_completed")
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", _cancelled_run())
+    monkeypatch.setattr(audio_rungs, "best_effort_cancel", fake_cancel)
+    result = await audio_tool.execute_generate_voiceover(
+        "call-7d",
+        {"text": "Hello there."},
+        None,
+        None,
+        _context(tmp_path, spent, spawn_background=spawned.append),
+    )
+    details = _details(result)
+    assert details["error_type"] == "media_already_completed"
+    assert "already completed" in details["error"]
+    assert spawned == [], "nothing left to observe"
+    assert spent[0].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_failure_surfaces_the_wire_word_beside_the_retry_class(monkeypatch, tmp_path):
+    """`reason_class` says transient; `error_type` says audio_rate_limited."""
+    spent: list[Any] = []
+    exc = AudioGenerationUnavailable(
+        "Audio generation failed on every available provider:\n- Radient: busy",
+        attempts=(
+            JobAttempt(
+                route="radient",
+                outcome="failed",
+                reason_class="transient",
+                error_type="audio_rate_limited",
+                message="Audio generation is busy right now. Wait a moment and try again.",
+            ),
+        ),
+    )
+    _fake_cascade(monkeypatch, exc)
+    result = await audio_tool.execute_generate_voiceover(
+        "call-12", {"text": "Hello there."}, None, None, _context(tmp_path, spent)
+    )
+    assert result.is_error
+    details = _details(result)
+    assert details["error_type"] == "audio_rate_limited"
+    assert details["attempts"][0]["reason_class"] == "transient"

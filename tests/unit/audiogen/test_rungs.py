@@ -237,28 +237,25 @@ async def test_a_sha_mismatch_fails_closed_and_discards_the_bytes():
     assert "sha256" in str(caught.value)
 
 
-@pytest.mark.asyncio
-async def test_a_cancel_receipt_quotes_the_servers_vendor_stopped_word():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/tools/audio/cancel":
-            return httpx.Response(
-                200,
-                json={
-                    "status": "CANCELLED",
-                    "cancellation": {"vendor_stopped": False, "note": "in flight"},
-                },
-            )
-        return httpx.Response(404)
-
+def _cancel_handle() -> CancelHandle:
     handle = CancelHandle()
     handle.provider = AudioRoute.RADIENT
     handle.request_id = "req-1"
     handle.base_url = HUB
     handle.credential = SecretStr("tok")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        # best_effort_cancel owns its client; patch the scope to inject ours.
-        import contextlib
+    return handle
 
+
+async def _cancel_against(handler):
+    """Run ``best_effort_cancel`` against a scripted transport.
+
+    ``best_effort_cancel`` owns its client, so the rung's scope is patched to
+    inject the scripted one. Restored in a ``finally``: a leaked patch would
+    make every later cancel in the module hit a dead transport.
+    """
+    import contextlib
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         original = audio_rungs._client_scope
 
         @contextlib.asynccontextmanager
@@ -267,14 +264,85 @@ async def test_a_cancel_receipt_quotes_the_servers_vendor_stopped_word():
 
         audio_rungs._client_scope = scope
         try:
-            receipt = await audio_rungs.best_effort_cancel(handle)
+            return await audio_rungs.best_effort_cancel(_cancel_handle())
         finally:
             audio_rungs._client_scope = original
+
+
+@pytest.mark.asyncio
+async def test_a_queued_cancel_is_a_guaranteed_stop_and_says_no_charge():
+    """`vendor_stopped: true` is the contract's ONE no-charge promise.
+
+    A queued job was never handed to the provider, so the stop is certain and
+    the receipt may say so. This is the only branch allowed to say "you will
+    not be charged".
+    """
+    receipt = await _cancel_against(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "status": "CANCELLED",
+                "cancellation": {"vendor_stopped": True},
+            },
+        )
+    )
+    assert receipt.outcome == "cancelled"
+    assert receipt.vendor_stopped is True
+    text = audio_rungs.cancel_receipt_text(receipt)
+    assert "stopped before the provider was called" in text
+    assert "you will not be charged" in text
+
+
+@pytest.mark.asyncio
+async def test_a_running_cancel_never_claims_no_charge():
+    """A running job keeps going: the receipt says "charged if it produces audio"."""
+    receipt = await _cancel_against(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "status": "CANCELLED",
+                "cancellation": {
+                    "vendor_stopped": False,
+                    "reason": "provider_has_no_cancel_api",
+                },
+            },
+        )
+    )
     assert receipt.outcome == "cancelled"
     assert receipt.vendor_stopped is False
+    assert receipt.reason == "provider_has_no_cancel_api"
     text = audio_rungs.cancel_receipt_text(receipt)
-    assert "could NOT be stopped" in text
-    assert "may still be charged" in text
+    assert "no cancellation endpoint" in text
+    assert "charged if it produces audio" in text
+    assert "will not be charged" not in text
+    # The settlement sentence appears ONLY when the poll was actually started.
+    watched = audio_rungs.cancel_receipt_text(receipt, settling=True)
+    assert watched.endswith(audio_rungs.SETTLEMENT_WATCH_NOTE)
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_queued_cancel_is_idempotent():
+    """Cancelling an already-queued-cancelled job answers 200 vendor_stopped:true."""
+    receipt = await _cancel_against(
+        lambda request: httpx.Response(
+            200, json={"status": "CANCELLED", "cancellation": {"vendor_stopped": True}}
+        )
+    )
+    assert receipt.outcome == "cancelled"
+    assert receipt.vendor_stopped is True
+
+
+@pytest.mark.asyncio
+async def test_a_completed_job_refuses_the_cancel_with_409():
+    """The settled conflict is a CODE on a 409, not a 200 status word."""
+    receipt = await _cancel_against(
+        lambda request: httpx.Response(
+            409, json={"code": "audio_already_completed", "error": "job finished"}
+        )
+    )
+    assert receipt.outcome == "already_completed"
+    text = audio_rungs.cancel_receipt_text(receipt)
+    assert "already completed" in text and "discarded" in text
 
 
 @pytest.mark.asyncio
@@ -282,6 +350,165 @@ async def test_a_cancel_with_nothing_to_stop_reads_none_and_says_so():
     receipt = await audio_rungs.best_effort_cancel(CancelHandle())
     assert receipt.outcome == "none"
     assert "nothing was left to cancel" in audio_rungs.cancel_receipt_text(receipt)
+
+
+# ---------------------------------------------------------------------------
+# The admission bound (HTTP 429, ``audio_rate_limited``)
+# ---------------------------------------------------------------------------
+
+
+def _rate_limited_response() -> httpx.Response:
+    """The contract's fixed busy answer — no ``Retry-After``, by design."""
+    return httpx.Response(
+        429,
+        json={
+            "code": "audio_rate_limited",
+            "error": "Audio generation is busy right now. Wait a moment and try again.",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_busy_submit_retries_with_bounded_backoff_then_succeeds(monkeypatch):
+    """A refused submit created no job row, so retrying it cannot double-bill.
+
+    The sleeps are recorded rather than paid: the module's ``_submit_sleep``
+    seam exists for exactly this test.
+    """
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", fake_sleep)
+    attempts = {"submit": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/tools/audio/voiceover":
+            attempts["submit"] += 1
+            if attempts["submit"] <= 2:
+                return _rate_limited_response()
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "req-busy",
+                    "status": "COMPLETED",
+                    "model": "radient/voiceover",
+                    "cost": {"v": 1, "amount_usd": 0.01, "basis": "billed"},
+                },
+            )
+        if request.url.path == "/v1/tools/audio/result":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    "audio": {
+                        "url": f"{HUB}/media/one.mp3",
+                        "content_type": "audio/mpeg",
+                        "duration_seconds": 12.5,
+                        "sha256": AUDIO_SHA,
+                    },
+                },
+            )
+        if request.url.path == "/v1/media/one.mp3":
+            return httpx.Response(200, content=AUDIO_BYTES)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        outcome = await audio_rungs.run_radient(
+            _spec(),
+            base_url=HUB,
+            credential="tok",
+            handle=CancelHandle(),
+            emit=None,
+            pause=_fast_pause,
+            client=client,
+        )
+    assert outcome.generation_id == "req-busy"
+    assert attempts["submit"] == 3
+    assert sleeps == [2.0, 4.0], "bounded backoff, in the contract's steps"
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_busy_submit_surfaces_as_transient_busy(monkeypatch):
+    """After the cap the refusal surfaces: retryable class, the wire's own word."""
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", fake_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _rate_limited_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs.run_radient(
+                _spec(),
+                base_url=HUB,
+                credential="tok",
+                handle=CancelHandle(),
+                emit=None,
+                pause=_fast_pause,
+                client=client,
+            )
+    exc = caught.value
+    assert exc.code == "transient", "a busy process is not a balance signal"
+    assert exc.status_code == 429
+    assert exc.details.get("error_type") == "audio_rate_limited"
+    assert "busy right now" in str(exc)
+    assert sleeps == [2.0, 4.0, 8.0], "four attempts, three waits"
+    # No header dependence: the response carried no Retry-After at all.
+    assert audio_rungs.SUBMIT_MAX_ATTEMPTS == 4
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_job_that_hits_the_vendor_limit_is_not_retried(monkeypatch):
+    """POST-admission 429 settles as COMPLETED+audio_rate_limited: no retry.
+
+    The contract forbids automatic retry of an admitted job (a resubmit is the
+    caller's decision), so the submit count stays 1 and the failure carries the
+    wire's word with zero cost.
+    """
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", fake_sleep)
+    submits = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/tools/audio/sound-effects":
+            submits["count"] += 1
+            return httpx.Response(200, json={"request_id": "req-limited", "status": "IN_QUEUE"})
+        if request.url.path == "/v1/tools/audio/status":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    "error_type": "audio_rate_limited",
+                    "error": "Audio generation is busy right now. Wait a moment and try again.",
+                    "cost": {"v": 1, "amount_usd": 0.0, "basis": "billed"},
+                },
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs.run_radient(
+                _spec("sound_effect"),
+                base_url=HUB,
+                credential="tok",
+                handle=CancelHandle(),
+                emit=None,
+                pause=_fast_pause,
+                client=client,
+            )
+    assert caught.value.code == "audio_rate_limited"
+    assert submits["count"] == 1, "an admitted job is never automatically resubmitted"
+    assert sleeps == [], "the submit backoff belongs to a REFUSED submit only"
 
 
 # ---------------------------------------------------------------------------

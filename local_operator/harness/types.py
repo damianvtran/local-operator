@@ -1765,6 +1765,20 @@ class ToolContext(BaseModel):
     # ``local_operator.video.records.build_record`` returns, and this module
     # must not import that module's way up the graph.
     journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # The audio lane's late-settlement writer (``Session.journal_audio_settle``):
+    # appends one ``audio_settle_v1`` bookkeeping row after a RUNNING cancel,
+    # because a job refused cancellation may finish minutes later and the tool
+    # call is long gone. Same rule as ``journal_video_job``: declared rather
+    # than probed for, ``None`` on a host that cannot journal, and the payload
+    # is a plain mapping (this module must not import the audiogen lane).
+    journal_audio_settle: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    #: The session's background-task door (``Session._spawn_background``): a
+    #: fire-and-forget coroutine that is tracked so ``dispose`` cancels it.
+    #: Bound by the session, absent on reduced hosts — the audio settle poll is
+    #: its one caller today (a bounded observation that must outlive the tool
+    #: call without blocking the turn). Typed loosely because the session's
+    #: method takes a coroutine and returns its Task.
+    spawn_background: Callable[[Any], Any] | None = Field(default=None, exclude=True)
     # Set by the session on each inbound ``lop send`` delivery so a blocking
     # ``wait`` can return early and let the model read its mailbox. Declared
     # rather than probed for, per this class's contract above. ``None`` means

@@ -70,24 +70,36 @@ login picks them up at the NEXT session start.
   downloads immediately (24 h life — nobody should rely on the URL later);
   the artifact is the attached copy, not the URL.
 - The generated duration comes from the provider, never derived client-side.
+- A busy platform answers the submit with "Audio generation is busy right
+  now." (`audio_rate_limited`); the harness retries that a few times with
+  backoff, then reports it as a busy—not a quota—failure. A job that hits a
+  vendor rate limit after admission fails with the same word and zero cost.
 - BYOK voice ids: `female` / `male` map to the vendors' canonical voices;
   a vendor id (an ElevenLabs voice id, an OpenAI voice name) passes through.
   A voice id for one vendor is not copied onto another during failover.
 
-## Cancelling
+## Stopping a generation
 
-Esc / steering stops the wait and asks the server to cancel — best-effort,
-and the receipt says exactly what happened:
+The honest framing is **stop before it starts / request stop**, never
+"cancelled for certain". Esc / steering stops the wait and sends a stop to the
+server, and the receipt says what the server said:
 
-- the server reports `vendor_stopped: true` → nothing further is generated
-  and the request is not charged;
-- `vendor_stopped: false` (the normal answer once a vendor is already
-  running — the vendors behind the server have no cancel API) → the work may
-  still complete upstream and may still be charged;
-- a BYOK call: the harness stopped waiting, but the user's provider may still
-  bill for work already delivered.
+- **Still queued** — a guaranteed stop: `cancellation.vendor_stopped: true`,
+  the provider was never called, nothing is charged.
+- **Already running** — `vendor_stopped: false` with
+  `reason: provider_has_no_cancel_api`: the vendors behind the server have no
+  cancel endpoint. The generation continues and is **charged if it produces
+  audio**. The tool keeps observing for about two minutes and records the
+  late charge (and the artifact, if one arrives). A switch-off or a closed
+  session stops the observation — the server's own settlement is unaffected.
+- **Already finished** — the stop is refused (`audio_already_completed`,
+  HTTP 409); the result was discarded.
+- **BYOK** — there is no server-side job at all: the harness stops waiting,
+  but your provider may still bill for work already delivered.
 
-Nothing is resumed after a cancel: call again for a fresh generation.
+Nothing is resumed after a stop: call again for a fresh generation. Retrying
+while the same job may still be running can pay twice — the receipt tells you
+which case you are in.
 
 ## The result
 
