@@ -9,15 +9,22 @@ directory under ``sessions/`` the same. On the operator's real store
 transcripts and 17,579 hidden-origin sessions had been idle for more than 48 hours
 — machine bookkeeping nobody opens, which the one policy could only remove by
 being switched on for the user's own conversations too. So the store is split
-by ONE predicate, ``resume.is_user_session_origin``:
+by TWO questions that must stay separate: the class split asks the LISTING
+question ``resume.is_user_session_origin``, while what this pass may REAP is
+``cleanup.DELETABLE_ORIGINS`` (a DESTRUCTION question; deriving one from the
+other made every origin minted later deletable by default):
 
 * PARENT class — everything the sidebar lists (no ``origin.json``, ``fork``,
   ``agent-workstream``). Governed by the existing five keys, OFF by default.
   ``cleanup.run_cleanup`` now iterates ONLY this class.
 * DELEGATED class — every other origin (``subagent``, ``agent-shell``,
-  ``agent-config`` and any future value, because the predicate is opt-OUT of
-  visibility). Governed by ``session.cleanup.delegated.*``, ON by default, with a
-  bounded age (2..720 hours). This module is that class's whole policy.
+  ``agent-config`` and any future value, because visibility is opt-OUT). Governed
+  by ``session.cleanup.delegated.*``, ON by default, with a bounded age
+  (2..720 hours). This module is that class's whole policy.
+* KEPT BY ORIGIN — hidden (so not the parent class) but not named in
+  ``DELETABLE_ORIGINS``: ``agent-config`` today, and every origin a later build
+  mints until someone names it there. Neither policy removes these; the scan
+  counts them (``kept_by_origin``) so the preview's numbers add up.
 
 ``cleanup.remove_session_dir`` remains the ONLY ``rmtree`` of a session
 directory (``tests/unit/session/test_no_session_deletion.py``); this module
@@ -29,6 +36,10 @@ THE SAFETY RULES (every one fails CLOSED: cannot tell => keep)
 
 A delegated session is kept when ANY of these holds:
 
+0. Its origin is not one retention may reap (``cleanup.DELETABLE_ORIGINS``). The
+   set is an ALLOW-LIST, so an unknown value, a newer build's origin, and the
+   operator's own ``agent-config`` runs are kept — ambiguity costs disk, never a
+   session nobody can recover.
 1. It is not older than the window. Age is hours since the last ACTIVITY
    (``retention.session_activity``: transcript or spooled mail, never a sidecar).
    A directory that was never active (no transcript) is clocked by
@@ -249,6 +260,7 @@ from local_operator.session.cleanup import (
     _has_armed_monitor,
     _has_armed_wake,
     _is_delegated_dir,
+    _is_deletable_dir,
     _lease_runtime_alive,
     _write_record,
     policy_from_config,
@@ -379,8 +391,16 @@ class DelegatedResult(CleanupResult):
 
     #: Hidden-origin directories seen (any age).
     delegated_total: int = 0
-    #: Hidden-origin directories inside the age window — kept without a row.
+    #: Hidden-origin directories kept with no row: inside the age window, or with
+    #: no USABLE clock (a missing marker, or an implausible birth stamp — see
+    #: :func:`_clock_without_activity`). Both mean "cannot tell it is old", so both
+    #: are kept, and the preview says which counts they are in.
     within_window: int = 0
+    #: Hidden-origin directories OLD ENOUGH to go but kept because their origin is
+    #: not in ``cleanup.DELETABLE_ORIGINS`` (``agent-config`` today, and any origin
+    #: a newer build mints). Neither class removes them; counted so the preview's
+    #: totals are explainable rather than mysterious.
+    kept_by_origin: int = 0
     #: Over-age candidates the pass did not get to (budget, stop or the switch
     #: turned off); the caller schedules another pass while this is > 0.
     remaining: int = 0
@@ -477,6 +497,21 @@ def _read_json(path: Path) -> Any:
         return json.load(handle)
 
 
+#: The earliest birth stamp this build will BELIEVE: 2020-01-01T00:00:00Z. Below
+#: it is a units error or a truncated epoch (``1.7e8`` is 1975), not a birth —
+#: the harness did not exist to write one. Believing it would rank the session as
+#: maximally OLD, which is the one direction that removes data.
+MIN_PLAUSIBLE_BIRTH = 1_577_836_800.0
+
+#: How far AHEAD of the wall clock a birth stamp may be and still count as a clock
+#: (NTP skew, a writer on another host, a test's fixed ``now``): one day. A far
+#: future value keeps the session anyway (a negative age is inside every window),
+#: so this bound is not about danger — it is that a garbage number which happens
+#: to sort sanely is still a number nobody wrote, and trusting it puts an invented
+#: timestamp into the candidate ordering.
+MAX_BIRTH_SKEW_S = 86_400.0
+
+
 def _clock_without_activity(directory: Path) -> float | None:
     """The age clock of a directory that was never worked in, or ``None``.
 
@@ -485,6 +520,14 @@ def _clock_without_activity(directory: Path) -> float | None:
     a LATER time than the birth (it moves with every entry added), which only ever
     makes the session look younger: the safe side. ``None`` means no clock could
     be established and the caller keeps the directory.
+
+    A PRESENT but IMPLAUSIBLE stamp (below :data:`MIN_PLAUSIBLE_BIRTH`, more than
+    :data:`MAX_BIRTH_SKEW_S` ahead, zero, negative, ``NaN``) is not a clock to
+    second-guess: it is corrupt, and the answer is ``None`` — keep. It must NOT
+    fall back to mtime, because the mtime can be stale too (the marker is exactly
+    what a truncated writer left behind) and ranking a corrupt session old is the
+    inverse of safe. Only a MISSING or unparseable marker takes the mtime
+    fallback, and there the stamp never existed to contradict it.
     """
     marker = directory / "created_at.json"
     try:
@@ -492,8 +535,14 @@ def _clock_without_activity(directory: Path) -> float | None:
         parsed: Any = json.loads(raw)
         if isinstance(parsed, Mapping):
             parsed = parsed.get("created_at", parsed.get("at"))
-        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool) and parsed > 0:
-            return float(parsed)
+        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            try:
+                stamp = float(parsed)
+            except OverflowError:  # a JSON integer too large for a float
+                return None
+            if MIN_PLAUSIBLE_BIRTH <= stamp <= time.time() + MAX_BIRTH_SKEW_S:
+                return stamp
+            return None
     except (OSError, ValueError):
         pass
     for candidate in (marker, directory):
@@ -506,8 +555,11 @@ def _clock_without_activity(directory: Path) -> float | None:
 
 #: THE class predicate lives in ``cleanup`` (the parent-class scan needs it to
 #: EXCLUDE these directories and ``cleanup`` cannot import this module); re-exported
-#: so both classes provably share one classifier.
+#: so both classes provably share one classifier. The same holds for the REAP
+#: predicate, which is the narrower question — a directory can be in this class and
+#: still not deletable (``agent-config``).
 is_delegated_dir = _is_delegated_dir
+is_deletable_dir = _is_deletable_dir
 
 
 def _bounded_dir_stats(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> tuple[int, int]:
@@ -1244,7 +1296,7 @@ def _content_guard(
     Narrower than the record pass's :func:`_evaluate` BY DESIGN — the carve-out
     is the point: parent-still-active, open projects and the scratchpad git
     hazard keep the RECORD; only the current session, a live claim or lease, an
-    armed wake or monitor, the (possibly widened) window and the class
+    armed wake or monitor, the (possibly widened) window and the REAP
     predicate refuse CONTENT. Spooled mail and open asks keep the record but
     not the content: neither is a running process, and the desk's class
     (merged+clean+stale) is exactly what is safe to take from a session that
@@ -1274,8 +1326,8 @@ def _content_guard(
         return "armed wake for this session"
     if _has_armed_monitor(config_dir, cand.path.name):
         return "armed monitor for this session"
-    if not _is_delegated_dir(cand.path):
-        return "not a delegated session"
+    if not _is_deletable_dir(cand.path):
+        return "origin is not reapable"
     return None
 
 
@@ -1545,12 +1597,15 @@ class _Scan:
     hidden: set[str] = field(default_factory=set)
     delegated_total: int = 0
     within_window: int = 0
+    #: Hidden and over-age, but its origin is not one retention may reap.
+    kept_by_origin: int = 0
     unreadable: int = 0
     stopped: bool = False
     #: Directories examined (every class), reported as ``scanned``.
     total: int = 0
-    #: Names of delegated sessions kept for being inside the window, capped: the
-    #: dry run names them (an honest "kept" list) without holding 17k strings.
+    #: Names of delegated sessions kept for being inside the window or for having
+    #: no usable clock, capped: the dry run names them (an honest "kept" list)
+    #: without holding 17k strings.
     window_names: list[str] = field(default_factory=list)
 
 
@@ -1564,8 +1619,11 @@ def _scan(
     """One pass over the store: no sizes, no rglob, a handful of syscalls per directory.
 
     Per directory: two stats for the activity clock; for an OLD one, one small read
-    of ``origin.json``; for every directory one stat of the roster (only parents
-    have one); liveness is probed only for an OLD directory that has a roster.
+    of ``origin.json`` — twice if it is hidden, once for the class split and once
+    for the reap set (:data:`cleanup.DELETABLE_ORIGINS`), a deliberate second
+    question rather than caching one answer and reusing it as the other; for every
+    directory one stat of the roster (only parents have one); liveness is probed
+    only for an OLD directory that has a roster.
     """
     scan = _Scan()
     try:
@@ -1623,6 +1681,14 @@ def _scan(
             scan.within_window += 1
             if len(scan.window_names) < WINDOW_NAMES_CAP:
                 scan.window_names.append(entry.name)
+            continue
+        if not _is_deletable_dir(path):
+            # Rule 0: over-age and hidden, but this origin is NOT one retention
+            # may reap (``cleanup.DELETABLE_ORIGINS``). Unknown must fail CLOSED:
+            # a value minted by a newer build is kept until somebody names it
+            # there, and an origin the operator owns (``agent-config``) stays put
+            # because reaping it is irreversible while keeping it costs disk.
+            scan.kept_by_origin += 1
             continue
         has_transcript = False
         try:
@@ -1689,6 +1755,11 @@ def _evaluate(
     guard = _guard(cand.path, config_dir, now)
     if guard is not None:
         return guard
+    if not _is_deletable_dir(cand.path):
+        # Re-asked at DECISION time rather than inherited from the scan: a marker
+        # rewritten since then (or one the scan raced) must keep the session, the
+        # same way every other guard is re-evaluated per directory.
+        return "origin is not reapable"
     hazard = scratchpad_git_hazard(cand.path)
     if hazard is not None:
         if (name, hazard) not in _WARNED_KEEP:
@@ -1784,6 +1855,7 @@ def run_delegated_pass(
     result.window_names = scan.window_names
     result.delegated_total = scan.delegated_total
     result.within_window = scan.within_window
+    result.kept_by_origin = scan.kept_by_origin
     result.unreadable = scan.unreadable
     if scan.stopped:
         result.skipped = "stopped during the scan"
@@ -2025,8 +2097,13 @@ def run_delegated_pass(
     if dry_run:
         # The honest kept list names the sessions the age rule itself saved, last
         # (capped at WINDOW_NAMES_CAP; the totals line carries the full count).
+        # The reason covers both members of the bucket: a session inside the
+        # window, and one with NO USABLE clock (no marker, or an implausible birth
+        # stamp). Calling the second "active recently" would state something the
+        # scan does not know.
         result.protected.extend(
-            (name, f"active within the last {result.hours}h") for name in scan.window_names
+            (name, f"inside the {result.hours}h window or no usable clock")
+            for name in scan.window_names
         )
     result.freed_bytes = freed
     if not dry_run and result.removed:
