@@ -92,19 +92,80 @@ def _kept(result: dr.DelegatedResult) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def test_only_hidden_origins_are_candidates_and_user_origins_never_are(root: Path) -> None:
-    for name, origin in (
-        ("sub", "subagent"),
-        ("shell", "agent-shell"),
-        ("config", "agent-config"),
-        ("future", "some-origin-minted-next-year"),
-    ):
+def test_only_the_reapable_origins_go_and_every_other_class_survives(root: Path) -> None:
+    """Survival, not predicate values: each directory is still on disk.
+
+    The reap set is ``cleanup.DELETABLE_ORIGINS``, an ALLOW-LIST — deliberately
+    not the negation of the visibility predicate. That inversion is the defect
+    this pins: it made every origin minted by a later code path deletable by
+    default, and reaped a hidden-but-operator-owned origin nobody had decided
+    to reap.
+    """
+    for name, origin in (("sub", "subagent"), ("shell", "agent-shell")):
         _mk(root, name, origin)
+    # Hidden, but never reapable: the operator's own configuration run and a
+    # value this build does not know. Both fail CLOSED.
+    _mk(root, "config", "agent-config")
+    _mk(root, "future", "some-origin-minted-next-year")
     for name, origin in (("user", None), ("fork", "fork"), ("ws", "agent-workstream")):
         _mk(root, name, origin, age_h=24 * 300)
     result = _pass(root)
-    assert {c.session for c in result.removed} == {"sub", "shell", "config", "future"}
-    assert _names(root) == {"user", "fork", "ws"}
+    assert {c.session for c in result.removed} == {"sub", "shell"}
+    assert _names(root) == {"config", "future", "user", "fork", "ws"}
+    assert result.kept_by_origin == 2
+
+
+def test_an_agent_config_run_is_never_reaped(root: Path) -> None:
+    """A stated DISPOSITION, not an inherited one.
+
+    The operator starts configuration runs from the Agents page, so the run is
+    the operator's own chore: reaping it is irreversible, keeping it costs a few
+    kilobytes. It is hidden (not in ``resume.USER_ORIGINS``, so no listing shows
+    it) AND kept (not in ``DELETABLE_ORIGINS``) — two answers on purpose.
+    """
+    _mk(root, "config", "agent-config", age_h=24 * 400)
+    assert _pass(root, dry_run=True).removed == []
+    assert _pass(root).removed == []
+    assert "config" in _names(root)
+
+
+def test_an_agent_config_run_is_not_the_parent_class_either(root: Path) -> None:
+    """Kept by BOTH policies: the parent scan stays blind to it.
+
+    A kept-but-hidden origin must not fall through to the parent class, whose
+    limits could remove it instead. It belongs to neither removal path.
+    """
+    _mk(root, "config", "agent-config", age_h=24 * 400)
+    parent = run_cleanup(
+        root,
+        CleanupPolicy(enabled=True, max_sessions=1, max_total_bytes=1, remove_empty=True),
+        now=NOW,
+        dry_run=True,
+    )
+    assert parent.scanned == 0
+    assert {c.session for c in parent.chosen} == set()
+
+
+def test_an_unknown_origin_is_kept_because_ambiguity_fails_closed(root: Path) -> None:
+    """A value present in ``origin.json`` but not in the reap set is NOT deletable.
+
+    Same direction as an empty marker: it may cost disk, never a session nobody
+    can recover. It is also invisible to the parent class (hidden), so neither
+    policy removes it.
+    """
+    _mk(root, "future", "agent-future-thing", age_h=24 * 400)
+    assert _pass(root).removed == []
+    assert "future" in _names(root)
+    parent = run_cleanup(
+        root, CleanupPolicy(enabled=True, max_total_bytes=1), now=NOW, dry_run=True
+    )
+    assert parent.scanned == 0
+
+
+def test_a_missing_origin_marker_is_the_users_own_and_survives(root: Path) -> None:
+    _mk(root, "plain", origin=None, age_h=24 * 400)
+    assert _pass(root).removed == []
+    assert "plain" in _names(root)
 
 
 def test_an_agent_workstream_ten_times_past_the_cutoff_is_never_delegated(root: Path) -> None:
@@ -194,6 +255,63 @@ def test_a_directory_with_no_clock_is_kept(root: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(dr, "_clock_without_activity", lambda _d: None)
     assert _pass(root).removed == []
     assert "noclock" in _names(root)
+
+
+def test_a_sane_birth_stamp_is_believed(root: Path) -> None:
+    """Positive control for the implausible cases below: the stamp IS the clock."""
+    directory = _mk(root, "sane", "subagent", age_h=None)
+    marker = directory / "created_at.json"
+    marker.write_text(json.dumps(NOW - 400 * HOUR))
+    old = NOW - 400 * HOUR
+    os.utime(marker, (old, old))
+    os.utime(directory, (old, old))
+    assert [c.session for c in _pass(root).removed] == ["sane"]
+    assert "sane" not in _names(root)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [0.0, -1.0, 1.7e8, 1_000_000_000_000.0, float("nan"), float("inf")],
+    ids=["zero", "negative", "truncated-epoch", "far-future", "nan", "inf"],
+)
+def test_an_implausible_birth_stamp_is_no_clock_and_the_session_survives(
+    root: Path, stamp: float
+) -> None:
+    """A positive-but-garbage ``created_at`` used to rank as MAXIMALLY OLD.
+
+    So a truncated epoch (``1.7e8`` is 1975) was the first thing reaped — the
+    inverse of safe. The stamp is now believed only inside a plausible window
+    (:data:`dr.MIN_PLAUSIBLE_BIRTH` .. now + ``MAX_BIRTH_SKEW_S``); outside it the
+    directory has no clock and is kept.
+
+    The mtimes are pushed OLD deliberately: that is what makes this a real
+    control rather than a coincidence. A fallback to mtime would remove the
+    session, so survival proves the stamp was REJECTED, not merely outranked.
+    """
+    directory = _mk(root, "odd", "subagent", age_h=None)
+    marker = directory / "created_at.json"
+    marker.write_text(json.dumps(stamp))
+    old = NOW - 400 * HOUR
+    os.utime(marker, (old, old))
+    os.utime(directory, (old, old))
+    assert _pass(root).removed == []
+    assert "odd" in _names(root)
+
+
+def test_an_unreadable_birth_marker_still_takes_the_mtime_clock(root: Path) -> None:
+    """Only a PRESENT-but-implausible value is rejected; a corrupt marker is not it.
+
+    A marker that does not parse holds no stamp to contradict the fallback, so
+    the mtime clock stands (an old one still reaps, which is the pre-existing
+    behaviour this change deliberately leaves alone).
+    """
+    directory = _mk(root, "garbled", "subagent", age_h=None)
+    marker = directory / "created_at.json"
+    marker.write_text("{not a number")
+    old = NOW - 400 * HOUR
+    os.utime(marker, (old, old))
+    os.utime(directory, (old, old))
+    assert [c.session for c in _pass(root).removed] == ["garbled"]
 
 
 def test_a_sidecar_write_does_not_move_the_clock(root: Path) -> None:
@@ -754,7 +872,10 @@ def test_a_dry_run_lists_everything_and_removes_nothing(root: Path) -> None:
     _mk(root, "fresh", age_h=1)
     result = _pass(root, dry_run=True, batch_size=2)
     assert len(result.removed) == 7 and len(_names(root)) == 8
-    assert _kept(result)["fresh"].startswith("active within")
+    # The kept row names its bucket honestly: "inside the window" and "no usable
+    # clock" share it (a missing marker and an implausible birth stamp both land
+    # there), so it must not claim the session was recently active.
+    assert _kept(result)["fresh"].startswith("inside the 48h window")
     assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
 
 

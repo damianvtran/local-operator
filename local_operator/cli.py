@@ -4929,6 +4929,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 enabled=policy.delegated_enabled,
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
+                kept_by_origin=getattr(delegated, "kept_by_origin", 0),
                 remaining=getattr(delegated, "remaining", 0),
                 scratchpad_enabled=policy.delegated_scratchpad_enabled,
                 scratchpad={
@@ -5038,7 +5039,9 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
-                f"newer than {delegated.hours}h (kept); {delegated_verb} {len(delegated.removed)}"
+                f"kept inside {delegated.hours}h or with no usable clock; "
+                f"{delegated.kept_by_origin} kept by origin; "
+                f"{delegated_verb} {len(delegated.removed)}"
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
             _print_kept(delegated.protected)
