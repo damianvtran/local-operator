@@ -7755,21 +7755,25 @@ class DesktopSessions:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
 
         Peaks are a sidecar of the SAME content-addressed store the bytes
-        live in (``<digest>.peaks.json``), computed once at artifact creation
-        (``session.attachments.cache_media``) and read here — never decoded
-        on this path, which is what keeps a render loop off the CPU. The
+        live in (``<digest>.peaks.json``), normally computed at creation.
+        Legacy audio gets one bounded server-side repair on a missing sidecar:
+        a serialized child decoder with an input cap and deadline, off the
+        event loop. Successful repairs persist; failed attempts are cached.
+        No renderer decodes media. The
         session gate is :meth:`attachment`'s, verbatim: the id is an
         EXISTENCE check over the durable user-session namespace (plus the
         peer-row door), and a digest held by another device raises
         :class:`PeerAttachmentUnavailable` so the 409 branch is the same one
         the byte route answers with. A digest with no sidecar — a pre-peaks
-        artifact, a host whose optional decoder was absent at creation, a
+        artifact that cannot be repaired within the recovery limits, or a
         damaged sidecar — is ``KeyError``, an ordinary 404: the surface
         draws its no-waveform state, exactly as a missing image degrades to
         a placeholder.
         """
 
         def read() -> dict[str, Any]:
+            from local_operator.audiogen.recovery import waveform_payload
+
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
@@ -7782,11 +7786,11 @@ class DesktopSessions:
                     raise KeyError("Unknown session")
                 # THIS DEVICE'S STORE FIRST, exactly as the byte route does:
                 # a moved conversation that kept a local copy still serves it.
-                payload = store.get_peaks(digest)
+                payload = waveform_payload(store, digest)
                 if payload is None:
                     raise PeerAttachmentUnavailable(session_id, row)
                 return payload
-            payload = store.get_peaks(digest)
+            payload = waveform_payload(store, digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
@@ -7991,13 +7995,15 @@ class DesktopSessions:
         The mirror of :meth:`attachment_waveform`, and the same containment
         proof runs before the store is touched
         (:func:`_contained_child_dir`) — a child read cannot become a way to
-        enumerate another conversation's media. The 404/no-sidecar rule and
-        the no-decode-on-read rule are identical to the parent's.
+        enumerate another conversation's media. Bounded legacy recovery and
+        the 404 fallback are identical to the parent's.
         """
 
         def read() -> dict[str, Any]:
+            from local_operator.audiogen.recovery import waveform_payload
+
             _contained_child_dir(self.root, session_id, child_id)
-            payload = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get_peaks(digest)
+            payload = waveform_payload(AttachmentStore(self.root / ATTACHMENTS_DIRNAME), digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload

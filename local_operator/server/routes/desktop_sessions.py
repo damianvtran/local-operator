@@ -3751,9 +3751,10 @@ async def attachment_waveform(session_id: str, digest: AttachmentDigest, request
     The audio surfaces' waveform source. Peaks are computed ONCE at artifact
     creation (``session.attachments.cache_media`` -> ``audiogen.peaks``: 240
     max-abs bars at 8 kHz mono, 0..1) and stored as the ``<digest>.peaks.json``
-    sidecar beside the bytes; this route only READS them, so a render loop
-    never pays a decode — the frozen rule that keeps a heavy codec off every
-    repaint. The server contract's v1 result carries no ``waveform`` field, so
+    sidecar beside the bytes. A missing legacy sidecar gets a bounded server
+    repair off the event loop (8 MiB input, one decoder, 10-second deadline);
+    successful repairs persist and failed attempts are cached. A render loop
+    never decodes media. The server contract's v1 result carries no ``waveform`` field, so
     the sidecar is the default source and remains the source when a future
     server lane ships its own peaks.
 
@@ -3763,8 +3764,8 @@ async def attachment_waveform(session_id: str, digest: AttachmentDigest, request
     routes unambiguously distinct), the session id is the same existence
     check, and a digest held by another device answers the same 409
     ``attachment_on_peer`` the byte route does. A digest with no sidecar is an
-    ordinary 404 — a pre-peaks artifact or a host without the optional
-    decoder at creation time — and the surface paints its no-waveform state,
+    ordinary 404 when bounded recovery is unavailable or fails — and the
+    surface paints its no-waveform state,
     exactly as a missing image degrades to a placeholder.
 
     ``no-store`` rides along with ``nosniff`` for the family's reason:
