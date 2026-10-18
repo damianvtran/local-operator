@@ -81,6 +81,7 @@ from local_operator.helpers import retention_label
 from local_operator.install_defaults import (
     DEFAULT_KEEP_GENERATIONS as DEFAULT_KEEP_GENERATIONS,
 )
+from local_operator.install_defaults import STABLE_ROOT_RELATIVE
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import PLATFORM_LABEL
 
@@ -1491,7 +1492,13 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
 #: ``Path(_STABLE_ROOT).expanduser()`` at every use so a redirected ``HOME``
 #: (an isolated test, a sandbox) moves it — an absolute path captured at import
 #: time would write into the operator's real home from inside a sandbox.
-_STABLE_ROOT = "~/.local/share/lop"
+#:
+#: Bound from :mod:`local_operator.install_defaults` rather than spelled here,
+#: because :mod:`local_operator.procname` resolves the same directory against
+#: the PASSWD home (SDK children get ``HOME`` rewritten) and the two spellings
+#: must not be able to drift. The ``~`` is added here because THIS module keeps
+#: the redirect-friendly reading; ``procname`` deliberately does not follow it.
+_STABLE_ROOT = "~/" + STABLE_ROOT_RELATIVE
 
 #: Where the console scripts uv would normally write land, so the stable
 #: launchers can be recognised and refreshed without a second constant.
@@ -1572,10 +1579,31 @@ if [ -z "$gen" ]; then
     echo "lop: no current install generation ($here/../current is unreadable)" >&2
     exit 78
 fi
-# Prefer the branded image when it is planted, because that is what Activity
-# Monitor reads (p_comm); the interpreter is the always-present fallback.
-if [ -x "$gen/tools/local-operator/bin/Local Operator" ]; then
-    exec "$gen/tools/local-operator/bin/Local Operator" "$@"
+# Prefer the branded image when it can actually START. It is normally a symlink
+# to the stable runtime clone, and through it the image path -- the identity
+# macOS's privacy prompts key on -- is ONE path for every generation, instead of
+# one new client per update. A symlink whose target's stdlib does not resolve
+# dies with "No module named 'encodings'" before any of our code runs, so ask
+# that question before naming it; the interpreter below always starts.
+branded="$gen/tools/local-operator/bin/Local Operator"
+use_branded=""
+if [ -x "$branded" ]; then
+    use_branded=1
+    if [ -L "$branded" ]; then
+        target=$(readlink "$branded") || target=""
+        case $target in
+            /*) ;;
+            *) target="$(dirname -- "$branded")/$target" ;;
+        esac
+        found=""
+        for enc in "$(dirname -- "$target")"/lib/python3*/encodings/__init__.py; do
+            if [ -f "$enc" ]; then found=1; break; fi
+        done
+        if [ -z "$found" ]; then use_branded=""; fi
+    fi
+fi
+if [ -n "$use_branded" ]; then
+    exec "$branded" "$@"
 fi
 exec "$gen/tools/local-operator/bin/python3" "$@"
 """

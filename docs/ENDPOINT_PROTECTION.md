@@ -166,12 +166,26 @@ here):
 - **plain pip**: the venv prefix or the base interpreter that received the
   package, wherever the user's toolchain put it.
 
-`Local Operator` is **not** a separate binary. It is a hardlink to the Python
-interpreter of that environment (`local_operator/procname.py`): the documented
+`Local Operator` is **not** a separate binary. It is a symlink to a per-Python-build
+**clone** of the interpreter (`local_operator/procname.py`): the documented
 anti-pattern `[sys.executable, "-m", module]` is what makes the OS notify
-"python3 is running in the background" on install, so the installer plants a
-second name for the interpreter's inode instead. §2 covers what that hardlink
-costs us; §5 covers replacing it.
+"python3 is running in the background" on install, so the installer publishes one
+image at a stable path and points every venv at it.
+
+```console
+$ ls -l ~/.local/share/lop/runtime/
+cpython-3.12.14-macos-aarch64-none-336bea37a4/
+$ ls -l ~/.local/share/lop/runtime/cpython-3.12.14-macos-aarch64-none-336bea37a4/
+bin/Local Operator        # clone of the interpreter: own inode, nlink 1
+lib -> <python build>/lib
+include -> <python build>/include
+$ ls -l ~/.local/share/lop/current/tools/local-operator/bin/Local Operator
+… -> ~/.local/share/lop/runtime/cpython-3.12.14-macos-aarch64-none-336bea37a4/bin/Local Operator
+```
+
+Why one image and not one per venv is the macOS privacy story below (it is the
+same mechanism). §2 covers what the underlying interpreter costs us; §5 covers
+replacing it with our own signed launcher.
 
 One shape has no `Program` key at all, and it is worth recognising because it
 is what a pre-branding plist looks like. When no branded link can be planted,
@@ -204,26 +218,35 @@ pid  1343  ucomm=python3.14       exec'd through <gen>/bin/python3 (symlink) pro
 pid 60013  ucomm=python3.14       exec'd through <uv-tool>/bin/python3 (symlink) proc_pidpath=<uv>/python3.14
 ```
 
+That capture predates the clone layout (§1); it is kept because it is the
+measurement the exclusion recipe was written from. Under the clone layout a
+branded process reports `proc_pidpath = <runtime>/<build-key>/bin/Local
+Operator` instead — measured 25 times on one build, always the same path.
+
 Two consequences an admin needs, and neither is obvious from the plists alone:
 
 - **The exec path is what decides the reported name, so it is what an exclusion
   has to cover.** `p_comm` — the Activity Monitor column, and the axis the
   2026-09-19 incident was about — is fixed by the path the process was executed
-  *through*: a symlink is resolved by the kernel (so `…/bin/python3` reports
-  `python3.14`), while a hardlink is not (so `…/bin/Local Operator` reports
-  `Local Operator`). Both processes above run the same interpreter build.
-- **`proc_pidpath()` is NOT a reliable way to name a hardlinked image**, so a
-  file-path exclusion written only against `*/bin/Local Operator` is
-  incomplete: the branded file and the interpreter it is a second name for are
-  one inode, and the path an EDR reports for that inode is whichever link name
-  the VFS cached. Write the exclusion for `*/bin/Local Operator` **and** for the
-  interpreter paths the same inode answers to (see §4).
+  *through*. A symlink to the interpreter reports `python3.14` (the kernel takes
+  the basename of the image it loads), and a symlink to the runtime image reports
+  `Local Operator`, because that image's own basename is the brand. Both
+  processes above run the same interpreter build.
+- **`proc_pidpath()` names the image, and under the clone layout that is one
+  stable path.** The clone has its own vnode, so there are no aliases to choose
+  between: `proc_pidpath` and `SecCodeCopyPath` both report the runtime image.
+  The old hardlink shape is the one where the answer was whichever link name the
+  VFS cached, and that shape now survives only as the fallback rung.
 
-**The plant is a hard link, and that has a blast radius worth stating plainly.**
-Because the branded `Local Operator` file and the interpreter are one inode,
-anything a security tool does to the file — quarantine, ownership change, mode
-change, content replacement — reaches the interpreter every venv on the machine
-resolves to. Measured on this machine, 2026-09-19 ~23:44 local:
+**The FALLBACK plant is a hard link, and its blast radius is worth stating
+plainly.** The default plant is a clone — its own inode — so a security tool
+quarantining, reowning, chmod-ing or truncating `Local Operator` reaches OUR
+copy and nothing else. The per-venv hardlink is still planted on machines where
+the runtime image cannot be (a read-only stable root, a non-APFS volume), and
+there the branded `Local Operator` file and the interpreter are one inode:
+anything a security tool does to the file reaches the interpreter every venv on
+the machine resolves to. Measured on this machine, 2026-09-19 ~23:44 local,
+under that layout:
 
 ```console
 $ ls -la ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12
@@ -258,14 +281,42 @@ side; nothing in `procname.py` writes modes or ownership, and nothing should
 an unrelated worktree's console script, because the mode belongs to the shared
 inode).
 
-A future change could reduce this blast radius: planting a per-venv **copy** of
-the interpreter is viable now that the mandatory `lib/libpython3.X.dylib`
-symlink is planted beside it (the failure the module docstring records for a
-copy is the missing dylib, not the copy shape; §5 already measures a detached
-copy executing beside a venv-like `lib/`). That would cost ~50 KB per venv and
-replace the inode staleness check with a content one, and it is deliberately NOT
-done in the change that added this measurement — it is its own decision with its
-own measurements.
+That is the hardlink rung's failure, and it is why the default rung moved. The
+same measurements now argue for the clone: a mode change or a truncation on our
+copy cannot reach uv's interpreter, and the copy is the first file of ours that
+could be re-signed without touching a shared tree (phase 2, §5).
+
+### macOS privacy (TCC) identity
+
+macOS records a grant against a **client identity** that for an ad-hoc-signed
+binary includes the path it was executed from. The branded image used to be a
+hardlink inside each venv, so every generation and every worktree venv was a new
+path — and a new client. Measured on the operator's machine in October 2026:
+nine separate rows in **System Settings → Privacy & Security → App Management**
+and the same in **Files & Folders**, one per build generation.
+
+The clone layout makes the image path a function of the PYTHON BUILD:
+`<runtime>/<build-key>/bin/Local Operator`, keyed on the interpreter's resolved
+path, size and mtime. Every venv of that build symlinks to it, so an update, a
+new generation, or a new worktree venv reuses the same client:
+
+- **one row per Python build**, not per update and not per worktree;
+- a new Python build is a new row, which is the one prompt that should happen;
+- the migration to this layout changes the image path once, so the **first launch
+after upgrading re-prompts once** per service. That prompt is expected;
+  granting it is the last one.
+
+Published `<runtime>/<build-key>` directories are never rewritten or collected.
+Nothing here can remove a TCC row, and the product does not try:
+
+- **Stale rows are removed by hand** — System Settings → Privacy & Security,
+  select the row, click **−**. Remove rows for builds that are gone; leave the
+  current one.
+- **Do NOT use `tccutil reset`.** Its usage is `tccutil reset <service>
+  [<bundle-id>]` — a bundle id, not a path. Without one it resets that service
+  for EVERY application on the machine, which destroys grants this product does
+  not own. There is no supported way to remove one path-identified client
+  programmatically.
 
 ### The config directory
 
@@ -673,7 +724,7 @@ install:
    the kind of place persistence hides.
 4. **A binary that is not what it is called.** The program the EDR sees is
    named `Local Operator` while its code signature's identity is CPython's,
-   because it is a hardlink (§2). This is a genuine **name/identity
+   because it is a clone of that interpreter (§1, §2). This is a genuine **name/identity
    disagreement by construction**, and it holds in both signing classes: the
    identifier is CPython's either way (`Identifier=python3` on an
    app-provisioned image, `Identifier=-` on a CLI one). What differs by class is
@@ -721,14 +772,16 @@ Scope the exclusion to:
   `~/.local/share/uv/tools/local-operator/**` for a pre-generation uv tool
   install, `~/.local/pipx/venvs/local-operator/**` for pipx, or the equivalent
   venv prefix for a plain pip install;
-- **the branded image name, and the shared interpreter it is a hardlink of** —
-  `*/bin/Local Operator` (which the plant creates in every tree the product runs
-  from, including each `lop` generation) **and** the interpreter paths the same
-  inode answers to, e.g.
-  `~/.local/share/uv/python/cpython-*/bin/python3.*` and the uv-tool
-  environment's own `…/bin/python3`. Both halves are needed: the exec path
-  decides `p_comm`, while the path an EDR reports for the inode is whichever
-  link name its cache holds (§1);
+- **the stable runtime image, and the branded name that points at it** —
+  `~/.local/share/lop/runtime/**` (the image every launch now executes:
+  `<runtime>/<build-key>/bin/Local Operator`), **and** `*/bin/Local Operator`
+  (the symlink each venv — including every `lop` generation and every source
+  worktree — resolves through). Both, because one is the exec path an EDR sees
+  and the other is the path an operator or a scanner will find;
+- **on the fallback rung only**, the shared interpreter the branded name is a
+  hardlink of, e.g. `~/.local/share/uv/python/cpython-*/bin/python3.*` and the
+  uv-tool environment's own `…/bin/python3`. That rung is taken only where the
+  runtime image cannot be planted, and its blast radius is the one in §1;
 - the plist paths — `~/Library/LaunchAgents/com.local-operator.*` (the glob is
   deliberately `com.local-operator.*` rather than `*.plist`, so it also matches
   a label the browser bridge derives from a non-default config root, §1);
@@ -848,7 +901,8 @@ Report it as a behavioural false positive with the evidence attached:
   that names the image, which matters because the analyst will scan the argv
   array first;
 - the install prefix, and the `Local Operator`-named image inside it, called
-  out explicitly as a **hardlink to the environment's CPython**, so the
+  out explicitly as a **clone of the environment's CPython** on a venv the
+  product owns (and, on the fallback rung only, a hardlink to it), so the
   analyst can see in one step why the name and the signature disagree;
 - the paths in `~/Library/Application Support/Local Operator` for a
   desktop-app install, including the fact that the directory is the app's data
@@ -959,31 +1013,29 @@ Two pieces of work, stated as work rather than intent:
   the layout the install prefix already has (`lib/libpython3.14.dylib` resolves
   through `@rpath`): the same copy executed from a directory without a `lib/`
   beside it fails exactly as `procname.py` documents, with
-  `dyld: Library not loaded: @rpath/libpython3.14.dylib`. So the real constraint
-  is: **the installer plants a hardlink**, which means whatever signature sits on
-  that inode is CPython's, and a separately signed image would be replaced by a
-  fresh hardlink at the next install — the signature would not survive the next
-  `lop … install`, `lop-update`, or app update. Two further reasons point the
-  same way: signing a copy would still be signing *CPython*, so the process an
-  EDR sees remains someone else's code with our name on it, and the copy would
-  need its own update path every time the interpreter changes. A launcher we
-  compile is the version of this that holds.
+  `dyld: Library not loaded: @rpath/libpython3.14.dylib`. The installer now
+  plants exactly that detached shape once per Python build, so the signature
+  argument changes shape with it: our clone COULD be re-signed, and that is the
+  prerequisite for phase 2. What still blocks signing TODAY is that a clone of
+  CPython is still CPython — signing it makes the process an EDR sees carry our
+  team identifier on someone else's code — and that any signature change moves
+  the cdhash, which is half of the macOS privacy client identity and re-prompts
+  (§1). A launcher we compile is the version of this that holds.
 
 Until both have shipped, path-scoped exclusions are the supported answer, and
 this document is the evidence to justify them.
 
-One further change belongs on this list, and it is about the blast radius rather
-than about detection: **plant a per-venv copy of the interpreter instead of a
-hardlink to it.** It would not stop an EDR flagging the name, but it would stop
-whatever an EDR does to that name from reaching the interpreter every venv on the
-machine resolves to through the shared inode (measured, §1: two uv interpreters
-left unreadable on 2026-09-19, every 3.12/3.13 venv on the host dead until
-reinstalled). The cost is stated with it: ~50 KB per venv, and a
-content-staleness check where the inode comparison is today. It is not done
-yet, and the reason to note it here rather than only in an issue is that the
-copy shape's known failure — `dyld: Library not loaded: @rpath/libpython3.X.dylib`
-— is exactly what the mandatory `lib/libpython3.X.dylib` symlink fixes, so the
-objection to it has already been measured away.
+One change on this list has already shipped, and it is about the blast radius
+rather than about detection: the interpreter is **cloned** once per Python build
+instead of being hardlinked into every venv. It does not stop an EDR flagging
+the name, but it stops whatever an EDR does to that name from reaching the
+interpreter every venv on the machine resolves to (measured, §1: two uv
+interpreters left unreadable on 2026-09-19, every 3.12/3.13 venv on the host
+dead until reinstalled). The cost is a ~50 KB clone (APFS shares the blocks) and
+a content-staleness rule — the build key — where the inode comparison was. The
+copy shape's old failure, `dyld: Library not loaded: @rpath/libpython3.X.dylib`,
+is what the `lib` symlink beside the image fixes, and it is measured: 25/25
+launches through the venv symlink, `sys.prefix` still the venv.
 
 ## 6. Where to find this
 

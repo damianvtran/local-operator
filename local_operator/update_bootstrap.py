@@ -229,7 +229,19 @@ def bootstrap(args: argparse.Namespace) -> int:
         for key in tuple(env):
             if key.startswith("CMUX_") or key == "XPC_FLAGS":
                 env.pop(key, None)
-        _run([uv, "venv", "--python", sys.executable, str(prefix)], env=env, deadline=deadline)
+        # The base for the controller venv must be the REAL interpreter, not
+        # ``sys.executable``: once this process runs through the branded
+        # symlink, that path is the runtime clone, and ``uv venv --python``
+        # would build a venv whose base is a directory holding no interpreter.
+        # Local import so this module stays stdlib-only up to this line.
+        from local_operator import procname
+
+        base_interpreter = procname.real_interpreter() or Path(sys.executable)
+        _run(
+            [uv, "venv", "--python", str(base_interpreter), str(prefix)],
+            env=env,
+            deadline=deadline,
+        )
         python = prefix / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         _run(
             [uv, "pip", "install", "--python", str(python), str(wheel)],
