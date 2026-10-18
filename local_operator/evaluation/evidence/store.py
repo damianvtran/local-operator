@@ -34,6 +34,7 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     ContextCompactionPayload,
     EnvironmentStepPayload,
+    ErrorPayload,
     EventKind,
     EventPayload,
     EventRecord,
@@ -67,6 +68,7 @@ _STATE = "state.json"
 _OUTCOME = "outcome.json"
 _ABANDONMENT = "abandonment.json"
 _DIGEST_CHARS = frozenset("0123456789abcdef")
+_DIGEST_LENGTH = 64
 # Only these exact semantic issues are expected when the finalizing marker
 # reaches disk before (or at) scoring_start and the process then dies
 # mid-finalization. Integrity and confinement findings always block. The
@@ -993,17 +995,43 @@ class EvidenceWriter:
         self._validate_event_phase(event)
         return event
 
-    def _persist_prevalidated_event(self, event: EventRecord) -> EventRecord:
-        """Commit one already-validated record while the caller still holds the RLock."""
+    def _persist_prevalidated_event(
+        self, event: EventRecord, *, best_effort: bool = False
+    ) -> EventRecord:
+        """Commit one already-validated record while the caller still holds the RLock.
+
+        ``best_effort`` is for the failure diagnostic ONLY, and it changes what
+        happens to the MEDIUM, never to the verdict: a failed write of a
+        disposable record is rolled back to the exact byte length the journal
+        had before the attempt instead of poisoning the writer. Poison is
+        permanent (``_ensure_open`` refuses everything, including
+        ``abandon()``), so poisoning on a diagnostic whose whole purpose is to
+        preserve the terminal loses the bundle -- measured by review with an
+        ENOSPC injected on the bytes of the diagnostic event: control
+        ``abandoned``, subject ``abandonment_failed`` with the journal's own
+        head unchanged.
+
+        A rollback that cannot be proven -- truncate failed, fsync failed, or
+        the size did not return to the pre-write value -- still poisons, because
+        an unverifiable journal must not accept another append. No memory state
+        (sequence, head, phase) has advanced at that point either way.
+        """
 
         encoded = event.to_canonical_json() + b"\n"
+        start: int | None = None
         try:
+            if best_effort:
+                # The length BEFORE the append. O_APPEND means any partial
+                # write lands at the tail, so truncating back to this offset
+                # restores the journal byte-for-byte.
+                start = os.fstat(self._events_fd).st_size
             _write_all(self._events_fd, encoded, self._calls)
             # The memory head advances only after the durable journal commit. A
             # failing fsync leaves memory pointing at the last known durable record.
             self._calls.fsync(self._events_fd)
         except (OSError, EvidenceError):
-            self._poison()
+            if not (best_effort and self._rollback_journal(start)):
+                self._poison()
             raise
         self._sequence += 1
         self._head = event.event_id
@@ -1019,6 +1047,7 @@ class EvidenceWriter:
         *,
         monotonic_ns: int | None = None,
         wall_time_ms: int | None = None,
+        best_effort: bool = False,
     ) -> EventRecord:
         event = self._build_event(
             kind,
@@ -1026,7 +1055,25 @@ class EvidenceWriter:
             monotonic_ns=monotonic_ns,
             wall_time_ms=wall_time_ms,
         )
-        return self._persist_prevalidated_event(event)
+        return self._persist_prevalidated_event(event, best_effort=best_effort)
+
+    def _rollback_journal(self, start: int | None) -> bool:
+        """Truncate a failed best-effort append back to its pre-write length.
+
+        Returns True only when the journal is PROVABLY back at ``start``: the
+        truncate and its fsync both succeeded and the size reads back. A caller
+        that gets False must poison -- an append whose tail is unknown is not a
+        journal anything may be written to again.
+        """
+
+        if start is None:
+            return False
+        try:
+            os.ftruncate(self._events_fd, start)
+            self._calls.fsync(self._events_fd)
+            return os.fstat(self._events_fd).st_size == start
+        except BaseException:
+            return False
 
     def _cleanup_artifact_temp(self, fd: int, temp: str) -> BaseException | None:
         """Attempt every temp cleanup step and return only the first failure.
@@ -1067,6 +1114,152 @@ class EvidenceWriter:
             expected_byte_count=expected_byte_count,
         )
 
+    def publish_failure_diagnostic(
+        self,
+        data: bytes,
+        *,
+        media_type: str = "text/plain",
+    ) -> EvidenceArtifactRef:
+        """Publish the bounded, scanned text that explains a terminal failure.
+
+        Allowed while the bundle is OPEN **and** while it is FINALIZING, and
+        that second state is the whole reason this exists: a scoring failure is
+        discovered only after ``begin_finalization`` (``scoring_start`` is
+        already durable), and its diagnosis has to be durable BEFORE
+        ``abandon()`` -- the only terminal a scored intent can take. The
+        ordinary artifact path refuses finalizing by design, so without this
+        seam the failure is reduced to a single column-less code and nobody can
+        tell a redaction refusal from a judge outage.
+
+        This does NOT weaken the phase rules for anything else: the caller must
+        name its own narrow state set, and ``scoring_details`` keeps its
+        single-phase finalizing path. The published bytes still pass the same
+        redaction scanner, byte bound, confinement and fsync path as every
+        other artifact -- so an uncleared diagnostic is refused here rather
+        than written, which is the drop side of the fail-open boundary.
+        """
+
+        return self._publish_artifact(
+            data,
+            media_type=media_type,
+            allowed_states=("open", "finalizing"),
+            # The fail-open boundary: a diagnostic is not durable evidence. An
+            # ENOSPC/EDQUOT/EMFILE here must cost the diagnosis, never the
+            # writer -- poison would make ``abandon()`` refuse the bundle and
+            # lose a run that could still record a terminal.
+            best_effort=True,
+        )
+
+    def record_failure_diagnostic(
+        self,
+        payload: ErrorPayload,
+        *,
+        monotonic_ns: int | None = None,
+        wall_time_ms: int | None = None,
+    ) -> EventRecord:
+        """Append the ``error`` event that carries a failure's diagnosis.
+
+        The verifier already admits ``error`` after execution closes (see
+        ``verify.allowed_after_finalizing``), so the same event works for both
+        failure classes this exists for: an evidence write that failed mid-run
+        (state OPEN) and a scoring failure (state FINALIZING). The writer's
+        ordinary ``append`` and ``_record_finalization_receipt`` are each
+        single-phase; this is the one joint rule, kept explicit rather than
+        relaxed on either of them.
+
+        Referencing the published diagnostic from this event is what keeps the
+        bundle verifiable: artifacts are discovered through the journal, so an
+        unreferenced diagnostic would be an ``artifact_unreferenced`` error and
+        ``abandon()`` refuses to verify a bundle that has one.
+        """
+
+        with self._thread_lock:
+            self._ensure_open()
+            if self._recovery_only:
+                raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
+            marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            if marker.state not in ("open", "finalizing"):
+                raise EvidenceTerminal("failure diagnostic is closed in this phase")
+            return self._append_locked(
+                "error",
+                payload,
+                monotonic_ns=monotonic_ns,
+                wall_time_ms=wall_time_ms,
+                # Rolled back, not poisoned: the diagnostic is the record whose
+                # job is to preserve the terminal (see
+                # ``_persist_prevalidated_event``).
+                best_effort=True,
+            )
+
+    def discard_unreferenced_artifacts(self) -> int:
+        """Remove artifact bytes that no journal record or the manifest names.
+
+        WHY THIS EXISTS. A failure between publishing an artifact and appending
+        the event that names it leaves an orphan, and ``abandon()`` refuses a
+        bundle whose verification reports ``artifact_unreferenced``. Measured
+        (2026-10-17): two OSWorld episodes stranded at ``state: open`` for
+        exactly this -- the failure detail was published, its error event never
+        landed, and the only possible terminal was refused. The stranding is
+        the defect; the orphan is its mechanism.
+
+        WHY THIS IS NOT A WEAKENING. The verifier's own rule is that the
+        manifest and the journal are the only authorities for which bytes
+        belong to a bundle. A file neither names is therefore NOT evidence --
+        removing it restores the invariant the gate checks rather than
+        bypassing it, and nothing a record names is ever touched. The check is
+        a conservative substring test against the durable journal and manifest,
+        so a digest that appears anywhere is kept.
+
+        Phase-gated and recovery-safe: it refuses once the bundle has a
+        terminal (nothing may change after one) and refuses on a poisoned
+        writer (``_ensure_open``), which is exactly the case where the state on
+        disk must not be touched. Returns the number of files removed.
+        """
+
+        with self._thread_lock:
+            self._ensure_open()
+            if self._recovery_only:
+                raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
+            marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
+            if marker.state not in ("open", "finalizing"):
+                raise EvidenceTerminal("artifacts are closed in this phase")
+            try:
+                named = self._read_regular(self._root_fd, _EVENTS) + self._read_regular(
+                    self._root_fd, _MANIFEST
+                )
+            except OSError:
+                return 0
+            removed = 0
+            for name in sorted(os.listdir(self._artifacts_fd)):
+                if name.startswith(".artifact.") and name.endswith(".tmp"):
+                    # A best-effort publish whose temp cleanup itself failed
+                    # (EIO on unlink) leaves its staging file behind. It is
+                    # writer-owned and no record can ever name it, and the
+                    # verifier rejects the NAME (``artifact_name_invalid``), so
+                    # removing it is the same restoration as the digest sweep.
+                    try:
+                        os.unlink(name, dir_fd=self._artifacts_fd)
+                    except FileNotFoundError:
+                        continue
+                    removed += 1
+                    continue
+                if len(name) != _DIGEST_LENGTH or any(
+                    character not in _DIGEST_CHARS for character in name
+                ):
+                    # Anything else is not an artifact this sweep may reason
+                    # about.
+                    continue
+                if name.encode("ascii") in named:
+                    continue
+                try:
+                    os.unlink(name, dir_fd=self._artifacts_fd)
+                except FileNotFoundError:
+                    continue
+                removed += 1
+            if removed:
+                os.fsync(self._artifacts_fd)
+            return removed
+
     def _publish_artifact(
         self,
         source: bytes | bytearray | memoryview | BinaryIO | Iterable[bytes],
@@ -1075,14 +1268,20 @@ class EvidenceWriter:
         expected_sha256: str | None = None,
         expected_byte_count: int | None = None,
         scoring_details: bool = False,
+        allowed_states: tuple[str, ...] | None = None,
+        best_effort: bool = False,
     ) -> EvidenceArtifactRef:
         with self._thread_lock:
             self._ensure_open()
             if self._recovery_only:
                 raise EvidenceRecoveryOnly("recovered bundle may only be abandoned")
             marker = StateMarker.from_canonical_json(self._read_regular(self._root_fd, _STATE))
-            expected_state = "finalizing" if scoring_details else "open"
-            if marker.state != expected_state:
+            expected_states = (
+                allowed_states
+                if allowed_states is not None
+                else (("finalizing" if scoring_details else "open"),)
+            )
+            if marker.state not in expected_states:
                 raise EvidenceTerminal("artifact publication is closed in this phase")
             stream: Iterable[bytes]
             if isinstance(source, (bytes, bytearray, memoryview)):
@@ -1102,6 +1301,10 @@ class EvidenceWriter:
             primary: BaseException | None = None
             ref: EvidenceArtifactRef | None = None
             link_attempted = False
+            # Whether THIS call created ``ref.sha256`` (as opposed to finding
+            # identical bytes already there). Only a file this call created may
+            # be removed again by the best-effort cleanup below.
+            created = False
             try:
                 fd = os.open(
                     temp,
@@ -1153,32 +1356,69 @@ class EvidenceWriter:
                         raise EvidenceBundleInvalid("existing artifact conflicts with digest")
                     if media_type != "application/octet-stream":
                         _project_artifact(existing, media_type)
+                else:
+                    created = True
             except BaseException as error:
                 primary = error
-                if link_attempted or (
-                    isinstance(error, (OSError, EvidenceError))
-                    and not isinstance(error, EvidenceBundleInvalid)
+                # ``best_effort`` (the failure diagnostic) never poisons: its
+                # bytes are disposable, and poisoning here would convert a
+                # survivable failure into a bundle that cannot record a
+                # terminal at all. Measured by independent review: an ENOSPC on
+                # the ~3 KB diagnostic, landing after the few hundred journal
+                # bytes, turned ``abandoned`` into ``abandonment_failed``; the
+                # same-code control (diagnostic disabled) abandoned cleanly.
+                if not best_effort and (
+                    link_attempted
+                    or (
+                        isinstance(error, (OSError, EvidenceError))
+                        and not isinstance(error, EvidenceBundleInvalid)
+                    )
                 ):
                     self._poison()
             cleanup_error = self._cleanup_artifact_temp(fd, temp)
             fd = -1
-            if cleanup_error is not None:
+            if cleanup_error is not None and not best_effort:
                 # Ambiguous temp ownership is itself a durable-boundary failure,
                 # even when the primary content rejection was deterministic.
                 self._poison()
             if primary is not None:
+                if best_effort:
+                    self._discard_created_artifact(created, ref)
                 if cleanup_error is not None:
                     raise primary from cleanup_error
                 raise primary
             if cleanup_error is not None:
+                if best_effort:
+                    self._discard_created_artifact(created, ref)
                 raise EvidenceRecoveryOnly("artifact cleanup failed") from cleanup_error
             assert ref is not None
             try:
                 self._calls.fsync(self._artifacts_fd)
             except OSError:
+                if best_effort:
+                    self._discard_created_artifact(created, ref)
+                    raise
                 self._poison()
                 raise
             return ref
+
+    def _discard_created_artifact(self, created: bool, ref: EvidenceArtifactRef | None) -> None:
+        """Remove an artifact THIS call linked, when the publish then failed.
+
+        Best-effort by construction: it runs on a path that is already
+        reporting a failure, and a file it cannot remove is the caller's
+        problem to detect via verification, never a second error to raise.
+        Only a digest this call itself created is removed (``created``), so
+        identical bytes that an earlier record already references are never
+        touched.
+        """
+
+        if not created or ref is None:
+            return
+        try:
+            self._calls.unlink(ref.sha256, dir_fd=self._artifacts_fd)
+        except BaseException:
+            return
 
     def begin_finalization(
         self,
