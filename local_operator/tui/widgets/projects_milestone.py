@@ -177,11 +177,18 @@ class MilestonePrompt(Vertical):
         if not name:
             self._fail("name", _t(_x.prompt_name_required()))
             return
+        # A BLANK optional date means "leave the stored one alone". Passing
+        # ``target_date=None`` would put the key in ``model_fields_set``, and
+        # the store reads a SUPPLIED null as a deliberate CLEAR (MilestoneEdit's
+        # tri-state): naming an existing milestone with this field empty would
+        # erase a date the reader never meant to touch. Only a typed date is
+        # sent.
+        fields: dict[str, Any] = {"name": name}
+        date = self._date_input.value.strip()
+        if date:
+            fields["target_date"] = date
         try:
-            edit = MilestoneEdit(
-                name=name,
-                target_date=self._date_input.value.strip() or None,
-            )
+            edit = MilestoneEdit(**fields)
         except ValidationError as exc:
             first = exc.errors()[0]
             location = first.get("loc") or ()

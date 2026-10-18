@@ -478,6 +478,46 @@ async def test_an_empty_name_is_refused_in_the_prompt(tmp_path: Path) -> None:
         assert _dump(tmp_path) == before
 
 
+async def test_a_blank_target_date_leaves_an_existing_milestones_date_alone(
+    tmp_path: Path,
+) -> None:
+    """A blank optional date is UNTOUCHED, not a clear.
+
+    ``MilestoneEdit``'s target_date is a tri-state (absent leaves it, ""/null
+    clears it), so the prompt must send the field only when the reader typed a
+    date — otherwise naming an existing milestone would erase a date they never
+    meant to change. The echoed name with nothing else moved is the store's
+    truthful no-change.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await _detail(pilot, app, view)
+        before = _dump(tmp_path)
+
+        await pilot.press("a")
+        await pilot.pause()
+        prompt = _prompt(view)
+        prompt._name_input.value = "spec shipped"  # seeded with 2026-10-01
+        assert prompt._date_input.value == ""  # the date is deliberately blank
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        project = _store(tmp_path).get_project_by_name("parity-spec")
+        assert project is not None
+        unchanged = [m for m in project.milestones if m.name == "spec shipped"]
+        assert len(unchanged) == 1 and unchanged[0].target_date == "2026-10-01"
+        assert _dump(tmp_path) == before, "an echoed name with a blank date is a no-op"
+        assert view._notice == "milestone 'spec shipped' was already exactly that"
+
+
 async def test_a_naming_an_existing_milestone_reports_updated_not_added(
     tmp_path: Path,
 ) -> None:

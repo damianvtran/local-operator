@@ -37983,10 +37983,17 @@ class OperatorApp(App[None]):
 
         from local_operator.projects import MilestoneEdit, store_error_text
 
+        # The same tri-state rule as the prompt's: a blank optional date is
+        # ABSENT, not a clear. ``target_date=None`` in model_fields_set would
+        # erase an existing milestone's stored date when the reader only echoed
+        # its name.
+        fields: dict[str, Any] = {"name": message.name}
+        if message.target_date:
+            fields["target_date"] = message.target_date
         try:
             _project, action = registry.set_milestone(
                 message.project_id,
-                MilestoneEdit(name=message.name, target_date=message.target_date or None),
+                MilestoneEdit(**fields),
             )
         except KeyError:
             # The store's add path raises KeyError only for a vanished project;
