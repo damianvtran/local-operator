@@ -135,9 +135,9 @@ evidence for both.
 |---|---|---|---|---|
 | 10.1 | List, board, timeline and detail views | ✅ | ✅ | UI projects page; TUI `widgets/projects_view.py` |
 | 10.2 | Toggle a milestone complete | ✅ | ✅ | UI milestone block; TUI `DetailMilestoneRow` |
-| 10.3 | Add or remove a milestone | ✅ | ◐ | UI `project-milestones.tsx` add/remove; TUI toggles only, while the `project` tool's `milestone` op can add/remove |
+| 10.3 | Add or remove a milestone | ✅ | ✅ | UI `project-milestones.tsx` add/remove; TUI detail `a` add, `x` remove behind y/n, `↵` toggle (`projects_detail.py`, `projects_milestone.py`) |
 | 10.4 | Create a project | ✅ | ✅ | UI form dialog; TUI `projects_form.py` |
-| 10.5 | Edit a project's fields | ✅ | ◐ | UI `features/projects/components/project-editors.tsx` (the retired form dialog is create-only); TUI form is create-only, while the `project` tool's `update` op can edit |
+| 10.5 | Edit a project's fields | ✅ | ✅ | UI `features/projects/components/project-editors.tsx`; TUI detail `e` opens the prefilled form and writes only changed fields (`projects_edit.py`, `projects_form.py`) |
 | 10.6 | Links, todos, updates, attachments, quick send, start session | ✅ | ✅ | UI project detail components; TUI `projects_detail.py`, `projects_send.py`, `projects_start.py` |
 
 ## 11. Mesh

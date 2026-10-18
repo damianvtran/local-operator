@@ -2318,6 +2318,101 @@
       },
       "status": "passed",
       "note": "clean terminal; no findings. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 1 auditor openai/gpt-6.1-sol found F1 MAJOR confirm_remove clipped the keep option at the 60-column floor (58/63 cells in a 56-cell row). Candidate shortened to 46/51 cells; round 2 independent re-audit on anthropic/claude-sonnet-5-5 measured the actual painter and passed. All 35 values semantically audited; ICU/placeholders/y-n/French typography/glossary clean. Final fix: supprimer « {name} » ? · y supprimer · n garder."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 1 auditor openai/gpt-6.1-sol found F1 MAJOR confirm_remove, F2 MAJOR remove_needs_row and F3 MINOR key_hint_edit over the actual footer/hint widths (57/71/57 vs 49/43/50 cells). All three shortened to 42/44/40 cells; round 2 independent re-audit on anthropic/claude-sonnet-5-5 measured the actual painters and passed. All 35 values semantically audited; ICU/placeholders/y-n/register/typography/glossary clean. Final fix: ¿Quitar hito “{name}”? · y quitar · n dejar."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Clean terminal, no findings: all 35 values audited, ICU/placeholders/y-n/आप register/glossary/widths pass. Auditor openai/gpt-6.1-sol (quota fallback from anthropic/claude-sonnet-5-5)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Clean terminal, no findings: all 35 values audited, ICU/placeholders/y-n/register/glossary/widths pass. Auditor openai/gpt-6.1-sol (quota fallback from anthropic/claude-sonnet-5-5)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Clean terminal, no findings: all 35 values audited, ICU/placeholders/y-n/register/glossary/widths pass. Auditor openai/gpt-6.1-sol (quota fallback from anthropic/claude-sonnet-5-5)."
     }
   ]
 }

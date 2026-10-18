@@ -28,7 +28,11 @@ def _en(key: str, **params: object) -> str:
 
 def test_catalogue_matches_the_extraction_golden() -> None:
     assert catalogues.load_catalogue("en", "tui.projects") == GOLDEN
-    assert len(GOLDEN) == 95
+    # NINETY-SEVEN: the P2 edit slice added the read-only notice and the form's
+    # done-gate refusal (QA/UX round 1) to this English-only namespace; the
+    # pin keeps the extraction golden and the shipped page vocabulary from
+    # drifting apart silently.
+    assert len(GOLDEN) == 97
     context = json.loads(
         (catalogues.catalogue_root() / "en" / "tui.projects.context.json").read_text()
     )
@@ -184,8 +188,17 @@ def test_view_keys_counts_and_binding_grammar_match_source() -> None:
         # including 1 tracked, rather than introducing new English grammar.
         assert view._t(copy.tracked(count=str(count))) == f" · {count} tracked"
         assert view._t(copy.this_session(count=str(count))) == f" · this session ({count})"
+    edit_catalogue = catalogues.load_catalogue("en", "tui.projects_edit")
     for binding in view._project_bindings():
-        assert binding.description == GOLDEN[f"tui.projects.binding_{binding.action}"]
+        # LOH-19 P2's three detail keys live in tui.projects_edit: tui.projects'
+        # English hash is pinned by shipped ledger rows, so adding keys there
+        # would un-ship every locale until the next translation wave. Every
+        # OTHER binding is still pinned to the extraction golden byte-for-byte.
+        suffix = f"binding_{binding.action}"
+        if binding.action in view.ProjectsView._DETAIL_ACTIONS:
+            assert binding.description == edit_catalogue[f"tui.projects_edit.{suffix}"]
+        else:
+            assert binding.description == GOLDEN[f"tui.projects.{suffix}"]
         assert binding.show is False
 
 
