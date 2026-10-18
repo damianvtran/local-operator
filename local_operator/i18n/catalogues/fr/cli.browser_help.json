@@ -18,5 +18,5 @@
   "cli.browser_help.uninstall_purge": "Supprimer aussi l’état d’appairage",
   "cli.browser_help.serve": "Exécuter le daemon du bridge (au premier plan)",
   "cli.browser_help.tabs": "Lister les enregistrements de propriété durables et les onglets actifs (lecture seule)",
-  "cli.browser_help.reconcile": "Alias de « tabs » : inspecter la propriété sans rien fermer"
+  "cli.browser_help.reconcile": "Alias de « tabs » : inspecter la propriété sans rien fermer"
 }

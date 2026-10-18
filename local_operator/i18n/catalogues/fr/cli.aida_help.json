@@ -1,6 +1,6 @@
 {
   "cli.aida_help.aida": "Notes de profil d’Aida : consigner ce qu’elle doit retenir",
-  "cli.aida_help.note": "Ajouter une note sous « About the operator » dans system_prompt.md",
+  "cli.aida_help.note": "Ajouter une note sous « About the operator » dans system_prompt.md",
   "cli.aida_help.note_text": "La note à consigner ; omettre pour la lire depuis STDIN",
-  "cli.aida_help.note_description": "Consigner une note dans <config root>/system_prompt.md, à l’intérieur de la section marquée « About the operator », pour que chaque session et sous-agent à venir la voie. Le fichier est résolu depuis la racine de configuration et n’est jamais un argument ; la note ne doit pas contenir les marqueurs de section. Omettre TEXT pour lire la note depuis STDIN (les notes multilignes ne demandent aucune mise entre guillemets)."
+  "cli.aida_help.note_description": "Consigner une note dans <config root>/system_prompt.md, à l’intérieur de la section marquée « About the operator », pour que chaque session et sous-agent à venir la voie. Le fichier est résolu depuis la racine de configuration et n’est jamais un argument ; la note ne doit pas contenir les marqueurs de section. Omettre TEXT pour lire la note depuis STDIN (les notes multilignes ne demandent aucune mise entre guillemets)."
 }

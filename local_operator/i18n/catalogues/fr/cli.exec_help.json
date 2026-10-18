@@ -4,7 +4,7 @@
   "cli.exec_help.clear_goal": "Effacer l’objectif permanent repris",
   "cli.exec_help.command": "Prompt littéral ; ''-'' ou omis avec stdin redirigé lit stdin ; facultatif pour une boucle",
   "cli.exec_help.control": "Router les approbations et les questions vers un superviseur attaché (peut attendre). Sans cette option, les approbations hors TTY sont refusées ; la découverte et le rattachement en direct restent disponibles dans les deux cas. --yolo reste une dérogation d’approbation explicite.",
-  "cli.exec_help.effort": "Régler l’effort de raisonnement ; validé contre le modèle sélectionné",
+  "cli.exec_help.effort": "Régler l’effort de raisonnement ; vérifié selon les capacités du modèle sélectionné",
   "cli.exec_help.goal": "Définir un objectif permanent littéral. Contrairement à /goal dans la TUI, le texte n’est PAS aussi envoyé comme message : associez-le à un prompt ou à --loop",
   "cli.exec_help.json": "Émettre une ligne JSON par événement d’agent au lieu du texte final",
   "cli.exec_help.loop": "Exécuter N itérations de continuation après le prompt facultatif ; nécessite un objectif permanent",

@@ -6,7 +6,7 @@
   "cli.sessions_help.limit": "avec --all (ou un filtre d’ensemble), plafonner les lignes stockées listées ; positif (par défaut : 50)",
   "cli.sessions_help.paused": "lister uniquement les sessions stockées dont le dernier tour a été ARRÊTÉ plutôt que terminé ou perdu — un arrêt délibéré ou un retrait de build (l’ensemble que sélectionne la reprise en lot ; implique --all)",
   "cli.sessions_help.failed": "lister uniquement les sessions stockées dont le dernier résultat enregistré était un échec (une disparition involontaire sans preuve d’arrêt délibéré ; implique --all). Une disparition dont le résultat n’a jamais été importé n’est dans aucun des deux ensembles",
-  "cli.sessions_help.peer": "lister les sessions détenues par un appareil pair (son propre catalogue, via le mesh)",
+  "cli.sessions_help.peer": "lister les sessions détenues par un appareil pair (son propre catalogue, via le maillage)",
   "cli.sessions_help.all_peers": "lister aussi les sessions que détiennent les autres appareils de ce réseau",
   "cli.sessions_help.cleanup": "Exécuter maintenant la politique de nettoyage des sessions (utilisez --dry-run pour prévisualiser)",
   "cli.sessions_help.cleanup_description": "Appliquer session.cleanup.* de la configuration (chaque limite pouvant être remplacée ci-dessous) au magasin de sessions, en deux classes : vos conversations (nécessite session.cleanup.enabled: true sauf avec --force) et les sessions de sous-agents/arrière-plan déléguées (session.cleanup.delegated.*, actives par défaut). Chaque suppression est consignée dans <config>/sessions/.cleanup-log.jsonl.",

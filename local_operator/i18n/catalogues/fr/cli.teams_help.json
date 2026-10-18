@@ -16,7 +16,7 @@
   "cli.teams_help.push_name": "Nom de l’équipe locale à envoyer",
   "cli.teams_help.push_org": "Locataire d’organisation dans lequel publier (`lop teams push --org <tenant_id> <team>` ; nécessite `lop login radient`)",
   "cli.teams_help.push_public": "Publier dans l’Agent Hub public plutôt que dans une organisation",
-  "cli.teams_help.push_id": "ID d’équipe du hub à écraser (republier ; ce que `lop teams push` a affiché comme « Team ID ») ; nécessite --org ou --public",
+  "cli.teams_help.push_id": "ID d’équipe du hub à écraser (republier ; ce que `lop teams push` a affiché comme « Team ID ») ; nécessite --org ou --public",
   "cli.teams_help.pull": "Récupérer (pull) une équipe depuis le hub par id, ou par nom depuis le hub public (Agent Hub)",
   "cli.teams_help.pull_team_id": "ID de l’équipe publiée à récupérer, ou nom d’une équipe publique (`lop teams pull a-team` ; les noms se résolvent via l’annuaire public)",
   "cli.teams_help.pull_org": "Locataire d’organisation auquel appartient l’équipe (`lop teams pull --org <tenant_id> <team-id>` ; nécessite `lop login radient`)",
