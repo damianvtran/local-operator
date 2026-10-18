@@ -8,6 +8,8 @@ rung would actually run.
 
 from __future__ import annotations
 
+import pytest
+
 from local_operator.audiogen import pricing
 
 
@@ -29,8 +31,58 @@ def test_unknown_provider_or_model_is_none_never_zero():
     assert pricing.voiceover_estimate("unknown", "m", 100) is None
     assert pricing.voiceover_estimate("elevenlabs", "no-such-model", 100) is None
     assert pricing.sound_effect_estimate("openai", None, 10) is None  # no OpenAI SFX path
+    assert pricing.sound_effect_estimate("elevenlabs", "no-such-model", 0.5) is None
     assert pricing.voiceover_estimate("elevenlabs", None, 0) is None
     assert pricing.sound_effect_estimate("elevenlabs", None, 0.0) is None
+
+
+def test_sound_effects_price_whole_started_seconds():
+    """ceil(duration_s) units at the per-second rate — the server lane's rule.
+
+    The ledger's count is an integer and a started second is the charged unit,
+    so a sub-second request is one unit, not a fraction of the rate: the bug
+    this pins quoted 0.5 s at $0.0010 while the platform bills $0.0020. Exact
+    integral durations must not gain a phantom second.
+    """
+    cases = [
+        (0.5, 1, 0.0020),
+        (1.0, 1, 0.0020),
+        (1.2, 2, 0.0040),
+        (2.5, 3, 0.0060),
+        (4.0, 4, 0.0080),
+        (4.01, 5, 0.0100),
+    ]
+    for duration, units, amount in cases:
+        estimate = pricing.sound_effect_estimate("elevenlabs", None, duration)
+        assert estimate is not None, duration
+        assert estimate.units == units, duration
+        assert estimate.unit == "seconds"
+        assert estimate.amount_usd == pytest.approx(amount), duration
+        assert estimate.price_version == pricing.PRICE_VERSION
+
+
+def test_sound_effect_units_is_the_shared_ceil_rule():
+    # One helper for both the estimate and the channel row; a divergence would
+    # let a row say 0.5 units beside an amount priced for 1.
+    assert [pricing.sound_effect_units(d) for d in (0.5, 1.0, 1.2, 4.0, 4.01)] == [
+        1,
+        1,
+        2,
+        4,
+        5,
+    ]
+
+
+def test_a_non_finite_duration_is_unpriceable_not_an_exception():
+    """JSON ``1e999`` parses to inf and reaches the consent describer.
+
+    The estimator answers None (the honest "amount not stated") and the shared
+    unit helper answers 0, so an approval summary degrades to its unstated
+    sentence instead of raising and falling back to raw JSON. Round-1 NIT-1.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert pricing.sound_effect_estimate("elevenlabs", None, bad) is None, bad
+        assert pricing.sound_effect_units(bad) == 0, bad
 
 
 def test_an_unpinned_model_prices_on_what_the_rung_would_run():

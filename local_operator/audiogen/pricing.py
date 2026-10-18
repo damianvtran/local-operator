@@ -29,12 +29,14 @@ states.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 __all__ = [
     "PRICE_VERSION",
     "PriceEstimate",
     "sound_effect_estimate",
+    "sound_effect_units",
     "voiceover_estimate",
 ]
 
@@ -118,19 +120,50 @@ def voiceover_estimate(provider: str, model: str | None, chars: int) -> PriceEst
     )
 
 
+def sound_effect_units(duration_s: float) -> int:
+    """The integer count a sound effect is metered in: whole started seconds.
+
+    The platform's own sound-effect lane charges the REQUESTED duration in
+    whole seconds, rounded up (``units = ceil(requested)``): the ledger's
+    count is an integer and a started second is the charged unit. So 0.5 s is
+    one unit and 4.01 s is five. The rate is per second, so multiplying the
+    rate by a FRACTIONAL duration under-estimates a sub-second request at half
+    its true cost (the merged lane did exactly that: 0.5 s priced at $0.0010
+    against the $0.0020 the server charges).
+
+    Shared by the estimate and the channel row so the amount and the count
+    cannot disagree. A non-positive duration has no units, and a NON-FINITE one
+    (``nan``/``inf``, which JSON's ``1e999`` produces) is not a count at all:
+    it answers 0 — the ledger's own "no count" — rather than raising out of a
+    receipt. The estimator additionally answers ``None`` for it, so a consent
+    card says "amount not stated" instead of losing its summary.
+    """
+    if not math.isfinite(duration_s):
+        return 0
+    return int(math.ceil(duration_s))
+
+
 def sound_effect_estimate(
     provider: str, model: str | None, duration_s: float
 ) -> PriceEstimate | None:
-    """The estimated sound-effect cost for ``duration_s`` seconds, or ``None``."""
-    if duration_s <= 0:
+    """The estimated sound-effect cost for ``duration_s`` seconds, or ``None``.
+
+    Priced over whole started seconds (:func:`sound_effect_units`), matching
+    the ledger's integer count and the server lane's billing rule — never over
+    the raw fractional duration, which would quote half the real unit cost for
+    anything under a second. ``None`` stays the honest answer for an unknown
+    provider/model ("amount not stated"), never a zero.
+    """
+    if not math.isfinite(duration_s) or duration_s <= 0:
         return None
     resolved = (model or "").strip() or "eleven_text_to_sound_v2"
     rate = SOUND_EFFECT_RATES_PER_SECOND.get((provider, resolved))
     if rate is None:
         return None
+    units = sound_effect_units(duration_s)
     return PriceEstimate(
-        amount_usd=rate * duration_s,
-        units=float(duration_s),
+        amount_usd=rate * units,
+        units=float(units),
         unit="seconds",
         price_version=PRICE_VERSION,
         provenance=_source_line(provider, resolved),

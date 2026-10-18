@@ -457,6 +457,29 @@ async def _cancel_receipt(
     }
     if receipt.reason:
         details["cancel_reason"] = receipt.reason
+    # The server's pending-settlement facts travel VERBATIM. A surface renders
+    # "awaiting settlement" only from explicit fields — ``settled: null``,
+    # ``cost_usd: null``, ``cost.basis: "quote"`` — so a body the harness
+    # drops is a state no client can show. Nothing is invented: ``cost`` is
+    # the server's own quote object, and ``settled``/``cost_usd`` are written
+    # as null ONLY for a quote-basis pending body (the contract's own
+    # spelling of "not settled" / "no settled figure"); a body that states
+    # either value is forwarded as stated. A cancel body with no cost object
+    # (BYOK, 409 already-completed) adds neither key.
+    server = receipt.server_payload or {}
+    cost = server.get("cost")
+    cost_basis = cost.get("basis") if isinstance(cost, dict) else None
+    for key in ("cancellation", "cost", "note"):
+        if key in server:
+            details[key] = server[key]
+    if "settled" in server:
+        details["settled"] = server["settled"]
+    elif cost_basis == "quote":
+        details["settled"] = None
+    if "cost_usd" in server:
+        details["cost_usd"] = server["cost_usd"]
+    elif cost_basis == "quote":
+        details["cost_usd"] = None
     if receipt.outcome == "already_completed":
         # The cancel conflict is NOT a failure: the surfaces' frozen branch
         # renders it as "already finished" off this pair (the media
@@ -467,10 +490,19 @@ async def _cancel_receipt(
 
 
 def _spend_units(spec: AudioJobSpec) -> tuple[float, str]:
-    """The channel record's count and unit: chars for speech, seconds for effects."""
+    """The channel record's count and unit: chars for speech, whole seconds for effects.
+
+    Sound effects count in whole started seconds — the same
+    :func:`pricing.sound_effect_units` rule the estimate prices with — so a
+    row's count and its estimated amount describe one quantity. A fractional
+    count here was how 0.5 s reached the ledger as ``units: 0.5`` beside a
+    figure priced for one second. Radient rows keep the server's own count
+    when the settled payload states one (``units=`` on the record); this is
+    only the default.
+    """
     if spec.direction == "voiceover":
         return float(len(spec.text)), "chars"
-    return float(spec.duration_s or 0.0), "seconds"
+    return float(pricing.sound_effect_units(float(spec.duration_s or 0.0))), "seconds"
 
 
 def _record_audio_channel(
