@@ -65,6 +65,10 @@ class SessionRow(BaseModel):
     #: The renderer's ``SessionCatalogueRow`` is this shape's hand-written
     #: mirror, so this key is a change to a second file as well as this one.
     pinned: bool
+    # Both keys serialize even for untagged/remote rows; absence cannot clear
+    # an optimistic client assignment. Local projection supplies both explicitly.
+    tags: list[dict[str, str]] = Field(default_factory=list)
+    primary: str | None = None
     #: -- THE MESH'S FIVE KEYS (mesh-session-mobility.md §9.2). Additive and
     #: defaulted, so every existing client reads exactly what it read before;
     #: they are DECLARED here rather than left to ``extra="allow"`` so the shape
