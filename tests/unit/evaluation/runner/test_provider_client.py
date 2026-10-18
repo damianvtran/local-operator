@@ -2736,17 +2736,71 @@ async def test_identical_frames_are_declared_as_a_no_op(tmp_path: Path) -> None:
 def test_unchanged_frames_note_escalates_without_accumulating_warnings() -> None:
     assert unchanged_frames_note(1) == UNCHANGED_FRAMES_NOTE
     counted = unchanged_frames_note(2)
-    assert counted == UNCHANGED_FRAMES_NOTE + " No visible progress after 2 consecutive actions."
+    assert counted == (
+        UNCHANGED_FRAMES_NOTE + " The screenshot has stayed identical for 2 consecutive steps."
+    )
     escalated = unchanged_frames_note(3)
-    assert "3 consecutive actions" in escalated
-    assert "Change the target, action kind, or application" in escalated
-    assert "repeating these attempts will keep failing" in escalated
+    assert "3 consecutive steps" in escalated
+    assert "otherwise change the target, action kind, or application" in escalated
+    assert "If the surface is still loading, keep waiting" in escalated
+    assert "will keep failing" not in escalated
     for streak in (4, 200, 100_000):
         note = unchanged_frames_note(streak)
         assert note == escalated.replace("3 consecutive", f"{streak} consecutive")
-        assert note.count("will keep failing") == 1
+        assert note.count("keep waiting") == 1
         assert "\n" not in note
         assert len(note) < 450
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action_kind", ["wait", "type"], ids=["wait-only", "non-wait"])
+async def test_escalated_no_change_note_preserves_loading_exception(
+    tmp_path: Path, action_kind: str
+) -> None:
+    def reply(message: Any) -> str:
+        payload = json.loads(_wait_reply(message))
+        if action_kind == "type":
+            payload["actions"][0].pop("duration_ms")
+            payload["actions"][0].update(kind="type", text="hello")
+        return json.dumps(payload)
+
+    stream = RecordingStream(reply)
+    client = _client(stream, tmp_path)
+    history: list[EpisodeTurn] = []
+    for sequence in range(4):
+        current = _framed_observation(tmp_path, sequence)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+    rendered = stream.requests[-1].messages[-1].content[0].text
+    assert unchanged_frames_note(3) in rendered
+    assert "If the surface is still loading, keep waiting; otherwise change" in rendered
+    assert "will keep failing" not in rendered
+    assert client._context._no_change_streak == 3
+
+
+def test_no_change_streak_survives_compaction_and_history_replay(tmp_path: Path) -> None:
+    from local_operator.evaluation.runner.provider_client import _ContextBuilder
+
+    context = _ContextBuilder(artifact_root=tmp_path, keep_recent_frames=1, rebuild_every_frames=1)
+    history = [EpisodeTurn(observation=_framed_observation(tmp_path, index)) for index in range(4)]
+    context.append_new_turns(history)
+    assert context._no_change_streak == 3
+    assert context.rebuild_due()
+    # Compaction replaces messages, not episode history. Replay must neither
+    # re-render old observations nor reset the evidence used by the next step.
+    compacted = context.messages[-1:]
+    context.replace(compacted)
+    context.append_new_turns(history)
+    assert context.messages == compacted
+    assert context._no_change_streak == 3
+    history.append(EpisodeTurn(observation=_framed_observation(tmp_path, 4)))
+    context.append_new_turns(history)
+    assert context._no_change_streak == 4
+    last_block = context.messages[-1].content[0]
+    assert isinstance(last_block, TextContent)
+    assert unchanged_frames_note(4) in last_block.text
+    assert len(context.messages) == 2
 
 
 @pytest.mark.asyncio

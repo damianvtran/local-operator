@@ -167,14 +167,14 @@ def unchanged_frames_note(streak: int) -> str:
     """
     if streak <= 1:
         return UNCHANGED_FRAMES_NOTE
-    counted = f" No visible progress after {streak} consecutive actions."
+    counted = f" The screenshot has stayed identical for {streak} consecutive steps."
     if streak == 2:
         return UNCHANGED_FRAMES_NOTE + counted
     return (
         UNCHANGED_FRAMES_NOTE
         + counted
-        + " Change the target, action kind, or application; repeating these attempts "
-        "will keep failing."
+        + " If the surface is still loading, keep waiting; otherwise change the target, "
+        "action kind, or application."
     )
 
 
