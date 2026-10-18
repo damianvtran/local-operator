@@ -767,6 +767,16 @@ async def test_lane_names_and_notice_lines_paint_in_readable_ink(refreshes) -> N
         assert isinstance(notice_style, Style) and notice_style.color is not None
         assert notice_style.color.name == theme_mod.semantic_color("muted")
 
+        # The refactor that shares the meta entries with the compact status line
+        # must not collapse the CI tone vocabulary onto the CI-only ``muted``
+        # role: comments and updated age are ordinary muted copy, not ``dim``.
+        for label in ("6 comments", "23/23 passed"):
+            start = block.plain.index(label)
+            span = next(span for span in block.spans if span.start <= start < span.end)
+            style = span.style
+            assert isinstance(style, Style) and style.color is not None
+            assert style.color.name == theme_mod.semantic_color("muted"), label
+
 
 @pytest.mark.asyncio
 async def test_row_offsets_count_every_line_when_a_notice_follows_the_meta(
@@ -802,7 +812,10 @@ async def test_narrow_rows_collapse_lanes_and_stay_dense(refreshes) -> None:
         ],
     )
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(60, 20)) as pilot:
+    # 60x24, not 60x20: the SHORT body (three lines) deliberately switches to
+    # the ultra-compact row, which has its own test. This one pins the dense
+    # four-line narrow row at the next size up.
+    async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
         view = await _open_review(pilot, app)
         assert view._narrow is True
@@ -824,6 +837,51 @@ async def test_narrow_rows_collapse_lanes_and_stay_dense(refreshes) -> None:
         # alignment hid the identity and state above the fold (UX U2).
         if height >= view._body.size.height:
             assert view._body.scroll_offset.y == start
+
+
+@pytest.mark.asyncio
+async def test_ultra_compact_row_shows_the_stale_notice_in_a_three_line_body(
+    refreshes,
+) -> None:
+    """Round 2 UX minor: at 60x20 the stale notice must not sit below the fold.
+
+    The body is three lines there, so a row is exactly identity, title and one
+    status line; a row WITH a notice puts the notice on that third line rather
+    than leaving it under the visible viewport.
+    """
+    title = "feat(code-review): the session's request ledger"
+    _populated(
+        1,
+        title=title,
+        stale=True,
+        lanes=[
+            {"lane": "agent", "round": 2, "state": "clean", "freshness": "fresh"},
+            {"lane": "design", "round": 1, "state": "clean", "freshness": "fresh"},
+            {"lane": "qa", "round": 1, "state": "clean", "freshness": "fresh"},
+        ],
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_review(pilot, app)
+        assert view._narrow is True
+        assert view._body.size.height == 3
+
+        body = _plain(view._body_text)
+        assert "Stale — last known state, not current." in body
+
+        start, height = view._row_offsets[0]
+        assert height == 3, "an ultra-compact row is three painted lines"
+        block = Text()
+        view._append_row(block, view._visible_rows[0], selected=True, width=view._line_width())
+        lines = block.plain.splitlines()
+        assert len(lines) == 3
+        assert "damianvtran/local-operator #1" in lines[0]
+        assert title[:40] in lines[1]
+        assert "Stale — last known state, not current." in lines[2]
+        # Identity, title and the notice are all inside the three-line viewport.
+        assert view._body.scroll_offset.y == start
+        assert height <= view._body.size.height
 
 
 @pytest.mark.asyncio

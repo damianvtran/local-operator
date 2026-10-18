@@ -616,6 +616,16 @@ class ReviewView(Vertical):
             _styled_line("  " + truncate_cells(review_model.row_title(row), width - 2), base)
         )
 
+        # Ultra-compact: a three-line body has room for identity, title and ONE
+        # status line. The status line is the row's notice when it has one, so
+        # a stale/cooling/failed warning is never the line below the fold; with
+        # no notice it carries the compact lane summary and the meta figures.
+        # This is the only way the stale honesty condition survives at 60x20
+        # without changing the layout at 60x24 or 100x30.
+        if self._ultra_compact():
+            self._append_compact_status(text, row, width=width, background=background)
+            return
+
         # Line C: the lane state. Wide mode gives each lane its own line; a
         # narrow page (four-line body at 60x20) gives the whole request one
         # dense summary instead, so its identity and meta stay in the viewport
@@ -651,6 +661,47 @@ class ReviewView(Vertical):
         # there and let the notice slot separate them.
         if not self._narrow:
             text.append("\n", style=base)
+
+    def _ultra_compact(self) -> bool:
+        """Whether the body viewport can only afford three lines per row.
+
+        Measured rather than keyed on page width: 60x20 and 60x24 have the same
+        width but different body heights, and only the shorter one loses the
+        notice. `0 <` guards the first paint before layout has run.
+        """
+        height = self._body.size.height
+        return 0 < height <= 3
+
+    def _append_compact_status(
+        self,
+        text: Text,
+        row: Mapping[str, Any],
+        *,
+        width: int,
+        background: Any,
+    ) -> None:
+        """The ultra-compact row's third and last line."""
+        muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
+        notice = (
+            _t(_kt.row_fetching())
+            if review_model.row_is_loading(row)
+            else review_model.row_notice(row)
+        )
+        if notice:
+            status = notice
+        else:
+            pieces: list[str] = []
+            if not row.get("link_only"):
+                lanes = review_model.lane_lines(row)
+                if lanes:
+                    pieces.append(self._lane_summary_text(lanes))
+            pieces.extend(item for item, _tone in self._meta_entries(row))
+            status = " · ".join(piece for piece in pieces if piece)
+        # Exactly one newline: the compact row is three painted lines, no blank
+        # separator, so `_row_offsets` and the three-line viewport agree.
+        text.append(
+            ("  " + truncate_cells(status, width - 2) if status else "") + "\n", style=muted
+        )
 
     def _append_lane_line(
         self, text: Text, line: review_model.LaneLine, *, width: int, background: Any
@@ -693,33 +744,46 @@ class ReviewView(Vertical):
         """
         muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
         dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
-        parts = [
-            f"{line.name} {line.round}" if line.round is not None else line.name for line in lines
-        ]
         text.append("  ", style=dim)
-        text.append(truncate_cells(" · ".join(parts), max(6, width - 2)), style=muted)
+        text.append(truncate_cells(self._lane_summary_text(lines), max(6, width - 2)), style=muted)
         text.append("\n")
 
-    def _meta_spans(self, row: Mapping[str, Any], *, width: int, background: Any) -> Text | None:
+    def _lane_summary_text(self, lines: tuple[review_model.LaneLine, ...]) -> str:
+        """The compact lane identity: name plus round, `Code 2 · Design 1`."""
+        return " · ".join(
+            f"{line.name} {line.round}" if line.round is not None else line.name for line in lines
+        )
+
+    def _meta_entries(self, row: Mapping[str, Any]) -> list[tuple[str, str]]:
+        """The meta figures as ``(text, resolved ink)``: CI, comments, updated age.
+
+        One source for the wide meta line and the ultra-compact status line, so
+        the two cannot disagree about what a row knows. The ink is RESOLVED
+        here rather than carried as a CI tone name: ``_ci_color("muted")`` is
+        the CI-specific dim role (a neutral CI count), while ordinary meta copy
+        is ``muted`` — collapsing both to one tone would paint comments dim.
+        """
         summary = row.get("summary")
         if row.get("link_only") or not isinstance(summary, Mapping):
-            return None
+            return []
+        entries: list[tuple[str, str]] = []
         ci = review_model.ci_clause(summary.get("ci"))
-        comments = review_model.comment_clause(summary.get("comments"))
-        updated_at = summary.get("updated_at")
-        updated = (
-            review_model.updated_clause(updated_at, self._now_ms)
-            if isinstance(updated_at, (int, float))
-            else None
-        )
-        parts: list[tuple[str, Any]] = []
         if ci is not None:
-            parts.append((ci.text, Style(color=_ci_color(ci.tone), bgcolor=background)))
-        muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
+            entries.append((ci.text, _ci_color(ci.tone)))
+        comments = review_model.comment_clause(summary.get("comments"))
         if comments:
-            parts.append((comments, muted))
-        if updated:
-            parts.append((updated, muted))
+            entries.append((comments, theme_mod.semantic_color("muted")))
+        updated_at = summary.get("updated_at")
+        if isinstance(updated_at, (int, float)):
+            updated = review_model.updated_clause(updated_at, self._now_ms)
+            if updated:
+                entries.append((updated, theme_mod.semantic_color("muted")))
+        return entries
+
+    def _meta_spans(self, row: Mapping[str, Any], *, width: int, background: Any) -> Text | None:
+        parts: list[tuple[str, Any]] = [
+            (text, Style(color=ink, bgcolor=background)) for text, ink in self._meta_entries(row)
+        ]
         if not parts:
             return None
         text = Text("  ")
