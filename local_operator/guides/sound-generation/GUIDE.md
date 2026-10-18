@@ -29,10 +29,13 @@ Use ONE `generate_sound_effect` call with `sounds` for multiple clips (1–50):
 ```
 
 Supply either `sounds` OR the single `prompt` + `duration_s`, never both.
-One write-tier approval shows the item count and summed **estimated** spend;
+One write-tier approval shows the item count and summed **estimated** spend
+when every item is priceable, or a known subtotal and unpriced-item count;
 Radient's per-item billed receipts remain authoritative. `loop`,
 `prompt_influence`, and `model` apply to the whole batch. Names default from
-trimmed, display-safe prompts; duplicate names remain distinct requests.
+trimmed, display-safe prompts (at most 100 characters, with an ellipsis when
+shortened); explicit names are
+bounded to 100 characters. Duplicate names remain distinct requests.
 Each successful clip carries its name in the caption, attachment and session
 file entry. A provider rejection belongs to that item, not its valid siblings.
 
@@ -44,6 +47,9 @@ starting, requests stop for in-flight calls, and preserves completed clips;
 **in-flight vendor cancellation is not guaranteed**. Inspect `details.artifacts`
 for each item's status, started flag, error, request id, digest, duration, units
 and cost/basis; totals report completed/failed/cancelled counts and known spend.
+The tool retains every request, name and request id even for identical audio
+bytes. Canvas/session files are content-addressed, so identical-byte outputs
+can coalesce into one file entry; the batch result does not deduplicate them.
 A partially successful batch is a success-with-failures; no attached clips is
 an error. Do not retry a stopped in-flight item blindly: it may still be billed.
 

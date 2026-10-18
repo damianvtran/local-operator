@@ -295,7 +295,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # The wire description carries one sentence; this holds the rest. Both
     # audio entries were measured by this test's own printed table (the
     # ``count_text_tokens`` ledger path) in the canonical arm.
-    "generate_sound_effect": 431,
+    # RE-MEASURED 2026-10-18 (#2595, B1/Q-1): reviewed batch schema was
+    # 487 (+56 from 431). Round-1 M4/M5 clarifies the exclusive single/batch
+    # fields and caps names at 100 chars: final render is 494 (+7 from 487).
+    # Both measurements use render_tool_doc + count_text_tokens in this test's
+    # canonical isolated arm, not a copied or guessed token allowance.
+    "generate_sound_effect": 494,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries

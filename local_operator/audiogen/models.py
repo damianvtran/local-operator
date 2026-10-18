@@ -132,7 +132,7 @@ class SoundEffectRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = None
+    name: str | None = Field(default=None, max_length=100)
     prompt: str = Field(min_length=1, max_length=SOUND_EFFECT_PROMPT_MAX_CHARS)
     # Batch duration bounds belong to the provider: rejecting a single item's
     # duration here would discard every valid sibling before the paid call.
@@ -140,7 +140,7 @@ class SoundEffectRequest(BaseModel):
 
 
 class GenerateSoundEffectParams(BaseModel):
-    """Arguments for the ``generate_sound_effect`` tool."""
+    """Use prompt + duration_s for one sound, or sounds for a batch (1-50); never both."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -148,13 +148,13 @@ class GenerateSoundEffectParams(BaseModel):
         default=None,
         min_length=1,
         max_length=SOUND_EFFECT_PROMPT_MAX_CHARS,
-        description="What to sound like (1-600 characters).",
+        description="Single form: required with duration_s; omit with sounds (1-600 characters).",
     )
     duration_s: float | None = Field(
         default=None,
         ge=SOUND_EFFECT_DURATION_MIN_S,
         le=SOUND_EFFECT_DURATION_MAX_S,
-        description="Length in seconds (0.5-30; required — there is no auto-duration).",
+        description="Single form: required with prompt (0.5-30 s); omit with sounds.",
     )
     loop: bool = Field(default=False, description="Make the clip loop seamlessly.")
     prompt_influence: float = Field(

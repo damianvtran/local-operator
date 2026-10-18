@@ -1266,6 +1266,8 @@ async def test_batch_partial_failure_uses_actual_http_rejection(monkeypatch):
     assert rejected["http_status"] == 400
     assert "duration_s must be between 0.5 and 30" in rejected["error"]
     assert _details(result)["cost_usd"] == pytest.approx(0.006)
+    assert _details(result)["cost"]["basis"] == "billed"
+    assert _details(result)["cost_complete"] is False
     assert _details(result)["artifacts"][0]["units"] == 1
 
 
@@ -1405,3 +1407,100 @@ async def test_batch_server_units_and_mixed_estimates_remain_honest(monkeypatch)
     assert details["artifacts"][0]["units"] == 3.5  # server fact, not client rounding
     assert details["artifacts"][0]["cost"]["basis"] == "billed"
     assert details["artifacts"][1]["cost"]["basis"] == "estimated"
+
+
+def test_batch_approval_keeps_known_subtotal_for_unpriceable_duration(monkeypatch):
+    monkeypatch.setattr(audio_tool, "_preferred_route", lambda direction: AudioRoute.RADIENT)
+    text = audio_tool._describe_sound_effect_approval(
+        {
+            "sounds": [
+                {"prompt": "valid", "duration_s": 0.5},
+                {"prompt": "invalid", "duration_s": 0},
+            ]
+        },
+        ".",
+    )
+    assert "Generate 2 sound effects" in text
+    assert "estimated known subtotal $0.0020" in text
+    assert "1 item(s) unpriced" in text
+    single = audio_tool._describe_sound_effect_approval(
+        {
+            "sounds": [
+                {"prompt": "valid", "duration_s": 0.5},
+            ]
+        },
+        ".",
+    )
+    assert "Generate 1 sound effect via" in single
+
+
+def test_batch_names_and_limit_are_explicitly_bounded():
+    base = {"prompt": "sound", "duration_s": 0.5}
+    valid = audio_tool.GenerateSoundEffectParams.model_validate(
+        {"sounds": [{**base, "name": "x" * 100}]}
+    )
+    assert valid.sounds and valid.sounds[0].name == "x" * 100
+    refusal = audio_tool._refuse_sound_effect_args(
+        {"sounds": [{**base, "name": "x" * 101}]}, frozenset()
+    )
+    assert refusal and "100" in refusal
+    refusal = audio_tool._refuse_sound_effect_args({"sounds": [base] * 51}, frozenset())
+    assert refusal and "50" in refusal
+    assert not audio_tool._sound_name("x" * 99 + " -tail", None).endswith((" ", ".", "-"))
+    shortened = audio_tool._sound_name("x" * 101, None)
+    assert len(shortened) == 100 and shortened.endswith("…")
+    description = audio_tool.GenerateSoundEffectParams.model_json_schema()["description"]
+    assert "prompt + duration_s" in description and "never both" in description
+
+
+@pytest.mark.asyncio
+async def test_batch_unknown_total_has_no_basis(monkeypatch):
+    async def cascade(**kwargs):
+        raise AudioGenerationUnavailable("No figure or asset reported")
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    result = await audio_tool.execute_generate_sound_effect(
+        "unknown",
+        {"sounds": [{"prompt": "sound", "duration_s": 0.5}]},
+        None,
+        None,
+        None,
+    )
+    assert result.is_error
+    assert _details(result)["cost"] == {"amount_usd": None, "basis": None}
+    assert _details(result)["cost_complete"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type,expected", [("audio/wav", "wav"), ("audio/unknown", None)])
+async def test_batch_identical_bytes_keep_names_ids_and_actual_format(
+    monkeypatch, content_type, expected
+):
+    from dataclasses import replace
+
+    async def cascade(**kwargs):
+        return _outcome(
+            generation_id=kwargs["spec"].text,
+            assets=(replace(_asset(), format=None, content_type=content_type),),
+        )
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    result = await audio_tool.execute_generate_sound_effect(
+        "same-bytes",
+        {
+            "sounds": [
+                {"prompt": name, "name": name, "duration_s": 0.5} for name in ("First", "Second")
+            ]
+        },
+        None,
+        None,
+        None,
+    )
+    rows = _details(result)["artifacts"]
+    blocks = [block for block in result.content if isinstance(block, AttachmentContent)]
+    assert len(rows) == len(blocks) == 2
+    assert [row["name"] for row in rows] == ["First", "Second"]
+    assert [row["request_id"] for row in rows] == ["First", "Second"]
+    assert rows[0]["digest"] == rows[1]["digest"]
+    assert [row["format"] for row in rows] == [expected, expected]
+    assert [block.name for block in blocks] == ["First", "Second"]
