@@ -3901,6 +3901,123 @@ async def test_child_attachment_route_is_bearer_gated_and_no_store(tmp_path, mon
     assert bad_digest.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_attachment_waveform_serves_the_payload_with_the_family_headers(
+    tmp_path, monkeypatch
+):
+    """The waveform route: peaks by digest, the same gates, a 404 on a miss.
+
+    The real-HTTP half of the shows-the-payload claim: bearer gating first,
+    then the frozen ``{version, bars, peaks}`` shape, the family's ``nosniff``
+    + ``no-store`` headers, an ordinary 404 for a digest with no sidecar, and
+    the declared digest pattern refusing a traversal-shaped one before the
+    handler runs.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.server.app import app
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put_bytes(b"ID3\x04\x00\x00\x00wire-peaks", "audio/mpeg")
+    assert ref is not None
+    bars = [round((index % 7) / 7.0, 4) for index in range(PEAK_BARS)]
+    assert store.put_peaks(ref.digest, bars)
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    path = f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}/waveform"
+
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+        assert client.get(path).status_code == 401
+        headers = {"Authorization": "Bearer token"}
+        response = client.get(path, headers=headers)
+        missing = client.get(
+            f"/v1/desktop/sessions/0123456789ab/attachments/{'f' * 32}/waveform",
+            headers=headers,
+        )
+        bad_digest = client.get(
+            "/v1/desktop/sessions/0123456789ab/attachments/not-a-digest/waveform",
+            headers=headers,
+        )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload == {"version": 1, "bars": PEAK_BARS, "peaks": bars}
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    # A digest with no sidecar is ordinary: the surface paints its no-waveform
+    # state rather than treating a missing sidecar as a fault.
+    assert missing.status_code == 404
+    assert bad_digest.status_code == 422
+
+    # The route DECLARATION carries the traversal gate (the family's rule).
+    parameters = app.openapi()["paths"][
+        "/v1/desktop/sessions/{session_id}/attachments/{digest}/waveform"
+    ]["get"]["parameters"]
+    digest = next(parameter for parameter in parameters if parameter["name"] == "digest")
+    assert digest["schema"]["pattern"] == "^[a-f0-9]{32}$"
+
+
+@pytest.mark.asyncio
+async def test_child_attachment_waveform_serves_for_a_contained_child(tmp_path):
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    parent_dir, child_dir = subagent_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put_bytes(b"ID3\x04\x00\x00\x00child-peaks", "audio/mpeg")
+    assert ref is not None
+    assert store.put_peaks(ref.digest, [0.25] * PEAK_BARS)
+
+    payload = await DesktopSessions(tmp_path).child_attachment_waveform(
+        PARENT_ID, CHILD_ID, ref.digest
+    )
+    assert payload["bars"] == PEAK_BARS and len(payload["peaks"]) == PEAK_BARS
+    # An unknown digest is the same ordinary miss the byte route reports, and
+    # the containment proof still runs first: a child the parent never named
+    # is refused before the store is touched.
+    with pytest.raises(KeyError):
+        await DesktopSessions(tmp_path).child_attachment_waveform(PARENT_ID, CHILD_ID, "f" * 32)
+    unnamed_dir = tmp_path / "sessions" / UNNAMED_CHILD_ID
+    unnamed_dir.mkdir()
+    mark_session_origin(unnamed_dir, ORIGIN_SUBAGENT, label="reviewer")
+    with pytest.raises(SubagentChildUnavailable):
+        await DesktopSessions(tmp_path).child_attachment_waveform(
+            PARENT_ID, UNNAMED_CHILD_ID, ref.digest
+        )
+
+
+@pytest.mark.asyncio
+async def test_attachment_waveform_host_reads_the_sidecar_or_misses(tmp_path):
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put_bytes(b"ID3\x04\x00\x00\x00host-peaks", "audio/mpeg")
+    assert ref is not None
+    assert store.put_peaks(ref.digest, [0.5] * PEAK_BARS)
+
+    pool = DesktopSessions(tmp_path)
+    payload = await pool.attachment_waveform("0123456789ab", ref.digest)
+    assert payload["version"] == 1 and payload["bars"] == PEAK_BARS
+    assert pool.bridges == {}, "a cold read must not start an owner"
+    with pytest.raises(KeyError):
+        await pool.attachment_waveform("0123456789ab", "f" * 32)
+    with pytest.raises(KeyError):
+        await pool.attachment_waveform("ffffffffffff", ref.digest)
+
+
 async def legacy_roster(parent_dir: Path, *session_dirs: Path) -> None:
     """Name children the way a PRE-sidecar runtime did: one transcript entry.
 

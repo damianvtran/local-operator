@@ -269,14 +269,40 @@ def _forced_video_backend() -> Iterator[None]:
         video_tool.video_provider_reachable = saved
 
 
+@contextmanager
+def _forced_audio_backend() -> Iterator[None]:
+    """Make the audio pair's builders say yes regardless of stored keys.
+
+    The FIFTH machine-probing leg (browser, console, image, video, now the
+    audio pair): both tools exist only where a credential for their direction
+    is reachable, so on a CI runner they would be gated off and the measured
+    surface would be two tools lighter than a session that has a provider —
+    the same green-by-fiction the four legs above prevent, same fix. Both
+    gates are patched, and they are DIFFERENT functions on purpose: the
+    sound-effect gate legitimately excludes OpenAI-only machines.
+    """
+    from local_operator.tools import audio_tool
+
+    saved_voiceover = audio_tool.audio_availability.voiceover_reachable
+    saved_effect = audio_tool.audio_availability.sound_effect_reachable
+    audio_tool.audio_availability.voiceover_reachable = lambda *args, **kwargs: True
+    audio_tool.audio_availability.sound_effect_reachable = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        audio_tool.audio_availability.voiceover_reachable = saved_voiceover
+        audio_tool.audio_availability.sound_effect_reachable = saved_effect
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
     DETERMINISTIC across hosts: the count must not depend on whether the
     machine running the benchmark happens to have cmux, the desktop app, an
-    image provider credential, or a video provider credential. See
-    :func:`_forced_browser_backend`, :func:`_forced_console_backend`,
-    :func:`_forced_image_backend` and :func:`_forced_video_backend`. Callers
+    image provider credential, a video provider credential, or an audio
+    provider credential. See :func:`_forced_browser_backend`,
+    :func:`_forced_console_backend`, :func:`_forced_image_backend`,
+    :func:`_forced_video_backend` and :func:`_forced_audio_backend`. Callers
     that report a measurement should also report ``len()`` of this, so a drop
     below the full surface is visible rather than silent.
     """
@@ -285,6 +311,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_console_backend(),
         _forced_image_backend(),
         _forced_video_backend(),
+        _forced_audio_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

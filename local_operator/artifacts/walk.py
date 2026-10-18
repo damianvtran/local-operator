@@ -42,7 +42,7 @@ from local_operator.artifacts import (
     JobOutcome,
     JobSpec,
 )
-from local_operator.artifacts.errors import failure_reason_class
+from local_operator.artifacts.errors import error_type_of, failure_reason_class
 from local_operator.artifacts.progress import (
     ProgressFn,
     emit_progress,
@@ -112,6 +112,7 @@ def all_failed_message(
     labels: Mapping[str, str],
     *,
     action: str = "generation",
+    terminal_exceptions: tuple[type[Exception], ...] = (),
 ) -> str:
     """The exhausted-walk sentence: one header plus one line per attempt.
 
@@ -182,6 +183,7 @@ async def run_job_walk(
     on_exhausted: Callable[[str, tuple[JobAttempt, ...]], BaseException],
     pre_attempts: Mapping[str, JobAttempt] | None = None,
     action: str = "generation",
+    terminal_exceptions: tuple[type[Exception], ...] = (),
 ) -> JobOutcome:
     """Run the walk. See the module docstring for the failure contract.
 
@@ -265,6 +267,7 @@ async def run_job_walk(
         except Exception as exc:  # noqa: BLE001 - every rung failure fails forward
             reason_class = failure_reason_class(exc)
             message = attempt_message(exc)
+            error_type = error_type_of(exc)
             attempts.append(
                 JobAttempt(
                     route=route,
@@ -272,6 +275,9 @@ async def run_job_walk(
                     reason_class=reason_class,
                     message=message,
                     status_code=status_code_of(exc),
+                    # The provider's own token, when it sent one: a surface
+                    # branches on this, not on the retryability class.
+                    error_type=error_type,
                 )
             )
             emit_rung_failure(
@@ -280,9 +286,13 @@ async def run_job_walk(
                 labels=labels,
                 tool=tool,
                 message=message,
-                error_type=reason_class,
+                error_type=error_type or reason_class,
                 num_images=spec.count,
             )
+            # Some lanes have already admitted a billable provider job. Their
+            # failures must not fail forward and accidentally buy another one.
+            if isinstance(exc, terminal_exceptions):
+                raise on_exhausted(message, tuple(attempts)) from exc
             continue
         attempts.append(JobAttempt(route=route, outcome="ok"))
         return JobOutcome(

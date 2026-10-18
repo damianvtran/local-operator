@@ -66,7 +66,7 @@ from local_operator.supplements.contract import (
 #: tool, a changed rule): a cache written under another version is discarded and rebuilt, so a
 #: rule change is never half-applied to an old session. Also covers the denylist's verdicts,
 #: which are baked into the stored records.
-SCAN_SCHEMA: Final = 2
+SCAN_SCHEMA: Final = 3
 
 #: ``origin`` vocabulary, strongest evidence first. A file seen under several origins keeps the
 #: strongest (``write`` then a later ``bash > same`` is still "written"), so the filter chips are
@@ -109,13 +109,23 @@ _RESULT_TOOLS: Final = frozenset(
         "eval",
         "browser",
         "generate_image",
+        "generate_voiceover",
+        "generate_sound_effect",
         "generate_video",
         "video_status",
     }
 )
 #: Tool names whose CALL rows are worth parsing: the ones that pair with a result above.
 _CALL_TOOLS: Final = frozenset({"write", "edit", "bash", "eval"})
-_ARTIFACT_TOOLS: Final = frozenset({"generate_image", "generate_video", "video_status"})
+_ARTIFACT_TOOLS: Final = frozenset(
+    {
+        "generate_image",
+        "generate_video",
+        "video_status",
+        "generate_voiceover",
+        "generate_sound_effect",
+    }
+)
 _ARTIFACT_KINDS: Final = frozenset({"image", "video", "audio"})
 
 # -- byte probes ------------------------------------------------------------------------------
@@ -123,7 +133,9 @@ _ARTIFACT_KINDS: Final = frozenset({"image", "video", "audio"})
 # a hand-built fixture or a future pretty-printer cannot silently blind the scanner.
 _CALL_NAME_PROBE: Final = re.compile(rb'"name"\s*:\s*"(?:write|edit|bash|eval)"')
 _TOOL_NAME_PROBE: Final = re.compile(rb'"tool_name"\s*:\s*"([a-z_]{1,32})"')
-_CUSTOM_PROBE: Final = re.compile(rb'"custom_type"\s*:\s*"(supplement_v1|job_result)"')
+_CUSTOM_PROBE: Final = re.compile(
+    rb'"custom_type"\s*:\s*"(supplement_v1|job_result|audio_settle_v1)"'
+)
 _CALL_ID_PROBE: Final = re.compile(rb'"tool_call_id"\s*:\s*"([^"\\]{1,128})"')
 _IS_ERROR_PROBE: Final = re.compile(rb'"is_error"\s*:\s*true')
 #: A bash result's own first line, ``exit code: N``. A non-zero exit is not ``is_error`` (the tool
@@ -463,15 +475,26 @@ class FileScan:
     # -- digest-only artifacts ----------------------------------------------------------------
 
     def _on_job_result_row(self, seq: int, line: bytes) -> None:
-        """A video job's ``job_result`` row: the background path delivers the receipt here."""
+        """Background video/audio receipts share the same durable artifact facts."""
         row = _row(line)
         payload = row.get("payload") if row else None
-        details = payload.get("details") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return
+        details = payload.get("details")
         if not isinstance(details, dict):
             return
         ts = _float(row.get("ts")) or 0.0 if row else 0.0
         self._on_artifact_facts(
-            seq, ts, "generate_video", _str(details.get("job_id")), details, None
+            seq,
+            ts,
+            (
+                (_str(details.get("tool")) or "generate_voiceover")
+                if payload.get("custom_type") == "audio_settle_v1"
+                else "generate_video"
+            ),
+            _str(details.get("request_id") or details.get("job_id")),
+            details,
+            None,
         )
 
     def _on_artifact_facts(
