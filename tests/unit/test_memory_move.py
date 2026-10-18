@@ -209,6 +209,192 @@ def test_move_records_ops_and_propagates_to_a_peer_like_any_mutation(store, tmp_
     assert peer.show("global", item["id"])["status"] == "forgotten"
 
 
+def test_move_into_global_applies_the_same_scope_fit_guard_as_put(store):
+    work = store.put(
+        "session",
+        {
+            "title": "Release cut",
+            "body": "Merge PR #2463 after CI goes green; next step: tag v1.2.3",
+        },
+    )
+    with pytest.raises(MemoryError) as refused:
+        store.move(reference("session", work), "global")
+    # Same value-free refusal a global put gets; no work text is echoed.
+    assert "memory://session" in str(refused.value)
+    assert "#2463" not in str(refused.value)
+    assert store.show("session", work["id"])["status"] == "active"
+    assert store.inventory("global")["items"] == []
+
+
+def test_the_edit_tool_refuses_a_move_that_bypasses_scope_fit(tmp_path):
+    context = ToolContext(
+        session_id="session-a",
+        team_id="team-a",
+        agent_id="agent-a",
+        memory_config_dir=str(tmp_path / "cfg"),
+        session_dir=str(tmp_path / "sessions" / "session-a"),
+    )
+    created = execute_memory_sync(
+        "write",
+        {
+            "path": "memory://session",
+            "content": json.dumps(
+                {
+                    "title": "Release cut",
+                    "body": "Merge PR #2463; next step: tag v1.2.3",
+                }
+            ),
+        },
+        context,
+    )
+    assert not created.is_error
+    item = json.loads(str(getattr(created.content[0], "text", "")))
+    moved = execute_memory_sync(
+        "edit",
+        {
+            "path": "memory://session/" + item["id"],
+            "old_text": item["version"],
+            "new_text": json.dumps({"move": "global"}),
+        },
+        context,
+    )
+    assert moved.is_error
+    assert "memory://session" in str(getattr(moved.content[0], "text", ""))
+
+
+def test_a_peer_correction_the_mover_never_saw_is_refused_not_erased(tmp_path):
+    from local_operator.network.memory import batch
+
+    scopes = ["global", "session", "team", "agent"]
+    mover = MemoryStore(
+        tmp_path / "a", MemoryIdentity("session-a", "team-a", "agent-a"), origin="device-a"
+    )
+    peer = MemoryStore(
+        tmp_path / "b", MemoryIdentity("session-a", "team-a", "agent-a"), origin="device-b"
+    )
+    item = mover.put("global", fact("Shared fact about the kestrel runbook"))
+    first = batch(mover, {}, scopes=scopes, origins={"device-a"})
+    peer.apply_ops(first["ops"], origins={"device-a"})
+    # The peer corrects the fact; the mover has not synced that correction.
+    head = peer.show("global", item["id"])
+    peer.put(
+        "global",
+        fact("IMPORTANT correction made on device B"),
+        entity=item["id"],
+        expected_version=head["version"],
+    )
+    mover.move(reference("global", item), "session")
+    second = batch(mover, first["after"], scopes=scopes, origins={"device-a"})
+    with pytest.raises(MemoryError, match="revision"):
+        peer.apply_ops(second["ops"], origins={"device-a"})
+    # The correction survives, is still searchable, and no destination copy appeared.
+    assert peer.show("global", item["id"])["fact"]["body"].startswith("IMPORTANT")
+    assert peer.search("IMPORTANT")
+    assert peer.inventory("session")["items"] == []
+    # Resolution: keep what the correction adds, forget the source, sync again.
+    current = peer.show("global", item["id"])
+    peer.put("global", {}, entity=item["id"], expected_version=current["version"], forget=True)
+    peer.apply_ops(second["ops"], origins={"device-a"})
+    assert peer.show("global", item["id"])["status"] == "forgotten"
+    destination = peer.inventory("session")["items"]
+    assert len(destination) == 1
+    assert peer.show("session", destination[0]["id"])["moved_from"] == {
+        "scope": "global",
+        "id": item["id"],
+    }
+
+
+def test_a_move_whose_destination_scope_is_filtered_still_replicates(tmp_path):
+    from local_operator.network.memory import batch
+
+    mover = MemoryStore(
+        tmp_path / "a", MemoryIdentity("session-a", "team-a", "agent-a"), origin="device-a"
+    )
+    peer = MemoryStore(
+        tmp_path / "b", MemoryIdentity("session-a", "team-a", "agent-a"), origin="device-b"
+    )
+    item = mover.put("global", fact("Fact moving to a filtered destination"))
+    first = batch(mover, {}, scopes=["global"], origins={"device-a"})
+    peer.apply_ops(first["ops"], origins={"device-a"})
+    mover.move(reference("global", item), "team")
+    # This peer syncs global only: the tombstone travels, the destination put does not.
+    second = batch(mover, first["after"], scopes=["global"], origins={"device-a"})
+    assert [op["kind"] for op in second["ops"]] == ["tombstone"]
+    # The filtered-out destination op is a sequence SKIP; the wire receiver applies
+    # batches with contiguous=False, exactly as network.memory.receive does.
+    peer.apply_ops(second["ops"], origins={"device-a"}, contiguous=False)
+    assert peer.show("global", item["id"])["status"] == "forgotten"
+
+
+def test_moved_from_survives_a_correction_and_is_printed_by_show(store):
+    from local_operator.memory_cli import render_human, run
+
+    original = store.put("global", fact("Fact that will be moved"))
+    moved = store.move(reference("global", original), "session")
+    _, dest_id = moved["moved"][0]["to"].split("/", 1)
+    head = store.show("session", dest_id)
+    store.put(
+        "session",
+        fact("Fact that was moved and then corrected"),
+        entity=dest_id,
+        expected_version=head["version"],
+    )
+    assert store.show("session", dest_id)["moved_from"] == {
+        "scope": "global",
+        "id": original["id"],
+    }
+    text, failed = run(
+        f"show session/{dest_id}",
+        config=store.root.parent,
+        identity=MemoryIdentity("session-a", "team-a", "agent-a"),
+        session_dir=store.session_dir,
+    )
+    assert not failed, text
+    assert "Moved from: global/" + original["id"] in render_human(text, failed)
+
+
+def test_move_out_resets_the_source_warning_state(store, monkeypatch):
+    import local_operator.memory as memory
+
+    monkeypatch.setattr(memory, "OWNER_TOKENS", 1000)
+    references = []
+    while store.inventory("session")["active_tokens"] < 900:
+        item = store.put("session", fact(f"Work checkpoint {len(references)}"))
+        references.append(reference("session", item))
+        if len(references) > 20:
+            break
+    # Relief out of the warned scope must clear its stored crossing level.
+    store.move(references, "team")
+    assert store.inventory("session")["active_tokens"] == 0
+    # Need the new destination ids, not the old session ids.
+    destinations = []
+    for row in store.inventory("team", limit=50)["items"]:
+        destinations.append(f"team/{row['id']}")
+    assert len(destinations) == len(references)
+    result = store.move(destinations, "session")
+    assert "warning" in result
+    assert "90" in result["warning"]
+
+
+def test_move_refuses_when_the_source_would_exceed_its_history_cap(store, monkeypatch):
+    import local_operator.memory as memory
+
+    monkeypatch.setattr(memory, "MAX_TOMBSTONES", 2)
+    items = [store.put("session", fact(f"Fact number {n}")) for n in range(3)]
+    with pytest.raises(MemoryError, match="history cap"):
+        store.move([reference("session", item) for item in items], "team")
+    assert len(store.inventory("session")["items"]) == 3
+    assert store.inventory("team")["items"] == []
+
+
+def test_move_honours_a_scope_restriction_on_the_target(store):
+    item = store.put("session", fact("Session-only fact"))
+    with pytest.raises(MemoryError, match="not found"):
+        store.move(item["id"], "team", scope="global")
+    assert store.show("session", item["id"])["status"] == "active"
+    assert store.inventory("team")["items"] == []
+
+
 def test_the_edit_tool_exposes_move_with_its_revision_guard(tmp_path):
     context = ToolContext(
         session_id="session-a",
