@@ -122,6 +122,10 @@ ECHO_POLICY = {
     # the answer, and a row behind it would only be readable after leaving
     # (`/settings`' rule).
     "review": False,
+    # The PAGE is the receipt (same rule as `/settings` and `/review`): it
+    # replaces the transcript region and takes no argument, so a user row
+    # printed behind it would only be readable after leaving.
+    "schedule": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -244,6 +248,10 @@ PROMPT_POLICY = {
     "import": False,
     # Takes no argument at all, so an inline engage has nothing to consume.
     "review": False,
+    # The PAGE is the receipt (same rule as `/settings` and `/review`): it
+    # replaces the transcript region and takes no argument, so a user row
+    # printed behind it would only be readable after leaving.
+    "schedule": False,
     "sidebar": False,
     "search": False,
     "accounts": False,

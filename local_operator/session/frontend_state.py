@@ -1021,6 +1021,14 @@ _FRONTEND_LOCAL_SLASHES = {
     # list the runtime host's PR ledger while the user is looking at this
     # screen — `/import`'s wrong-machine answer, with nothing written.
     "review",
+    # Reads and WRITES THIS process's live wake scheduler: the rows are the
+    # ones this terminal's runtime armed, and `set_wake_schedules` re-arms them
+    # here. Routed to a follower's runtime it would list and rewrite wakes on
+    # the host the runtime lives on while the user watches this screen — the
+    # wrong-machine answer `/settings` and `/import` refuse, with a mutation
+    # attached. The machine-wide wake index (the desktop's schedules page) is a
+    # different subject and is deliberately not what this page reads.
+    "schedule",
     "provider",
     "search",
     "accounts",
