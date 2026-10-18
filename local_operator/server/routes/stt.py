@@ -53,12 +53,12 @@ from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath, AudioPathResolution
 from local_operator.stt import audio as stt_audio
-from local_operator.stt.cleanup import InvalidCleanupMode
 from local_operator.stt.cascade import (
     SttUnavailable,
     resolve_audio_path,
     transcribe_audio,
 )
+from local_operator.stt.cleanup import InvalidCleanupMode
 
 router = APIRouter()
 
