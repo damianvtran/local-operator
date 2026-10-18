@@ -41,6 +41,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from local_operator.stt import RemovedSpan
@@ -546,14 +547,19 @@ def configured_cleanup(source: Any) -> CleanupMode:
     if setting is None:  # a tree without the row (older plugin/consumer)
         return DEFAULT_CLEANUP
     try:
-        from local_operator.config import ConfigManager
+        from types import SimpleNamespace
 
-        if not hasattr(source, "get_config"):
-            source = ConfigManager(source)
-        else:
-            directory = getattr(source, "config_dir", None)
-            if directory is not None:
-                source = ConfigManager(directory)
-        return resolve_cleanup(settings_io.read_setting(source, setting))
+        from local_operator.config import read_config_values
+
+        directory = getattr(source, "config_dir", source)
+        values = read_config_values(Path(directory))
+        if values is None:
+            return DEFAULT_CLEANUP
+        # A tiny duck-typed manager: ``read_setting`` only needs
+        # ``get_config().values``, and this read must never construct a
+        # ConfigManager (construction MOVES a malformed file aside, which a
+        # dictation has no business doing — review round 2, r2-M1).
+        snapshot: Any = SimpleNamespace(get_config=lambda: SimpleNamespace(values=values))
+        return resolve_cleanup(settings_io.read_setting(snapshot, setting))
     except Exception:  # noqa: BLE001 — an unreadable/invalid setting must not fail dictation
         return DEFAULT_CLEANUP
