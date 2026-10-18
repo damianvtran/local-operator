@@ -4930,6 +4930,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
                 kept_by_origin=getattr(delegated, "kept_by_origin", 0),
+                kept_by_origin_names=getattr(delegated, "kept_by_origin_names", []),
                 remaining=getattr(delegated, "remaining", 0),
                 scratchpad_enabled=policy.delegated_scratchpad_enabled,
                 scratchpad={

@@ -113,6 +113,7 @@ def test_only_the_reapable_origins_go_and_every_other_class_survives(root: Path)
     assert {c.session for c in result.removed} == {"sub", "shell"}
     assert _names(root) == {"config", "future", "user", "fork", "ws"}
     assert result.kept_by_origin == 2
+    assert set(result.kept_by_origin_names) == {"config", "future"}
 
 
 def test_an_agent_config_run_is_never_reaped(root: Path) -> None:
@@ -252,7 +253,7 @@ def test_an_abandoned_directory_is_clocked_by_created_at_then_mtime(root: Path) 
 
 def test_a_directory_with_no_clock_is_kept(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _mk(root, "noclock", age_h=None)
-    monkeypatch.setattr(dr, "_clock_without_activity", lambda _d: None)
+    monkeypatch.setattr(dr, "_clock_without_activity", lambda *_args: None)
     assert _pass(root).removed == []
     assert "noclock" in _names(root)
 
@@ -271,8 +272,16 @@ def test_a_sane_birth_stamp_is_believed(root: Path) -> None:
 
 @pytest.mark.parametrize(
     "stamp",
-    [0.0, -1.0, 1.7e8, 1_000_000_000_000.0, float("nan"), float("inf")],
-    ids=["zero", "negative", "truncated-epoch", "far-future", "nan", "inf"],
+    [0.0, -1.0, 1.7e8, 1_000_000_000_000.0, 10**400, float("nan"), float("inf")],
+    ids=[
+        "zero",
+        "negative",
+        "truncated-epoch",
+        "far-future",
+        "too-large-for-float",
+        "nan",
+        "inf",
+    ],
 )
 def test_an_implausible_birth_stamp_is_no_clock_and_the_session_survives(
     root: Path, stamp: float
@@ -877,6 +886,19 @@ def test_a_dry_run_lists_everything_and_removes_nothing(root: Path) -> None:
     # there), so it must not claim the session was recently active.
     assert _kept(result)["fresh"].startswith("inside the 48h window")
     assert not (root / "sessions" / CLEANUP_LOG_NAME).exists()
+
+
+def test_a_dry_run_names_the_sessions_kept_by_origin(root: Path) -> None:
+    """A count the operator cannot act on is not a usable preview.
+
+    These rows are hidden from every listing, so the dry run's kept list is the
+    only place they can be found; the name must ride beside ``kept_by_origin``
+    exactly as ``window_names`` does for the in-window group.
+    """
+    _mk(root, "config", "agent-config")
+    result = _pass(root, dry_run=True)
+    assert result.kept_by_origin == 1
+    assert _kept(result)["config"] == "origin not reapable"
 
 
 def test_a_dry_run_with_the_switch_off_still_lists_and_says_so(root: Path) -> None:
