@@ -74,11 +74,14 @@ from local_operator.i18n.keys import cli_mcp_help as _mh
 from local_operator.i18n.keys import cli_memory_help as _me
 from local_operator.i18n.keys import cli_mobile_help as _mb
 from local_operator.i18n.keys import cli_model_help as _mo
+from local_operator.i18n.keys import cli_monitor_help as _mn
 from local_operator.i18n.keys import cli_qwencloud_help as _qc
+from local_operator.i18n.keys import cli_refresh_help as _re
 from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
@@ -1462,51 +1465,49 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "session", help=_rc.session().envelope(locale=help_locale)["text"]
     )
 
+    # Render help per parser build: pre-startup locale selection must not activate
+    # process-wide state or touch the live runtime just to display these flags.
     stop_parser = subparsers.add_parser(
         "stop",
-        help="Stop a running lop session (graceful, then signals)",
+        help=_st.stop().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     stop_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+        help=_st.target().envelope(locale=help_locale)["text"],
     )
-    stop_parser.add_argument("--pid", type=int, help="target by exact pid")
-    stop_parser.add_argument("--session", dest="session", help="target by exact session id")
+    stop_parser.add_argument("--pid", type=int, help=_st.pid().envelope(locale=help_locale)["text"])
+    stop_parser.add_argument(
+        "--session", dest="session", help=_st.session().envelope(locale=help_locale)["text"]
+    )
     stop_parser.add_argument(
         "--all",
         dest="stop_all",
         action="store_true",
-        help="stop every session on this machine (prompts on a TTY; --yes to skip)",
+        help=_st.all().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--yes",
         action="store_true",
-        help="skip the --all confirmation (required when stdin is not a TTY)",
+        help=_st.yes().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--json",
         action="store_true",
-        help="machine-readable outcome per target",
+        help=_st.json().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="graceful-op wait per session before escalating (default 10)",
+        help=_st.timeout().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--force",
         action="store_true",
-        help=(
-            "escalate past a refusal or a skip: signal a target whose socket "
-            "cannot confirm identity, one that reports a turn in flight, or one "
-            "already leaving after a signal — each of those can cut the turn it "
-            "is in. Not needed for a cooperative mid-turn runtime: the plain "
-            "stop ends that one promptly, through its socket"
-        ),
+        help=(_st.force().envelope(locale=help_locale)["text"]),
     )
 
     # The rotation path (`lop refresh`): ask every live runtime to move to the
@@ -1517,34 +1518,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # that destroyed 32 turns on 2026-09-14: an ad-hoc signal sweep.
     refresh_parser = subparsers.add_parser(
         "refresh",
-        help=(
-            "Ask running sessions to move to the build on disk at their next "
-            "boundary (no signals)"
-        ),
+        help=(_re.refresh().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     refresh_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+        help=_re.target().envelope(locale=help_locale)["text"],
     )
-    refresh_parser.add_argument("--pid", type=int, help="target by exact pid")
-    refresh_parser.add_argument("--session", dest="session", help="target by exact session id")
+    refresh_parser.add_argument(
+        "--pid", type=int, help=_re.pid().envelope(locale=help_locale)["text"]
+    )
+    refresh_parser.add_argument(
+        "--session", dest="session", help=_re.session().envelope(locale=help_locale)["text"]
+    )
     refresh_parser.add_argument(
         "--all",
         dest="refresh_all",
         action="store_true",
-        help="ask every live session on this machine (no confirmation: nothing is ended)",
+        help=_re.all().envelope(locale=help_locale)["text"],
     )
     refresh_parser.add_argument(
-        "--json", action="store_true", help="machine-readable outcome per target"
+        "--json", action="store_true", help=_re.json().envelope(locale=help_locale)["text"]
     )
     refresh_parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="wait per session for its answer (default 10)",
+        help=_re.timeout().envelope(locale=help_locale)["text"],
     )
 
     # Scheduled wakes, and the process that fires them for sessions nobody is
@@ -1695,7 +1697,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # design statement rather than an omission.
     monitor_parser = subparsers.add_parser(
         "monitor",
-        help="Inspect standing monitors and cancel one on a closed session",
+        help=_mn.monitor().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # DEFAULTS ON THE PARENT, the `wake_parser` discipline: `monitor_command`
@@ -1706,21 +1708,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
     monitor_sub = monitor_parser.add_subparsers(dest="monitor_command")
     monitor_status = monitor_sub.add_parser(
         "status",
-        help="every monitor on this machine, soonest first",
+        help=_mn.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    monitor_status.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_status.add_argument(
+        "--json", action="store_true", help=_mn.json().envelope(locale=help_locale)["text"]
+    )
     monitor_cancel = monitor_sub.add_parser(
         "cancel",
-        help=(
-            "cancel a monitor on a session with no runtime open (a live session changes "
-            "its own monitors from inside)"
-        ),
+        help=(_mn.cancel().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    monitor_cancel.add_argument("session", help="session id the monitor belongs to")
-    monitor_cancel.add_argument("monitor_id", metavar="id", help="monitor id (m1, m2, …)")
-    monitor_cancel.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_cancel.add_argument("session", help=_mn.session().envelope(locale=help_locale)["text"])
+    monitor_cancel.add_argument(
+        "monitor_id", metavar="id", help=_mn.monitor_id().envelope(locale=help_locale)["text"]
+    )
+    monitor_cancel.add_argument(
+        "--json", action="store_true", help=_mn.json().envelope(locale=help_locale)["text"]
+    )
 
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git

@@ -1,0 +1,37 @@
+{
+  "cli.refresh_help.refresh": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Top-level summary: request a move to the installed build at the next safe boundary, without signals or termination."
+  },
+  "cli.refresh_help.target": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Positional selector accepts conversation name, session id, pid, or cwd substring and ignores case."
+  },
+  "cli.refresh_help.pid": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--pid chooses an exact process identifier; preserve the flag token."
+  },
+  "cli.refresh_help.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--session chooses the exact session identifier, not a fuzzy selector."
+  },
+  "cli.refresh_help.all": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--all asks every live session on this machine; no confirmation is needed because refresh ends nothing."
+  },
+  "cli.refresh_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--json emits one machine-readable outcome per target, not an aggregate status."
+  },
+  "cli.refresh_help.timeout": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "--timeout bounds the wait for each session answer separately, with a default of 10 seconds."
+  }
+}
