@@ -35,6 +35,8 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
+from local_operator.stt import RemovedSpan
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,12 +51,23 @@ class SttOutcome:
     Field names are deliberately the ones the cascade's ``SttOutcome`` carries
     (``text``/``provider``/``model``) so the daemon route reads either object
     the same way; see :func:`_adopt_outcome`.
+
+    The cleanup fields mirror the cascade's exactly (and are copied by
+    ``_adopt_outcome``): ``raw_text`` is the text before OUR rules, ``None``
+    only when ``raw_unavailable`` names why no raw copy exists, ``removed`` is
+    what our layer deleted, and ``cleanup`` is the provenance token. A caller
+    must not present an "original" view when ``raw_unavailable`` is set.
     """
 
     text: str
     provider: str
     model: Optional[str] = None
     path: str = ""
+    raw_text: Optional[str] = None
+    raw_unavailable: str = ""
+    language: Optional[str] = None
+    cleanup: str = "none"
+    removed: tuple[RemovedSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -291,6 +304,9 @@ def _transcribe_radient_sync(
         provider=str(getattr(result, "provider", "") or "radient"),
         model=getattr(result, "model", None) or model,
         path="provider_stt_radient",
+        raw_text=str(getattr(result, "text", "") or ""),
+        language=(getattr(result, "language", None) or getattr(result, "language_code", None)),
+        cleanup="none",
     )
 
 
@@ -366,6 +382,11 @@ def _adopt_outcome(raw: Any, path: str) -> SttOutcome:
         provider=provider,
         model=getattr(raw, "model", None),
         path=str(getattr(raw, "path", "") or path),
+        raw_text=getattr(raw, "raw_text", None),
+        raw_unavailable=str(getattr(raw, "raw_unavailable", "") or ""),
+        language=getattr(raw, "language", None),
+        cleanup=str(getattr(raw, "cleanup", "none") or "none"),
+        removed=tuple(getattr(raw, "removed", ()) or ()),
     )
 
 
@@ -376,6 +397,7 @@ async def _transcribe_via_cascade(
     *,
     language: Optional[str],
     prompt: Optional[str],
+    cleanup: Optional[str] = None,
     config_root: Any,
     store: Any,
 ) -> SttOutcome:
@@ -422,6 +444,7 @@ async def _transcribe_via_cascade(
             store=store,
             language=language,
             prompt=prompt,
+            cleanup=cleanup,
         )
         if inspect.isawaitable(result):
             result = await result
@@ -438,6 +461,7 @@ async def transcribe_with_backend(
     language: Optional[str] = None,
     prompt: Optional[str] = None,
     model: Optional[str] = None,
+    cleanup: Optional[str] = None,
     config_root: Any = None,
     store: Any = None,
 ) -> SttOutcome:
@@ -473,6 +497,7 @@ async def transcribe_with_backend(
             mime,
             language=language,
             prompt=prompt,
+            cleanup=cleanup,
             config_root=config_root,
             store=store,
         )

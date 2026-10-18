@@ -199,7 +199,11 @@ async def test_the_radient_adapter_sends_bytes_off_the_loop_and_cleans_up(
     )
 
     assert outcome == SttOutcome(
-        text="hello world", provider="elevenlabs", model=None, path="provider_stt_radient"
+        text="hello world",
+        provider="elevenlabs",
+        model=None,
+        path="provider_stt_radient",
+        raw_text="hello world",
     )
     assert seen["bytes"] == b"RIFFfake-bytes"
     assert seen["credential_root"] == tmp_path
@@ -249,6 +253,11 @@ async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_execut
     class _CascadeOutcome:
         text = "phone text"
         path = "provider_stt_openai"
+        raw_text = None
+        raw_unavailable = "provider_no_verbatim"
+        language = "eng"
+        cleanup = "elevenlabs.no_verbatim"
+        removed = ()
 
     async def fake_executor(backend: str, audio: bytes, mime: str, **kwargs: Any) -> Any:
         seen.update(backend=backend, audio=audio, mime=mime, kwargs=kwargs)
@@ -269,6 +278,12 @@ async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_execut
     assert outcome.text == "phone text"
     assert outcome.path == "provider_stt_openai"
     assert outcome.provider == "openai"
+    # The mirror copies the cleanup fields; the daemon's JSON is built from it.
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+    assert outcome.language == "eng"
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.removed == ()
     # The phone's ``model`` form field is an STT-model hint the Radient adapter
     # honors; the cascade executor deliberately does not receive it.
     assert seen == {
@@ -280,8 +295,16 @@ async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_execut
             "store": None,
             "language": "en",
             "prompt": "hint",
+            "cleanup": None,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_cleanup_mode_is_refused_before_availability() -> None:
+    """The Radient path has no cleanup work yet, but the mode is still validated."""
+    with pytest.raises(ValueError, match="Unknown transcription cleanup mode"):
+        await transcribe_audio(b"x", "audio/wav", cleanup="bogus")
 
 
 # ---------------------------------------------------------------------------

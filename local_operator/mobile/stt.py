@@ -58,6 +58,7 @@ from local_operator.clients.stt import (
     resolve_backend_key,
     transcribe_with_backend,
 )
+from local_operator.stt.cleanup import resolve_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +352,7 @@ async def transcribe_audio(
     language: Optional[str] = None,
     prompt: Optional[str] = None,
     model: Optional[str] = None,
+    cleanup: Optional[str] = None,
     backend: Optional[str] = None,
     availability: Optional[dict[str, Any]] = None,
     resolver: Optional[Callable[..., Any]] = None,
@@ -365,6 +367,11 @@ async def transcribe_audio(
     executable path exists (the route answers 503), and passes upstream typing
     through unchanged for :func:`describe_stt_failure`.
     """
+    # Validate before the availability read: an unknown mode is the caller's
+    # 422 on every rung, including the Radient path that has no cleanup work
+    # in this slice. Without this, the phone would accept a value the desktop
+    # route refuses and silently ignore it.
+    resolve_cleanup(cleanup)
     answer = (
         availability
         if availability is not None
@@ -386,12 +393,21 @@ async def transcribe_audio(
         language=language,
         prompt=prompt,
         model=model,
+        cleanup=cleanup,
         config_root=config_root,
         store=store,
     )
     if not outcome.path:
         outcome = SttOutcome(
-            text=outcome.text, provider=outcome.provider, model=outcome.model, path=path
+            text=outcome.text,
+            provider=outcome.provider,
+            model=outcome.model,
+            path=path,
+            raw_text=outcome.raw_text,
+            raw_unavailable=outcome.raw_unavailable,
+            language=outcome.language,
+            cleanup=outcome.cleanup,
+            removed=outcome.removed,
         )
     return outcome
 

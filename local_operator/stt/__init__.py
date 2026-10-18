@@ -29,6 +29,7 @@ __all__ = [
     "RungAvailability",
     "SttAttempt",
     "SttOutcome",
+    "RemovedSpan",
 ]
 
 
@@ -97,6 +98,22 @@ class SttAttempt:
 
 
 @dataclass(frozen=True)
+class RemovedSpan:
+    """One span a cleanup rule removed, in raw-transcript coordinates.
+
+    ``start`` is inclusive and ``end`` exclusive in ``raw_text``. ``kind`` is
+    ``"filler"`` or ``"cue"``; ``token`` is the exact matched text. A span is
+    audit evidence, not an edit instruction: it must not be applied to a
+    different string (see ``stt/cleanup.py``).
+    """
+
+    start: int
+    end: int
+    kind: str
+    token: str
+
+
+@dataclass(frozen=True)
 class SttOutcome:
     """A successful cascade run: the text, the rung that produced it, and the walk."""
 
@@ -117,3 +134,23 @@ class SttOutcome:
     #: older envelope still names the vendor — QA round 1, Q3). A BYO rung
     #: leaves it empty; the route knows that leg from the path itself.
     provider: str = ""
+    #: The text before OUR cleanup rules, for audit and recovery. ``None``
+    #: means no raw copy exists (the provider removed at source); it must never
+    #: be read as "nothing was removed". ``raw_unavailable`` says why.
+    raw_text: str | None = None
+    #: Why ``raw_text`` is absent. Empty when a raw copy exists (including when
+    #: it equals ``text``). Today the only value is
+    #: ``"provider_no_verbatim"``; the vocabulary is open so a later provider
+    #: can name its own reason.
+    raw_unavailable: str = ""
+    #: The provider-detected language when it reports one (ISO-639-1/-3 as the
+    #: provider spells it). ``None`` when the provider does not say.
+    language: str | None = None
+    #: Provenance for the text above: ``"none"``, ``"elevenlabs.no_verbatim"``,
+    #: a later ``"client.rules.v1"``, or a joined form. Never empty.
+    cleanup: str = "none"
+    #: Exactly what our rules removed, in ``raw_text`` coordinates. Empty when
+    #: our layer removed nothing — which is NOT the same claim as "the
+    #: transcript is verbatim": provider-native cleanup may have removed text
+    #: upstream (see ``raw_unavailable``).
+    removed: tuple[RemovedSpan, ...] = ()

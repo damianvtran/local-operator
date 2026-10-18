@@ -187,8 +187,50 @@ def test_success_answers_with_the_path_that_actually_ran(
         "model": "gpt-transcribe",
         # The token that RAN — never re-derived from the availability answer.
         "path": "provider_stt_radient",
+        "cleanup": "none",
+        "raw_text": None,
+        "raw_unavailable": "",
+        "language": None,
+        "removed": [],
     }
     assert calls[0]["audio"] == b"not-really-audio"
+
+
+def test_cleanup_is_forwarded_and_provenance_is_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(
+            text="So I think we should ship.",
+            provider="elevenlabs",
+            path="provider_stt_elevenlabs",
+            raw_text=None,
+            raw_unavailable="provider_no_verbatim",
+            language="eng",
+            cleanup="elevenlabs.no_verbatim",
+        ),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "auto"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["cleanup"] == "auto"
+    body = response.json()
+    assert body["cleanup"] == "elevenlabs.no_verbatim"
+    assert body["raw_text"] is None
+    assert body["raw_unavailable"] == "provider_no_verbatim"
+    assert body["language"] == "eng"
+    assert body["removed"] == []
+
+
+def test_a_refused_cleanup_mode_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_dispatch(monkeypatch, error=ValueError("Unknown transcription cleanup mode 'bogus'."))
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "bogus"}, **_audio())
+
+    assert response.status_code == 422
+    assert "Unknown transcription cleanup mode" in response.json()["error"]
 
 
 def test_a_backend_refusal_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
