@@ -1245,6 +1245,15 @@ class AudioCancelReceipt:
     #: "will be charged if it produces audio" sentence belongs to THAT reason,
     #: not to every unstopped cancel.
     reason: str = ""
+    #: The cancel response's JSON object, VERBATIM, when the server sent one.
+    #:
+    #: The settled contract's pending-settlement facts live in that body —
+    #: ``cost`` (a ``quote`` basis with its units and quote), ``cancellation``
+    #: (vendor_stopped/reason/detail) and ``note`` — and a surface can only
+    #: render "awaiting settlement" from fields a client actually receives.
+    #: The tool result forwards these keys; nothing is invented here, and a
+    #: body that states no ``settled``/``cost_usd`` is not turned into a figure.
+    server_payload: dict[str, Any] | None = None
 
 
 #: The closed cancel-outcome tokens (mirrors the image lane's set).
@@ -1329,15 +1338,20 @@ def cancel_receipt_text(
     return f"Not cancelled — {phrase}."
 
 
-def _parse_cancel_body(response: httpx.Response) -> tuple[str, bool | None, str]:
-    """``(token, vendor_stopped, reason)`` from a cancel response, tolerantly.
+def _parse_cancel_body(
+    response: httpx.Response,
+) -> tuple[str, bool | None, str, dict[str, Any] | None]:
+    """``(token, vendor_stopped, reason, payload)`` from a cancel response, tolerantly.
 
     The settled vocabulary is a small closed set spelled in a JSON field or a
     body depending on the deployment; a body neither reads nor parses just
     fails the marker test and the HTTP status decides. ``vendor_stopped`` is
     read only when the payload genuinely carries a bool; ``reason`` is the
     server's own word (``provider_has_no_cancel_api`` today) and is surfaced
-    for the receipt rather than parsed into behaviour.
+    for the receipt rather than parsed into behaviour. ``payload`` is the
+    parsed object itself (``None`` when the body was not a JSON object) so the
+    tool can forward the contract's cost/cancellation/note facts instead of
+    dropping them here.
     """
     vendor_stopped: bool | None = None
     reason = ""
@@ -1362,8 +1376,9 @@ def _parse_cancel_body(response: httpx.Response) -> tuple[str, bool | None, str]
             or payload.get("code")
         )
         if isinstance(token, str):
-            return token.upper(), vendor_stopped, reason
-    return (response.text or "").upper(), vendor_stopped, reason
+            return token.upper(), vendor_stopped, reason, payload
+        return (response.text or "").upper(), vendor_stopped, reason, payload
+    return (response.text or "").upper(), vendor_stopped, reason, None
 
 
 async def best_effort_cancel(handle: SharedCancelHandle | None) -> AudioCancelReceipt:
@@ -1410,21 +1425,30 @@ async def best_effort_cancel(handle: SharedCancelHandle | None) -> AudioCancelRe
             return AudioCancelReceipt(outcome="failed")
         if response.status_code == 404:
             return AudioCancelReceipt(outcome="not_found")
-        token, vendor_stopped, reason = _parse_cancel_body(response)
+        token, vendor_stopped, reason, payload = _parse_cancel_body(response)
         # The settled contract spells a completed/failed job's refusal as 409
         # ``audio_already_completed``, not a 200 status word — and a status
         # word spelled ALREADY_COMPLETED is still honoured (older deployments).
         if response.status_code == 409 or "ALREADY_COMPLETED" in token:
             return AudioCancelReceipt(
-                outcome="already_completed", vendor_stopped=vendor_stopped, reason=reason
+                outcome="already_completed",
+                vendor_stopped=vendor_stopped,
+                reason=reason,
+                server_payload=payload,
             )
         if 200 <= response.status_code < 300:
             return AudioCancelReceipt(
-                outcome="cancelled", vendor_stopped=vendor_stopped, reason=reason
+                outcome="cancelled",
+                vendor_stopped=vendor_stopped,
+                reason=reason,
+                server_payload=payload,
             )
         if "CANCELLED" in token:
             return AudioCancelReceipt(
-                outcome="cancelled", vendor_stopped=vendor_stopped, reason=reason
+                outcome="cancelled",
+                vendor_stopped=vendor_stopped,
+                reason=reason,
+                server_payload=payload,
             )
         return AudioCancelReceipt(outcome="failed")
 
