@@ -211,6 +211,27 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
                     "file hunks are not supported."
                 )
             replacement = json.loads(args.get("new_text") or "null")
+            # A move is an EDIT command rather than a new verb: the fact is being
+            # mutated, so it keeps the same optimistic revision guard as correction/
+            # forget, and no new tool surface has to be discovered. Its one target is
+            # the path's ID; {"move":"scope"} is the whole payload.
+            move = replacement.get("move") if isinstance(replacement, dict) else None
+            if move is not None:
+                if set(replacement) != {"move"} or not isinstance(move, str):
+                    raise MemoryError(
+                        'Move requires exactly {"move":"session|team|agent|global"} and a revision.'
+                    )
+                if not scope or not entity:
+                    raise MemoryError("Move needs memory://SCOPE/ID, not a bare scope.")
+                store.import_session()
+                value = store.move(
+                    f"{scope}/{entity}",
+                    move,
+                    expected_version=args.get("old_text"),
+                )
+                # A write is not budgeted like a read: return the move receipt
+                # directly rather than falling through to the recall-budget loop.
+                return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             forget = replacement == {"forget": True, "confirm": True}
             if isinstance(replacement, dict) and "forget" in replacement and not forget:
                 raise MemoryError(

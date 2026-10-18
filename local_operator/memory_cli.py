@@ -24,7 +24,7 @@ from local_operator.memory import SCOPES, MemoryError, MemoryIdentity, MemorySto
 from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED, policy
 from local_operator.paths import config_dir
 
-OPERATIONS = ("list", "show", "search", "edit", "forget", "status", "inspect")
+OPERATIONS = ("list", "show", "search", "move", "edit", "forget", "status", "inspect")
 #: Fields a flag-based edit may change; everything else is carried over from the
 #: revision being corrected, so a one-word fix never needs the whole record retyped.
 _EDITABLE = (
@@ -43,7 +43,8 @@ _EDITABLE = (
     "replaces",
 )
 USAGE = (
-    "Commands: list · show ID · search WORDS · status · inspect (read-only preview) · "
+    "Commands: list · show ID · search WORDS · move ID [ID…] --to SCOPE · status · "
+    "inspect (read-only preview) · "
     "edit ID --revision REV (--title T | --body B | --tag T | --alias A | --verified) · "
     "forget ID --revision REV --yes. ID is the SCOPE/ID printed by list."
 )
@@ -58,6 +59,7 @@ EPILOG = (
     "  lop memory search staging host\n"
     "  lop memory show global/01a13d37-52d8-70fd-a819-01843005f4b5\n"
     "  lop memory edit global/<id> --revision <rev> --body 'Staging host is stage-2'\n"
+    "  lop memory move global/<id> --to session\n"
     "  lop memory forget global/<id> --revision <rev> --yes\n"
     "Session-scoped facts need the session: add --session ID (inside a session the /memory "
     "command binds it automatically)."
@@ -94,6 +96,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         nargs="*",
         help="show/edit/forget: the SCOPE/ID (or a unique ID prefix) printed by list; "
         "search: the words to look for (quotes optional)",
+    )
+    parser.add_argument(
+        "--to",
+        choices=SCOPES,
+        default=None,
+        help="move: destination scope (session, team, agent or global)",
     )
     parser.add_argument(
         "--revision",
@@ -217,6 +225,9 @@ def execute(
     scope = args.scope
     if args.operation == "status":
         return _status(root, store)
+    if getattr(args, "to", None) and args.operation != "move":
+        # Same rule as --limit: a silently ignored flag reads as if it applied.
+        raise MemoryError("--to applies to `move` only.")
     if args.limit is not None and args.operation != "inspect":
         # A silently ignored flag reads as a filter that was applied.
         raise MemoryError("--limit applies to `inspect` only.")
@@ -264,6 +275,20 @@ def execute(
         if not words:
             raise MemoryError(f"Search needs words, e.g. {prefix} search staging host.")
         return {"results": store.search(" ".join(words), scope), "query": True, **common}
+    if args.operation == "move":
+        if not args.to:
+            raise MemoryError(f"Move needs a destination: {prefix} move SCOPE/ID --to session.")
+        if not words:
+            raise MemoryError(f"A move needs at least one ID: {prefix} move SCOPE/ID --to session.")
+        if len(words) > 64:
+            raise MemoryError("A move accepts at most 64 memories at once.")
+        try:
+            value = store.move(list(words), args.to, expected_version=args.revision or None)
+        except MemoryError as exc:
+            if "not found" in str(exc):
+                raise MemoryError(f"{exc} List what you can see with: {prefix} list") from None
+            raise
+        return {**value, "context": common["context"]}
     if not words:
         raise MemoryError(f"An explicit memory ID is required: {prefix} {args.operation} SCOPE/ID.")
     if len(words) > 1:
@@ -483,6 +508,34 @@ def _status_text(value: dict[str, Any]) -> str:
         f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
         f"{usage.get('storage_bytes', 0)} bytes"
     )
+    quotas = usage.get("quotas") or []
+    if quotas:
+        # Wrapped at the repo's row bar: a NoticeBlock clips a longer line at the
+        # pane edge instead of wrapping it, and a clipped percentage/headroom is
+        # the one number this line exists to show.
+        lines += _shaped(
+            "Quota: "
+            + " · ".join(
+                f"{row['scope']} {row['used_tokens']}/{row['cap_tokens']} "
+                f"({row['percent']}%, {row['headroom_tokens']} left)"
+                for row in quotas
+            )
+        )
+        near = [row for row in quotas if row["percent"] >= 80]
+        if near:
+            # The actionable half: the defect was a cap that stayed silent until
+            # it refused writes, so the warning must name both ways to relieve it.
+            lines += _shaped(
+                "Near cap: "
+                + ", ".join(f"{row['scope']} {row['percent']}%" for row in near)
+                + ". Consolidate stale facts (forget) or move work-state facts to "
+                "session scope."
+            )
+            # The command sits on its own line so wrapping never splits it.
+            lines += _shaped(
+                "Free space: `lop memory move ID --to session` "
+                "(TUI: `/memory move ID --to session`)."
+            )
     lines.append(value["limits"])
     return "\n".join(lines)
 
@@ -665,6 +718,27 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         for row in rows:
             lines += _row(row)
         lines.append(f"Next: {prefix} show {rows[0]['scope']}/{rows[0]['id']}{value['context']}")
+        return "\n".join(lines)
+    if value.get("action") == "moved":
+        rows = value["moved"]
+        lines = [f"Moved {len(rows)} fact(s) to {value['destination']}."]
+        for row in rows:
+            # Two UUIDs plus an arrow exceed the 80-column bar; a clipped destination
+            # would hide the half of the receipt that carries the new reference.
+            lines += _shaped(f"  {row['from']} → {row['to']}")
+        if rows:
+            lines += _shaped(
+                f"Next: {prefix} show {rows[0]['to']}{value.get('context', '')} --related "
+                "(the previous scope is shown as moved_from)"
+            )
+        if value.get("warning"):
+            lines += _shaped(value["warning"])
+        quota = value.get("quota") or {}
+        if quota:
+            lines.append(
+                f"Quota: {quota['used_tokens']}/{quota['cap_tokens']} tokens "
+                f"({quota['percent']}%, {quota['headroom_tokens']} left)"
+            )
         return "\n".join(lines)
     if "items" in value:
         items = value["items"]
