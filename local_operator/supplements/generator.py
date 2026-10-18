@@ -328,8 +328,8 @@ def evidence_block(
         if used + payload_bytes > MAX_EVIDENCE_BYTES:
             break
         used += payload_bytes + 1
-        parts.append(f"<dataset>{payload}</dataset>")
-    parts.append("</evidence>")
+        parts.append(f"<dataset>{payload}</dataset>")  # i18n: ignore model-facing evidence envelope
+    parts.append("</evidence>")  # i18n: ignore model-facing evidence envelope
     if instruction:
         parts.append(steer_instruction(instruction))
     return scrub_shapes("\n".join(parts))
@@ -462,7 +462,9 @@ async def generate(
             diagnosis = failure_detail(cause)
             # The line names the generation turn this attempt was FILLING; unlike a
             # completed turn it does not consume one (the loop note above).
-            detail.append(f"turn {turns + 1}: {diagnosis}")
+            detail.append(
+                f"turn {turns + 1}: {diagnosis}"
+            )  # i18n: ignore internal journal (dev log)
             logger.warning("supplements: generator %s failed: %s", model.label, diagnosis)
             error = f"generator:{type(cause).__name__}"
             if isinstance(cause, ProviderError):
@@ -474,6 +476,7 @@ async def generate(
                 # The ladder's explicit ceiling: primary + alternate already failed with no
                 # completed turn between them, so no further provider attempt can be spent.
                 detail.append(
+                    # i18n: ignore internal journal (dev log)
                     f"bound:{BOUND_ATTEMPTS} {failure_streak} provider attempt(s) failed "
                     "without a completed turn"
                 )
@@ -485,16 +488,21 @@ async def generate(
                 # An invariant today -- failures do not consume turns, so the loop condition
                 # has already guaranteed the fallback a slot -- kept as the named reason a
                 # fallback continuation would be refused should that invariant ever change.
-                detail.append(f"bound:{BOUND_TURNS} no turn remains for fallback")
+                detail.append(
+                    f"bound:{BOUND_TURNS} no turn remains for fallback"
+                )  # i18n: ignore internal journal (dev log)
                 break
             if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
                 detail.append(
+                    # i18n: ignore internal journal (dev log)
                     f"bound:{BOUND_COST} reached or affordability unavailable before fallback"
                 )
                 error = f"bound:{BOUND_COST}"
                 break
             if timeout_s is not None and clock() - start >= timeout_s:
-                detail.append(f"bound:{BOUND_TIME} reached before fallback")
+                detail.append(
+                    f"bound:{BOUND_TIME} reached before fallback"
+                )  # i18n: ignore internal journal (dev log)
                 error = f"bound:{BOUND_TIME}"
                 break
             model, alternate = alternate, None
@@ -514,6 +522,7 @@ async def generate(
             # truncated block is exactly what the repair turn exists for -- but it must leave
             # a record, or "which bound touched this job" is unknowable (round-1 review R7).
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_TOKENS} turn {turns} hit the {max_output_tokens}-token "
                 "per-turn limit"
             )
@@ -532,13 +541,15 @@ async def generate(
         if not accepted_now and not rejected_now:
             # The fork answered the single word NONE (a legitimate "no figure helps").
             none = True
-            detail.append(f"turn {turns}: NONE")
+            detail.append(f"turn {turns}: NONE")  # i18n: ignore internal journal (dev log)
             break
         if len(accepted) > max_components:
             # More blocks passed than the row may carry: keep the first MAX_COMPONENTS and
             # record the trim. Dropping the extras is the memo's own cap (§2.5), and silently
             # keeping three of four would make the recorded decision a lie.
-            detail.append(f"components bound: kept {max_components} of {len(accepted)}")
+            detail.append(
+                f"components bound: kept {max_components} of {len(accepted)}"
+            )  # i18n: ignore internal journal (dev log)
             accepted = accepted[:max_components]
             error = f"bound:{BOUND_COMPONENTS}"
             if accepted_sink is not None:
@@ -550,6 +561,7 @@ async def generate(
             # never rendered -- and the drop is recorded (memo §2.5: "dropped and the
             # failure recorded").
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_TURNS} {len(rejected)} block(s) still rejected at "
                 f"{turns} of {max(1, max_turns)} turn(s) — {_rejection_reasons(rejected)}"
             )
@@ -562,12 +574,14 @@ async def generate(
         # guard for a turn that hangs mid-flight.
         if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_COST} cap: ${cost:.4f} of ${max_cost_usd:.2f} reached before repair"
             )
             error = f"bound:{BOUND_COST}" if not accepted else error
             break
         if timeout_s is not None and clock() - start >= timeout_s:
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_TIME} wall clock {clock() - start:.1f}s of {timeout_s:.0f}s "
                 "reached before repair"
             )
