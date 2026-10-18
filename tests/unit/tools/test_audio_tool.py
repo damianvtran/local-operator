@@ -10,6 +10,7 @@ ledger.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -153,11 +154,17 @@ def test_the_voiceover_schema_is_the_frozen_one():
 def test_the_sound_effect_schema_is_the_frozen_one():
     schema = audio_tool.GenerateSoundEffectParams.model_json_schema()
     properties = schema["properties"]
-    assert set(properties) == {"prompt", "duration_s", "loop", "prompt_influence", "model"}
-    assert set(schema["required"]) == {"prompt", "duration_s"}, "duration has no auto-duration"
-    assert properties["prompt"]["maxLength"] == 600
-    assert properties["duration_s"]["minimum"] == 0.5
-    assert properties["duration_s"]["maximum"] == 30.0
+    assert set(properties) == {
+        "prompt",
+        "duration_s",
+        "sounds",
+        "loop",
+        "prompt_influence",
+        "model",
+    }
+    assert _string_arm(properties["prompt"])["maxLength"] == 600
+    assert _string_arm(properties["duration_s"])["minimum"] == 0.5
+    assert _string_arm(properties["duration_s"])["maximum"] == 30.0
     assert properties["loop"]["default"] is False
     assert properties["prompt_influence"]["default"] == 0.3
 
@@ -1073,3 +1080,328 @@ async def test_accepted_cancel_revises_the_same_charge(
         assert [row.rev for row in spent] == [0, 1]
         assert len({row.record_id for row in spent}) == 1
         assert spent[-1].billing_basis == "billed"
+
+
+# Batch envelopes validate before approval; individual provider rejection is a
+# result, not a reason to discard an otherwise valid paid batch.
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"prompt": "click"},
+        {"duration_s": 1},
+        {"sounds": []},
+        {"sounds": [{"prompt": "click", "duration_s": 1}], "prompt": "other"},
+        {"sounds": [{"prompt": "click", "duration_s": 1}], "duration_s": None},
+        {"sounds": [{"prompt": "click", "duration_s": 1}] * 51},
+    ],
+)
+def test_batch_envelope_refused_before_approval(args):
+    assert audio_tool._refuse_sound_effect_args(args, frozenset())
+
+
+def test_batch_duration_reaches_provider_and_names_are_display_safe():
+    params = audio_tool.GenerateSoundEffectParams.model_validate(
+        {"sounds": [{"prompt": " bad / sound ", "duration_s": 31}]}
+    )
+    assert params.sounds and params.sounds[0].duration_s == 31
+    assert audio_tool._sound_name(" bad / sound ", None) == "bad - sound"
+    assert audio_tool._sound_name("anything", "../") == "sound-effect"
+    assert audio_tool._sound_name("anything", " named ") == "named"
+
+
+def test_batch_approval_is_one_summed_estimate(monkeypatch):
+    monkeypatch.setattr(audio_tool, "_preferred_route", lambda direction: AudioRoute.RADIENT)
+    args = {"sounds": [{"prompt": "click", "duration_s": 0.5}] * 10}
+    text = audio_tool._describe_sound_effect_approval(args, ".")
+    assert "10 sound effects" in text
+    assert "estimated total $0.0200" in text
+    assert "billed figures are authoritative" in text
+
+
+@pytest.mark.asyncio
+async def test_batch_ten_named_attachments_cost_and_max_two(monkeypatch):
+    from dataclasses import replace
+
+    active = peak = 0
+    updates = []
+
+    async def cascade(**kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        spec = kwargs["spec"]
+        assert spec.batch_submission
+        await asyncio.sleep(0.001)
+        active -= 1
+        return _outcome(
+            assets=(replace(_asset(0.5), data=b"ID3" + spec.text.encode()),),
+            generation_id=spec.text,
+            cost_usd=0.002,
+        )
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    result = await audio_tool.execute_generate_sound_effect(
+        "batch",
+        {
+            "sounds": [
+                {"name": "duplicate" if n < 2 else None, "prompt": f"sound-{n}", "duration_s": 0.5}
+                for n in range(10)
+            ]
+        },
+        None,
+        updates.append,
+        None,
+    )
+    assert not result.is_error
+    assert peak == 2
+    blocks = [b for b in result.content if isinstance(b, AttachmentContent)]
+    assert len(blocks) == 10
+    assert [b.name for b in blocks][:3] == ["duplicate", "duplicate", "sound-2"]
+    details = _details(result)
+    assert details["completed"] == 10 and details["failed"] == details["cancelled"] == 0
+    assert details["cost_usd"] == pytest.approx(0.02)
+    for n, row in enumerate(details["artifacts"]):
+        assert row["name"] == blocks[n].name
+        assert row["digest"] == blocks[n].attachment
+        assert row["request_id"] == f"sound-{n}"
+        assert row["cost"] == {
+            "amount_usd": 0.002,
+            "basis": "billed",
+            "units": 1.0,
+            "unit": "seconds",
+        }
+        assert row["error"] is None
+        assert row["duration_s"] == 0.5 and row["format"] == "mp3"
+    assert "1/10 duplicate: completed" in _text(result)
+    assert any(
+        "10/10 sound-9" in b.text for u in updates for b in u.content if isinstance(b, TextContent)
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_partial_failure_uses_actual_http_rejection(monkeypatch):
+    import hashlib
+    import json
+
+    import httpx
+
+    from local_operator.audiogen import cascade, rungs
+
+    monkeypatch.setattr(cascade.audio_availability, "radient_available", lambda cfg=None: True)
+    monkeypatch.setattr(cascade.audio_availability, "elevenlabs_key", lambda cfg=None: None)
+    monkeypatch.setattr(cascade.audio_availability, "openai_audio_key", lambda cfg=None: None)
+    submissions = []
+    audio = b"ID3mock-http-audio"
+
+    def respond(request):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            submissions.append(body)
+            if body["duration_seconds"] == 31:
+                return httpx.Response(
+                    400,
+                    json={
+                        "code": "audio_rejected",
+                        "error": "duration_s must be between 0.5 and 30",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": body["prompt"],
+                    "status": "COMPLETED",
+                    "model": "sfx",
+                    "cost": {"amount_usd": 0.002, "basis": "billed", "units": 1, "unit": "seconds"},
+                },
+            )
+        if request.url.path.endswith("/result"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    "audio": {
+                        "url": "https://fixture.invalid/media.mp3",
+                        "content_type": "audio/mpeg",
+                        "duration_seconds": 0.5,
+                        "sha256": hashlib.sha256(audio).hexdigest(),
+                    },
+                },
+            )
+        assert request.url.path == "/media.mp3"
+        return httpx.Response(200, content=audio)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        async def route(route, **kwargs):
+            assert route == AudioRoute.RADIENT
+            return await rungs.run_radient(
+                kwargs["spec"],
+                credential="fixture-token",
+                base_url="https://fixture.invalid/v1",
+                handle=kwargs["handle"],
+                emit=kwargs["emit"],
+                pause=kwargs["pause"],
+                client=client,
+            )
+
+        monkeypatch.setattr(cascade, "_run_route", route)
+        result = await audio_tool.execute_generate_sound_effect(
+            "partial",
+            {
+                "sounds": [
+                    {"prompt": f"sound-{n}", "duration_s": 31 if n == 2 else 0.5} for n in range(4)
+                ]
+            },
+            None,
+            None,
+            None,
+        )
+    assert not result.is_error
+    assert len(submissions) == 4
+    assert len([b for b in result.content if isinstance(b, AttachmentContent)]) == 3
+    assert _details(result)["failed"] == 1
+    rejected = _details(result)["artifacts"][2]
+    assert rejected["error_type"] == "audio_rejected"
+    assert rejected["http_status"] == 400
+    assert "duration_s must be between 0.5 and 30" in rejected["error"]
+    assert _details(result)["cost_usd"] == pytest.approx(0.006)
+    assert _details(result)["artifacts"][0]["units"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refuse_all", [False, True])
+async def test_batch_cache_refusal_is_isolated_and_all_refused_errors(monkeypatch, refuse_all):
+    from local_operator.session import attachments
+
+    original = attachments.cache_media
+    registered = []
+
+    def cache(*args, **kwargs):
+        registered.append(kwargs["name"])
+        if refuse_all or kwargs["name"] == "sound-0":
+            return None
+        return original(*args, **kwargs)
+
+    async def cascade(**kwargs):
+        return _outcome(cost_usd=0.002)
+
+    monkeypatch.setattr(attachments, "cache_media", cache)
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    result = await audio_tool.execute_generate_sound_effect(
+        "cache",
+        {"sounds": [{"prompt": f"sound-{n}", "duration_s": 0.5} for n in range(4)]},
+        None,
+        None,
+        None,
+    )
+    assert len(registered) == 4
+    assert result.is_error is refuse_all
+    assert _details(result)["completed"] == (0 if refuse_all else 3)
+    # Billed output refused by storage still belongs in the total.
+    assert _details(result)["cost_usd"] == pytest.approx(0.008)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_task", [False, True])
+async def test_batch_stop_does_not_start_queue_and_retains_completed(monkeypatch, cancel_task):
+    from local_operator.harness.types import AbortSignal
+
+    signal = AbortSignal()
+    started = []
+    blocked = asyncio.Event()
+
+    async def cascade(**kwargs):
+        text = kwargs["spec"].text
+        started.append(text)
+        if text == "sound-0":
+            return _outcome(cost_usd=0.002)
+        blocked.set()
+        if cancel_task:
+            await asyncio.Event().wait()
+        else:
+            signal.abort()
+            raise AudioGenerationCancelled()
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    task = asyncio.ensure_future(
+        audio_tool.execute_generate_sound_effect(
+            "cancel",
+            {"sounds": [{"prompt": f"sound-{n}", "duration_s": 0.5} for n in range(10)]},
+            signal,
+            None,
+            None,
+        )
+    )
+    await blocked.wait()
+    if cancel_task:
+        task.cancel()
+    result = await task
+    assert not result.is_error
+    assert _details(result)["completed"] == 1
+    assert _details(result)["cancelled"] == 9
+    assert len(started) <= 3
+    rows = _details(result)["artifacts"]
+    assert rows[-1]["started"] is False
+    assert rows[-1]["error"] == "Never started; no provider call"
+    assert "billed" in _text(result) or "stopped" in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_batch_deadline_returns_partial_and_marks_unstarted(monkeypatch):
+    calls = []
+
+    async def cascade(**kwargs):
+        text = kwargs["spec"].text
+        calls.append(text)
+        if text == "sound-0":
+            return _outcome(cost_usd=0.002)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(audio_tool, "SOUND_BATCH_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    result = await audio_tool.execute_generate_sound_effect(
+        "slow",
+        {"sounds": [{"prompt": f"sound-{n}", "duration_s": 0.5} for n in range(50)]},
+        None,
+        None,
+        None,
+    )
+    assert not result.is_error
+    assert len(calls) == 3  # one completed, then two in flight; no remaining submissions
+    assert _details(result)["completed"] == 1
+    assert _details(result)["cancelled"] == 49
+    assert sum(row["started"] for row in _details(result)["artifacts"]) == 3
+    assert "Batch time budget reached" in _text(result)
+    assert "not a guaranteed vendor cancellation" in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_batch_server_units_and_mixed_estimates_remain_honest(monkeypatch):
+    async def cascade(**kwargs):
+        spec = kwargs["spec"]
+        if spec.text == "billed":
+            kwargs["handle"].cost = {
+                "amount_usd": 0.007,
+                "basis": "billed",
+                "units": 3.5,
+                "unit": "seconds",
+            }
+            return _outcome(cost_usd=0.007)
+        return _outcome(cost_usd=0.004, billing_basis="estimated", cost_source="rate_table")
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", cascade)
+    result = await audio_tool.execute_generate_sound_effect(
+        "costs",
+        {"sounds": [{"prompt": name, "duration_s": 0.5} for name in ("billed", "estimated")]},
+        None,
+        None,
+        None,
+    )
+    details = _details(result)
+    assert details["cost_usd"] == pytest.approx(0.011)
+    assert details["cost"]["basis"] == "estimated"
+    assert details["cost_complete"] is True
+    assert details["artifacts"][0]["units"] == 3.5  # server fact, not client rounding
+    assert details["artifacts"][0]["cost"]["basis"] == "billed"
+    assert details["artifacts"][1]["cost"]["basis"] == "estimated"
