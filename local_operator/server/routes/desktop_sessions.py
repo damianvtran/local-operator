@@ -696,6 +696,20 @@ class Pin(Input):
     pinned: StrictBool
 
 
+class TagCategory(Input):
+    id: str | None = None
+    name: str
+
+
+class TagRegistry(Input):
+    tags: list[TagCategory]
+
+
+class TagAssignment(Input):
+    tags: list[str]
+    primary: str | None
+
+
 class Archive(Input):
     """The ARCHIVE state the caller wants this session to be in.
 
@@ -4410,6 +4424,34 @@ async def notified(session_id: str, body: Notified, request: Request):
         await _refuse_remote_write(request, session_id, noun="notification")
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
+
+
+@router.get("/v1/desktop/tags", response_model=CRUDResponse[dict[str, Any]])
+async def tags(request: Request):
+    async with errors(request):
+        return reply(await host(request).tags())
+
+
+@router.put("/v1/desktop/tags", response_model=CRUDResponse[dict[str, Any]])
+async def replace_tags(body: TagRegistry, request: Request):
+    # Desired state is retry-safe and admits no work, so no receipt is needed.
+    async with errors(request):
+        try:
+            return reply(
+                await host(request).replace_tags([(tag.id, tag.name) for tag in body.tags])
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+
+@router.put("/v1/desktop/sessions/{session_id}/tags", response_model=CRUDResponse[dict[str, Any]])
+async def session_tags(session_id: str, body: TagAssignment, request: Request):
+    async with errors(request):
+        await _refuse_remote_write(request, session_id, noun="tags")
+        try:
+            return reply(await host(request).set_tags(session_id, body.tags, body.primary))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
 
 @router.post("/v1/desktop/sessions/{session_id}/pin", response_model=CRUDResponse[PinState])
