@@ -1,0 +1,8 @@
+{
+  "cli.update_help.update": "Mettre à niveau cette installation depuis PyPI. Pas le script lop-update, qui reconstruit le runtime global depuis un checkout git local.",
+  "cli.update_help.check": "Afficher l’installé face à PyPI ; ne rien installer",
+  "cli.update_help.from_snapshot": "Installer une arborescence source locale (un répertoire, ou une référence git du dépôt courant) dans sa propre génération d’installation. Sur macOS, une référence qui correspond exactement à une version publiée installe le wheel publié depuis PyPI — le seul build qui porte l’agent de clés macOS — et toute autre référence est construite depuis les sources.",
+  "cli.update_help.allow_downgrade": "Autoriser --from-snapshot à installer un build PLUS ANCIEN que l’installation actuelle (un retour arrière délibéré ; consigné dans le marqueur d’installation). Sans --from-snapshot, c’est refusé sur le chemin PyPI, qui n’installe que des versions plus récentes ; les options de refresh priment.",
+  "cli.update_help.no_services": "Ne pas amener les daemons `lop serve` sur le nouveau build ; les daemons supervisés sont tout de même réparés. À utiliser uniquement quand autre chose lance les serve, p. ex. un script qui possède leur lancement.",
+  "cli.update_help.no_roll": "Ne pas mettre en file de déploiement mesh pour cette mise à jour, quoi que dise `network.rollout_on_update` ; `lop network update` déploie toujours à la main."
+}

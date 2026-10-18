@@ -1,0 +1,11 @@
+{
+  "cli.stop_help.stop": "Arrêter une session lop en cours (en douceur, puis par signaux)",
+  "cli.stop_help.target": "nom-de-conversation / id-de-session / pid / sous-chaîne du cwd (insensible à la casse)",
+  "cli.stop_help.pid": "cibler par pid exact",
+  "cli.stop_help.session": "cibler par id de session exact",
+  "cli.stop_help.all": "arrêter toutes les sessions de cette machine (demande confirmation sur un TTY ; --yes pour l’éviter)",
+  "cli.stop_help.yes": "ignorer la confirmation de --all (requis quand stdin n’est pas un TTY)",
+  "cli.stop_help.json": "résultat lisible par machine par cible",
+  "cli.stop_help.timeout": "attente de l’opération en douceur par session avant escalade (par défaut 10)",
+  "cli.stop_help.force": "escalader au-delà d’un refus ou d’une omission : signaler une cible dont la socket ne peut pas confirmer l’identité, une cible qui signale un tour en cours, ou une cible déjà en train de partir après un signal — chacun de ces cas peut couper le tour en cours. Inutile pour un runtime coopératif en cours de tour : l’arrêt simple termine celui-ci rapidement, via sa socket"
+}

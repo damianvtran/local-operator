@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "Connecter l’outil browser à une extension Chromium",
+  "cli.browser_help.install": "Installer le daemon du bridge",
+  "cli.browser_help.status": "Afficher l’état du daemon, de l’extension et de l’appairage",
+  "cli.browser_help.status_repair": "Réconcilier l’état annoncé avec la réalité : retirer les onglets qui n’existent plus et republier un heartbeat frais. Sans danger pendant que des sessions sont actives.",
+  "cli.browser_help.json": "sortie lisible par machine",
+  "cli.browser_help.cleanup": "Fermer un propriétaire d’onglet dont l’état terminal est prouvé, après revalidation",
+  "cli.browser_help.cleanup_yes": "Approuver ce nettoyage précis",
+  "cli.browser_help.daemon_action": "{action, select, start{Démarrer} stop{Arrêter} restart{Redémarrer} other{{action}}} le daemon",
+  "cli.browser_help.pair": "Afficher le code d’appairage de l’extension",
+  "cli.browser_help.pair_reset": "Révoquer d’abord le navigateur appairé",
+  "cli.browser_help.pair_list": "Lister les extensions de navigateur autorisées, et celle qui pilote",
+  "cli.browser_help.pair_revoke": "Révoquer UNE extension autorisée (son id, un préfixe d’id non ambigu ou une partie de son libellé), en laissant toutes les autres appairées",
+  "cli.browser_help.drive": "Choisir l’extension autorisée qui pilote le navigateur",
+  "cli.browser_help.drive_target": "ID de l’extension (ou un préfixe non ambigu), ou une partie de son libellé",
+  "cli.browser_help.logs": "Suivre le log du daemon en continu",
+  "cli.browser_help.uninstall": "Retirer le daemon du bridge",
+  "cli.browser_help.uninstall_purge": "Supprimer aussi l’état d’appairage",
+  "cli.browser_help.serve": "Exécuter le daemon du bridge (au premier plan)",
+  "cli.browser_help.tabs": "Lister les enregistrements de propriété durables et les onglets actifs (lecture seule)",
+  "cli.browser_help.reconcile": "Alias de « tabs » : inspecter la propriété sans rien fermer"
+}

@@ -1,0 +1,4 @@
+{
+  "cli.logout_help.logout": "Se déconnecter d’un fournisseur (supprime les identifiants stockés)",
+  "cli.logout_help.provider": "Fournisseur dont se déconnecter"
+}

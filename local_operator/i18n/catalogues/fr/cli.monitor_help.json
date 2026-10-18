@@ -1,0 +1,8 @@
+{
+  "cli.monitor_help.monitor": "Inspecter les surveillances permanentes et en annuler une sur une session fermée",
+  "cli.monitor_help.status": "toutes les surveillances de cette machine, la plus proche en premier",
+  "cli.monitor_help.json": "sortie lisible par machine",
+  "cli.monitor_help.cancel": "annuler une surveillance sur une session sans runtime ouvert (une session active modifie ses propres surveillances de l’intérieur)",
+  "cli.monitor_help.session": "id de la session à laquelle appartient la surveillance",
+  "cli.monitor_help.monitor_id": "id de surveillance (m1, m2, …)"
+}

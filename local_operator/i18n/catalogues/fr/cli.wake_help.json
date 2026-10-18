@@ -1,0 +1,19 @@
+{
+  "cli.wake_help.wake": "Inspecter les réveils planifiés et le superviseur qui les déclenche",
+  "cli.wake_help.status": "si un superviseur est installé, et ce qu’il déclencherait ensuite",
+  "cli.wake_help.json": "sortie lisible par machine",
+  "cli.wake_help.status_install": "installer le superviseur maintenant plutôt que d’attendre la prochaine planification",
+  "cli.wake_help.status_uninstall": "retirer le superviseur ; les réveils planifiés ne se déclenchent plus que si une session est ouverte",
+  "cli.wake_help.install": "installer ou réparer le superviseur maintenant (redémarre un superviseur obsolète ou arrêté)",
+  "cli.wake_help.list": "tous les réveils planifiés de cette machine, le plus proche en premier",
+  "cli.wake_help.create": "planifier un réveil pour une session (installe le superviseur à la demande)",
+  "cli.wake_help.create_session": "id de session à réveiller",
+  "cli.wake_help.create_when": "quand déclencher : une durée (\"in 2m\", \"45s\") ou une heure (\"at 09:30\")",
+  "cli.wake_help.create_message": "le prompt que la session s’envoie au déclenchement ({max} caractères au maximum)",
+  "cli.wake_help.create_every": "répéter toutes les DURATION après le premier déclenchement (\"5m\", \"1h\", \"8h30m\")",
+  "cli.wake_help.create_until": "arrêter de répéter après cet instant (\"in 7d\", \"at 09:30\")",
+  "cli.wake_help.create_limit": "arrêter de répéter après N déclenchements",
+  "cli.wake_help.create_notify": "notifier à la fin du tour du réveil (silencieux par défaut : les armements scriptés respectent le contrat ; les tours en erreur notifient quoi qu’il arrive)",
+  "cli.wake_help.serve": "exécuter le superviseur au premier plan (ce que lance le LaunchAgent)",
+  "cli.wake_help.serve_once": "déclencher tout ce qui est dû maintenant, puis quitter"
+}

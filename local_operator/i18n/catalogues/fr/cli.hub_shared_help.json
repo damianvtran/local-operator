@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "Ignorer les invites de confirmation ; il n’accepte pas les valeurs non résolues (utilisez --accept-unresolved pour cela)",
+  "cli.hub_shared_help.publish_preview_only": "Lancer l’aperçu et afficher le diff sans publier (sortie 2 quand la publication généraliserait quelque chose)",
+  "cli.hub_shared_help.publish_json": "Sortie d’aperçu lisible par machine ; elle porte les valeurs de référence et l’épinglage de commit à usage unique, traitez-la donc comme sensible",
+  "cli.hub_shared_help.publish_accept_unresolved": "Reconnaître chaque valeur que l’aperçu n’a pas pu classer, en la publiant telle quelle",
+  "cli.hub_shared_help.publish_allow_internal_ops": "Consentir à l’autorisation d’opérations internes pour une publication d’organisation (nécessite --org ; affiche le texte de consentement de façon interactive)",
+  "cli.hub_shared_help.sync_check": "Signaler seulement ce qui est disponible ; ne rien modifier",
+  "cli.hub_shared_help.sync_prefer": "Trancher un conflit : garder votre version ou prendre celle du hub pour les sections que les deux ont modifiées",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "Appliquer quand la base est inconnue : les ajouts du hub sont pris, rien des vôtres n’est envoyé",
+  "cli.hub_shared_help.sync_replace": "ÉCARTER votre copie au profit de celle du hub (affiche ce qui a été écarté ; nécessite --yes)",
+  "cli.hub_shared_help.sync_yes": "Confirmer --replace",
+  "cli.hub_shared_help.sync_dry_run": "Afficher ce qui changerait ; n’écrire aucune ligne d’agent",
+  "cli.hub_shared_help.sync_json": "Émettre le rapport en JSON"
+}
