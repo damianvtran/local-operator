@@ -56,6 +56,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -357,6 +358,7 @@ async def _submit_with_backoff(
     *,
     body: dict[str, Any],
     credential: str,
+    jitter: bool = False,
 ) -> dict[str, Any]:
     """POST the submit, retrying ONLY the admission-bound refusal.
 
@@ -386,7 +388,10 @@ async def _submit_with_backoff(
             last = exc
             if attempt >= SUBMIT_MAX_ATTEMPTS - 1:
                 break
-            await _submit_sleep(SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)])
+            delay = SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)]
+            # Two batch workers may hit the same account cap simultaneously.
+            # Desynchronize retries without exceeding the existing bounded ladder.
+            await _submit_sleep(delay * random.uniform(0.75, 1.0) if jitter else delay)
     assert last is not None
     raise _rate_limited_error(last)
 
@@ -593,6 +598,7 @@ async def run_radient(
             f"{base}{submit_path}",
             body=body,
             credential=credential,
+            jitter=spec.batch_submission,
         )
         request_id = _as_str(submit.get("request_id"))
         if request_id is None:

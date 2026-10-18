@@ -20,7 +20,7 @@ no OpenAI sound-effect path, so an OpenAI-only machine gets the voiceover tool
 and NOT a sound-effect tool whose every call could only end in "no provider
 for this request shape" (the D9 footprint rule, applied per tool).
 
-**Result shape** (frozen contract): ``ToolResult(content=[caption, ONE
+**Single result shape** (frozen contract): ``ToolResult(content=[caption, ONE
 AttachmentContent(kind="audio", duration_s=…)], details={…})`` — the caption
 FIRST and self-sufficient, the bytes registered exactly once through
 ``session.attachments.cache_media`` (which also writes the waveform peaks
@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import re
 from typing import Any, Callable
 
 from pydantic import ValidationError
@@ -100,7 +101,8 @@ _VOICEOVER_DESCRIPTION = (
     "for the user. Docs: `tool://generate_voiceover`; playbook: `guide://sound-generation`."
 )
 _SOUND_EFFECT_DESCRIPTION = (
-    "Generate a sound effect via the configured provider; the result is attached for the user. "
+    "Generate a sound effect or named batch via the configured provider; "
+    "audio is attached for the user. "
     "Docs: `tool://generate_sound_effect`; playbook: `guide://sound-generation`."
 )
 
@@ -154,6 +156,7 @@ def build_generate_sound_effect_tool(context: ToolContext) -> AgentTool | None:
         concurrency="shared",
         interruptible=True,
         describe_approval=_describe_sound_effect_approval,
+        refuse_args=_refuse_sound_effect_args,
         execute=execute_generate_sound_effect,
     )
 
@@ -223,8 +226,45 @@ def _describe_voiceover_approval(args: dict[str, Any], cwd: str) -> str:
     )
 
 
+def _refuse_sound_effect_args(args: dict[str, Any], offered: frozenset[str]) -> str | None:
+    """Reject malformed paid envelopes before the existing write-tier approval."""
+    del offered
+    try:
+        GenerateSoundEffectParams.model_validate(args)
+    except ValidationError as exc:
+        return f"Invalid generate_sound_effect arguments: {exc}"
+    return None
+
+
 def _describe_sound_effect_approval(args: dict[str, Any], cwd: str) -> str:
     del cwd
+    if args.get("sounds") is not None:
+        try:
+            params = GenerateSoundEffectParams.model_validate(args)
+        except ValidationError as exc:
+            return f"[unresolvable] {exc}"
+        route = _preferred_route("sound_effect")
+        label = AUDIO_RUNG_LABELS.get(str(route), "the configured provider")
+        # Radient's published underlying SFX rate is an APPROVAL estimate only;
+        # each server receipt remains authoritative for billing and the ledger.
+        estimates = [
+            pricing.sound_effect_estimate(
+                "elevenlabs" if route == AudioRoute.RADIENT else str(route),
+                None if route == AudioRoute.RADIENT else params.model,
+                item.duration_s,
+            )
+            for item in params.sounds or []
+        ]
+        known = [estimate for estimate in estimates if estimate is not None]
+        total = (
+            f"estimated total ${sum(e.amount_usd for e in known):.4f} "
+            if len(known) == len(estimates)
+            else f"estimated known subtotal ${sum(e.amount_usd for e in known):.4f}; "
+            f"{len(estimates) - len(known)} item(s) unpriced "
+        )
+        total += f"({pricing.PRICE_VERSION}); per-item billed figures are authoritative"
+        noun = "sound effect" if len(estimates) == 1 else "sound effects"
+        return f"Generate {len(estimates)} {noun} via {label} — {total}."
     prompt = args.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return "[unresolvable] generate_sound_effect without a prompt"
@@ -584,6 +624,8 @@ async def _execute_audio(
     signal: AbortSignal | None,
     on_update: Callable[[AgentToolUpdate], None] | None,
     context: ToolContext | None,
+    artifact_name: str | None = None,
+    cancel_as_result: bool = False,
 ) -> ToolResult:
     """Resolve → cascade → the frozen attachment result, for either direction.
 
@@ -671,6 +713,8 @@ async def _execute_audio(
                     else "cancelled before settlement was observed; the job may still be charged"
                 ),
             )
+        if cancel_as_result:
+            details["cost"] = handle.cost
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name=spec.tool,
@@ -683,7 +727,7 @@ async def _execute_audio(
         # never raises and never masks the cancellation — a second stop
         # abandons it. The terminal updates go through the guarded emitter
         # for the same reason.
-        await _cancel_receipt(spec, handle, progress, active, context)
+        text, details = await _cancel_receipt(spec, handle, progress, active, context)
         if handle.cost is None:
             _record_audio_channel(
                 context,
@@ -697,6 +741,15 @@ async def _execute_audio(
                 status="cancelled",
                 request_id=str(handle.request_id or ""),
                 detail="cancelled by the loop; the job may still be charged",
+            )
+        if cancel_as_result:
+            details["cost"] = handle.cost
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=spec.tool,
+                is_error=True,
+                content=[TextContent(text=text)],
+                details=details,
             )
         raise
     except AudioGenerationUnavailable as exc:
@@ -738,6 +791,9 @@ async def _execute_audio(
         }
         if handle.request_id:
             details["request_id"] = handle.request_id
+        if cancel_as_result:
+            details["cost"] = handle.cost
+            details["http_status"] = exc.attempts[-1].status_code if exc.attempts else None
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name=spec.tool,
@@ -746,7 +802,14 @@ async def _execute_audio(
             details=details,
         )
 
-    result = _generated_result(tool_call_id, spec, outcome, handle)
+    result = _generated_result(tool_call_id, spec, outcome, handle, name=artifact_name)
+    if cancel_as_result and result.details is not None:
+        result.details["cost"] = handle.cost or {
+            "amount_usd": outcome.cost_usd,
+            "basis": outcome.billing_basis,
+            "units": _spend_units(spec)[0],
+            "unit": _spend_units(spec)[1],
+        }
     if handle.cost is None:
         _record_audio_channel(
             context,
@@ -812,10 +875,14 @@ async def execute_generate_sound_effect(
         params = GenerateSoundEffectParams.model_validate(args)
     except ValidationError as exc:
         raise InvalidToolArgumentsError(str(exc)) from exc
+    if params.sounds is not None:
+        return await _execute_sound_batch(
+            tool_call_id, params, signal=signal, on_update=on_update, context=context
+        )
     spec = AudioJobSpec(
         tool="generate_sound_effect",
         direction="sound_effect",
-        text=params.prompt,
+        text=params.prompt or "",
         duration_s=params.duration_s,
         loop=params.loop,
         prompt_influence=params.prompt_influence,
@@ -823,6 +890,254 @@ async def execute_generate_sound_effect(
     )
     return await _execute_audio(
         tool_call_id, spec, signal=signal, on_update=on_update, context=context
+    )
+
+
+# Leave headroom inside the tool's 240s bound for two best-effort stop receipts.
+# A slow 50-item batch is partial delivery, never 50 independently renewed budgets.
+SOUND_BATCH_TIMEOUT_S = 225.0
+
+
+def _sound_name(prompt: str, explicit: str | None) -> str:
+    # Names are display handles, not paths. Preserve duplicates as distinct rows:
+    # content-addressed storage may dedupe bytes, but never the user's requests.
+    value = (explicit if explicit is not None else prompt).strip()
+    value = re.sub(r"[^\w .-]+", "-", value, flags=re.UNICODE).strip(" .-")
+    if len(value) > 100:
+        value = value[:99].rstrip(" .-") + "…"
+    return value or "sound-effect"
+
+
+async def _execute_sound_batch(
+    tool_call_id: str,
+    params: GenerateSoundEffectParams,
+    *,
+    signal: AbortSignal | None,
+    on_update: Callable[[AgentToolUpdate], None] | None,
+    context: ToolContext | None,
+) -> ToolResult:
+    """Two workers consume a queue; cancellation never starts queued paid work.
+
+    Reuse the single-item cascade, financial observer and attachment registration
+    rather than creating a second provider or storage path. Each worker owns its
+    own cancel handle; one rejected item cannot cancel successful siblings.
+    """
+    from local_operator.harness.types import AttachmentContent
+
+    sounds = params.sounds or []
+    names = [_sound_name(item.prompt, item.name) for item in sounds]
+    results: list[ToolResult | None] = [None] * len(sounds)
+    started: set[int] = set()
+    queue = iter(enumerate(sounds))
+    stop = AbortSignal.any_of(signal) if signal is not None else AbortSignal()
+
+    def progress(index: int, update: AgentToolUpdate) -> None:
+        if on_update is None:
+            return
+        prefix = f"{index + 1}/{len(sounds)} {names[index]}"
+        try:
+            on_update(
+                AgentToolUpdate(
+                    content=[
+                        TextContent(
+                            text=f"{prefix}: "
+                            + " ".join(
+                                block.text
+                                for block in update.content
+                                if isinstance(block, TextContent)
+                            )
+                        )
+                    ],
+                    details={
+                        **(update.details or {}),
+                        "name": names[index],
+                        "item": index + 1,
+                        "total": len(sounds),
+                    },
+                )
+            )
+        except Exception:  # noqa: BLE001 - presentation cannot interrupt paid work
+            logger.debug("batch progress callback failed", exc_info=True)
+
+    async def worker() -> None:
+        for index, item in queue:
+            if stop.aborted or (signal is not None and signal.aborted):
+                return
+            started.add(index)
+            progress(index, AgentToolUpdate(content=[TextContent(text="Starting generation…")]))
+            spec = AudioJobSpec(
+                tool="generate_sound_effect",
+                direction="sound_effect",
+                text=item.prompt,
+                duration_s=item.duration_s,
+                batch_submission=True,
+                loop=params.loop,
+                prompt_influence=params.prompt_influence,
+                model=params.model,
+            )
+            try:
+                result = await _execute_audio(
+                    tool_call_id,
+                    spec,
+                    signal=stop,
+                    on_update=lambda update: progress(index, update),
+                    context=context,
+                    artifact_name=names[index],
+                    cancel_as_result=True,
+                )
+            except asyncio.CancelledError:
+                # A second cancellation can interrupt even the best-effort stop.
+                # Do not claim a vendor stop or zero charge in that case.
+                result = ToolResult(
+                    tool_call_id=tool_call_id,
+                    tool_name="generate_sound_effect",
+                    is_error=True,
+                    content=[
+                        TextContent(text="Stopped waiting; provider work may still be billed.")
+                    ],
+                    details={"stage": "cancelled", "vendor_stopped": None},
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate a failed sibling
+                logger.exception("batch sound effect failed")
+                result = ToolResult(
+                    tool_call_id=tool_call_id,
+                    tool_name="generate_sound_effect",
+                    is_error=True,
+                    content=[TextContent(text=str(exc))],
+                    details={"error": str(exc)},
+                )
+            results[index] = result
+            progress(
+                index,
+                AgentToolUpdate(
+                    content=[TextContent(text="Failed" if result.is_error else "Completed")],
+                    details=result.details,
+                ),
+            )
+
+    workers = [asyncio.create_task(worker()) for _ in range(min(2, len(sounds)))]
+    reason: str | None = None
+    try:
+        _, pending = await asyncio.wait(workers, timeout=SOUND_BATCH_TIMEOUT_S)
+        if pending:
+            reason = "Batch time budget reached"
+    except asyncio.CancelledError:
+        reason = "Batch stop requested"
+    finally:
+        if reason is not None:
+            stop.abort(reason)
+            for task in workers:
+                if not task.done():
+                    task.cancel()
+        # Only TWO worker tasks, not one scheduled task per paid item. Awaiting
+        # them preserves stop receipts and prevents orphaned in-flight work.
+        await asyncio.gather(*workers, return_exceptions=True)
+        stop.cancel()
+
+    artifacts: list[dict[str, Any]] = []
+    attachments: list[AttachmentContent] = []
+    completed = failed = cancelled = 0
+    captions: list[str] = []
+    for index, (item, result) in enumerate(zip(sounds, results, strict=True)):
+        details = dict(result.details or {}) if result is not None else {}
+        blocks = [b for b in result.content if isinstance(b, AttachmentContent)] if result else []
+        was_cancelled = result is None or details.get("stage") == "cancelled"
+        status = "completed" if blocks else "cancelled" if was_cancelled else "failed"
+        completed += status == "completed"
+        failed += status == "failed"
+        cancelled += status == "cancelled"
+        attached = (details.get("artifacts") or [{}])[0]
+        amount = details.get("cost_usd")
+        basis = details.get("billing_basis")
+        cost = details.get("cost") or {"amount_usd": amount, "basis": basis}
+        if index not in started:
+            # A queue item that never made a provider call is the one case
+            # where zero is KNOWABLE, rather than an unknown financial outcome.
+            cost = {"amount_usd": 0.0, "basis": "billed", "units": 0, "unit": "seconds"}
+        error = None
+        if not blocks:
+            error = details.get("error") or (
+                "Never started; no provider call"
+                if index not in started
+                else (
+                    " ".join(b.text for b in result.content if isinstance(b, TextContent))
+                    if result
+                    else "Stop requested; provider outcome unknown"
+                )
+            )
+        row = {
+            **{key: value for key, value in details.items() if key != "artifacts"},
+            **attached,
+            "name": names[index],
+            "status": status,
+            "started": index in started,
+            "request_id": details.get("request_id")
+            or (details.get("cancel_handle") or {}).get("request_id"),
+            "digest": attached.get("digest"),
+            "duration_s": attached.get("duration_s", item.duration_s),
+            "format": (details.get("audio") or {}).get("format")
+            or {
+                "audio/mpeg": "mp3",
+                "audio/mp3": "mp3",
+                "audio/wav": "wav",
+                "audio/x-wav": "wav",
+                "audio/ogg": "ogg",
+                "audio/flac": "flac",
+            }.get(str(attached.get("content_type") or "").split(";", 1)[0].strip()),
+            "cost_usd": cost.get("amount_usd"),
+            "cost": cost,
+            "units": cost.get("units") if index in started else 0,
+            "unit": cost.get("unit"),
+            "error": error,
+        }
+        artifacts.append(row)
+        attachments.extend(blocks)
+        captions.append(
+            f"{index + 1}/{len(sounds)} {names[index]}: {status}" + (f" — {error}" if error else "")
+        )
+    known_costs = [row["cost_usd"] for row in artifacts if row["cost_usd"] is not None]
+    total = sum(known_costs) if known_costs else None
+    # Completeness and basis answer different questions: an unpriced failure
+    # must not relabel successful, server-billed siblings as estimates.
+    known_rows = [row for row in artifacts if row["cost_usd"] is not None]
+    total_basis = (
+        (
+            "billed"
+            if all(row["cost"].get("basis") == "billed" for row in known_rows)
+            else "estimated"
+        )
+        if known_rows
+        else None
+    )
+    caption = (
+        f"Sound effects: {completed} completed, {failed} failed, {cancelled} cancelled/stopped. "
+        + (
+            f"Known total ${total:g} ({total_basis}); unknown or late charges are not included. "
+            if total is not None
+            else "Total cost not yet known. "
+        )
+        + (
+            f"{reason}. In-flight stop is best-effort, not a guaranteed vendor cancellation. "
+            if reason
+            else ""
+        )
+        + "\n"
+        + "\n".join(captions)
+    )
+    return ToolResult(
+        tool_call_id=tool_call_id,
+        tool_name="generate_sound_effect",
+        is_error=not attachments,
+        content=[TextContent(text=caption), *attachments],
+        details={
+            "artifacts": artifacts,
+            "cost_usd": total,
+            "cost_complete": len(known_costs) == len(artifacts),
+            "cost": {"amount_usd": total, "basis": total_basis},
+            "completed": completed,
+            "failed": failed,
+            "cancelled": cancelled,
+        },
     )
 
 
@@ -890,6 +1205,8 @@ def _generated_result(
     spec: AudioJobSpec,
     outcome: Any,
     handle: audio_rungs.CancelHandle,
+    *,
+    name: str | None = None,
 ) -> ToolResult:
     """Register the audio and shape the frozen result (caption FIRST)."""
     from local_operator.session.attachments import artifact_details, cache_media
@@ -905,7 +1222,11 @@ def _generated_result(
                 asset.data,
                 asset.content_type or "application/octet-stream",
                 kind="audio",
-                name=_artifact_name(outcome.model, asset.content_type, index),
+                name=(
+                    name
+                    if name is not None
+                    else _artifact_name(outcome.model, asset.content_type, index)
+                ),
                 source_url=asset.source_url or None,
                 duration_s=asset.duration_s,
             )
