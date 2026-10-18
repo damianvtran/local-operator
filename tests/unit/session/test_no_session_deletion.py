@@ -453,6 +453,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    (
+        "local_operator/session/session_tags.py::_write",
+        "os.replace",
+        "Atomic replacement of a sibling mkstemp REGULAR FILE under <config>/tags "
+        "(registry) or <config>/tags/<entity_type>/ (assignment); both paths are "
+        "under the tags store, never sessions/ and never a session directory.",
+    ),
+    (
+        "local_operator/session/session_tags.py::_write",
+        "<path>.unlink",
+        "Cleanup of that same sibling mkstemp REGULAR FILE after failure; "
+        "never a session or transcript.",
+    ),
     # -- the archive index: the pins store's row, for the pins store's reasons --
     # One file at the config root with a FIXED basename (`archived-sessions.json`
     # plus a pid-named sibling while it is written). No session id, no caller
@@ -3175,6 +3188,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> tags/<type>/<id>.json under config_dir()/tags, never sessions/
+        "local_operator/session/session_tags.py::_write",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
         "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)

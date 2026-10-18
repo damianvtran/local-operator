@@ -351,7 +351,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
-    "sessions": 798,
+    # Spawn's tags field/description deliberately adds 21 reference tokens.
+    "sessions": 819,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
