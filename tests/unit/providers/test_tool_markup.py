@@ -265,6 +265,18 @@ def test_markup_inside_a_fence_is_kept(text: str) -> None:
         assert _chunked(text, size, has_tool_calls=True) == text
 
 
+@pytest.mark.parametrize("indent", ["\u3000", "\u00a0", "\f", " \t"])
+def test_dsml_line_indented_by_any_whitespace_is_dropped_without_calls(indent: str) -> None:
+    """Review N1: the stream skips indentation as ``\\s`` (U+3000, U+00A0, form
+    feed) before classifying a line, so dropping the DSML lines from a no-call
+    tail must skip the same class, or a line already judged markup is kept."""
+    text = f'Hi\n{indent}{DSML} parameter name="i" string="true">v\nafter\n'
+    expected = "Hi\nafter\n"
+    assert strip_tool_markup(text, has_tool_calls=False) == expected
+    for size in (1, 3, 7):
+        assert _chunked(text, size, has_tool_calls=False) == expected
+
+
 def test_crlf_prose_without_markup_is_byte_identical() -> None:
     text = "Line one.\r\n\r\nLine two.\r\nEnd\r"
     assert strip_tool_markup(text, has_tool_calls=True) == text
