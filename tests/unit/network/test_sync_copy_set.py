@@ -523,6 +523,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "no session copy may carry it, and a session travelling to another device "
         "neither needs nor may inherit it",
     ),
+    "local_operator/voice/slot.py": (
+        3,
+        "``VOICE_DIRNAME`` ('voice'), ``ACTIVE_NAME`` ('active.json') and "
+        "``LOCK_NAME`` ('slot.lock'): the machine-wide voice slot — ONE file under "
+        "``<config>/voice/`` naming the single session this device's microphone "
+        "belongs to, plus the lock its writers share. Outside ``sessions/``, and a "
+        "receiving device must mint its own slot rather than inherit which "
+        "conversation the sender was speaking to, so none of the three is an entry "
+        "of a session directory",
+    ),
     "local_operator/paths.py": (
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
