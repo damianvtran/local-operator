@@ -2413,6 +2413,101 @@
       },
       "status": "passed",
       "note": "Clean terminal, no findings: all 35 values audited, ICU/placeholders/y-n/register/glossary/widths pass. Auditor openai/gpt-6.1-sol (quota fallback from anthropic/claude-sonnet-5-5)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.authoring",
+      "source_sha256": "cf0a9896221113cfb53ca863a25ffb3b558c905a1ce343e664f66ff007d75a26",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "39-key LOH-19 P3a translation; independent semantic, glossary and rendered-fit audit pending. Actual translator model openai/gpt-6.1-sol after Anthropic quota fallback. English source is bound by source_sha256; no English audit row is used by the per-locale ledger. No audit pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.authoring",
+      "source_sha256": "cf0a9896221113cfb53ca863a25ffb3b558c905a1ce343e664f66ff007d75a26",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "39-key LOH-19 P3a translation; independent semantic, glossary and rendered-fit audit pending. Actual translator model openai/gpt-6.1-sol after Anthropic quota fallback. English source is bound by source_sha256; no English audit row is used by the per-locale ledger. No audit pass claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.authoring",
+      "source_sha256": "cf0a9896221113cfb53ca863a25ffb3b558c905a1ce343e664f66ff007d75a26",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "39-key LOH-19 P3a translation; independent semantic, glossary and rendered-fit audit pending. Actual translator model openai/gpt-6.1-sol after Anthropic quota fallback. English source is bound by source_sha256; no English audit row is used by the per-locale ledger. No audit pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.authoring",
+      "source_sha256": "cf0a9896221113cfb53ca863a25ffb3b558c905a1ce343e664f66ff007d75a26",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "39-key LOH-19 P3a translation; independent semantic, glossary and rendered-fit audit pending. Actual translator model openai/gpt-6.1-sol after Anthropic quota fallback. English source is bound by source_sha256; no English audit row is used by the per-locale ledger. No audit pass claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.authoring",
+      "source_sha256": "cf0a9896221113cfb53ca863a25ffb3b558c905a1ce343e664f66ff007d75a26",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "date": null,
+        "result": "pending",
+        "findings": null
+      },
+      "status": "pending",
+      "note": "39-key LOH-19 P3a translation; independent semantic, glossary and rendered-fit audit pending. Actual translator model openai/gpt-6.1-sol after Anthropic quota fallback. English source is bound by source_sha256; no English audit row is used by the per-locale ledger. No audit pass claimed."
     }
   ]
 }
