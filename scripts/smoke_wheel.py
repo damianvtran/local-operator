@@ -86,6 +86,15 @@ from pathlib import Path
 INDEX_URL = "https://pypi.org/simple"
 DEFAULT_SERVER_TIMEOUT = 90
 DEFAULT_INDEX_WAIT = 300
+#: Teardown bounds. The grace is how long the whole GROUP gets after SIGTERM;
+#: the leader wait inside it is incidental. The kill-wait is how long the group
+#: may take to disappear after SIGKILL before the smoke reports a leak.
+REAP_GRACE_SECONDS = 10.0
+REAP_KILL_WAIT_SECONDS = 5.0
+#: A server that answers /health and then dies is not healthy. This window is
+#: long enough for a one-shot responder to exit after writing its payload (the
+#: failing shape) and short enough not to change the happy path's cost.
+POST_HEALTH_SETTLE_SECONDS = 1.0
 #: Installation pulls ~10 server dependencies; the bound is generous and exists
 #: only so a wedged pip cannot hang the job. It is not the server-start timeout
 #: (`--timeout`), which is the one a caller tunes.
@@ -179,6 +188,12 @@ def _clean_env(root: Path) -> dict[str, str]:
         "PATH": os.defpath,
         "HOME": str(home),
         "LOCAL_OPERATOR_CONFIG_DIR": str(config),
+        # The server this smoke starts is a harness child nobody is watching.
+        # Without the product's gate, a mock-backed session could put its own
+        # reply on the operator's lock screen; tests/unit/test_notification_isolation.py
+        # requires every builder of a local-operator child environment to carry
+        # it, and a builder that merely inherits it is not the property wanted.
+        "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
         "TERM": "xterm-256color",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
     }
@@ -317,29 +332,71 @@ def _free_loopback_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _reap(proc: subprocess.Popen[bytes]) -> None:
-    """Kill the server's whole process group; uvicorn may spawn children.
+def _group_alive(pgid: int) -> bool:
+    """Whether any process remains in ``pgid``.
 
-    Deliberately does NOT return early when the leader has already exited: a
-    worker it spawned can outlive it, and that is exactly the leak `--port`
-    reuse would then inherit. ``start_new_session=True`` guarantees the leader's
-    pid is the group id.
+    ``killpg(pgid, 0)`` is the only check that sees children the leader spawned
+    and may have re-parented. A group owned by another user cannot happen here
+    (the smoke owns everything it starts), but treating EPERM as alive is the
+    conservative reading rather than a false "gone".
     """
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _reap(proc: subprocess.Popen[bytes]) -> None:
+    """Kill the server's WHOLE process group and prove the group is gone.
+
+    Waiting for the leader says nothing about its workers: a child that ignores
+    SIGTERM survives the leader's exit, and a leader that exited before this
+    call (a one-shot responder) leaves the group alive behind it. So SIGKILL is
+    unconditional, not a fallback for a leader that timed out, and success is
+    decided by ``killpg(pgid, 0)`` rather than by ``proc.poll()``.
+
+    The leader is reaped between SIGTERM and SIGKILL because a zombie leader
+    still counts as a member of its group: polling the group before reaping it
+    would wait forever. ``start_new_session=True`` guarantees ``proc.pid`` is
+    the group id.
+    """
+    pgid = proc.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=REAP_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
+        pass
+
+    # UNCONDITIONAL. This is the finding: gating SIGKILL on the leader's wait
+    # timing out leaves a SIGTERM-ignoring worker alive whenever the leader
+    # exits promptly (or had already exited).
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=REAP_KILL_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+
+    deadline = time.monotonic() + REAP_KILL_WAIT_SECONDS
+    while _group_alive(pgid):
+        if time.monotonic() >= deadline:
+            raise SmokeError(
+                f"process group {pgid} still exists {REAP_KILL_WAIT_SECONDS:.0f}s "
+                "after SIGKILL; a child escaped teardown"
+            )
+        time.sleep(0.05)
+    # After the group is gone the leader must already be reaped by the wait
+    # above; this call is just the idempotent final reaping for resource
+    # accounting when the group vanished before the SIGKILL wait.
+    proc.wait()
 
 
 def _serve_check(
@@ -409,6 +466,16 @@ def _serve_check(
         if problems:
             raise SmokeError(
                 "/health answered but the payload is wrong:\n  " + "\n  ".join(problems)
+            )
+        # A payload is a snapshot, not a liveness claim. Wait out the settle
+        # window and check the leader again: a one-shot responder that writes a
+        # valid body and exits (17 in the regression) must fail, not race the
+        # return and leave a half-dead server looking healthy.
+        time.sleep(POST_HEALTH_SETTLE_SECONDS)
+        if proc.poll() is not None:
+            raise SmokeError(
+                f"`lop serve` exited with {proc.returncode} just after answering "
+                f"/health\n{_tail(log_path.read_text(errors='replace'))}"
             )
         print(f"  /health: {json.dumps(body, sort_keys=True)}", flush=True)
     finally:
@@ -484,7 +551,7 @@ def _run_checks(args: argparse.Namespace, root: Path) -> None:
                 "base import unexpectedly succeeded; the negative control proves nothing\n"
                 f"reported module: {imported.stdout.strip()}"
             )
-        _step("import-base", False, "failed as expected")
+        _step("import-base", True, "failed as expected (negative control)")
         print(_tail(imported.stderr), flush=True)
         print("EXPECTED FAILURE OBSERVED", flush=True)
         return
