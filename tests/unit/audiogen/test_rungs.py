@@ -732,3 +732,32 @@ async def test_radient_sha_is_required_well_formed_and_matching(sha):
         else:
             with pytest.raises(APIError, match="sha256"):
                 await audio_rungs._download_audio_asset(audio, http=client)
+
+
+@pytest.mark.asyncio
+async def test_batch_admission_backoff_is_jittered_and_bounded(monkeypatch):
+    sleeps = []
+
+    async def pause(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(audio_rungs, "_submit_sleep", pause)
+    monkeypatch.setattr(audio_rungs.random, "uniform", lambda low, high: 0.875)
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return _rate_limited_response()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as caught:
+            await audio_rungs._submit_with_backoff(
+                client,
+                f"{HUB}/tools/audio/sound-effects",
+                body={"prompt": "click", "duration_s": 0.5},
+                credential="synthetic",
+                jitter=True,
+            )
+    assert caught.value.details["error_type"] == "audio_rate_limited"
+    assert len(requests) == 4
+    assert sleeps == [1.75, 3.5, 7.0]

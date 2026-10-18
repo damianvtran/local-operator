@@ -20,6 +20,33 @@ When NOT to use them:
   anything on the user's machine.
 - The user wants to transcribe audio — that is the STT path, not this one.
 
+## Named sound-effect batches
+
+Use ONE `generate_sound_effect` call with `sounds` for multiple clips (1–50):
+
+```json
+{"sounds":[{"name":"Door chime","prompt":"A warm two-note door chime","duration_s":1},{"prompt":"Soft mechanical click","duration_s":0.5}]}
+```
+
+Supply either `sounds` OR the single `prompt` + `duration_s`, never both.
+One write-tier approval shows the item count and summed **estimated** spend;
+Radient's per-item billed receipts remain authoritative. `loop`,
+`prompt_influence`, and `model` apply to the whole batch. Names default from
+trimmed, display-safe prompts; duplicate names remain distinct requests.
+Each successful clip carries its name in the caption, attachment and session
+file entry. A provider rejection belongs to that item, not its valid siblings.
+
+The queue runs at most two items at once, with bounded jittered backoff for
+admission rate limits. A 225-second batch budget leaves time for best-effort
+stop receipts within the tool's 240-second bound: slow batches deliver partial
+results, not a renewed budget per clip. Stopping prevents queued calls from
+starting, requests stop for in-flight calls, and preserves completed clips;
+**in-flight vendor cancellation is not guaranteed**. Inspect `details.artifacts`
+for each item's status, started flag, error, request id, digest, duration, units
+and cost/basis; totals report completed/failed/cancelled counts and known spend.
+A partially successful batch is a success-with-failures; no attached clips is
+an error. Do not retry a stopped in-flight item blindly: it may still be billed.
+
 ## Which provider runs
 
 Fixed, append-only order, first credential wins; a refusal falls forward to
@@ -103,7 +130,7 @@ which case you are in.
 
 ## The result
 
-The result is one caption plus the audio attached to the session
+A single result is one caption plus the audio attached to the session
 (`AttachmentContent(kind="audio", duration_s=…)`), registered once through
 the content-addressed store — `details.artifacts` carries the digest for the
 session-files index, and `details.audio` the provider's facts. A waveform is
