@@ -395,6 +395,22 @@ async def test_a_narrow_page_hides_the_detail_pane() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_narrowest_page_shows_the_cursor_rows_head_and_every_hint() -> None:
+    """60x24 is the narrow floor: the dock band leaves the list a two-line
+    viewport, and the page must still show the selected row's HEAD (not scroll
+    to its meta line) and advertise every key without clipping one."""
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        assert view._body.scroll_offset.y == 0
+        visible = [button for button in view._hint_order if button.display]
+        painted = sum(button.size.width for button in visible)
+        assert painted <= view.size.width, (painted, view.size.width)
+        assert {button._key for button in visible} >= {"n", "e", "d", "r", "esc"}
+
+
+@pytest.mark.asyncio
 async def test_the_supervisor_line_is_one_best_effort_warning(monkeypatch) -> None:
     monkeypatch.setattr(
         schedule_view_mod,

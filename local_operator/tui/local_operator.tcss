@@ -2319,6 +2319,14 @@ Screen.settings #input-dock #prompt-chevron {
     height: 1fr;
 }
 
+/* The footer is a SENTENCE, not a one-line caption: the supervisor notice is
+ * 71 cells and the 60-column frame clipped it mid-word ("...while"). `auto`
+ * gives it the second line it needs THERE; at 100 columns it still measures
+ * one line, so the taller page layout does not shift. */
+.schedule-view .settings-view-detail {
+    height: auto;
+}
+
 
 /* ── full-page projects view ───────────────────────────────────────────── *
  *

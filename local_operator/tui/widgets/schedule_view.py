@@ -73,6 +73,26 @@ _INDENT = "  "
 _MIN_LABEL_COLUMN = 9
 
 
+class _ScheduleBody(ScrollableContainer):
+    """The list body, which tells the page when its WIDTH settles.
+
+    The page truncates each row to the body's measured width. The body's width
+    is not the page's: it loses the detail pane's 42 cells and the scrollbar,
+    and it settles a layout pass after the page mounts — with no Resize on the
+    PAGE itself. Without this hook the first paint kept the 80-column fallback
+    and a long prompt WRAPPED in a 54-cell column (measured at 100x30, the
+    layout defect this class exists for): a wrapped head is a third line, which
+    breaks the page's fixed two-line row contract and its cursor arithmetic.
+    """
+
+    def __init__(self, *children: Any, on_settle: Callable[[], None], **kwargs: Any) -> None:
+        super().__init__(*children, **kwargs)
+        self._on_settle = on_settle
+
+    def on_resize(self) -> None:
+        self._on_settle()
+
+
 class ScheduleViewDismissed(Message):
     """The page's esc hint/key was pressed; the app owns teardown."""
 
@@ -190,8 +210,15 @@ class ScheduleForm(Vertical):
         with self._fields_scroll:
             for block in self._blocks:
                 yield block
+            # The key legend travels WITH the fields, not pinned under them.
+            # Pinned, on a viewport that shows only the first two fields (the
+            # 100x30 capture, with the dock band below it), it painted directly
+            # under `when` and read as the form's end — repeat, ends and notify
+            # were undiscoverable behind a scrollbar with no other cue.
+            yield self._keys_hint
+        # A refusal IS pinned: it is the receipt for the save the user just
+        # pressed, and it must be visible wherever the fields are scrolled.
         yield self._refusal
-        yield self._keys_hint
 
     def on_mount(self) -> None:
         self._refusal.display = False
@@ -328,7 +355,9 @@ class ScheduleView(Vertical):
         self._title = Static(classes="settings-view-title")
         self._rule = Static(classes="settings-view-rule")
         self._body_text = Static()
-        self._body = ScrollableContainer(self._body_text, classes="settings-view-body")
+        self._body = _ScheduleBody(
+            self._body_text, on_settle=self._paint, classes="settings-view-body"
+        )
         self._body.can_focus = False
         self._pane_body = Static(classes="schedule-view-pane-text")
         self._pane = ScrollableContainer(
@@ -774,7 +803,13 @@ class ScheduleView(Vertical):
             self._hint_escape: _t(_k.hint_back()),
         }
         if self._rows:
-            labels[self._hint_move] = _t(_k.hint_move())
+            # The full row measures 57 cells and the 60-column page gives it
+            # 56: the last hint's label was clipped to "esc bac" (measured in
+            # the narrow capture). Below 70 columns the arrows keep their key
+            # and lose the word — `↑↓` needs no gloss — which buys the five
+            # cells the row was over; every key stays advertised.
+            narrow = self.size.width < 70
+            labels[self._hint_move] = "" if narrow else _t(_k.hint_move())
             if self._writable:
                 labels[self._hint_edit] = _t(_k.hint_edit())
                 labels[self._hint_cancel] = _t(_k.hint_cancel())
@@ -796,7 +831,14 @@ class ScheduleView(Vertical):
         start = self._cursor * 3
         viewport = max(1, self._body.size.height or 1)
         y = self._body.scroll_offset.y
-        if start < y:
+        if viewport <= 2:
+            # A row is TWO lines. Where the viewport is exactly one row (the
+            # 60x24 capture, with the dock band under it), bottom-anchoring
+            # scrolled to `start + 1` and hid the row's HEAD — the frame showed
+            # only "in 1h · every 1d…" under a blank first line. Anchor such a
+            # row at its top: the head is the identity, the meta can wait.
+            target = start
+        elif start < y:
             target = start
         elif start + 2 > y + viewport:
             target = start + 2 - viewport
