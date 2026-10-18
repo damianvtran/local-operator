@@ -508,28 +508,44 @@ def _get_model_encoding(model: str) -> object | None:
     which is what the previous inline implementation did.
 
     A ``None`` result is NOT cached (see :data:`_MODEL_ENCODINGS`): during a
-    tokenizer cooldown this call returns the fallback for the current count,
-    and the next call after recovery resolves and caches the model's real
-    encoder instead of inheriting the cooldown forever.
+    failure episode this call returns the fallback for the current count, and
+    the next call after recovery resolves and caches the model's real encoder
+    instead of inheriting the episode forever.
 
-    A COOLDOWN GATES THIS PATH TOO. Model resolution does not go through
-    :func:`_get_encoding`'s load claim — it calls tiktoken directly — so
-    without an explicit latch check every ``count_text_tokens(...
-    model=...)`` during a cooldown pays its own synchronous fetches, TWICE per
-    call: a failed ``encoding_for_model`` falls through to
-    ``get_encoding("cl100k_base")``. Measured with a 0.4 s fake fetch: 7
-    attempts over 3 calls. The call site is per message, per HTTP request
-    (``server/routes/chat.py``), and an offline fetch is 75.7 s to time out, so
-    that is minutes per request for as long as the process is offline — the
-    unbounded-fetch behaviour the cooldown exists to prevent. Cached encoders
-    are still served first: they cost no fetch and outlive a cooldown, the
-    same order :func:`_get_encoding` uses (encoding, then latch).
+    A FAILURE EPISODE GATES THIS PATH FOR ITS WHOLE LENGTH. Model resolution
+    does not go through :func:`_get_encoding`'s load claim — it calls tiktoken
+    directly — so without an explicit latch check every ``count_text_tokens(...
+    model=...)`` pays its own synchronous fetches, TWICE per call: a failed
+    ``encoding_for_model`` falls through to ``get_encoding("cl100k_base")``.
+    Measured with a 0.4 s fake fetch: 7 attempts over 3 calls. The call site is
+    per message, per HTTP request (``server/routes/chat.py``), and an offline
+    fetch is 75.7 s to time out, so that is minutes per request for as long as
+    the process is offline — the unbounded-fetch behaviour the cooldown exists
+    to prevent.
+
+    THE GATE IS :data:`_ENCODING_FAILED` ALONE, NOT THE RETRY WINDOW. Gating on
+    ``now < _ENCODING_RETRY_AT`` bounded the window and left the boundary
+    broken: once the deadline elapses this path has no loader thread to hand
+    the retry to, so every caller fetched INLINE again, for the 75.7 s each
+    attempt takes. The deadline says when the BASE path may try again; it is
+    not the model path's cue to fetch. Recovery arrives only through the base
+    load clearing the flag — one recovery path, deliberately (do not add a
+    second one here).
+
+    THE TRADE, and it is intentional: an encoding tiktoken has LOCALLY cached
+    (model file present, base table missing) is not served during an episode.
+    Serving it would mean retrying ``encoding_for_model`` per call, which is
+    the fetch storm this gate exists to stop. Keep the gate episode-wide; do
+    not "improve" it back into a per-call fetch.
+
+    Cached encoders are still served first: they cost no fetch and outlive a
+    cooldown, the same order :func:`_get_encoding` uses (encoding, then latch).
     """
     with _STATE_LOCK:
         cached = _MODEL_ENCODINGS.get(model)
         if cached is not None:
             return cached
-        if _ENCODING_FAILED and time.monotonic() < _ENCODING_RETRY_AT:
+        if _ENCODING_FAILED:
             return None
         # Snapshot for the publish guard below: a reset that lands while this
         # resolution is fetching invalidates the result (see the store).
