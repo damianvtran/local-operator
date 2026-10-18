@@ -701,6 +701,9 @@ def test_interleaved_multi_call_turn_moves_all_pairs_together():
         cut = find_cut_point(messages, keep)
         expected = 2 if sum(estimate_tokens(m) for m in messages[2:]) <= 2 * keep else 8
         assert cut == expected
+        # find_cut_point returns Optional[int]; the assertion above pins the value,
+        # this narrows the type for the partition helper without changing the test.
+        assert cut is not None
         assert_partition_pair_integrity(*prepare_partitions(messages, cut))
     # Byte-driven advancement uses the SAME legality rule, not just token cuts.
     advanced = advance_cut_to_wire_band(
