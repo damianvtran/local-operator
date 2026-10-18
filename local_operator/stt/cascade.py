@@ -73,9 +73,13 @@ from local_operator.stt import (
 )
 from local_operator.stt import audio as stt_audio
 from local_operator.stt.cleanup import (
+    CLIENT_RULES_PROVENANCE,
     CleanupMode,
     RemovedSpan,
+    apply_client_rules,
+    choose_cleanup_language,
     elevenlabs_cleanup_options,
+    normalize_language_hint,
     resolve_cleanup,
 )
 from local_operator.stt.clients import (
@@ -127,6 +131,7 @@ class _RungResult:
     raw_text: str | None = None
     raw_unavailable: str = ""
     language: str | None = None
+    language_probability: float | None = None
     cleanup: str = "none"
     removed: tuple[RemovedSpan, ...] = ()
 
@@ -346,6 +351,7 @@ async def _run_radient_rung(
     language: str | None,
     prompt: str | None,
     correlation_session_id: str | None = None,
+    cleanup: CleanupMode = "auto",
 ) -> _RungResult:
     """Rung 1: the existing Radient route path, off the event loop.
 
@@ -382,7 +388,7 @@ async def _run_radient_rung(
         prompt=prompt,
         response_format="json",
         temperature=0.0,
-        language=language,
+        language=normalize_language_hint(language),
         provider=None,
         session_id=str(correlation_session_id or "") or None,
         client_request_id=new_correlation_id(),
@@ -399,14 +405,31 @@ async def _run_radient_rung(
     # spelling without widening the typed response model.
     payload = result.model_dump() if hasattr(result, "model_dump") else {}
     detected = payload.get("language") or payload.get("language_code")
+    probability = payload.get("language_probability")
     text = result.text or ""
+    # Radient has no native cleanup switch. ``auto`` and ``client`` both mean
+    # the deterministic rules here; ``provider``/``off`` leave the text alone.
+    cleaned = None
+    if cleanup in ("auto", "client"):
+        cleaned = apply_client_rules(
+            text,
+            language=choose_cleanup_language(
+                language,
+                detected if isinstance(detected, str) else None,
+                float(probability) if isinstance(probability, (int, float)) else None,
+            ),
+        )
     return _RungResult(
-        text=text,
+        text=cleaned.text if cleaned else text,
         cost=cost,
         provider=provider,
         raw_text=text,
         language=detected if isinstance(detected, str) else None,
-        cleanup="none",
+        language_probability=(
+            float(probability) if isinstance(probability, (int, float)) else None
+        ),
+        cleanup=CLIENT_RULES_PROVENANCE if cleaned else "none",
+        removed=cleaned.removed if cleaned else (),
     )
 
 
@@ -439,7 +462,9 @@ async def _run_elevenlabs_rung(
     result = await client.transcribe(
         audio,
         mime=mime,
-        language=language,
+        # ISO-639-1 only: a BCP-47 tag or an unmapped 3-letter label must not
+        # reach the provider, where it is a validation error rather than a hint.
+        language=normalize_language_hint(language),
         prompt=prompt,
         no_verbatim=options.no_verbatim,
         tag_audio_events=options.tag_audio_events,
@@ -448,12 +473,25 @@ async def _run_elevenlabs_rung(
     # No cost object on a BYO leg: the vendor is not the hub and reports no
     # charge in this family, and the envelope that would name it is the hub's
     # only — the route knows this leg from the path itself (PR-3).
+    cleaned = None
+    if cleanup == "client":
+        detected = getattr(result, "language", None)
+        cleaned = apply_client_rules(
+            result.text,
+            language=choose_cleanup_language(
+                language, detected, getattr(result, "language_probability", None)
+            ),
+        )
     return _RungResult(
-        text=result.text,
-        raw_text=getattr(result, "raw_text", None),
-        raw_unavailable=getattr(result, "raw_unavailable", ""),
+        text=cleaned.text if cleaned else result.text,
+        raw_text=(result.text if cleaned else getattr(result, "raw_text", None)),
+        raw_unavailable=("" if cleaned else getattr(result, "raw_unavailable", "")),
         language=getattr(result, "language", None),
-        cleanup=getattr(result, "cleanup", "none") or "none",
+        language_probability=getattr(result, "language_probability", None),
+        cleanup=(
+            CLIENT_RULES_PROVENANCE if cleaned else (getattr(result, "cleanup", "none") or "none")
+        ),
+        removed=cleaned.removed if cleaned else (),
     )
 
 
@@ -479,17 +517,30 @@ async def _run_openai_rung(
         raise APIError("No OpenAI API key is stored.", status_code=None)
     client = OpenAiSttClient(key)
     result = await client.transcribe(
-        audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
+        audio,
+        mime=mime,
+        language=normalize_language_hint(language),
+        prompt=prompt,
+        timeout_s=timeout_s,
     )
     # See the ElevenLabs rung: no cost object for a BYO leg, and no provider
-    # for the route to read — the path names it. No provider-side switch was
-    # sent, so the raw copy is the returned text.
+    # for the route to read — the path names it. OpenAI has no native switch,
+    # so ``auto``/``client`` use the same deterministic rules as Radient.
+    cleaned = None
+    if cleanup in ("auto", "client"):
+        cleaned = apply_client_rules(
+            result.text,
+            language=choose_cleanup_language(language, getattr(result, "language", None), None),
+        )
     return _RungResult(
-        text=result.text,
-        raw_text=getattr(result, "raw_text", result.text),
-        raw_unavailable=getattr(result, "raw_unavailable", ""),
+        text=cleaned.text if cleaned else result.text,
+        raw_text=(result.text if cleaned else getattr(result, "raw_text", result.text)),
+        raw_unavailable=("" if cleaned else getattr(result, "raw_unavailable", "")),
         language=getattr(result, "language", None),
-        cleanup=getattr(result, "cleanup", "none") or "none",
+        cleanup=(
+            CLIENT_RULES_PROVENANCE if cleaned else (getattr(result, "cleanup", "none") or "none")
+        ),
+        removed=cleaned.removed if cleaned else (),
     )
 
 
@@ -600,6 +651,7 @@ async def transcribe_audio(
                         language=language,
                         prompt=prompt,
                         correlation_session_id=correlation_session_id,
+                        cleanup=mode,
                     )
                 else:
                     if audio is None:

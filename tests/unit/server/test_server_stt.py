@@ -542,3 +542,31 @@ async def test_the_cascade_route_records_the_envelope_provider_and_correlates(
     assert sent, "the Radient rung must have run"
     assert sent[0]["session_id"] == "sess-qa-cascade", "Q4: the correlation id rides"
     assert len(sent[0]["client_request_id"]) == 32
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_cleanup_client_cleans_elevenlabs(
+    test_app_client, store_override, elevenlabs_upstream
+) -> None:
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(
+        lambda record: (
+            200,
+            {"text": "Uh, so I think.", "language_code": "eng", "language_probability": 0.99},
+        )
+    )
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "client"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    body = upstream.requests[0]["body"]
+    assert b'name="no_verbatim"' in body and b"\r\n\r\nfalse\r\n" in body
+    assert result["text"] == "So I think."
+    assert result["raw_text"] == "Uh, so I think."
+    assert result["cleanup"] == "client.rules.v1"
+    assert result["removed"] == [{"start": 0, "end": 2, "kind": "filler", "token": "Uh"}]
