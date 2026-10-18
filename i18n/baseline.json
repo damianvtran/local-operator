@@ -77,7 +77,8 @@
     "local_operator/supplements/generator.py",
     "local_operator/evaluation/runner/episode.py",
     "local_operator/harness/loop.py",
-    "local_operator/incidents.py"
+    "local_operator/incidents.py",
+    "local_operator/session/session.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -203,7 +204,6 @@
     "local_operator/session/runtime/process.py": 4,
     "local_operator/session/runtime/serving.py": 4,
     "local_operator/session/runtime/supplements.py": 1,
-    "local_operator/session/session.py": 28,
     "local_operator/session/spec.py": 2,
     "local_operator/session/transcript_index.py": 12,
     "local_operator/session_factory.py": 15,

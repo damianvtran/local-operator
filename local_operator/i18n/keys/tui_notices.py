@@ -10,6 +10,10 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def auto_continuation_limit(*, limit: str) -> Msg:
+    return Msg("tui.notices.auto_continuation_limit", {"limit": limit})
+
+
 def budget_exhausted_continue() -> Msg:
     return Msg("tui.notices.budget_exhausted_continue", {})
 
@@ -22,12 +26,44 @@ def budget_exhausted_retry(*, effort: str) -> Msg:
     return Msg("tui.notices.budget_exhausted_retry", {"effort": effort})
 
 
+def effort_default_changed(*, effort: str) -> Msg:
+    return Msg("tui.notices.effort_default_changed", {"effort": effort})
+
+
+def effort_default_changed_headline() -> Msg:
+    return Msg("tui.notices.effort_default_changed_headline", {})
+
+
 def empty_reply() -> Msg:
     return Msg("tui.notices.empty_reply", {})
 
 
+def image_rejected_history() -> Msg:
+    return Msg("tui.notices.image_rejected_history", {})
+
+
+def image_unsupported(*, model: str) -> Msg:
+    return Msg("tui.notices.image_unsupported", {"model": model})
+
+
 def kept_going_stopped() -> Msg:
     return Msg("tui.notices.kept_going_stopped", {})
+
+
+def model_default_changed(*, model: str) -> Msg:
+    return Msg("tui.notices.model_default_changed", {"model": model})
+
+
+def model_default_changed_headline() -> Msg:
+    return Msg("tui.notices.model_default_changed_headline", {})
+
+
+def model_info_incomplete(*, model: str) -> Msg:
+    return Msg("tui.notices.model_info_incomplete", {"model": model})
+
+
+def model_info_incomplete_headline() -> Msg:
+    return Msg("tui.notices.model_info_incomplete_headline", {})
 
 
 def output_limit_before_call() -> Msg:
@@ -56,3 +92,35 @@ def reasoning_echo_thinking_off() -> Msg:
 
 def repeated_tool_errors() -> Msg:
     return Msg("tui.notices.repeated_tool_errors", {})
+
+
+def request_too_large_dropped() -> Msg:
+    return Msg("tui.notices.request_too_large_dropped", {})
+
+
+def steering_not_saved(*, command_id: str, reason: str) -> Msg:
+    return Msg("tui.notices.steering_not_saved", {"command_id": command_id, "reason": reason})
+
+
+def stopped_session_held() -> Msg:
+    return Msg("tui.notices.stopped_session_held", {})
+
+
+def too_large_images_removed() -> Msg:
+    return Msg("tui.notices.too_large_images_removed", {})
+
+
+def too_large_run_compact() -> Msg:
+    return Msg("tui.notices.too_large_run_compact", {})
+
+
+def unsaved_asides(*, count: str) -> Msg:
+    return Msg("tui.notices.unsaved_asides", {"count": count})
+
+
+def unsaved_receipts(*, count: str) -> Msg:
+    return Msg("tui.notices.unsaved_receipts", {"count": count})
+
+
+def unsaved_records(*, summary: str) -> Msg:
+    return Msg("tui.notices.unsaved_records", {"summary": summary})
