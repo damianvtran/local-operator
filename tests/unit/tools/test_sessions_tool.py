@@ -2947,3 +2947,66 @@ async def test_omitting_tags_leaves_spawn_receipt_unchanged(root: Path, monkeypa
         " — visible in the operator's sidebar, /resume and the phone list."
         " origin: agent-workstream."
     )
+
+
+def test_info_tag_names_share_the_assignment_registry_snapshot(root: Path, monkeypatch) -> None:
+    from local_operator.session import session_tags
+
+    sid = "abcdef123456"
+    _session(root, sid, "tagged")
+    category = session_tags.write_categories(root, [(None, "Review")])[0]
+    session_tags.set_entity_tags(root, "session", sid, [category["id"]], category["id"])
+    original = session_tags.read_categories
+    reads = 0
+
+    def registry_snapshot(root):
+        nonlocal reads
+        reads += 1
+        return original(root) if reads == 1 else []
+
+    monkeypatch.setattr(session_tags, "read_categories", registry_snapshot)
+    extras = _sessions_marker_extras(sid)
+    assert extras["tags"] == ["Review"]
+    assert extras["primary"] == category["id"]
+    assert reads == 1
+
+
+@pytest.mark.asyncio
+async def test_spawn_starting_without_published_id_reports_tag_partial_success(
+    root: Path, monkeypatch
+) -> None:
+    """A grace-expired job may already own a session: do not invite a duplicate spawn."""
+    from local_operator.session.session_tags import write_categories
+
+    write_categories(root, [(None, "Review")])
+    sid = "abcdef123456"
+
+    async def launch(argv, env, cwd):
+        # Publication can lag directory creation: the tool cannot infer this id.
+        _session(root, sid, "still publishing")
+        return 0, "Background job cafebabe0001: starting (execution receipt)\n"
+
+    def no_write(*args):
+        raise AssertionError("No assignment may be written without a published id")
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.job_status", lambda *args, **kwargs: {"status": "starting"}
+    )
+    monkeypatch.setattr("local_operator.tools.builtin.SESSIONS_READY_GRACE_S", 0)
+    monkeypatch.setattr("local_operator.session.session_tags.set_entity_tags", no_write)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "tags": ["Review"]}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["session_id"] is None
+    assert details["job_id"] == "cafebabe0001"
+    assert details["readiness"] == "starting"
+    assert details["tags_applied"] is False
+    assert "tags" not in details
+    assert "not published" in details["tags_error"]
+    assert "lop exec --status cafebabe0001" in result.text
+    assert "do not repeat the spawn" in result.text
+    assert (root / "sessions" / sid).is_dir()
+    assert not (root / "tags" / "session").exists()

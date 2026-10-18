@@ -16200,12 +16200,13 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     extras["session_dir"] = str(directory)
     from local_operator.session.session_tags import read_categories, read_entity_tags
 
+    categories = read_categories(config_dir())
     try:
-        assignment = read_entity_tags(config_dir(), "session", session_id)
+        assignment = read_entity_tags(config_dir(), "session", session_id, categories=categories)
     except ValueError:
         # Older imported directories need not have generated session-id shape.
         assignment = {"tags": [], "primary": None}
-    lookup = {tag["id"]: tag["name"] for tag in read_categories(config_dir())}
+    lookup = {tag["id"]: tag["name"] for tag in categories}
     extras["tags"] = [lookup[key] for key in assignment["tags"] if key in lookup]
     extras["primary"] = assignment["primary"]
 
@@ -18434,9 +18435,21 @@ async def _sessions_open(
     if tag_ids is not None:
         from local_operator.session.session_tags import read_categories, set_entity_tags
 
+        if not session_id:
+            # The bounded publication grace already expired, but the launcher
+            # admitted a job. Report that partial success, not a spawn failure
+            # that invites a second session; there is no background tag retry.
+            reason = "Session id is not published yet; tags were not written"
+            details.update(tags_applied=False, tags_error=reason)
+            return _text(
+                tool_call_id,
+                "sessions",
+                f"Spawn requested (job {job_id}). {reason}. "
+                f"Follow `lop exec --status {job_id}`, then apply tags to the "
+                "published session; do not repeat the spawn to retry tags.",
+                details=details,
+            )
         try:
-            if not session_id:
-                raise ValueError("Session id has not been published; tags were not written")
             # The ledger, not argv, establishes identity. A failed durable write
             # must not turn an admitted session into a false tag-success receipt.
             applied = await asyncio.to_thread(

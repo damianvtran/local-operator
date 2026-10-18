@@ -7340,7 +7340,11 @@ class DesktopSessions:
     async def set_tags(
         self, session_id: str, tag_ids: list[str], primary: str | None
     ) -> dict[str, Any]:
-        from local_operator.session.session_tags import read_categories, set_entity_tags
+        from local_operator.session.session_tags import (
+            read_categories,
+            read_entity_tags,
+            set_entity_tags,
+        )
 
         def apply() -> dict[str, Any]:
             # Like pins, delegated runs are taggable: directory admission is
@@ -7350,8 +7354,12 @@ class DesktopSessions:
                 or not (self.root / "sessions" / session_id).is_dir()
             ):
                 raise KeyError("Unknown session")
-            state = set_entity_tags(self.root, "session", session_id, tag_ids, primary)
-            lookup = {tag["id"]: tag for tag in read_categories(self.root)}
+            set_entity_tags(self.root, "session", session_id, tag_ids, primary)
+            # Resolve IDs and names against one snapshot: a concurrent deletion
+            # may prune a tag, but must not leave primary outside the returned tags.
+            categories = read_categories(self.root)
+            state = read_entity_tags(self.root, "session", session_id, categories=categories)
+            lookup = {tag["id"]: tag for tag in categories}
             return {
                 "session_id": session_id,
                 "primary": state["primary"],

@@ -130,3 +130,33 @@ async def test_invalid_requests_are_refused_without_writes(api) -> None:
     assert (
         await client.put("/v1/desktop/projects/project/tags", json={"tags": [], "primary": None})
     ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_assignment_response_uses_one_registry_snapshot(api, monkeypatch) -> None:
+    """Deletion between writing IDs and resolving names cannot leak an orphan primary."""
+    from local_operator.session import session_tags
+
+    client, root = api
+    sid = "aaaaaaaaaaa1"
+    seed(root, sid)
+    category = (await client.put("/v1/desktop/tags", json={"tags": [{"name": "Review"}]})).json()[
+        "result"
+    ]["tags"][0]
+    original = session_tags.read_categories
+    reads = 0
+
+    def registry_snapshot(root):
+        nonlocal reads
+        reads += 1
+        # Validation and the store's write-result read see the old registry;
+        # the HTTP name-resolution read sees a concurrent category deletion.
+        return original(root) if reads < 3 else []
+
+    monkeypatch.setattr(session_tags, "read_categories", registry_snapshot)
+    response = await client.put(
+        f"/v1/desktop/sessions/{sid}/tags",
+        json={"tags": [category["id"]], "primary": category["id"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"session_id": sid, "tags": [], "primary": None}
