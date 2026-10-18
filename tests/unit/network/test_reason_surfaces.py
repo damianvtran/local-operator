@@ -99,6 +99,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the local hub_sync eligibility token, compared by update_policy's consent carve-out",
     ),
+    # The inspect page's own disposition prose. ``memory_inspect._disposition``
+    # composes every sentence this read prints ("Already in the global bank; ...",
+    # "No work/lane/progress marker; ..."), on this device, for a reader — the
+    # ``reason`` key is the PREVIEW payload's, not a mesh wire field. This module
+    # is in the scan only because it names ``local_operator.network`` for the
+    # trusted-peer sync line. The guard is a proxy for "turns a value into text"
+    # and it matches by field NAME, so the read is declared rather than renamed:
+    # the key keeps its plain meaning for a future reader of the payload.
+    ("local_operator/memory_cli.py", "_inspect_text", "reason"): (
+        1,
+        "the inspect page's own disposition prose, authored in memory_inspect._disposition",
+    ),
     # ``lop update``'s prune notices read the plan's OWN reasons — the same sweep
     # vocabulary ``_cleanup_row`` above declares (``superseded, unreferenced`` /
     # ``the pointer's target`` / the removal-failed sentence), authored in

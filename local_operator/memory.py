@@ -595,6 +595,20 @@ class MemoryIdentity:
         return result
 
 
+#: The status vocabulary a stored fact may carry. Exported so a READER
+#: (``memory_inspect``) gates the same closed set the writer enforces instead of
+#: restating it: an imported row can hold any string in this column, and the
+#: reader echoes it to the screen. Two spellings of "valid status" is how one
+#: surface ends up showing a value the other refuses.
+FACT_STATUSES = ("active", "candidate", "disputed", "superseded", "expired")
+
+#: The inclusive upper bound on any stored freshness timestamp (year 3000).
+#: Named and exported for the same reason as ``FACT_STATUSES``: the read-only
+#: inspector gates fields with the writer's rule, and a second literal in that
+#: reader is how the two drift apart silently.
+MAX_FACT_TIMESTAMP = 32503680000
+
+
 def validate_fact(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise MemoryError("Memory content must be a JSON object; read guide://memory.")
@@ -657,14 +671,11 @@ def validate_fact(raw: Any) -> dict[str, Any]:
             raise MemoryError(
                 "Tags/aliases must contain at most 12 short strings (64 characters each)."
             )
-    if (
-        fact["status"] not in ("active", "candidate", "disputed", "superseded", "expired")
-        or type(fact["pinned"]) is not bool
-    ):
+    if fact["status"] not in FACT_STATUSES or type(fact["pinned"]) is not bool:
         raise MemoryError("Invalid memory status or pinned flag.")
     for key in ("verified_at", "expires_at", "created_at", "source_time"):
         x = fact[key]
-        if x is not None and (type(x) not in (int, float) or not 0 <= x <= 32503680000):
+        if x is not None and (type(x) not in (int, float) or not 0 <= x <= MAX_FACT_TIMESTAMP):
             raise MemoryError("Freshness timestamps must be finite Unix seconds or null.")
     source = fact["source"]
     if (
