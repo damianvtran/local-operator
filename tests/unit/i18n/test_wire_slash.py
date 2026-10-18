@@ -29,6 +29,11 @@ from local_operator.slash_commands import SLASH_COMMANDS
 #: by the registry's own tests.
 #: Not in wire.slash on purpose: any edit to that catalogue voids the audited locale ledger hashes.
 MEMORY_COMMAND = "memory"
+#: ``/import`` follows the ``/memory`` PRECEDENT (keep a new command out of the
+#: audited wire.slash catalogue), but its copy lives in the English-only
+#: ``tui.import`` namespace because the page is TUI-owned — not in
+#: ``wire.memory``'s namespace class. This test exempts it from the key walk.
+IMPORT_COMMAND = "import"
 
 PREVIOUS_ENGLISH: dict[str, str] = {
     "help": "List all commands",
@@ -104,9 +109,9 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # 50 at S2, +1 with C's `/language`, +1 with `/memory`. `/memory` lives in the
     # English-only `wire.memory` namespace so the audited wire.slash hash stays valid;
     # a missing or extra command raises a KeyError either way rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 1 == 53
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 2 == 54
     for command in SLASH_COMMANDS:
-        if command.name == MEMORY_COMMAND:
+        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND):
             continue
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 
@@ -124,7 +129,7 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
     # function, rendered through the runtime — asserted under the pinned `en`
     # locale (RFC §7).
     for command in SLASH_COMMANDS:
-        if command.name == MEMORY_COMMAND:
+        if command.name in (MEMORY_COMMAND, IMPORT_COMMAND):
             continue
         function = getattr(wire_slash, command.name)
         message = function()
