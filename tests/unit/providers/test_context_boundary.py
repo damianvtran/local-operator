@@ -1,11 +1,15 @@
 """Regression guards for stale admission hints, without live model requests."""
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
-from local_operator.compaction.tokens import invalidate_message_cache
+from local_operator.compaction.tokens import (
+    clear_estimate_cache,
+    invalidate_message_cache,
+)
 from local_operator.harness.types import (
     ChatRequest,
     Message,
@@ -125,6 +129,79 @@ def test_calibration_margin_cannot_refuse_measured_headroom():
     req.context_tokens_hint_model = model_key(req)
     assert _estimated_prompt_tokens(req) == pair
     assert _effective_max_tokens(req) > 0
+
+
+def test_a_failed_tokenizer_warm_does_not_change_the_measured_pair():
+    """A failed warm must not leave the process on the chars/4 ruler.
+
+    This is the measured CI failure, kept as a discrimination test. With the
+    real encoder this payload measures ``(97502, 90002)`` and admits 2,499
+    reply tokens; under the old process-wide sticky latch (reproduced by
+    setting ``_ENCODING_FAILED``) the identical request measured
+    ``(106876, 97501)`` and ``_effective_max_tokens`` refused a window it
+    could serve.
+
+    The latch is re-armed here with its backoff deadline ELAPSED, which is the
+    state a transient first-use failure leaves a live process in: the retry
+    must recover the exact ruler, otherwise one failed fetch silently affects
+    every compaction budget for the life of the process.
+
+    The retry is DISPATCHED rather than run inline (a caller must never wait
+    on a fetch — round-1 fix 3), so the recovery is joined here: the call that
+    notices the elapsed deadline counts with the fallback, and the next one
+    has the real encoder back. The measurement below runs after that
+    publication, which is the state every later request sees.
+    """
+    pytest.importorskip("tiktoken")
+    from local_operator.compaction import tokens as tokens_mod
+
+    tokens_mod.reset_tokenizer_state()
+    if tokens_mod._get_encoding() is None:
+        pytest.skip("cl100k_base unavailable — these numbers would be the fallback's")
+
+    try:
+        clear_estimate_cache()
+        tokens_mod._ENCODING = None
+        tokens_mod._ENCODING_FAILED = True
+        tokens_mod._ENCODING_FAILURES = 1
+        tokens_mod._ENCODING_RETRY_AT = 0.0
+
+        # The retry is dispatched, so the table-cached load may publish before
+        # this call returns; either way the latch must clear without a fetch
+        # ever running on this thread.
+        tokens_mod._get_encoding()
+        deadline = time.monotonic() + 60.0
+        while tokens_mod._ENCODING is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert tokens_mod._ENCODING is not None, "the dispatched retry never recovered"
+        assert tokens_mod._ENCODING_FAILED is False
+
+        req = request().model_copy(
+            update={
+                "model": ModelSpec(
+                    provider="openai",
+                    model_id="gpt-5",
+                    context_window=100_000,
+                    max_output_tokens=8192,
+                ),
+                "messages": [Message.user("word " * 60_000)],
+            }
+        )
+        tracker = ContextTokenTracker()
+        tracker.record(measure_request(req), Usage(context_tokens=60_001))
+        req.messages.append(Message.user("more " * 30_000))
+
+        pair = tracker.reconcile(measure_request(req), 1.25)
+
+        assert pair is not None
+        fallback_note = f"measured {pair}; the chars/4 fallback measures (106876, 97501)"
+        assert pair == (97502, 90002), fallback_note
+        req.context_tokens_hint, req.context_tokens_hint_measured = pair
+        req.context_tokens_hint_model = model_key(req)
+        assert _effective_max_tokens(req) == 2499
+    finally:
+        tokens_mod.reset_tokenizer_state()
+        clear_estimate_cache()
 
 
 def native_answer(req, *, reasoning=5000, scope="account-a", stop="toolUse"):
