@@ -2199,3 +2199,29 @@ def test_create_transcription_sends_the_correlation_headers(
         import os as _os
 
         _os.unlink(path)
+
+
+def test_transcription_cleanup_provenance_is_a_real_list_field() -> None:
+    """Construct the model and read ``removed`` back as a list.
+
+    Regression guard for v0.77.0: ``removed: list[dict[str, Any]]`` sat in a
+    class that also defines a ``dict`` method. Pydantic evaluates model
+    annotations after the class body completes, so on Python 3.14 (PEP 649)
+    ``dict`` resolved to that method and the module failed to import with
+    ``TypeError: 'function' object is not subscriptable`` -- taking ``lop serve``
+    down with it. Keeping the annotation on ``List``/``Dict`` avoids resolving
+    either builtin through the class namespace.
+    """
+    spans = [{"start": 0, "end": 5, "kind": "filler", "text": "um"}]
+    model = RadientTranscriptionResponseData(
+        text="hello",
+        provider="elevenlabs",
+        status="completed",
+        removed=spans,
+    )
+
+    assert isinstance(model.removed, list)
+    assert model.removed == spans
+    field = RadientTranscriptionResponseData.model_fields["removed"]
+    assert field.default_factory is list
+    assert RadientTranscriptionResponseData(text="hi", provider="x", status="ok").removed == []
