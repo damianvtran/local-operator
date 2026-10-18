@@ -29,9 +29,10 @@ from local_operator.slash_commands import SLASH_COMMANDS
 #: by the registry's own tests.
 #: Not in wire.slash on purpose: any edit to that catalogue voids the audited locale ledger hashes.
 MEMORY_COMMAND = "memory"
-#: ``/import`` is the same shape as ``/memory``: its description lives in the
-#: English-only ``tui.import`` namespace so the audited wire.slash hashes stay
-#: valid, and this test exempts it from the wire.slash key walk.
+#: ``/import`` follows the ``/memory`` PRECEDENT (keep a new command out of the
+#: audited wire.slash catalogue), but its copy lives in the English-only
+#: ``tui.import`` namespace because the page is TUI-owned — not in
+#: ``wire.memory``'s namespace class. This test exempts it from the key walk.
 IMPORT_COMMAND = "import"
 
 PREVIOUS_ENGLISH: dict[str, str] = {

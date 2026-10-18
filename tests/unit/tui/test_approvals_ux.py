@@ -794,6 +794,10 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # OPTIONAL like `/team`, which `/agent` mirrors: bare `/agent` lists
         # the roles/specialists, and the space opens the name argument list.
         "agent": ArgumentMode.OPTIONAL,
+        # OPTIONAL: bare `/import` opens the source list; the space begins the
+        # subcommand vocabulary (`list`, `preview …`, `run …`, `status`,
+        # `cancel`) rather than a free-text prompt.
+        "import": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/effort`: bare `/analytics` opens the default (usage)
         # view, and the space offers the analytics-view list (today just
         # `usage`); the screen it opens IS the receipt, so it never echoes.

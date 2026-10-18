@@ -2208,6 +2208,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "list.remove",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_import_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/harness_import/service.py::HarnessImportService._create",
+        "shutil.rmtree",
+        "only a target this call created, with no transcript row committed",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_org_chart_view",
         "<path>.remove",
         "widget.remove()",
