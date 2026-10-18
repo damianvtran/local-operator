@@ -390,6 +390,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "state bound to one install, exactly as untransportable as the lock and "
         "the attempt file beside it.",
     ),
+    "local_operator/procname.py": (
+        1,
+        "``_SOURCE_MARKER`` ('source'): the sidecar a published runtime image "
+        "carries inside ``<stable root>/runtime/<build key>/``, naming the "
+        "interpreter it was cloned from. It is install-level state about ONE "
+        "interpreter build, beside the published image under the lop install root "
+        "and outside any session directory; a session travelling between devices "
+        "carries neither the image nor its marker",
+    ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
         1,
