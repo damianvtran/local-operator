@@ -590,9 +590,7 @@ async def test_x_asks_y_n_and_n_keeps_the_milestone(tmp_path: Path) -> None:
         await pilot.pause()
         assert page.confirming and page.confirm_name == "groundwork"
         assert view._confirm_row.display
-        assert any(
-            "remove milestone 'groundwork'" in row for row in view.rendered_rows()
-        )
+        assert any("remove milestone 'groundwork'" in row for row in view.rendered_rows())
 
         await pilot.press("n")
         await pilot.pause()
@@ -953,9 +951,7 @@ async def test_a_follower_session_cannot_write_any_project_or_milestone(
         await pilot.pause()
         before = _dump(tmp_path)
         assert view._read_only is True
-        assert view._notice and "Read-only" in view._notice, (
-            "the state must be visible on entry"
-        )
+        assert view._notice and "Read-only" in view._notice, "the state must be visible on entry"
 
         # `c` must not open the create form.
         await pilot.press("c")

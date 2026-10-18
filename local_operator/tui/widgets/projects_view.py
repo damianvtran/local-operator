@@ -742,9 +742,7 @@ class ProjectsView(Vertical):
         # The add-milestone prompt's submit key is ENTER, not the form's
         # ctrl+s: the same button cannot advertise both, and `ctrl+s add` would
         # be a hinted key that resumes the session instead of adding.
-        self._milestone_add_hint = HintButton(
-            "↵", lambda: self._milestone_prompt.action_submit()
-        )
+        self._milestone_add_hint = HintButton("↵", lambda: self._milestone_prompt.action_submit())
         self._state_hint = HintButton(READ_ONLY_NOTE)
         self._hints = Horizontal(classes="projects-view-hints")
 
@@ -1952,13 +1950,9 @@ class ProjectsView(Vertical):
         # action the page cannot perform is the "nothing happens" bug one step
         # earlier. The keys themselves stay bound, so a press still explains
         # WHY via the notice (QA round 1, Q1).
-        has_remove = (
-            self._detail_page.selected_milestone() is not None and not self._read_only
-        )
+        has_remove = self._detail_page.selected_milestone() is not None and not self._read_only
         short: list[tuple[HintButton, str, bool]] = [] if self._read_only else [edit, add]
-        wide: list[tuple[HintButton, str, bool]] = (
-            [] if self._read_only else [edit, add_long]
-        )
+        wide: list[tuple[HintButton, str, bool]] = [] if self._read_only else [edit, add_long]
         if has_remove:
             short.append(remove)
             wide.append(remove)
@@ -2972,9 +2966,7 @@ class ProjectsView(Vertical):
         reporting a write that did not move the row.
         """
         self._exit_form(back="detail")
-        self.show_notice(
-            _te(copy_edit.saved()) if changed else _te(copy_edit.no_changes())
-        )
+        self.show_notice(_te(copy_edit.saved()) if changed else _te(copy_edit.no_changes()))
 
     def action_add_milestone(self) -> None:
         """``a``: open the add-milestone prompt over the detail page."""

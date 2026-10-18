@@ -187,9 +187,7 @@ def build_edit_plan(initial: ProjectEditState, final: ProjectEditState) -> EditP
             # silently keeping the old number.
             return _refusal("estimate", _t(_x.refusal_estimate_clear()))
         if not (0.0 < final_estimate <= ESTIMATE_MAX):
-            return _refusal(
-                "estimate", _t(_x.refusal_estimate_range(maximum=f"{ESTIMATE_MAX:g}"))
-            )
+            return _refusal("estimate", _t(_x.refusal_estimate_range(maximum=f"{ESTIMATE_MAX:g}")))
         changed["estimate"] = final_estimate
     if final.estimate_unit != initial.estimate_unit:
         changed["estimate_unit"] = final.estimate_unit
