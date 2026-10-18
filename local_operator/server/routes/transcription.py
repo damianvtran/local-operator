@@ -162,9 +162,7 @@ async def create_transcription_endpoint(
                 ),
             )
         transcription_result.text = cleaned.text if cleaned else raw_text
-        transcription_result.language = (
-            detected if isinstance(detected, str) else None
-        )
+        transcription_result.language = detected if isinstance(detected, str) else None
         transcription_result.cleanup = CLIENT_RULES_PROVENANCE if cleaned else "none"
         transcription_result.raw_text = raw_text
         transcription_result.removed = (
