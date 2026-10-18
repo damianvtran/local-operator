@@ -244,9 +244,8 @@ are called from **every path that serves the phone and the cascade**:
   (Radient/OpenAI; `auto` on ElevenLabs is provider-native only, per §4.2).
 
 This is what makes the phone and desktop answers identical. The legacy
-Radient-only route (`server/routes/transcription.py`) is outside this set until
-slice 3, which must either wire it to the same pure function or declare it
-deprecated; it is not allowed to drift silently.
+Radient-only route (`server/routes/transcription.py`) was wired to the same pure
+function in slice 3; it is no longer outside this set and cannot drift silently.
 
 Why the pure function lives in `stt/cleanup.py` and not in the phone client: the
 phone is one surface, the daemon holds the provider keys and sees the provider's
@@ -524,10 +523,10 @@ and stays opt-in because its evidence includes a real negative control.
 5. **Raw retention.** `no_verbatim` gives no raw copy. The design preserves raw where
    the provider returns it and documents the upstream limitation; a future durable
    raw store is a data-retention decision, not part of this workstream.
-6. **The legacy Radient route.** If desktop callers still use
-   `POST /v1/transcriptions`, they bypass the cascade and would not get cleanup until
-   the legacy route is wired. Slice 3 must either wire it or state explicitly that it
-   is deprecated; no silent divergence.
+6. **The legacy Radient route.** Desktop callers still use
+   `POST /v1/transcriptions`; slice 3 wired it to the same pure function and
+   additive provenance fields, so it no longer bypasses cleanup. It is not
+   deprecated and it cannot diverge silently.
 7. **Phone UI.** No toggle is proposed in the first slices. The setting is global
    per user/installation; a per-message toggle would need a design/UX round and is
    out of scope until the behaviour is proven.

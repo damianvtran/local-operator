@@ -15,9 +15,10 @@ Two routes, both gated on the managed-mode boundary like the legacy
   classifies with the shared mapper in ``stt/errors.py``, so the two surfaces
   cannot disagree).
 
-The legacy ``/v1/transcriptions`` route is untouched in behaviour: it stays
-the Radient-only path (rung 1). Surfaces migrate to this family when they want
-the cascade.
+The legacy ``/v1/transcriptions`` route stays the Radient-only path (rung 1),
+but since LOH-5 slice 3 it shares the same pure cleanup rules and additive
+provenance fields; it is not a second behaviour. Surfaces migrate to this
+family when they want the cascade.
 """
 
 from __future__ import annotations
