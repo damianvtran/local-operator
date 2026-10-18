@@ -116,9 +116,10 @@ async def committed_passes(
 
 @pytest.mark.asyncio
 async def test_an_open_todo_does_not_disable_compaction(tmp_path) -> None:
-    """The regression, as a rate: a session with work still open compacts as
-    often as one with none. Before the fix this was 0 committed against 5,
-    every refusal reading ``cut_not_replayable`` and nothing said to the user.
+    """The regression, as a rate: a session with work still open compacts at
+    least as often as one with none. Before the fix this was 0 committed
+    against 5, every refusal reading ``cut_not_replayable`` and nothing said
+    to the user.
     """
     turns = 6
     with_todos = await committed_passes(
@@ -129,7 +130,11 @@ async def test_an_open_todo_does_not_disable_compaction(tmp_path) -> None:
     )
     without_todos = await committed_passes(tmp_path, "todo-compaction-clear", [], turns)
 
-    assert with_todos == without_todos
+    # A todo continuation adds another assistant reply: the opening turn can
+    # now have two summarizable rows and a legal forward cut, while the clear
+    # session still has only two total messages. Earlier legitimate progress
+    # must not fail the guard against reminders DISABLING compaction.
+    assert with_todos >= without_todos
     assert with_todos >= turns - 1  # only the opening turn has nothing to compact
 
 

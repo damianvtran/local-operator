@@ -98,8 +98,10 @@ def test_no_cut_when_everything_is_recent():
 
 def test_no_cut_when_cut_would_be_trivial():
     """cut <= 1 means zero or one message to summarize -> None."""
-    messages2 = [_big_user(), _big_user(400), Message.user("tail")]
-    keep2 = estimate_tokens(messages2[2]) + 10
+    # Two real messages have only one nonempty prefix: no legal forward
+    # alternative can satisfy the historical two-message minimum.
+    messages2 = [_big_user(), _big_user(400)]
+    keep2 = estimate_tokens(messages2[1]) + 10
     assert find_cut_point(messages2, keep2) is None
 
 

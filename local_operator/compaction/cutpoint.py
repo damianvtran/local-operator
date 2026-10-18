@@ -428,9 +428,16 @@ def _snap_to_valid_cut(
     # the only useful cut. Summarizing the older prefix still buys headroom
     # even if the indivisible tail exceeds the requested retention budget.
     for backward in range(candidate, -1, -1):
-        if makes_progress(backward) and _is_valid_cut(messages, backward, result_at, safe_cuts):
+        if (
+            prefix_tokens[backward] >= (keep_recent_tokens or 0)
+            and makes_progress(backward)
+            and _is_valid_cut(messages, backward, result_at, safe_cuts)
+        ):
             return backward
-    return candidate if candidate in safe_cuts else None
+    # Replacing a tiny prefix with a marker can GROW an oversized mid-run
+    # context. No forward escape means an honest refusal is the only safe
+    # outcome unless the unbounded fallback removes at least a recency budget.
+    return candidate if candidate in safe_cuts and bounded_retention(candidate) else None
 
 
 def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) -> int | None:
@@ -519,6 +526,26 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
                 )
             ):
                 index = snapped
+
+    if index <= 1:
+        # A giant message at index 1 can overshoot the backwards token walk.
+        # Do not confuse a trivial proposed prefix with an absence of useful
+        # cuts: the next legal boundary may shed the entire oversized paste.
+        # Keep the historical two-message rule when no such boundary exists.
+        safe_cuts = _pairing_safe_cuts(messages)
+        prefix_tokens = 0
+        real_messages = 0
+        for forward, message in enumerate(messages):
+            if (
+                real_messages >= 2
+                and prefix_tokens >= keep_recent_tokens
+                and _is_valid_cut(messages, forward, result_at, safe_cuts)
+            ):
+                index = forward
+                break
+            if not _is_compaction_marker(message) and not _is_preserved_user_turn(message):
+                prefix_tokens += _message_tokens(message)
+                real_messages += 1
 
     # Defensive invariant (the predicate already excludes violations; the
     # assertion makes a future regression loud instead of silent). GENERAL

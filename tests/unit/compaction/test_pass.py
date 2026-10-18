@@ -789,3 +789,120 @@ async def test_oversized_interleaved_tail_must_compact_when_safe_cut_exists(keep
     assert result.tokens_before - result.tokens_after > 100000
     assert result.tokens_after < 115200
     assert call in result.messages
+
+
+@pytest.mark.asyncio
+async def test_tiny_prefix_with_oversized_tail_must_not_grow_or_strand_next_pass():
+    call = Message.assistant("reads")
+    call.tool_calls = [
+        ToolCall(id=cid, name="read", arguments={}) for cid in ("answered", "pending")
+    ]
+    history = [
+        Message.user("hi"),
+        Message.assistant("hello"),
+        Message.user("ok"),
+        call,
+        Message.user("delivery"),
+        Message(
+            role="tool",
+            content=[TextContent(text="result " * 50000)],
+            tool_call_id="answered",
+            tool_name="read",
+        ),
+    ]
+    summarize = _Summarizer("Summary here.")
+    settings = CompactionSettings(keep_recent_tokens=20000, threshold_tokens=40000)
+    first = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert first.tokens_after <= first.tokens_before
+    # An honest initial refusal leaves the original work intact and does not
+    # pay for a larger marker only to refuse permanently on the next attempt.
+    second = await run_compaction_pass(
+        first.messages,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert second.tokens_after <= second.tokens_before
+    assert not first.ran and not second.ran
+    assert not summarize.prompts
+    assert first.messages == history and second.messages == history
+
+
+@pytest.mark.asyncio
+async def test_giant_second_message_uses_legal_forward_cut():
+    history = [
+        Message.user("older " * 7426),
+        Message.user("paste " * 153999),
+        Message.assistant("recent " * 18562),
+    ]
+    result = await run_compaction_pass(
+        history,
+        model=_model(window=128000),
+        settings=CompactionSettings(keep_recent_tokens=20000),
+        summarize=_Summarizer("Prior work summarized."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert result.ran, result.reason
+    assert result.tokens_after <= result.tokens_before
+    assert result.tokens_after < 20000
+    assert result.messages[-1] is history[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep", [64, 256, 1024, 5000])
+@pytest.mark.parametrize("shape", ["giant-second", "answered-tail", "pending-tail"])
+async def test_pair_safe_prefix_budget_invariant_compacts_without_growth(keep, shape):
+    from local_operator.compaction.cutpoint import find_cut_point
+    from local_operator.compaction.tokens import estimate_tokens
+
+    # Contract: a useful legal pair-safe cut whose prefix reaches the keep
+    # budget must be found; every successful pass must be non-growing.
+    if shape == "giant-second":
+        history = [
+            Message.user("hi"),
+            Message.user("paste " * (3 * keep)),
+            Message.assistant("recent " * (keep // 2)),
+        ]
+    else:
+        call = Message.assistant("reads")
+        ids = ("answered", "pending") if shape == "pending-tail" else ("answered",)
+        call.tool_calls = [ToolCall(id=cid, name="read", arguments={}) for cid in ids]
+        history = [
+            Message.user("older " * keep),
+            Message.assistant("hello"),
+            Message.user("ok"),
+            call,
+            Message.user("delivery"),
+            Message(
+                role="tool",
+                content=[TextContent(text="result " * (3 * keep))],
+                tool_call_id="answered",
+                tool_name="read",
+            ),
+        ]
+    assert sum(estimate_tokens(m) for m in history[:2]) >= keep
+    # Cut 2 is pair-safe by construction and contains two real prefix rows.
+    cut = find_cut_point(history, keep)
+    assert cut is not None
+    assert sum(estimate_tokens(m) for m in history[:cut]) >= keep
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=CompactionSettings(keep_recent_tokens=keep),
+        summarize=_Summarizer("Short summary."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert result.ran, result.reason
+    assert result.tokens_after <= result.tokens_before
