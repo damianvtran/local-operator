@@ -664,3 +664,103 @@ def test_advance_honours_the_replayability_guard():
         )
         == 3
     )
+
+
+def test_interrupted_tool_pair_keeps_issuing_call():
+    messages = [
+        *[_big_user() for _ in range(7)],
+        _assistant_with_call("mcp__episode_actions_apply_actions:12"),
+        Message.user("interleaved delivery"),
+        _tool_result("mcp__episode_actions_apply_actions:12"),
+        Message.assistant("done"),
+    ]
+    keep = sum(estimate_tokens(m) for m in messages[8:])
+    cut = find_cut_point(messages, keep)
+    assert cut == 7
+    assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+
+
+def test_interleaved_multi_call_turn_moves_all_pairs_together():
+    first = _assistant_with_call("a")
+    first.tool_calls.append(ToolCall(id="b", name="bash", arguments={}))
+    messages = [
+        _big_user(),
+        _big_user(),
+        first,
+        Message.user("delivery one"),
+        _tool_result("a"),
+        Message.assistant("still waiting"),
+        Message.user("delivery two"),
+        _tool_result("b"),
+        Message.assistant("done"),
+    ]
+    for index in (3, 4, 5, 6):
+        keep = sum(estimate_tokens(m) for m in messages[index:])
+        cut = find_cut_point(messages, keep)
+        assert cut == 2
+        assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+    # Byte-driven advancement uses the SAME legality rule, not just token cuts.
+    advanced = advance_cut_to_wire_band(
+        messages, 2, band_bytes=1, kept_bytes=lambda index: len(messages) - index
+    )
+    assert advanced == 8
+    assert_partition_pair_integrity(*prepare_partitions(messages, advanced))
+
+
+def test_reverse_order_pair_is_not_split():
+    messages = [
+        _big_user(),
+        _big_user(),
+        Message.user("before reversed pair"),
+        _tool_result("reverse"),
+        Message.user("delivery"),
+        _assistant_with_call("reverse"),
+        Message.assistant("done"),
+    ]
+    keep = sum(estimate_tokens(m) for m in messages[4:])
+    cut = find_cut_point(messages, keep)
+    assert cut == 2
+    assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+
+
+def test_no_safe_nonempty_tail_still_raises_for_missing_issuer():
+    # There is no issuing call anywhere and the last message is its result.
+    # Every nonempty kept suffix is invalid; snapping cannot repair the input.
+    messages = [_big_user(), _big_user(), Message.user("delivery"), _tool_result("missing")]
+    keep = sum(estimate_tokens(m) for m in messages[2:])
+    with pytest.raises(AssertionError, match="without issuing calls anywhere"):
+        find_cut_point(messages, keep)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_final_pair_guard_survives_a_broken_selector(monkeypatch, reverse):
+    from local_operator.compaction import cutpoint
+
+    pair = [_assistant_with_call("guard"), _tool_result("guard")]
+    if reverse:
+        pair.reverse()
+    messages = [_big_user(), _big_user(), pair[0], Message.user("delivery"), pair[1]]
+    monkeypatch.setattr(cutpoint, "_snap_to_valid_cut", lambda *args: 3)
+    keep = sum(estimate_tokens(m) for m in messages[3:])
+    with pytest.raises(AssertionError, match="cut point 3 orphans tool"):
+        find_cut_point(messages, keep)
+
+
+def test_normal_compaction_partitions_are_byte_identical():
+    # Fixed pre-fix control: a complete ordinary tool turn has cut 4. Comparing
+    # serialized partitions also pins metadata and call/result payload bytes.
+    messages = [
+        _big_user(),
+        _big_user(),
+        _assistant_with_call("normal"),
+        _tool_result("normal"),
+        Message.user("next task"),
+        Message.assistant("done"),
+    ]
+    keep = sum(estimate_tokens(m) for m in messages[4:])
+    cut = find_cut_point(messages, keep)
+    assert cut == 4
+    partitions = prepare_partitions(messages, cut)
+    actual = [[m.model_dump_json() for m in part] for part in partitions]
+    expected = [[m.model_dump_json() for m in part] for part in (messages[:4], messages[4:])]
+    assert actual == expected

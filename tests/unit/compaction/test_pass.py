@@ -32,7 +32,13 @@ from local_operator.compaction.pruning import (
 )
 from local_operator.compaction.thresholds import CompactionSettings
 from local_operator.compaction.tokens import estimate_messages_tokens
-from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
+from local_operator.harness.types import (
+    ImageContent,
+    Message,
+    ModelSpec,
+    TextContent,
+    ToolCall,
+)
 
 NOW = 10_000_000
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
@@ -623,3 +629,57 @@ def test_shed_stale_frames_treats_pruned_notices_as_stale_turns() -> None:
     # Both pruned turns went; the current framed observation never does.
     assert removed == 4
     assert [_texts(m)[0] for m in out] == ["<previous-context-summary>...", "t3"]
+
+
+@pytest.mark.asyncio
+async def test_interleaved_tool_result_compacts_and_continues() -> None:
+    call = Message.assistant("calling")
+    call.tool_calls = [ToolCall(id="interleaved", name="bash", arguments={})]
+    result_message = Message(
+        role="tool",
+        content=[TextContent(text="result " * 100)],
+        tool_call_id="interleaved",
+        tool_name="bash",
+    )
+    history = [
+        Message.user("older " * 200),
+        Message.assistant("earlier " * 200),
+        call,
+        Message.user("delivery"),
+        result_message,
+        Message.assistant("done"),
+    ]
+    from local_operator.compaction.tokens import estimate_tokens
+
+    summarizer = _Summarizer("Prior work summarized.")
+    settings = CompactionSettings(keep_recent_tokens=sum(estimate_tokens(m) for m in history[3:]))
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=settings,
+        summarize=summarizer,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert result.ran, result.reason
+    assert len(summarizer.prompts) == 1
+    assert call in result.messages and result_message in result.messages
+    # Continue the same real pipeline with new work, rather than only asserting
+    # the first selector returned a legal integer.
+    continued = await run_compaction_pass(
+        [
+            *result.messages,
+            Message.user("new task " * 200),
+            Message.assistant("new answer " * 200),
+            Message.user("latest"),
+        ],
+        model=_model(),
+        settings=settings,
+        summarize=summarizer,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert continued.ran, continued.reason
+    assert len(summarizer.prompts) == 2
