@@ -34,10 +34,6 @@ def empty_sessions(*, source: str) -> Msg:
     return Msg("tui.import.empty_sessions", {"source": source})
 
 
-def empty_store() -> Msg:
-    return Msg("tui.import.empty_store", {})
-
-
 def error_busy() -> Msg:
     return Msg("tui.import.error_busy", {})
 
@@ -80,6 +76,10 @@ def hint_back() -> Msg:
 
 def hint_cancel() -> Msg:
     return Msg("tui.import.hint_cancel", {})
+
+
+def hint_confirm() -> Msg:
+    return Msg("tui.import.hint_confirm", {})
 
 
 def hint_import() -> Msg:
@@ -128,10 +128,6 @@ def loading_sources() -> Msg:
 
 def metadata_only_explain() -> Msg:
     return Msg("tui.import.metadata_only_explain", {})
-
-
-def no_sessions(*, source: str) -> Msg:
-    return Msg("tui.import.no_sessions", {"source": source})
 
 
 def no_sources() -> Msg:
@@ -194,8 +190,8 @@ def preview_confirm() -> Msg:
     return Msg("tui.import.preview_confirm", {})
 
 
-def preview_confirm_short() -> Msg:
-    return Msg("tui.import.preview_confirm_short", {})
+def preview_confirm_metadata() -> Msg:
+    return Msg("tui.import.preview_confirm_metadata", {})
 
 
 def preview_header() -> Msg:
@@ -211,6 +207,10 @@ def preview_memory(*, records: int | float, tokens: str, global_tokens: str) -> 
 
 def preview_narrow(*, count: int | float) -> Msg:
     return Msg("tui.import.preview_narrow", {"count": count})
+
+
+def preview_narrow_metadata(*, count: int | float) -> Msg:
+    return Msg("tui.import.preview_narrow_metadata", {"count": count})
 
 
 def preview_summary(*, s: int | float, m: int | float, c: int | float) -> Msg:
@@ -237,6 +237,18 @@ def rerun_hint() -> Msg:
     return Msg("tui.import.rerun_hint", {})
 
 
+def result_detail(*, outcome: str, messages: int | float) -> Msg:
+    return Msg("tui.import.result_detail", {"outcome": outcome, "messages": messages})
+
+
+def result_head(*, source_id: str, target: str) -> Msg:
+    return Msg("tui.import.result_head", {"source_id": source_id, "target": target})
+
+
+def result_head_no_target(*, source_id: str) -> Msg:
+    return Msg("tui.import.result_head_no_target", {"source_id": source_id})
+
+
 def result_header() -> Msg:
     return Msg("tui.import.result_header", {})
 
@@ -245,20 +257,6 @@ def result_memory(*, imported: str, skipped: str, redactions: str) -> Msg:
     return Msg(
         "tui.import.result_memory",
         {"imported": imported, "skipped": skipped, "redactions": redactions},
-    )
-
-
-def result_row(*, source_id: str, target: str, outcome: str, messages: int | float) -> Msg:
-    return Msg(
-        "tui.import.result_row",
-        {"source_id": source_id, "target": target, "outcome": outcome, "messages": messages},
-    )
-
-
-def result_row_no_target(*, source_id: str, outcome: str, messages: int | float) -> Msg:
-    return Msg(
-        "tui.import.result_row_no_target",
-        {"source_id": source_id, "outcome": outcome, "messages": messages},
     )
 
 
@@ -301,10 +299,6 @@ def selected_count(*, count: str) -> Msg:
     return Msg("tui.import.selected_count", {"count": count})
 
 
-def session_cwd(*, cwd: str) -> Msg:
-    return Msg("tui.import.session_cwd", {"cwd": cwd})
-
-
 def session_header(*, source: str) -> Msg:
     return Msg("tui.import.session_header", {"source": source})
 
@@ -338,10 +332,6 @@ def source_no_detail() -> Msg:
 
 def source_not_found() -> Msg:
     return Msg("tui.import.source_not_found", {})
-
-
-def source_path(*, path: str) -> Msg:
-    return Msg("tui.import.source_path", {"path": path})
 
 
 def source_row(*, label: str, count: int | float, availability: str) -> Msg:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -307,23 +308,25 @@ async def test_cancel_command_reattaches_and_arms_the_poll(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_end_and_arrow_keep_the_cursor_in_a_long_list() -> None:
-    _seed_many_omp()
+@pytest.mark.parametrize("count", [41, 1203])
+async def test_end_and_arrow_show_the_full_last_row(count) -> None:
+    _seed_many_omp(count)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         view = await _open_omp(pilot)
         view.action_jump(1)
         await pilot.pause()
-        assert view._session_index == 11
+        index = count - 1
+        assert view._session_index == index
         offsets = [2 + (1 if row.cwd else 0) for row in view._sessions]
-        top = sum(offsets[:11])
+        top = view._body_leading_lines() + sum(offsets[:index])
         y = view._body.scroll_offset.y
         height = view._body.size.height
-        assert y <= top < y + height
+        assert top + offsets[index] <= y + height
         view.action_move(1)  # clamped at the last row
         await pilot.pause()
-        assert view._session_index == 11
+        assert view._session_index == index
 
 
 @pytest.mark.asyncio
@@ -340,7 +343,12 @@ async def test_long_titles_are_one_clipped_line_at_every_width(size) -> None:
         title_lines = [line for line in lines if "long synthetic title" in line or "…" in line]
         assert len(title_lines) >= 1
         assert all(cell_len(line) <= view._line_width() for line in lines)
-        assert any("2026-01-02" in line and "…" in line for line in title_lines)
+        # The fixture's timestamp crosses a UTC date boundary; assert the
+        # rendered date SHAPE rather than one timezone's calendar date (Q-8).
+        assert any(
+            "…" in line and re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", line)
+            for line in title_lines
+        )
         assert view._pane.display is (size[0] >= 100)
 
 
@@ -354,15 +362,36 @@ async def test_source_and_session_rows_are_clickable() -> None:
         await pilot.pause()
         view = await _open_import(pilot)
         body = view._body
-        event = SimpleNamespace(
-            button=1,
-            screen_x=body.region.x + 2,
-            screen_y=body.region.y + 4,
-            stop=lambda: None,
-        )
-        view.on_click(event)
-        await _settle(pilot, lambda: view._state == "sessions")
-        assert view._source == "omp"
+        leading = view._body_leading_lines()
+
+        def click_line(line: int) -> None:
+            view.on_click(
+                SimpleNamespace(
+                    button=1,
+                    screen_x=body.region.x + 2,
+                    screen_y=body.region.y + line - body.scroll_offset.y,
+                    stop=lambda: None,
+                )
+            )
+
+        # Every source card, including the last one, opens its own source.
+        for index, source in enumerate(("claude", "codex", "omp")):
+            click_line(leading + index * 2)
+            await pilot.pause()
+            await _settle(
+                pilot,
+                lambda: view._state in ("sessions", "empty"),
+            )
+            assert view._source == source
+            if source != "omp":
+                await pilot.press("escape")
+                await _settle(pilot, lambda: view._state == "sources")
+
+        # Session title, meta and cwd lines all resolve to their own row.
+        for line, expected in ((leading, 0), (leading + 4, 1), (leading + 5, 1)):
+            click_line(line)
+            await pilot.pause()
+            assert view._session_index == expected
 
 
 def test_selection_count_is_outside_the_body_and_a_toggles_both_ways() -> None:
@@ -469,3 +498,104 @@ def test_preview_paints_memory_counts() -> None:
     body = view._body_rich().plain
     assert "2 memory records" in body
     assert "1,234 tokens" in body
+
+
+def test_preview_warning_total_and_wrapped_tail() -> None:
+    from types import SimpleNamespace
+
+    from local_operator.harness_import.types import ImportRequest
+
+    view = HarnessImportView()
+    view._request = ImportRequest(sources=["omp"], session_ids={"omp": ["s"]})
+    view._selected = {"s"}
+    view._preview = SimpleNamespace(
+        total_sessions=1,
+        total_messages=8,
+        total_compactions=1,
+        total_memory_records=0,
+        projected_memory_tokens=0,
+        projected_global_tokens=0,
+        warnings=[
+            SimpleNamespace(message=f"warning {index} with an actionable tail")
+            for index in range(10)
+        ],
+    )
+    view._state = "preview"
+    body = view._body_rich().plain
+    assert "10 warnings" in body
+    assert "warning 0 with an actionable tail" in body
+    assert "warning 3" in body
+    assert "warning 4" not in body
+
+
+def test_one_failure_is_rendered_and_counted_once() -> None:
+    from types import SimpleNamespace
+
+    from local_operator.harness_import.types import (
+        ImportProgress,
+        ImportRequest,
+        ImportResult,
+        ImportWarning,
+        SessionResult,
+    )
+
+    view = HarnessImportView()
+    request = ImportRequest(sources=["omp"], session_ids={"omp": ["s1"]})
+    result = ImportResult(
+        job_id="job",
+        state="failed",
+        warnings=[
+            ImportWarning(
+                source="omp",
+                session_id="s1",
+                code="import_failed",
+                message="OSError: source disappeared",
+            )
+        ],
+        sessions=[
+            SessionResult(
+                source="omp",
+                source_id="s1",
+                outcome="failed",
+                warnings=["OSError: source disappeared"],
+            )
+        ],
+    )
+    view._job = SimpleNamespace(
+        result=result,
+        progress=ImportProgress(job_id="job", state="failed"),
+        job_id="job",
+        request=request,
+    )
+    view._state = "result"
+    body = view._body_rich().plain
+    assert body.count("OSError: source disappeared") == 1
+    assert "1 warning" in body
+    assert "2 warnings" not in body
+
+
+def test_result_row_is_two_lines_and_keeps_outcome_and_count() -> None:
+    view = HarnessImportView()
+    row = {
+        "source_id": "omp-synthetic-with-a-long-identifier",
+        "target_session_id": "e0bb9751a4e6",
+        "outcome": "skipped_already_imported",
+        "messages": 7,
+    }
+    lines = view._result_row(row).splitlines()
+    assert len(lines) == 2
+    assert "already imported" in lines[1]
+    assert "7 messages" in lines[1]
+    assert "…" not in lines[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size,visible", [((80, 24), True), ((60, 20), False)])
+async def test_move_hint_uses_the_width_budget(size, visible) -> None:
+    _seed_omp()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_omp(pilot)
+        await pilot.pause()
+        assert view._hint_move.display is visible

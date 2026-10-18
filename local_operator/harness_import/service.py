@@ -503,8 +503,8 @@ class HarnessImportService:
         target_id = directory.name
         outcome.target_session_id = target_id
         mapped = mapped or self._map(adapter, session)
-        # A cancellation can land after the target directory exists but before
-        # one row is committed (the 200k-message cancel case). Leaving
+        # A cancellation or any write failure can land after the target
+        # directory exists but before one row is committed. Leaving
         # created_at/title/partial-manifest there advertises an empty session
         # that no listing will ever show. Remove only a directory THIS call
         # created and only while it still has no transcript; a partial import
@@ -543,7 +543,7 @@ class HarnessImportService:
                     predecessor=predecessor,
                 ),
             )
-        except _ImportCancelled:
+        except Exception:
             if created_here and not (directory / "transcript.jsonl").exists():
                 shutil.rmtree(directory, ignore_errors=True)
             raise
