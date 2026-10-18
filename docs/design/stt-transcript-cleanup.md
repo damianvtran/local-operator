@@ -31,9 +31,10 @@ surface sees it. Two levers exist, and the evidence says they are not equal:
    this covers English and French only; CJK, Arabic, Hindi/Urdu and other scripts are
    deliberately untouched by client rules. This is the only lever that can help the
    **Radient** rung, and it needs a language hint to remove fillers; the phone web
-   client supplies `navigator.language` in slice 3 (the daemon already accepts the
-   form field). Without a hint the token rules no-op, while the closed cue lexicon
-   still removes non-text cues because cue labels are provider vocabulary.
+   client supplies `navigator.language` in slice 3, normalised to the primary
+   subtag before it reaches Radient (the daemon already accepts the form field).
+   Without a hint the token rules no-op, while the closed cue lexicon still removes
+   non-text cues because cue labels are provider vocabulary.
 
 The first implementation slice is the shared cleanup module plus the provider-native
 ElevenLabs request fields, provenance and raw-text carrying, with tests. It does not
@@ -285,9 +286,13 @@ form field already exists). The hint is **normalised at the daemon boundary to t
 primary subtag** (`en-US` -> `en`, `zh-Hans` -> `zh`) before it reaches either the
 rule key or Radient's `language` field, whose documented shape is ISO-639-1. The
 provider's ISO-639-3 labels map to the same keys (`eng` -> `en`, `fra` -> `fr`); an
-unmapped or unknown value is a no-op. The hinted `/api/transcribe` test asserts the
-Radient wire value is `en`, not `en-US`. Without any hint, token rules do nothing;
-the cue lexicon still runs because its labels are provider vocabulary.
+unmapped or unknown value is a no-op. The wire guard is stricter than the rule
+key: `fil-PH` normalises to the three-letter `fil`, which is not ISO-639-1, so the
+Radient `language` field is forwarded only when the value matches `^[a-z]{2}$`;
+otherwise the field is omitted and the provider auto-detects. The hinted
+`/api/transcribe` test asserts the Radient wire value is `en`, not `en-US`.
+Without any hint, token rules do nothing; the cue lexicon still runs because its
+labels are provider vocabulary.
 
 Token sets (v1):
 
@@ -403,7 +408,7 @@ Fixtures per language, each with a positive and a negative control:
 | en hyphen | `uh-huh, that works` | byte-identical (hyphen guard) |
 | NFD accent | `uh\u0301` | byte-identical; the combining mark blocks the token boundary (no split) |
 | ZWJ/ZWNJ | `uh\u200d` / `\u200cuh` | byte-identical; joiners preserved |
-| RTL control | `U+200F uh U+200F` (RLM around the token) | token removed; both U+200F controls preserved |
+| RTL control | `U+200FuhU+200F` (RLM immediately before and after `uh`, no spaces) | `uh` removed; both U+200F controls preserved; no separator whitespace involved |
 | Arabic diacritic | `أُمّي` (with harakat) | byte-identical; no mark or letter removed |
 | en abbreviations | `UM and UH are universities.` | byte-identical (all-caps guard) |
 | en quote | `He said "uh" and left.` | byte-identical inside quotes |
@@ -468,10 +473,12 @@ Fixtures per language, each with a positive and a negative control:
    quote/code/all-caps guards, span deletion, multilingual fixtures and negative
    controls, idempotency, `off` byte-equality. Wire into `auto`/`client` for **both
    Radient adapters** (`_run_radient_rung` and `_transcribe_radient_sync`) and the
-   OpenAI rung; have the phone web client send `navigator.language` as the caller
-   hint; carry `language_probability` so the language gate is real, and no-op the
-   token rules (not cue removal) when the caller supplied no language and the
-   provider's label is weak. Add a
+   OpenAI rung; have the phone web client send `navigator.language`, normalised to
+   the primary subtag before it reaches either consumer; forward it to Radient's
+   `language` field only when the normalised value matches `^[a-z]{2}$`, otherwise
+   omit the field; carry `language_probability` so the language gate is real, and
+   no-op the token rules (not cue removal) when the caller supplied no language and
+   the provider's label is weak. Add a
    `POST /api/transcribe` Radient-rung integration test for both the hinted and
    unhinted cases.
 4. **Settings surface.** `speech.transcription.cleanup` in `/settings` (enum,
