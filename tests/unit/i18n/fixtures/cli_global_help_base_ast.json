@@ -1,0 +1,27 @@
+{
+  "base": "786b95b7ae5eaaecb2db5bd34e64e4dc893d00f1",
+  "messages": {
+    "cli.global_help.debug": "Enable debug mode for verbose output",
+    "cli.global_help.agent": "Select a legacy named agent (creates it if missing). Without --train, use a separate persisted session; exec --profile attaches a reusable role instead.",
+    "cli.global_help.train": "Use the legacy agent history directory (or an autosave agent) instead of a separate session. Ordinary sessions are also persisted and resumable; --resume takes precedence over this directory selection.",
+    "cli.global_help.description": "\n    Local Operator - An environment for agentic AI models to perform tasks on the local device.\n\n    Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi\n    and Alibaba. Features include interactive chat, safe code execution,\n    context-aware conversation history, and built-in safety checks.\n\n    Configure your preferred model and hosting platform via command line arguments. Your\n    configuration file is located at ~/.local-operator/config.yml and can be edited directly.\n",
+    "cli.global_help.resume": "Resume a previous session by id, replaying its transcript. The id is the one printed when a session is stopped with Ctrl+C twice, and is the directory name under ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent session.",
+    "cli.global_help.version": "Show program's version number and exit",
+    "cli.global_help.hosting": "Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+    "cli.global_help.model": "Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, the provider's suggested model is used.",
+    "cli.global_help.run_in": "The working directory to run the operator in.  Must be a valid directory.",
+    "cli.global_help.yolo": "Auto-approve all tool executions (read/write/exec tiers) without prompting",
+    "cli.global_help.no_tui": "Disable the full-screen TUI; use the plain headless REPL instead",
+    "cli.global_help.tui": "Force the full-screen TUI even when stdout is not a tty (errors clearly if the TUI cannot run without a tty)",
+    "cli.global_help.yolo_conditional": "Conditional for this verb's peer create: the session starts unattended only when the target device grants this one the `unattended` capability",
+    "cli.global_help.propagated_resume": "Resume a previous session by id. Pass with no id for the most recent.",
+    "cli.global_help.propagated_hosting": "Hosting platform for this run (e.g. anthropic, openai, openrouter)",
+    "cli.global_help.propagated_model": "Model to use for this run",
+    "cli.global_help.propagated_run_in": "Working directory to run the operator in"
+  },
+  "cli_ast_sha256": "59e3a69022e45c28276322642143ee443e0524547920c6af90c10793b548a01a",
+  "description_assignment": "CLI_DESCRIPTION = \"\"\"\n    Local Operator - An environment for agentic AI models to perform tasks on the local device.\n\n    Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi\n    and Alibaba. Features include interactive chat, safe code execution,\n    context-aware conversation history, and built-in safety checks.\n\n    Configure your preferred model and hosting platform via command line arguments. Your\n    configuration file is located at ~/.local-operator/config.yml and can be edited directly.\n\"\"\"",
+  "propagator_ast_sha256": "38ba8b6f006ccd866d8a094655291a11cabeb1e163784ffa33dbd0019a1a2c87",
+  "description_index": 61,
+  "root_calls_ast_sha256": "3648187925041cc9bea97ad181acdb99c5798a2dda4619e3967c50eaf59f4f99"
+}
