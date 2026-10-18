@@ -1182,7 +1182,9 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
 
     Three claims, each needing the HTTP layer:
 
-    1. a pin WRITE publishes exactly one catalogue frame, within the probe interval;
+    1. a pin WRITE publishes exactly one catalogue frame (awaited as a fact —
+       see ``_await_frames`` for why a post-ack window cannot attribute it, and
+       why the guard is a backstop rather than a bound);
     2. a QUIET window publishes none — otherwise the feed would refetch every
        sidebar on the machine once a second for nothing;
     3. a client connecting AFTER the write is not REPLAYED it, because the frame is
@@ -1216,9 +1218,12 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
             return [frame for frame in streamed[since:] if frame["type"] == "catalogue"]
 
         try:
-            # The feed's own first probe publishes one catalogue frame as the
-            # token is established, so it is DRAINED rather than asserted away:
-            # the windows below have to be attributable to the pin.
+            # The CONNECTION BOUNDARY establishes the catalogue token
+            # (``_take_baseline`` primes it), and priming publishes NOTHING — the
+            # feed announces changes after connect, not state, so nothing
+            # catalogue-shaped arrives here in a healthy run. The sleep stays as
+            # slack so the windows below are attributable to the first write
+            # alone.
             await asyncio.sleep(2.5)
 
             # (2) A quiet window publishes NOTHING catalogue-shaped.
@@ -1226,8 +1231,11 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
             await asyncio.sleep(2.5)
             assert catalogues(quiet_from) == [], streamed[quiet_from:]
 
-            # (1) The write, and the frame it owes within the probe interval plus
-            # slack (a little over 2 x CATALOGUE_PROBE_INTERVAL_S).
+            # (1) The pin write, and the frame it owes. The baseline is taken
+            # BEFORE the write: the frame is owed the moment the write lands,
+            # and `_await_frames` carries why a post-ack sample cannot
+            # attribute it.
+            wrote_from = len(streamed)
             pinned = await client.post(
                 f"/v1/desktop/sessions/{session_id}/pin", json={"pinned": True}
             )
@@ -1241,9 +1249,9 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
                 [session_id, her_id]
             )
 
-            wrote_from = len(streamed)
-            await asyncio.sleep(2.5)
-            published = catalogues(wrote_from)
+            published = await _await_frames(
+                streamed, "catalogue", since=wrote_from, what="the pin write"
+            )
             assert len(published) == 1, streamed[wrote_from:]
             revision = published[0]["payload"]["revision"]
 
