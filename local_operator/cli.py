@@ -59,8 +59,10 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_hub_help as _hu
 from local_operator.i18n.keys import cli_mcp_help as _mh
 from local_operator.i18n.keys import cli_mobile_help as _mb
 from local_operator.i18n.keys import cli_sessions_help as _sh
@@ -427,123 +429,119 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # Agents command
-    agents_parser = subparsers.add_parser("agents", help="Manage agents", parents=[parent_parser])
+    agents_parser = subparsers.add_parser(
+        "agents", help=_ag.agents().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
     agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
     list_parser = agents_subparsers.add_parser(
-        "list", help="List all agents", parents=[parent_parser]
+        "list", help=_ag.list().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     list_parser.add_argument(
         "--page",
         type=int,
         default=1,
-        help="Page number to display (default: 1)",
+        help=_ag.list_page().envelope(locale=help_locale)["text"],
     )
     list_parser.add_argument(
         "--perpage",
         type=int,
         default=10,
-        help="Number of agents per page (default: 10)",
+        help=_ag.list_perpage().envelope(locale=help_locale)["text"],
     )
     create_parser = agents_subparsers.add_parser(
-        "create", help="Create a new agent", parents=[parent_parser]
+        "create", help=_ag.create().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     create_parser.add_argument(
         "name",
         type=str,
-        help="Name of the agent to create",
+        help=_ag.create_name().envelope(locale=help_locale)["text"],
     )
     delete_parser = agents_subparsers.add_parser(
         "delete",
-        help="Delete an agent (local by name or Radient by ID)",
+        help=_ag.delete().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     delete_group = delete_parser.add_mutually_exclusive_group(required=True)
     delete_group.add_argument(
         "--name",
         type=str,
-        help="Name of the agent to delete locally",
+        help=_ag.delete_name().envelope(locale=help_locale)["text"],
         dest="name",
     )
     delete_group.add_argument(
         "--id",
         type=str,
-        help="ID of the agent to delete from Radient",
+        help=_ag.delete_id().envelope(locale=help_locale)["text"],
         dest="agent_id",
     )
     delete_parser.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Delete an agent from this organization's workspace instead of the "
-        "public hub (Agent Hub org sharing; requires `lop login radient`)",
+        help=_ag.delete_org().envelope(locale=help_locale)["text"],
     )
     # Push command
     push_parser = agents_subparsers.add_parser(
         "push",
-        help="Push (upload) an agent to Radient; `--org` and `--hub-id` push through "
-        "the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only "
-        "with changes pending, 3 declined, 130 cancelled)",
+        help=_ag.push().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     push_group = push_parser.add_mutually_exclusive_group(required=True)
     push_group.add_argument(
         "--name",
         type=str,
-        help="Name of the agent to push to Radient",
+        help=_ag.push_name().envelope(locale=help_locale)["text"],
     )
     push_group.add_argument(
         "--id",
         type=str,
-        help="ID of the agent to push to Radient (explicit overwrite)",
+        help=_ag.push_id().envelope(locale=help_locale)["text"],
     )
     push_parser.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Publish into this organization's workspace instead of the public hub "
-        "(Agent Hub org sharing; requires `lop login radient`)",
+        help=_ag.push_org().envelope(locale=help_locale)["text"],
     )
     push_parser.add_argument(
         "--hub-id",
         type=str,
         default=None,
-        help="Republish (overwrite) this hub listing from the local agent (checks for "
-        "personal references first); needs --name (--id is a local id)",
+        help=_ag.push_hub_id().envelope(locale=help_locale)["text"],
     )
     _add_hub_publish_flags(push_parser)
     # Pull command
     pull_parser = agents_subparsers.add_parser(
-        "pull", help="Pull (download) an agent from Radient", parents=[parent_parser]
+        "pull", help=_ag.pull().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     pull_parser.add_argument(
         "--id",
         type=str,
         required=True,
-        help="ID of the agent to pull from Radient",
+        help=_ag.pull_id().envelope(locale=help_locale)["text"],
     )
     pull_parser.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Pull from this organization's workspace instead of the public hub "
-        "(Agent Hub org sharing; requires `lop login radient`)",
+        help=_ag.pull_org().envelope(locale=help_locale)["text"],
     )
     # Sync command
     sync_parser = agents_subparsers.add_parser(
         "sync",
-        help="Update installed starters and hub-pulled agents to their latest text",
+        help=_ag.sync().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     sync_group = sync_parser.add_mutually_exclusive_group()
     sync_group.add_argument(
         "--name",
         type=str,
-        help="Sync only the installed profile with this name",
+        help=_ag.sync_name().envelope(locale=help_locale)["text"],
     )
     sync_group.add_argument(
         "--all",
         action="store_true",
-        help="Sync every installed starter and hub-pulled agent (default when --name is absent)",
+        help=_ag.sync_all().envelope(locale=help_locale)["text"],
     )
     _add_hub_sync_flags(sync_parser)
     sync_parser.add_argument(
@@ -716,54 +714,60 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     hub_parser = subparsers.add_parser(
-        "hub", help="Agent Hub update status", parents=[parent_parser]
+        "hub", help=_hu.hub().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     hub_subparsers = hub_parser.add_subparsers(dest="hub_command")
     hub_status = hub_subparsers.add_parser(
         "status",
-        help="Show which pulled agents and teams have hub updates",
+        help=_hu.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    hub_status.add_argument("--json", action="store_true", help="Emit the desktop route payload")
+    hub_status.add_argument(
+        "--json", action="store_true", help=_hu.status_json().envelope(locale=help_locale)["text"]
+    )
     hub_links = hub_subparsers.add_parser(
         "links",
-        help="List every hub link (healthy or not) with its source, scope and policy",
+        help=_hu.links().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     hub_links.add_argument("--kind", choices=["agent", "team", "skill"], default=None)
-    hub_links.add_argument("--json", action="store_true", help="Emit the desktop links payload")
+    hub_links.add_argument(
+        "--json", action="store_true", help=_hu.links_json().envelope(locale=help_locale)["text"]
+    )
     hub_link_group = hub_subparsers.add_parser(
         "link",
-        help="Edit one hub link's independent policy",
+        help=_hu.link().envelope(locale=help_locale)["text"],
     )
     hub_link_subparsers = hub_link_group.add_subparsers(dest="hub_link_command", required=True)
     hub_link = hub_link_subparsers.add_parser(
         "set",
-        help="Set this link's subscribe and/or auto_push policy",
+        help=_hu.link_set().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    hub_link.add_argument("link_id", help="The link id from `lop hub links`")
+    hub_link.add_argument(
+        "link_id", help=_hu.link_set_link_id().envelope(locale=help_locale)["text"]
+    )
     hub_link.add_argument(
         "--subscribe",
         choices=["true", "false"],
         default=None,
-        help="Unattended inbound synchronization for this link",
+        help=_hu.link_set_subscribe().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument(
         "--auto-push",
         choices=["true", "false"],
         default=None,
-        help="Unattended outbound publication for this link",
+        help=_hu.link_set_auto_push().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument(
         "--expected-revision",
         default=None,
-        help="The policy revision you last saw (CAS); omitted reads it fresh first",
+        help=_hu.link_set_expected_revision().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument(
         "--confirm-public-egress",
         action="store_true",
-        help="Explicit consent to publish authored changes to a PUBLIC origin",
+        help=_hu.link_set_confirm_public_egress().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument("--json", action="store_true")
 
