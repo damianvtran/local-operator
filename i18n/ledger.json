@@ -1330,6 +1330,614 @@
       },
       "status": "passed",
       "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "81b18d3d6b7e10419262b2ea97a4dfc423779be6d82b872dbf04209704c2bfe3",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator (session c37c11f4fcab)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cfaba0095633)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2592 independent fr audit: round 1 FAIL (T1 major, T2-T4 minor, T5 nit); all T1-T5 fixed by d00c94d; round 2 PASS on d00c94da27c109b9d1a1c11f3ae91e5af2e9dca0. Full initial scope 32 files/409 keys, all 196 high-visibility keys; delta audit 10 files/11 values. Zero unresolved blocker/major. Translator actual deepseek/deepseek-flash, no fallback; auditor actual openai/gpt-6.1-sol after disclosed Anthropic quota fallback. Round 1 comment 6249540057; round 2: https://github.com/damianvtran/local-operator/pull/2592#issuecomment-6249597453. Historical findings preserved here and in PR comments; overflow risk documented, no observed French-prose clipping in supplied captures."
     }
   ]
 }

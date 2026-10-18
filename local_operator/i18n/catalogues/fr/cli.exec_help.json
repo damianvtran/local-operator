@@ -1,0 +1,22 @@
+{
+  "cli.exec_help.agent_id": "ID de l’agent à utiliser pour cette exécution (alternative à --agent par nom)",
+  "cli.exec_help.background": "Détacher la tâche : lancer un processus d’arrière-plan avec un fichier de log et rendre la main immédiatement",
+  "cli.exec_help.clear_goal": "Effacer l’objectif permanent repris",
+  "cli.exec_help.command": "Prompt littéral ; ''-'' ou omis avec stdin redirigé lit stdin ; facultatif pour une boucle",
+  "cli.exec_help.control": "Router les approbations et les questions vers un superviseur attaché (peut attendre). Sans cette option, les approbations hors TTY sont refusées ; la découverte et le rattachement en direct restent disponibles dans les deux cas. --yolo reste une dérogation d’approbation explicite.",
+  "cli.exec_help.effort": "Régler l’effort de raisonnement ; vérifié selon les capacités du modèle sélectionné",
+  "cli.exec_help.goal": "Définir un objectif permanent littéral. Contrairement à /goal dans la TUI, le texte n’est PAS aussi envoyé comme message : associez-le à un prompt ou à --loop",
+  "cli.exec_help.json": "Émettre une ligne JSON par événement d’agent au lieu du texte final",
+  "cli.exec_help.loop": "Exécuter N itérations de continuation après le prompt facultatif ; nécessite un objectif permanent",
+  "cli.exec_help.loop_goal": "Continuer et évaluer cet objectif jusqu’à ce qu’il soit atteint (sans nombre d’itérations fixe)",
+  "cli.exec_help.name": "Définir le nom de conversation persisté",
+  "cli.exec_help.output_format": "Imposer le format de la réponse FINALE de l’assistant. L’exécution échoue (sortie 1) si aucune charge utile valide n’est produite dans --output-retries. Par défaut : aucune contrainte — le comportement est inchangé.",
+  "cli.exec_help.output_retries": "Nombre maximal de tentatives après une réponse finale invalide (0-5 ; par défaut 2). Nécessite --output-format.",
+  "cli.exec_help.output_schema": "Fichier JSON Schema auquel la charge utile JSON/YAML/TOML décodée doit satisfaire. Pour --output-format markdown : un objet JSON '{'''required_sections'': [...]'}'. Nécessite --output-format.",
+  "cli.exec_help.profile": "Attacher un rôle ou un spécialiste réutilisable (équivalent de /agent ; pas l’ancien --agent)",
+  "cli.exec_help.status": "Lire l’état d’une tâche d’arrière-plan durable en JSON ; ne démarre pas de session",
+  "cli.exec_help.supervisor_fd": "Écrire la capacité opérateur de cette exécution dans ce descripteur hérité, afin que le superviseur tenant l’autre extrémité puisse APPROUVER les cartes que cette exécution met en attente (étape E). Nécessite --control ; refusé avec --background. Numéros de descripteur uniquement — la valeur ne touche jamais argv, l’environnement ni un fichier.",
+  "cli.exec_help.team": "Attacher une équipe enregistrée avec son manager, son effectif et ses briefs",
+  "cli.exec_help.tools": "Outils accessibles à cette exécution, séparés par des virgules, et les SEULS. Les outils exclus sont inaccessibles, pas seulement non approuvés. La déclaration vaut APPROBATION pour ses propres membres uniquement là où personne ne peut être consulté — une exécution hors TTY sans --control ; sur un terminal, et sous --control, chaque appel d’écriture ou d’exécution reste décidé par la barrière d’approbation. Un nom absent de ce build est inaccessible et signalé",
+  "cli.exec_help.workstream": "Publier cette exécution comme WORKSTREAM parallèle de longue durée demandé par l’opérateur : elle apparaît dans la barre latérale, /resume et la liste du téléphone, porte la session qui l’a ouverte, et peut être suivie et pilotée. Sans cela, une exécution ouverte par un agent reste éphémère : invisible partout et silencieuse. Ne change que la visibilité de la ligne, jamais la gestion des approbations (associez --control pour cela). N’écrit rien en dehors du shell d’un agent"
+}

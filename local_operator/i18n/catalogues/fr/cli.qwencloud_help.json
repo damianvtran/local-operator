@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "Stocker le cookie de session de la console QwenCloud que lit /usage",
+  "cli.qwencloud_help.set": "Stocker le cookie ; la valeur est lue depuis STDIN, jamais depuis argv",
+  "cli.qwencloud_help.status": "Indiquer si un cookie est stocké et son âge ; jamais sa valeur",
+  "cli.qwencloud_help.rm": "Supprimer le cookie stocké",
+  "cli.qwencloud_help.migrate": "Déplacer un ticket en clair vers le coffre d’identifiants chiffré"
+}
