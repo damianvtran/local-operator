@@ -73,6 +73,30 @@ def test_the_tail_is_spoken_in_the_first_person_and_rides_inside_the_cap() -> No
     assert len(body) >= 20
 
 
+def test_the_tail_is_never_clipped_even_when_the_cut_has_no_whitespace() -> None:
+    """A cap must not eat the tail's final full stop (review N5).
+
+    With no whitespace inside the window there is no word boundary, so the cut
+    is the whole window; the full stop added to end that cut then made the
+    assembled string one character over, and slicing it to the cap removed the
+    TAIL's own full stop. The listener, who cannot see the cut, lost the only
+    sign that the reply had stopped. Unbroken tokens and unspaced CJK text are
+    the two shapes that reach the branch, so both are swept across the cap
+    range rather than spot-checked.
+    """
+    unbroken = "x" * 500
+    unspaced = "这是一段没有任何空格的中文文本，用来测试截断的行为。" * 20
+    # Up to the shorter sample's length: above it the text is not truncated at
+    # all, and the branch under test is never reached.
+    for cap_value in range(sp.MIN_MAX_SPOKEN_CHARS, len(unbroken)):
+        for source in (unbroken, unspaced):
+            result = sp.speakable(source, max_chars=cap_value)
+            assert result.truncated
+            assert len(result.text) <= cap_value
+            assert result.text.endswith(sp.TRUNCATION_TAIL), (cap_value, result.text[-60:])
+            assert result.text.endswith(".")
+
+
 def test_the_cap_falls_back_to_a_word_boundary() -> None:
     text = "word " * 400
     result = sp.speakable(text, max_chars=150)

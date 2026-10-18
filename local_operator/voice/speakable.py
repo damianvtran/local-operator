@@ -121,12 +121,22 @@ def cap(text: str, max_chars: int) -> Speakable:
     """
     if len(text) <= max_chars:
         return Speakable(text=text, truncated=False)
-    budget = max(0, max_chars - len(TRUNCATION_TAIL) - 1)
-    window = text[:budget]
+    # Room for the answer, with the tail RESERVED out of the budget and joined
+    # after. The assembled string is never sliced: a no-whitespace window takes
+    # the whole budget, the full stop added to end it costs one more character,
+    # and a final ``[:max_chars]`` therefore used to remove the tail's own full
+    # stop — the listener's only sign that the reply stopped.
+    room = max_chars - len(TRUNCATION_TAIL) - 1
+    if room <= 0:
+        # Unreachable through the route (the registry floor is 100), but ``cap``
+        # is pure and callable with anything: there is no room for an answer, so
+        # the announcement stands alone, still inside the promise.
+        return Speakable(text=TRUNCATION_TAIL[: max(0, max_chars)], truncated=True)
+    window = text[:room]
     ends = [match.end() for match in _SENTENCE_END.finditer(window)]
     # A sentence boundary in the back half wins; one near the start would
     # throw most of the budget away, so a word boundary is better there.
-    if ends and ends[-1] >= budget // 2:
+    if ends and ends[-1] >= room // 2:
         cut = window[: ends[-1]]
     else:
         space = window.rfind(" ")
@@ -134,8 +144,13 @@ def cap(text: str, max_chars: int) -> Speakable:
     cut = cut.rstrip(" ,;:-")
     if cut and cut[-1] not in ".!?":
         cut += "."
+    # The tail outranks the answer: the cut loses its last character rather than
+    # the tail losing its full stop (in practice only the no-whitespace case,
+    # whose added period is exactly the one character over).
+    if len(cut) + 1 + len(TRUNCATION_TAIL) > max_chars:
+        cut = cut[:-1].rstrip(" ,;:-")
     spoken = f"{cut} {TRUNCATION_TAIL}".strip()
-    return Speakable(text=spoken[:max_chars], truncated=True)
+    return Speakable(text=spoken, truncated=True)
 
 
 def speakable(text: str, *, max_chars: int = DEFAULT_MAX_SPOKEN_CHARS) -> Speakable:
