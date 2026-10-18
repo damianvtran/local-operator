@@ -1,6 +1,7 @@
 """Native relay/PeerLink sockets, two isolated homes, no live mesh mutation."""
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -516,3 +517,107 @@ def test_offline_return_restarts_real_relay_same_roots_and_catches_up(devices, m
         )
     finally:
         returned.stop()
+
+
+class _StubMemoryLink:
+    """A link that answers memory frames with canned payloads, no socket.
+
+    This is the reviewer/QA shape that exposed the silent refusal: `_push_to_peer`
+    talks to the peer only through `link.request`, so a stub is honest here — the
+    assertion is about what the RECEIPT keeps, not about the transport.
+    """
+
+    def __init__(self, answers: list[dict[str, Any]]) -> None:
+        self.capabilities = (wire.MEMORY_SYNC_V1,)
+        self.network_id = "n_memory_stub"
+        self.answers = list(answers)
+        self.frames: list[dict[str, Any]] = []
+
+    def request(self, frame: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
+        self.frames.append(frame)
+        return self.answers.pop(0)
+
+
+def _memory_server(root: Path) -> Any:
+    from local_operator.network import relay
+
+    return relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+
+
+def _stub_memory_sync(server: Any, link: _StubMemoryLink, monkeypatch: pytest.MonkeyPatch) -> None:
+    from argparse import Namespace
+
+    monkeypatch.setattr(memory, "settings", lambda root: (True, list(memory.SCOPES), []))
+    monkeypatch.setattr(server, "_ensure_link", lambda device_id: link)
+    monkeypatch.setattr(server, "_next_relay_req", lambda: 1)
+    # The push batch is built for the active origins; a one-member namespace is
+    # enough and keeps this test off the network store entirely.
+    monkeypatch.setattr(
+        memory.network_store,
+        "load",
+        lambda *args, **kwargs: Namespace(active_members=lambda: [Namespace(device_id="device-a")]),
+    )
+
+
+def test_a_peer_refusal_message_reaches_the_receipt_and_status(tmp_path, monkeypatch):
+    """Round-2 MAJOR: the actionable sentence was dropped and status claimed success."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    store.put("global", {"title": "Sync proof", "body": "Durable preference for tea"})
+    server = _memory_server(tmp_path)
+    refusal = "Memory move refused: resolve the conflict on this device, then sync again."
+    link = _StubMemoryLink(
+        [
+            {
+                "op": "ack",
+                "req": 1,
+                "detail": {"v": 1, "generation": 0, "scopes": ["global"], "vector": {}},
+            },
+            {"op": "error", "req": 1, "code": "bad_memory", "message": refusal},
+        ]
+    )
+    _stub_memory_sync(server, link, monkeypatch)
+    device = "d_" + "a" * 32
+
+    result = memory.push_to_peer(server, device)
+    assert result == {
+        "ok": False,
+        "code": "bad_memory",
+        "message": refusal,
+        "batches": 0,
+    }
+    receipt = memory.peer_status(tmp_path)[0]
+    assert receipt["code"] == "bad_memory"
+    assert receipt["message"] == refusal
+
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "Peers synced: 0" in human
+    assert "1 failing" in human
+    assert device in human and "bad_memory" in human
+    # The sentence is wrapped at the row bar, so the assertion is per clause.
+    assert "Memory move" in human
+    assert "resolve the conflict on this device" in human
+
+    # A healthy answer clears the stale sentence: a recovered peer must not keep
+    # showing the failure that was just resolved.
+    monkeypatch.setattr(
+        memory, "_push_to_peer", lambda server, device_id: {"ok": True, "code": "in_sync"}
+    )
+    assert memory.push_to_peer(server, device)["code"] == "in_sync"
+    recovered = memory.peer_status(tmp_path)[0]
+    assert recovered["message"] == ""
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert "Peers synced: 1" in render_human(text, failed)
+    assert "Not syncing with" not in render_human(text, failed)
+
+
+def test_bad_memory_is_a_policy_refusal_not_a_fast_retry():
+    """The refusal repeats until the conflict is resolved; 15 s retries only flood logs."""
+    from local_operator.network import definitions
+
+    assert "bad_memory" in definitions.POLICY_REFUSAL_CODES

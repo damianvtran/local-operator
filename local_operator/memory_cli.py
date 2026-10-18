@@ -481,6 +481,24 @@ def _searched_line(value: dict[str, Any], prefix: str) -> str:
     return line
 
 
+#: What the operator can DO about a non-healthy sync receipt. The peer's own
+#: refusal sentence wins when it has one (it names the exact conflict); these are
+#: the fallbacks so a code whose refusal carried no sentence is still actionable.
+_PEER_REMEDY: dict[str, str] = {
+    "bad_memory": "Resolve the named memory conflict on the refusing peer, then sync again.",
+    "peer_too_old": "Run lop-update on both peers.",
+    "refused": "Grant this device memory access on the peer.",
+    "not_authorised": "Grant this device memory access on the peer.",
+    "capability_denied": "Grant memory-sync-v1 on the peer.",
+    "not_a_member": "Re-pair this device with the peer's network.",
+    "policy": "Review the peer's memory policy.",
+    "unreachable": "The peer is offline; sync resumes when it returns.",
+    "push_failed": "A transport failure; it retries automatically.",
+    "memory_sync_failed": "A local failure while pushing; inspect `lop memory status --json`.",
+    "scope_or_version_mismatch": "Run lop-update on both peers; their memory-sync versions differ.",
+}
+
+
 def _status_text(value: dict[str, Any]) -> str:
     policy_ = value["policy"]
     sync = value["sync"]
@@ -507,8 +525,29 @@ def _status_text(value: dict[str, Any]) -> str:
                 else ""
             )
         )
+    from local_operator.network.memory import HEALTHY_PEER_CODES
+
     peers = sync.get("peers") or []
-    lines.append(f"Peers synced: {len(peers)}" + ("" if peers else " (none yet)"))
+    # A receipt that is not a healthy code is a peer whose memory stream is NOT
+    # moving. Counting it under "synced" was the round-2 defect: the operator was
+    # told everything was fine while every later op queued behind a refusal.
+    failing = [p for p in peers if str(p.get("code") or "") not in HEALTHY_PEER_CODES]
+    summary = f"Peers synced: {len(peers) - len(failing)}"
+    if peers:
+        if failing:
+            summary += f" · {len(failing)} failing"
+    else:
+        summary += " (none yet)"
+    lines.append(summary)
+    for receipt in failing:
+        device = str(receipt.get("device") or "unknown device")
+        code = str(receipt.get("code") or "unknown")
+        # The peer's own sentence names the exact conflict and the way out; the map
+        # is the fallback for a code whose refusal carried no sentence.
+        remedy = str(receipt.get("message") or "").strip() or _PEER_REMEDY.get(
+            code, "Run `lop memory status --json` for this peer's receipt."
+        )
+        lines += _shaped(f"Not syncing with {device}: {code}. {remedy}")
     usage = value["usage"]
     lines.append(
         f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
