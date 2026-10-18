@@ -352,6 +352,35 @@ def _rate_limited_error(exc: APIError) -> APIError:
     )
 
 
+def _hub_reason_error(exc: APIError) -> APIError:
+    """``exc`` with the hub's additive ``details.reason`` appended, else ``exc``.
+
+    A refused audio submit carries the server's generic sentence in
+    ``error`` and the parameter-level explanation in ``details.reason``
+    (e.g. "duration_seconds must be between 0.5 and 30 seconds, got 31").
+    Every surface that shows the failure — the single tool result and each
+    batch row, whose ``error`` is composed from the attempt messages — shows
+    ``str(exc)``, so appending the reason HERE is what makes the actionable
+    text reach them without teaching every downstream consumer about the
+    details map. The typed fields (status, code, details, body) are copied
+    unchanged: this upgrades the sentence, never the classification.
+
+    Optional by design: an older hub, a reasonless refusal, or a reason
+    already present in the message returns the exception unchanged — the
+    field is consumed additively only, never required.
+    """
+    reason = exc.details.get("reason")
+    if isinstance(reason, str) and reason.strip() and reason not in str(exc):
+        return APIError(
+            f"{exc} ({reason.strip()})",
+            status_code=exc.status_code,
+            code=exc.code,
+            details=exc.details,
+            body=exc.body,
+        )
+    return exc
+
+
 async def _submit_with_backoff(
     client: httpx.AsyncClient,
     url: str,
@@ -384,7 +413,11 @@ async def _submit_with_backoff(
             )
         except APIError as exc:
             if not _is_admission_refusal(exc):
-                raise
+                # The hub's refusal sentence is generic; its per-parameter
+                # reason rides ``details.reason``. Consume it here, at the
+                # source, so the attempt message (and every surface built
+                # from it) carries the actionable text (see the helper).
+                raise _hub_reason_error(exc) from exc
             last = exc
             if attempt >= SUBMIT_MAX_ATTEMPTS - 1:
                 break
