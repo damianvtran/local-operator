@@ -1,0 +1,14 @@
+{
+  "tui.notices.reasoning_echo_filled": "the provider refused this request for a missing reasoning echo — retrying with the echo filled in at the same effort",
+  "tui.notices.reasoning_echo_thinking_off": "the provider refused this request for a missing reasoning echo — retrying with thinking disabled",
+  "tui.notices.budget_exhausted_retry": "model spent its whole output budget thinking and produced nothing — retrying once at effort {effort} (your reasoning effort is unchanged)",
+  "tui.notices.budget_exhausted_continue": "the model spent its whole output budget thinking and produced nothing — re-asking it to continue the work",
+  "tui.notices.budget_exhausted_no_output": "the model spent its whole output budget thinking and produced no visible output ({cause}) — retry, or switch to a model with a larger output budget",
+  "tui.notices.output_limit_continuing": "the model hit the output limit — continuing the answer where it stopped",
+  "tui.notices.output_limit_cut_off": "the model hit the output limit — this answer is cut off, and the rest was never sent — ask again to continue, or narrow the request",
+  "tui.notices.output_limit_tool_call": "the model hit the output limit mid tool call — nothing was executed; re-asking it to re-emit the call in smaller pieces",
+  "tui.notices.output_limit_before_call": "the model hit the output limit before the call ran — nothing was executed; re-asking it to re-issue the call as it is",
+  "tui.notices.empty_reply": "the model''s reply arrived empty (no text, no tool calls) — re-asking it for its next action or finish",
+  "tui.notices.repeated_tool_errors": "Repeated tool errors — requesting a different approach.",
+  "tui.notices.kept_going_stopped": "This turn was stopped because it kept being asked to keep going; the pending message was dropped. Reply with what to do next."
+}
