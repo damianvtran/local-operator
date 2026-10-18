@@ -405,7 +405,7 @@ async def test_the_supervisor_line_is_one_best_effort_warning(monkeypatch) -> No
         await _boot(pilot, app)
         view = await _open(pilot, app)
         await _settle(pilot, lambda: view.supervisor_checked)
-        assert "supervisor not running" in _plain(view._notice_text)
+        assert "Nothing supervises these wakes" in _plain(view._notice_text)
         # ...and it is a NOTE, not a gate: the page still opens the form.
         await pilot.press("n")
         await pilot.pause()

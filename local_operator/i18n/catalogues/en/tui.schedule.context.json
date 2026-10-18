@@ -245,7 +245,7 @@
     "tone": "terse, operator-facing, one fact per sentence"
   },
   "tui.schedule.notice_supervisor": {
-    "note": "One-line warning: the supervised-delivery process is absent, so wakes need this conversation open.",
+    "note": "One-line state notice covering BOTH supervisor conditions — unsupported on this platform and installed-but-not-running. Names the CONVERSATION's runtime as the thing that keeps wakes firing, not the /schedule page: closing the page does not stop the runtime.",
     "role": "TUI /schedule page",
     "tone": "terse, operator-facing, one fact per sentence"
   },
