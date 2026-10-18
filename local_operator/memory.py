@@ -785,35 +785,8 @@ CREATE INDEX IF NOT EXISTS associations_locator ON associations(scope,owner,loca
 CREATE TABLE IF NOT EXISTS causal_edges(op_id TEXT,parent TEXT,PRIMARY KEY(op_id,parent));
 CREATE INDEX IF NOT EXISTS causal_edges_parent ON causal_edges(parent);
 CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n INTEGER,
- reason TEXT,refused INTEGER,PRIMARY KEY(session,compaction));
+ PRIMARY KEY(session,compaction));
 """
-
-#: Columns added to a table that may already exist on the operator's disk.
-#: ``CREATE TABLE IF NOT EXISTS`` never changes an EXISTING table, so a store created by
-#: an older release would silently keep the old shape and every write naming the new
-#: column would fail. Each entry is applied explicitly (and idempotently) in
-#: ``connection()``. Append-only, ``(table, column, declaration)``: the column is
-#: additive, nullable and carries no default, so rows written before it stay NULL and
-#: every reader that names its own columns keeps working unchanged.
-_ADDITIVE_COLUMNS = (("captures", "reason", "TEXT"), ("captures", "refused", "INTEGER"))
-
-
-def _migrate(db: sqlite3.Connection) -> None:
-    """Bring an existing store up to the current additive shape; never destructive.
-
-    A bare ``ALTER TABLE ... ADD COLUMN`` is the whole mechanism on purpose: no table
-    rewrite, no version table to drift, and a store created by this release already has
-    the column so the loop is a no-op. Two processes may race the same ALTER; the loser
-    gets "duplicate column name", which is verified rather than assumed.
-    """
-    for table, column, declaration in _ADDITIVE_COLUMNS:
-        if column in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
-            continue
-        try:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-        except sqlite3.OperationalError:
-            if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
-                raise
 
 
 class MemoryStore:
@@ -855,7 +828,6 @@ class MemoryStore:
             db.execute("PRAGMA wal_autocheckpoint=64")
             db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // 4096}")
             db.executescript(_SCHEMA)
-            _migrate(db)
         except sqlite3.Error as exc:
             db.close()
             if created:
