@@ -85,7 +85,7 @@ from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
 from local_operator.network import projection, store, wire
-from local_operator.network.audit import AuditEvent, AuditLog
+from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.credentials.repair import repair_checks
 from local_operator.network.credentials.sync import sync_checks
@@ -6071,6 +6071,28 @@ class RelayServer:
             # is the same two-part discipline at the remote seam. The AUTHORISER's
             # refusals stay codeless (see ``wire.refusal_frame``), so "which guard fired"
             # is still not something a remote peer is told.
+            #
+            # AND THE LOCAL TRACE IS WRITTEN HERE, not only implied by the peer's own
+            # receipt. A handler refusal is a semantic event on THIS device too — the
+            # operator reading `lop memory status` on the refusing side must be able to
+            # see that memory batches are being turned away and why. The cause is the
+            # refusal code where the audit vocabulary knows it (``bad_memory`` is
+            # registered for exactly this path); anything else is a policy answer.
+            self.audit.record(
+                AuditEvent(
+                    event="authorisation_refused",
+                    actor=link.device_id,
+                    subject=link.network_id,
+                    network_id=link.network_id,
+                    epoch=link.epoch,
+                    outcome="refused",
+                    cause=refusal.code if refusal.code in CAUSES else "policy",
+                    # ``granted`` is real on every production path; the getattr keeps
+                    # the refusal-shape unit tests (which pass None to prove the
+                    # branch reads neither the link nor the grant) honest.
+                    detail={"op": getattr(granted, "action", "")},
+                )
+            )
             return wire.error_from(refusal, req)
         except Exception as exc:  # noqa: BLE001 — a handler bug must not close the link
             self.audit.record(

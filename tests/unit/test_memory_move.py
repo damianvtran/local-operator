@@ -458,3 +458,23 @@ def execute_memory_sync(name, args, context):
     import asyncio
 
     return asyncio.run(execute_memory("call", name, args, context))
+
+
+def test_merge_and_forget_together_are_refused(store):
+    """A multi-parent forget is indistinguishable from a move tombstone on the wire.
+
+    No shipping surface passes both (the CLI's --resolve is correction-only), so
+    the shape is refused rather than left as a latent peer-side false positive.
+    """
+    item = store.put("global", fact("Fact whose conflict a human might resolve"))
+    head = store.show("global", item["id"])
+    with pytest.raises(MemoryError, match="cannot merge"):
+        store.put(
+            "global",
+            {},
+            entity=item["id"],
+            expected_version=head["version"],
+            forget=True,
+            merge=True,
+        )
+    assert store.show("global", item["id"])["status"] == "active"

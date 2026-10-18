@@ -1076,6 +1076,17 @@ class MemoryStore:
         list (``show``) opts in explicitly.
         """
         owner = self.identity.owner(scope)
+        if forget and merge:
+            # A merge forget builds a multi-parent tombstone, which is
+            # indistinguishable on the wire from a move's source tombstone — the
+            # peer-side move guard would refuse a legitimate forget. No shipping
+            # surface passes both (the CLI's --resolve is correction-only), so
+            # refuse the shape instead of keeping a latent false positive: resolve
+            # the conflict with an edit, then forget the revision that was read.
+            raise MemoryError(
+                "Forget cannot merge concurrent revisions. Resolve them with an edit "
+                "(--resolve), then forget the revision you read."
+            )
         if entity is not None:
             safe_segment(entity)
             if not expected_version:

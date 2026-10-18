@@ -97,10 +97,13 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
   timestamps, and records the source as `moved_from` in the destination's history.
   Moving to the scope it is already in is refused. The source entity then ends
   exactly like a forget: its own revisions are closed, not kept. A source with
-  unmerged concurrent revisions is refused, and a trusted peer holding a
-  correction the moving device never saw refuses the replication rather than
-  erase it — resolve the conflict first. Moved facts replicate to trusted peers
-  exactly like any other mutation.
+  unmerged concurrent revisions is refused. A trusted peer **running this
+  release** that holds a correction the moving device never saw refuses the
+  replication rather than erase it — resolve the conflict first. That protection
+  is version-bound: an older peer applies the move as a forget (its own unseen
+  correction is erased), and an older mover's single-parent tombstone cannot be
+  told apart from a forget even by an upgraded peer. Moved facts replicate to
+  trusted peers exactly like any other mutation.
 - Replace a separate old fact with `replaces:"OLD_ID"` on an explicit new store.
   Without that intent both facts stay visible, even near-duplicates. Superseded
   facts remain inspectable. Exact same-body/source repeats are idempotent;
