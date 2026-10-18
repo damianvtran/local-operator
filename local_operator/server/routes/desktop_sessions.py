@@ -698,15 +698,20 @@ class Pin(Input):
 
 class TagCategory(Input):
     id: str | None = None
-    name: str
+    name: str = Field(
+        description="Trimmed unique category name, 1..24 characters; Untagged is reserved."
+    )
 
 
 class TagRegistry(Input):
-    tags: list[TagCategory]
+    tags: list[TagCategory] = Field(max_length=32)
 
 
 class TagAssignment(Input):
-    tags: list[str]
+    tags: list[str] = Field(
+        max_length=8,
+        description="Existing assignment order is preserved; new tags append in this order.",
+    )
     primary: str | None
 
 
@@ -4447,7 +4452,7 @@ async def replace_tags(body: TagRegistry, request: Request):
 @router.put("/v1/desktop/sessions/{session_id}/tags", response_model=CRUDResponse[dict[str, Any]])
 async def session_tags(session_id: str, body: TagAssignment, request: Request):
     async with errors(request):
-        await _refuse_remote_write(request, session_id, noun="tags")
+        await _refuse_remote_write(request, session_id, noun="tag assignment")
         try:
             return reply(await host(request).set_tags(session_id, body.tags, body.primary))
         except ValueError as exc:

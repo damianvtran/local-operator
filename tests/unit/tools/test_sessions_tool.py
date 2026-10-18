@@ -2777,9 +2777,9 @@ async def test_a_full_id_target_names_the_peer_on_every_addressed_op(
 
 @pytest.mark.asyncio
 async def test_spawn_unknown_tags_refuses_before_any_session(root: Path, monkeypatch) -> None:
-    from local_operator.session.session_tags import write_categories
+    from local_operator.session.session_tags import read_categories, write_categories
 
-    write_categories(root, [(None, "Review")])
+    before_categories = write_categories(root, [(None, "Review")])
     before = set((root / "sessions").glob("*"))
 
     async def never_launch(*args):
@@ -2791,6 +2791,7 @@ async def test_spawn_unknown_tags_refuses_before_any_session(root: Path, monkeyp
     )
     assert result.is_error and "Known categories: Review" in result.text
     assert set((root / "sessions").glob("*")) == before
+    assert read_categories(root) == before_categories
 
 
 @pytest.mark.asyncio
@@ -2880,7 +2881,11 @@ async def test_spawn_tag_write_failure_reports_admitted_session(root: Path, monk
     result = await execute_sessions(
         "t", {"op": "spawn", "prompt": "go", "tags": ["Review"]}, None, None, _context(root)
     )
-    assert result.is_error and "synthetic write refusal" in result.text
+    assert not result.is_error and "synthetic write refusal" in result.text
+    assert "tags" not in (result.details or {})
+    assert "Review" not in result.text
+    assert "sidebar Tags… picker" in result.text
+    assert "do not repeat the spawn" in result.text
     assert (result.details or {})["session_id"] == sid
     assert (result.details or {})["tags_applied"] is False
 
@@ -3008,5 +3013,45 @@ async def test_spawn_starting_without_published_id_reports_tag_partial_success(
     assert "not published" in details["tags_error"]
     assert "lop exec --status cafebabe0001" in result.text
     assert "do not repeat the spawn" in result.text
+    assert "sidebar Tags… picker" in result.text
     assert (root / "sessions" / sid).is_dir()
     assert not (root / "tags" / "session").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["rename_before_write", "delete_after_write"])
+async def test_spawn_receipt_uses_prelaunch_category_names(
+    root: Path, monkeypatch, change: str
+) -> None:
+    from local_operator.session import session_tags
+
+    category = session_tags.write_categories(root, [(None, "Review")])[0]
+    sid = "abcdef123456"
+    real_write = session_tags.set_entity_tags
+
+    async def launch(argv, env, cwd):
+        _session(root, sid, "tagged")
+        if change == "rename_before_write":
+            session_tags.write_categories(root, [(category["id"], "Renamed")])
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    def write_then_delete(*args):
+        written = real_write(*args)
+        session_tags.write_categories(root, [])
+        return written
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.job_status",
+        lambda *args, **kwargs: {"status": "running", "session_id": sid},
+    )
+    if change == "delete_after_write":
+        monkeypatch.setattr(session_tags, "set_entity_tags", write_then_delete)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "tags": ["review"]}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert (result.details or {})["tags_applied"] is True
+    assert (result.details or {})["tags"] == ["Review"]
+    assert "tags: Review" in result.text
+    assert "Renamed" not in result.text

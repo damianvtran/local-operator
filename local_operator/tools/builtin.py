@@ -18290,6 +18290,7 @@ async def _sessions_open(
     launcher wrote.
     """
     tag_ids: list[str] | None = None
+    tag_names: dict[str, str] = {}
     if params.tags is not None:
         if str(params.peer or "").strip():
             return _error(
@@ -18298,11 +18299,16 @@ async def _sessions_open(
                 "Tags are for local sessions only; mesh tag forwarding is not "
                 "supported in this slice.",
             )
-        from local_operator.session.session_tags import resolve_category_names
+        from local_operator.session.session_tags import (
+            read_categories,
+            resolve_category_names,
+        )
 
         # Refuse before the launcher can mint a directory or admit work.
         try:
-            tag_ids = await asyncio.to_thread(resolve_category_names, config_dir(), params.tags)
+            categories = await asyncio.to_thread(read_categories, config_dir())
+            tag_ids = resolve_category_names(config_dir(), params.tags, categories=categories)
+            tag_names = {tag["id"]: tag["name"] for tag in categories}
         except ValueError as exc:
             return _error(tool_call_id, "sessions", str(exc))
     if str(params.peer or "").strip():
@@ -18433,7 +18439,7 @@ async def _sessions_open(
         "log_path": str(state.get("log") or "") or None,
     }
     if tag_ids is not None:
-        from local_operator.session.session_tags import read_categories, set_entity_tags
+        from local_operator.session.session_tags import set_entity_tags
 
         if not session_id:
             # The bounded publication grace already expired, but the launcher
@@ -18445,27 +18451,28 @@ async def _sessions_open(
                 tool_call_id,
                 "sessions",
                 f"Spawn requested (job {job_id}). {reason}. "
-                f"Follow `lop exec --status {job_id}`, then apply tags to the "
-                "published session; do not repeat the spawn to retry tags.",
+                f"Follow `lop exec --status {job_id}`. Once listed, the operator can "
+                "re-tag it from the sidebar Tags… picker; do not repeat the spawn to retry tags.",
                 details=details,
             )
         try:
             # The ledger, not argv, establishes identity. A failed durable write
             # must not turn an admitted session into a false tag-success receipt.
-            applied = await asyncio.to_thread(
+            await asyncio.to_thread(
                 set_entity_tags, config_dir(), "session", session_id, tag_ids, tag_ids[0]
             )
-            lookup = {tag["id"]: tag["name"] for tag in read_categories(config_dir())}
-            if applied["tags"] != tag_ids:
-                raise ValueError("Categories changed while applying tags")
-            details["tags"] = [lookup[key] for key in applied["tags"]]
+            # This receipt describes the successful write, not a later registry
+            # edit. Reuse the exact vocabulary snapshot validated before launch.
+            details["tags"] = [tag_names[key] for key in tag_ids]
             details["tags_applied"] = True
         except (OSError, ValueError, KeyError) as exc:
             details.update(tags_applied=False, tags_error=str(exc))
-            return _error(
+            return _text(
                 tool_call_id,
                 "sessions",
-                _sessions_open_body(params, details) + f" Tags not applied: {exc}",
+                _sessions_open_body(params, details) + f" Tags not applied: {exc}. "
+                "Once listed, the operator can re-tag it from the sidebar Tags… picker; "
+                "do not repeat the spawn to retry tags.",
                 details=details,
             )
     if params.op == "resume":
