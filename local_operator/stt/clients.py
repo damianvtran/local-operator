@@ -28,6 +28,7 @@ import httpx
 
 from local_operator.clients._http import APIError
 from local_operator.stt import audio as stt_audio
+from local_operator.stt.cleanup import RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM
 from local_operator.stt.errors import api_error_from_httpx_response
 
 #: The hosts. Overridable per instance for tests; the OpenAI default carries
@@ -55,12 +56,26 @@ DEFAULT_TRANSCRIBE_TIMEOUT_S = 60.0
 
 @dataclass(frozen=True)
 class SttClientResult:
-    """One successful transcription from one provider."""
+    """One successful transcription from one provider.
+
+    ``raw_text`` is the text before OUR cleanup layer, when a copy exists.
+    ``None`` with ``raw_unavailable`` set means the provider removed at source
+    (Scribe's ``no_verbatim``); ``None`` with an empty reason would be a bug.
+    ``cleanup`` is the provider-side provenance this call actually asked for.
+    """
 
     text: str
     #: The model id the provider actually ran (the fallback id when it fired).
     model: str
     provider: str
+    #: Text before our cleanup rules; see the class docstring.
+    raw_text: str | None = None
+    #: Why ``raw_text`` is absent; empty when a raw copy exists.
+    raw_unavailable: str = ""
+    #: The provider-detected language when it reports one.
+    language: str | None = None
+    #: Provider-side cleanup provenance (``"none"`` when no switch was sent).
+    cleanup: str = "none"
 
 
 async def _post(
@@ -167,6 +182,8 @@ class ElevenLabsSttClient:
         model: str | None = None,
         language: str | None = None,
         prompt: str | None = None,
+        no_verbatim: bool | None = None,
+        tag_audio_events: bool | None = None,
         timeout_s: float = DEFAULT_TRANSCRIBE_TIMEOUT_S,
     ) -> SttClientResult:
         """Transcribe ``audio``; raise :class:`APIError` on any upstream refusal.
@@ -177,11 +194,23 @@ class ElevenLabsSttClient:
         scope for v1. Refusing the whole rung over an optional hint would
         disable the fallback chain for a nicety, so the hint is simply not
         forwarded.
+
+        ``no_verbatim`` is Scribe v2's native filler/disfluency switch. It is
+        only sent for a ``scribe_v2*`` model (the provider documents support
+        there and only there); a caller that pinned another model gets no
+        field rather than an upstream 422. ``tag_audio_events`` is sent only
+        when explicitly asked for: the field has no documented default, so a
+        verbatim caller must not inherit a value we guessed.
         """
         model_id = model or ELEVENLABS_STT_MODEL
         data: dict[str, str] = {"model_id": model_id}
         if language:
             data["language_code"] = language
+        sends_no_verbatim = no_verbatim is not None and model_id.startswith("scribe_v2")
+        if sends_no_verbatim:
+            data["no_verbatim"] = "true" if no_verbatim else "false"
+        if tag_audio_events is not None:
+            data["tag_audio_events"] = "true" if tag_audio_events else "false"
         files = {"file": (stt_audio.filename_for_mime(mime), audio, mime)}
         response, payload = await _post_owned(
             self._client,
@@ -199,7 +228,22 @@ class ElevenLabsSttClient:
                 "ElevenLabs returned a response without transcript text.",
                 status_code=response.status_code,
             )
-        return SttClientResult(text=text, model=model_id, provider="elevenlabs")
+        # A provider-side removal leaves no raw copy: the response's ``text``
+        # and ``words`` are already cleaned (measured 2026-10-18). Record the
+        # reason explicitly so a caller cannot read ``None`` as "nothing was
+        # removed". ``no_verbatim=False`` does return the verbatim text, so the
+        # raw copy is the text itself on that path.
+        provider_removed = bool(sends_no_verbatim and no_verbatim)
+        detected = payload.get("language_code")
+        return SttClientResult(
+            text=text,
+            model=model_id,
+            provider="elevenlabs",
+            raw_text=None if provider_removed else text,
+            raw_unavailable=(RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM if provider_removed else ""),
+            language=detected if isinstance(detected, str) else None,
+            cleanup="elevenlabs.no_verbatim" if provider_removed else "none",
+        )
 
 
 class OpenAiSttClient:
@@ -265,7 +309,14 @@ class OpenAiSttClient:
                     "OpenAI returned a response without transcript text.",
                     status_code=response.status_code,
                 )
-            return SttClientResult(text=text, model=model_id, provider="openai")
+            return SttClientResult(
+                text=text,
+                model=model_id,
+                provider="openai",
+                raw_text=text,
+                language=None,
+                cleanup="none",
+            )
         # Only reachable when every candidate was skipped as model-unavailable.
         raise last or APIError("OpenAI transcription failed on every model candidate.")
 

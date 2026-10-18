@@ -7135,6 +7135,7 @@ def build_app(daemon: MobileDaemon):
                 language=_optional_field("language"),
                 prompt=_optional_field("prompt"),
                 model=_optional_field("model"),
+                cleanup=_optional_field("cleanup"),
                 availability=answer,
             )
         except SttBackendUnavailable:
@@ -7171,6 +7172,19 @@ def build_app(daemon: MobileDaemon):
                 "provider": outcome.provider,
                 "model": outcome.model,
                 "path": outcome.path,
+                "cleanup": outcome.cleanup,
+                "raw_text": outcome.raw_text,
+                "raw_unavailable": outcome.raw_unavailable,
+                "language": outcome.language,
+                "removed": [
+                    {
+                        "start": span.start,
+                        "end": span.end,
+                        "kind": span.kind,
+                        "token": span.token,
+                    }
+                    for span in outcome.removed
+                ],
             }
         )
 

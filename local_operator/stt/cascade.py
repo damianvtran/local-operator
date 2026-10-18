@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,6 +72,12 @@ from local_operator.stt import (
     SttOutcome,
 )
 from local_operator.stt import audio as stt_audio
+from local_operator.stt.cleanup import (
+    CleanupMode,
+    RemovedSpan,
+    elevenlabs_cleanup_options,
+    resolve_cleanup,
+)
 from local_operator.stt.clients import (
     DEFAULT_TRANSCRIBE_TIMEOUT_S,
     ElevenLabsSttClient,
@@ -102,6 +109,26 @@ SUPERWHISPER_REASON = (
     "SuperWhisper is reserved but unavailable: it has no non-interactive "
     "transcription interface."
 )
+
+
+@dataclass(frozen=True)
+class _RungResult:
+    """One rung's successful output, before the walk builds ``SttOutcome``.
+
+    A dataclass rather than a longer tuple: the cleanup work adds three fields
+    (raw text, its absence reason, the detected language) and a bare
+    five-tuple would make every call site count positions. ``cost``/``provider``
+    keep the PR-3 meanings they had.
+    """
+
+    text: str
+    cost: Any = None
+    provider: str = ""
+    raw_text: str | None = None
+    raw_unavailable: str = ""
+    language: str | None = None
+    cleanup: str = "none"
+    removed: tuple[RemovedSpan, ...] = ()
 
 
 class SttUnavailable(RuntimeError):
@@ -319,7 +346,7 @@ async def _run_radient_rung(
     language: str | None,
     prompt: str | None,
     correlation_session_id: str | None = None,
-) -> tuple[str, Any, str]:
+) -> _RungResult:
     """Rung 1: the existing Radient route path, off the event loop.
 
     Wrapped in ``asyncio.to_thread`` because ``RadientClient`` is sync
@@ -366,7 +393,21 @@ async def _run_radient_rung(
     except Exception:  # noqa: BLE001 — a cost parse must not fail a transcript
         cost = None
     provider = str(getattr(result, "provider", "") or "")
-    return result.text or "", cost, provider
+    # Radient's response is an extra-allow model: a provider that reports the
+    # detected language puts it in ``language`` or ``language_code``. Reading
+    # both through the dump keeps this seam independent of the vendor's
+    # spelling without widening the typed response model.
+    payload = result.model_dump() if hasattr(result, "model_dump") else {}
+    detected = payload.get("language") or payload.get("language_code")
+    text = result.text or ""
+    return _RungResult(
+        text=text,
+        cost=cost,
+        provider=provider,
+        raw_text=text,
+        language=detected if isinstance(detected, str) else None,
+        cleanup="none",
+    )
 
 
 async def _run_elevenlabs_rung(
@@ -377,20 +418,43 @@ async def _run_elevenlabs_rung(
     session_id: str | None,
     language: str | None,
     prompt: str | None,
+    cleanup: CleanupMode = "auto",
     timeout_s: float,
-) -> tuple[str, Any, str]:
-    """Rung 2: the user's own ElevenLabs key."""
+) -> _RungResult:
+    """Rung 2: the user's own ElevenLabs key.
+
+    ``cleanup`` is resolved by the caller; this runner only translates it into
+    the provider's request fields. ``auto``/``provider`` turn on Scribe v2's
+    native no-verbatim switch (and suppress audio-event tags); ``off`` sends
+    neither field, so the request stays byte-identical to the pre-cleanup
+    client. The client reports whether it actually sent the switch (a pinned
+    non-scribe_v2 model does not), and that report — not the caller's wish — is
+    the provenance the outcome carries.
+    """
     key = await store.get_api_key("elevenlabs", session_id, read_only=True)
     if not key:
         raise APIError("No ElevenLabs API key is stored.", status_code=None)
+    options = elevenlabs_cleanup_options(cleanup)
     client = ElevenLabsSttClient(key)
     result = await client.transcribe(
-        audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
+        audio,
+        mime=mime,
+        language=language,
+        prompt=prompt,
+        no_verbatim=options.no_verbatim,
+        tag_audio_events=options.tag_audio_events,
+        timeout_s=timeout_s,
     )
     # No cost object on a BYO leg: the vendor is not the hub and reports no
     # charge in this family, and the envelope that would name it is the hub's
     # only — the route knows this leg from the path itself (PR-3).
-    return result.text, None, ""
+    return _RungResult(
+        text=result.text,
+        raw_text=getattr(result, "raw_text", None),
+        raw_unavailable=getattr(result, "raw_unavailable", ""),
+        language=getattr(result, "language", None),
+        cleanup=getattr(result, "cleanup", "none") or "none",
+    )
 
 
 async def _run_openai_rung(
@@ -401,9 +465,15 @@ async def _run_openai_rung(
     session_id: str | None,
     language: str | None,
     prompt: str | None,
+    cleanup: CleanupMode = "auto",
     timeout_s: float,
-) -> tuple[str, Any, str]:
-    """Rung 3: the user's own OpenAI API key (``openai-key`` rows, never ChatGPT OAuth)."""
+) -> _RungResult:
+    """Rung 3: the user's own OpenAI API key (``openai-key`` rows, never ChatGPT OAuth).
+
+    OpenAI's transcription endpoint has no native no-verbatim switch; the
+    ``cleanup`` argument is accepted so the token executor can call every rung
+    uniformly, and client rules (a later slice) are the only lever here.
+    """
     key = await _openai_stt_key(store, session_id)
     if not key:
         raise APIError("No OpenAI API key is stored.", status_code=None)
@@ -412,8 +482,15 @@ async def _run_openai_rung(
         audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
     )
     # See the ElevenLabs rung: no cost object for a BYO leg, and no provider
-    # for the route to read — the path names it.
-    return result.text, None, ""
+    # for the route to read — the path names it. No provider-side switch was
+    # sent, so the raw copy is the returned text.
+    return _RungResult(
+        text=result.text,
+        raw_text=getattr(result, "raw_text", result.text),
+        raw_unavailable=getattr(result, "raw_unavailable", ""),
+        language=getattr(result, "language", None),
+        cleanup=getattr(result, "cleanup", "none") or "none",
+    )
 
 
 def _failed_attempt(path: AudioPath, exc: BaseException) -> SttAttempt:
@@ -461,6 +538,7 @@ async def transcribe_audio(
     language: str | None = None,
     prompt: str | None = None,
     correlation_session_id: str | None = None,
+    cleanup: str | None = None,
 ) -> SttOutcome:
     """Run the STT cascade over one audio file. See module docstring.
 
@@ -468,7 +546,13 @@ async def transcribe_audio(
     hub's client correlation header and the emitted spend record — deliberately
     NOT the ``session_id`` above: that one scopes credential lookup, a
     different question answered by the store (QA round 1, Q4).
+
+    ``cleanup`` is validated before any network call (an unknown or
+    not-yet-implemented mode raises ValueError, which the routes map to 422).
+    The mode reaches the ElevenLabs runner as request fields; rungs without a
+    native switch ignore it until the client-rules slice.
     """
+    mode = resolve_cleanup(cleanup)
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
     try:
@@ -539,6 +623,7 @@ async def transcribe_audio(
                             session_id=session_id,
                             language=language,
                             prompt=prompt,
+                            cleanup=mode,
                             timeout_s=attempt_timeout,
                         )
                     else:
@@ -549,15 +634,14 @@ async def transcribe_audio(
                             session_id=session_id,
                             language=language,
                             prompt=prompt,
+                            cleanup=mode,
                             timeout_s=attempt_timeout,
                         )
                 # ONE bound for every rung, whatever the rung does with its own
                 # timeouts: the deadline is the executor's promise, and a
                 # client that outlived its own timeout must not be able to
                 # extend the cascade.
-                text, rung_cost, rung_provider = await asyncio.wait_for(
-                    attempt, timeout=attempt_timeout
-                )
+                rung = await asyncio.wait_for(attempt, timeout=attempt_timeout)
             except asyncio.TimeoutError:
                 # A timeout never reached an upstream status; it behaves like a
                 # transport failure (502, text passed through).
@@ -574,11 +658,16 @@ async def transcribe_audio(
                 continue
             attempts.append(SttAttempt(path=path, outcome="ok"))
             return SttOutcome(
-                text=text,
+                text=rung.text,
                 path=path,
                 attempts=tuple(attempts),
-                cost=rung_cost,
-                provider=rung_provider,
+                cost=rung.cost,
+                provider=rung.provider,
+                raw_text=rung.raw_text,
+                raw_unavailable=rung.raw_unavailable,
+                language=rung.language,
+                cleanup=rung.cleanup,
+                removed=rung.removed,
             )
 
         chosen = _choose_final_failure(failures)
@@ -624,6 +713,7 @@ async def transcribe_backend(
     store: AuthStore | None = None,
     language: str | None = None,
     prompt: str | None = None,
+    cleanup: str | None = None,
 ) -> SttOutcome:
     """Run ONE named rung over in-memory bytes — the mobile bridge's executor.
 
@@ -651,6 +741,7 @@ async def transcribe_backend(
     No ``model`` argument: the model-audio rung is not an STT call (see
     :data:`STT_RUNG_PATHS`), and the phone has no session model to offer.
     """
+    mode = resolve_cleanup(cleanup)
     try:
         path = AudioPath(backend)
     except ValueError:
@@ -676,12 +767,12 @@ async def transcribe_backend(
                 reason = f"The speech-to-text cascade cannot run the {backend!r} path."
             raise SttUnavailable(reason, resolution=resolution)
         try:
-            # The token runners return ``(text, cost, provider)`` like the walk's
-            # rungs (PR-3); cost and provider are dropped here because this
+            # The token runners return ``_RungResult`` like the walk's rungs
+            # (PR-3); cost and provider are dropped here because this
             # executor's caller (the mobile bridge) records no spend channel yet
             # — the phone's route is not an emitter in this slice, and pretending
             # a cost it never records would be worse than not carrying it.
-            text, _cost, _provider = await asyncio.wait_for(
+            rung_result = await asyncio.wait_for(
                 runner(
                     audio,
                     mime=mime,
@@ -689,6 +780,7 @@ async def transcribe_backend(
                     session_id=session_id,
                     language=language,
                     prompt=prompt,
+                    cleanup=mode,
                     timeout_s=STT_ATTEMPT_TIMEOUT_S,
                 ),
                 timeout=STT_ATTEMPT_TIMEOUT_S,
@@ -703,4 +795,13 @@ async def transcribe_backend(
     finally:
         if owned:
             store.close()
-    return SttOutcome(text=text, path=path, attempts=(SttAttempt(path=path, outcome="ok"),))
+    return SttOutcome(
+        text=rung_result.text,
+        path=path,
+        attempts=(SttAttempt(path=path, outcome="ok"),),
+        raw_text=rung_result.raw_text,
+        raw_unavailable=rung_result.raw_unavailable,
+        language=rung_result.language,
+        cleanup=rung_result.cleanup,
+        removed=rung_result.removed,
+    )
