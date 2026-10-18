@@ -1,0 +1,7 @@
+{
+  "cli.install_help.install": "Manage the local install generations (layout for the stable `lop` runtime)",
+  "cli.install_help.prune": "Delete install generations nothing is running from",
+  "cli.install_help.keep": "How many unreferenced generations to keep (default: %(default)s; 0 or more). A generation named by a live or saved session, and the one `current` points at, are never removed",
+  "cli.install_help.migrate": "Copy this install into the generation layout and point `current` at it",
+  "cli.install_help.status": "Show the install layout: pointer, generations and what a new `lop` would load"
+}

@@ -104,12 +104,15 @@ def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check, 
     baseline_dir = tmp_path / "i18n"
     baseline_dir.mkdir()
     baseline = baseline_dir / "baseline.json"
+    # Later tranches lower the live count; this fixture enforces that count,
+    # not this tranche's historical ceiling, so the planted +1 stays meaningful.
+    count = _live_cli_count(i18n_check)
     baseline.write_text(
         json.dumps(
             {
                 "note": "slice fixture",
                 "enforced": [CLI],
-                "files": {CLI: _live_cli_count(i18n_check)},
+                "files": {CLI: count},
             }
         )
     )
@@ -123,7 +126,7 @@ def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check, 
     target.write_text(source + '\nprint("planted stop refresh monitor prose")\n', encoding="utf-8")
     assert i18n_check.main([]) == 1
     output = capsys.readouterr().out
-    assert CLI in output and "497" in output and "496" in output
+    assert f"{CLI}: {count + 1} literal(s) against a ceiling of {count}" in output
     target.write_text(source, encoding="utf-8")
     assert i18n_check.main([]) == 0
 

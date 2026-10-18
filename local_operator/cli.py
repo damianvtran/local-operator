@@ -67,6 +67,7 @@ from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_install_help as _in
 from local_operator.i18n.keys import cli_login_help as _li
 from local_operator.i18n.keys import cli_login_status_help as _ls
 from local_operator.i18n.keys import cli_logout_help as _lo
@@ -80,9 +81,11 @@ from local_operator.i18n.keys import cli_refresh_help as _re
 from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
+from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
+from local_operator.i18n.keys import cli_update_help as _up
 from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
@@ -1732,16 +1735,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
     update_parser = subparsers.add_parser(
         "update",
-        help=(
-            "Upgrade this install from PyPI. Not the lop-update script, "
-            "which rebuilds the global runtime from a local git checkout."
-        ),
+        help=(_up.update().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     update_parser.add_argument(
         "--check",
         action="store_true",
-        help="Print installed vs PyPI; do not install",
+        help=_up.check().envelope(locale=help_locale)["text"],
     )
     # Hidden (``SUPPRESS``): nobody types this, and it is not an upgrade — it is
     # the repair step ``lop update`` runs in a CHILD process from the newly
@@ -1792,12 +1792,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="from_snapshot",
         metavar="DIR_OR_REF",
         default=None,
-        help=(
-            "Install a local source tree (a directory, or a git ref of the current "
-            "repository) into its own install generation. On macOS, a ref that is exactly a "
-            "published release installs the published wheel from PyPI — the only build "
-            "carrying the macOS key agent — and every other ref is built from source."
-        ),
+        help=(_up.from_snapshot().envelope(locale=help_locale)["text"]),
     )
     # The deliberate-downgrade override for --from-snapshot: without it a target
     # STRICTLY OLDER than the install the pointer names is refused before any
@@ -1810,12 +1805,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--allow-downgrade",
         dest="allow_downgrade",
         action="store_true",
-        help=(
-            "Allow --from-snapshot to install a build OLDER than the current install "
-            "(a deliberate rollback; recorded in the install marker). Without "
-            "--from-snapshot it is refused on the PyPI path, which only installs "
-            "newer versions; the refresh flags take precedence."
-        ),
+        help=(_up.allow_downgrade().envelope(locale=help_locale)["text"]),
     )
     # The isolated verified controller has UNKNOWN/PIP kind. These explicit
     # destination arguments authorize ONLY its canonical immutable protocol;
@@ -1826,11 +1816,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--no-services",
         dest="no_services",
         action="store_true",
-        help=(
-            "Do not bring the `lop serve` daemons onto the new build; the supervised "
-            "daemons are still repaired. Use this only when something else will "
-            "start the serves, e.g. a script that owns their launch."
-        ),
+        help=(_up.no_services().envelope(locale=help_locale)["text"]),
     )
     # S3b's per-run override of the mesh-roll switch (note §5): the roll is
     # otherwise queued when this update moves to a newer version and
@@ -1841,10 +1827,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--no-roll",
         dest="no_roll",
         action="store_true",
-        help=(
-            "Do not queue a mesh rollout for this update, whatever "
-            "`network.rollout_on_update` says; `lop network update` still rolls by hand."
-        ),
+        help=(_up.no_roll().envelope(locale=help_locale)["text"]),
     )
 
     # The NON-RUNTIME SERVICES, as one verb group. A service is a long-lived
@@ -1855,56 +1838,39 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # prints can name a command that exists.
     services_parser = subparsers.add_parser(
         "services",
-        help=(
-            "Bring this machine's non-runtime services (serve daemons and the "
-            "supervised daemons) onto the current build, without stopping any "
-            "running conversation"
-        ),
+        help=(_sr.services().envelope(locale=help_locale)["text"]),
         # A reader who opens this page is asking what a "service" IS, and the verb
         # group defined nothing (design review D9). The distinction it draws is the
         # one the whole feature rests on: a RUNTIME is a conversation and is never
         # touched; everything else that serves this machine can be brought along.
-        description=(
-            "Everything local_operator runs for this machine that is not a conversation. "
-            "A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the "
-            "mobile relay, the browser bridge, the tunnel and the wakes agent. "
-            "Runtimes — the processes holding your conversations — are never stopped: "
-            "'restart' reloads a serve daemon in place, keeping its pid and socket."
-        ),
+        description=(_sr.services_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_subparsers = services_parser.add_subparsers(dest="services_command")
     services_subparsers.add_parser(
         "status",
-        help=(
-            "Report each non-runtime service, the build it is serving, and the build "
-            "the install is on"
-        ),
+        help=(_sr.status().envelope(locale=help_locale)["text"]),
         # D9 put the distinction on the GROUP page; a reader who runs `services status
         # --help` directly was still shown no prose at all (design review D10).
-        description=(
-            "Read-only. Names the build the install is on and, for each `lop serve` "
-            "daemon, the build it is SERVING — both sides of every comparison, because "
-            "the ordinary drift on this machine is a same-version rebuild where the "
-            "version alone cannot show that a daemon is behind."
-        ),
+        description=(_sr.status_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_restart = services_subparsers.add_parser(
         "restart",
-        help="Move every service onto the current build (never stops a runtime)",
+        help=_sr.restart().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
+    # Format the code-owned constant exactly as before; the message owns the
+    # surrounding prose and can translate it without freezing the default.
     services_restart.add_argument(
         "--wait",
         type=_positive_seconds,
         default=None,
         metavar="SECONDS",
         help=(
-            "How long to wait for an asked daemon to come back on the new build "
-            f"(default: {DEFAULT_SERVICES_WAIT_S:g}s; must be positive). A daemon that does "
-            "not make it is reported, left serving the build it loaded, and retried by "
-            "the next `lop services restart`."
+            _sr.wait(wait_seconds=f"{DEFAULT_SERVICES_WAIT_S:g}").envelope(locale=help_locale)[
+                "text"
+            ]
         ),
     )
     # The RECOVERY verb, and the only destructive one in this group. It exists
@@ -1916,24 +1882,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # only way out, and the pid to kill discoverable only by `lsof`.
     services_reclaim = services_subparsers.add_parser(
         "reclaim",
-        help=(
-            "End a `lop serve` daemon that is recorded but not serving its address "
-            "(never one that is serving)"
-        ),
-        description=(
-            "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to "
-            "SIGKILL at a bound, after proving the process is this product's serve "
-            "daemon and that it is not the one serving the address its record names. "
-            "`lop services status` lists the daemons this is for. It is never "
-            "automatic: the daemon may be supervising session runtimes, and no reader "
-            "of a record can prove a successor is ready to take its place."
-        ),
+        help=(_sr.reclaim().envelope(locale=help_locale)["text"]),
+        description=(_sr.reclaim_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_reclaim.add_argument(
         "pid",
         type=int,
-        help="The daemon's pid, exactly as `lop services status` prints it",
+        help=_sr.pid().envelope(locale=help_locale)["text"],
     )
 
     # The install LAYOUT's own commands. One verb group rather than flags on
@@ -1983,13 +1939,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser(
         "install",
-        help="Manage the local install generations (layout for the stable `lop` runtime)",
+        help=_in.install().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     install_subparsers = install_parser.add_subparsers(dest="install_command")
     prune_parser = install_subparsers.add_parser(
         "prune",
-        help="Delete install generations nothing is running from",
+        help=_in.prune().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     prune_parser.add_argument(
@@ -1997,20 +1953,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=_generation_count,
         default=DEFAULT_KEEP_GENERATIONS,
         metavar="N",
-        help=(
-            "How many unreferenced generations to keep (default: %(default)s; 0 or "
-            "more). A generation named by a live or saved session, and the one "
-            "`current` points at, are never removed"
-        ),
+        help=(_in.keep().envelope(locale=help_locale)["text"]),
     )
     install_subparsers.add_parser(
         "migrate",
-        help="Copy this install into the generation layout and point `current` at it",
+        help=_in.migrate().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     install_subparsers.add_parser(
         "status",
-        help="Show the install layout: pointer, generations and what a new `lop` would load",
+        help=_in.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
