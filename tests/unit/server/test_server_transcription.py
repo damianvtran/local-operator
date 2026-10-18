@@ -921,3 +921,105 @@ async def test_a_non_finite_duration_states_no_count_and_keeps_the_call(tmp_path
         )
     assert response.status == 200
     assert captured2 and captured2[0].units == 0.0 and captured2[0].amount_micro is None
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_auto_cleans_radient_text(test_app_client, temp_audio_file):
+    """The legacy route now uses the same pure rules as the cascade."""
+    mock_radient_client = MagicMock()
+    mock_transcription_response = RadientTranscriptionResponseData(
+        text="Uh, so I think we should ship.",
+        provider="radient",
+        status="completed",
+        language="eng",
+        language_probability=0.99,
+    )
+    mock_radient_client.create_transcription.return_value = mock_transcription_response
+    mock_radient_client.api_key = "[redacted]"
+
+    app.dependency_overrides[get_radient_client] = lambda: mock_radient_client
+    try:
+        with open(temp_audio_file, "rb") as f:
+            response = await test_app_client.post(
+                "/v1/transcriptions",
+                files={"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")},
+            )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "So I think we should ship."
+    assert result["raw_text"] == "Uh, so I think we should ship."
+    assert result["cleanup"] == "client.rules.v1"
+    assert result["removed"] == [{"start": 0, "end": 2, "kind": "filler", "token": "Uh"}]
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_off_is_verbatim(test_app_client, temp_audio_file):
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "[redacted]"
+    mock_radient_client.create_transcription.return_value = RadientTranscriptionResponseData(
+        text="Uh, so I think.", provider="radient", status="completed"
+    )
+
+    app.dependency_overrides[get_radient_client] = lambda: mock_radient_client
+    try:
+        with open(temp_audio_file, "rb") as f:
+            response = await test_app_client.post(
+                "/v1/transcriptions",
+                files={"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")},
+                data={"cleanup": "off"},
+            )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+
+    result = response.json()["result"]
+    assert result["text"] == "Uh, so I think."
+    assert result["raw_text"] == "Uh, so I think."
+    assert result["cleanup"] == "none"
+    assert result["removed"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_normalises_en_us_for_radient(test_app_client, temp_audio_file):
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "[redacted]"
+    mock_radient_client.create_transcription.return_value = RadientTranscriptionResponseData(
+        text="Uh, hello.", provider="radient", status="completed"
+    )
+
+    app.dependency_overrides[get_radient_client] = lambda: mock_radient_client
+    try:
+        with open(temp_audio_file, "rb") as f:
+            response = await test_app_client.post(
+                "/v1/transcriptions",
+                files={"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")},
+                data={"language": "en-US"},
+            )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+
+    assert response.status_code == 200
+    assert mock_radient_client.create_transcription.call_args[1]["language"] == "en"
+    assert response.json()["result"]["text"] == "Hello."
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_edit_is_422(test_app_client, temp_audio_file):
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "[redacted]"
+
+    app.dependency_overrides[get_radient_client] = lambda: mock_radient_client
+    try:
+        with open(temp_audio_file, "rb") as f:
+            response = await test_app_client.post(
+                "/v1/transcriptions",
+                files={"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")},
+                data={"cleanup": "edit"},
+            )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+
+    assert response.status_code == 422
+    mock_radient_client.create_transcription.assert_not_called()

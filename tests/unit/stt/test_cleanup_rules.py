@@ -80,6 +80,9 @@ def test_cue_lexicon_removes_only_known_cues() -> None:
     assert _clean("[laughter] That was funny.", None).text == "That was funny."
     assert _clean("The value is [inaudible].", None).text == "The value is [inaudible]."
     assert _clean("Keep [REDACTED] and [sic].", None).text == "Keep [REDACTED] and [sic]."
+    # A cue-shaped label inside code or quotes is content, not an audio event.
+    assert _clean("He wrote `[laughter]` in code.", None).text == "He wrote `[laughter]` in code."
+    assert _clean('He said "[laughter]" aloud.', None).text == 'He said "[laughter]" aloud.'
 
 
 def test_unknown_language_removes_cues_but_not_tokens() -> None:

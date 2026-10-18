@@ -454,7 +454,7 @@ def apply_client_rules(text: str, *, language: str | None = None) -> ClientRules
     surviving text.
     """
     protected = _protected_spans(text)
-    cues = _cue_spans(text)
+    cues = [cue for cue in _cue_spans(text) if not _inside(protected, cue[0], cue[1])]
     cue_ranges = [(cue_start, cue_end) for cue_start, cue_end, _, _ in cues]
     spans: list[tuple[int, int, str, str]] = list(cues)
 

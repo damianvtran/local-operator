@@ -19,6 +19,14 @@ from local_operator.i18n.keys import wire_errors_media as _wm
 from local_operator.server.dependencies import get_config_manager, get_radient_client
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.voice_spend import emit_voice_spend
+from local_operator.stt.cleanup import (
+    CLIENT_RULES_PROVENANCE,
+    InvalidCleanupMode,
+    apply_client_rules,
+    choose_cleanup_language,
+    normalize_language_hint,
+    resolve_cleanup,
+)
 from local_operator.stt.errors import (
     classify_upstream_failure as _classify_upstream_failure,
 )
@@ -63,6 +71,8 @@ async def create_transcription_endpoint(
     temperature: Optional[float] = Form(0.0),
     language: Optional[str] = Form(None),
     provider: Optional[str] = Form(None),
+    #: The same closed vocabulary as the cascade routes. Absent = ``auto``.
+    cleanup: Optional[str] = Form(None),
     #: Optional client correlation id (PR-3): additive and tolerant — a caller
     #: that has it sends it, every other form value keeps working unchanged,
     #: and it is used for the spend record (analytics + the session's pending
@@ -79,6 +89,13 @@ async def create_transcription_endpoint(
     own configured provider/model default applies. Pass `model` and `provider`
     together to pin a specific backend.
     """
+    # A direct call (tests, in-process callers) can pass the FastAPI ``Form``
+    # sentinel; only a real string is a mode.
+    raw_cleanup = cleanup if isinstance(cleanup, str) else None
+    try:
+        mode = resolve_cleanup(raw_cleanup)
+    except InvalidCleanupMode as exc:
+        raise HTTPException(status_code=422, detail=_wm.media_refusal(error=str(exc)).envelope())
     if not radient_client.api_key:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
@@ -115,10 +132,43 @@ async def create_transcription_endpoint(
             prompt=prompt,
             response_format=response_format,
             temperature=temperature,
-            language=language,
+            # Radient's field is ISO-639-1; a BCP-47 tag or an unmapped
+            # 3-letter label is omitted rather than sent as a 400.
+            language=normalize_language_hint(language),
             provider=provider,
             session_id=str(session_id or "") or None,
             client_request_id=request_id,
+        )
+
+        # The legacy route shares the cascade's pure rules, so two live
+        # endpoints cannot return different text for the same audio. The
+        # response is additive: ``cleanup``/``raw_text``/``removed`` sit beside
+        # the existing fields (the model allows extras).
+        raw_text = str(transcription_result.text or "")
+        detected = getattr(transcription_result, "language", None) or getattr(
+            transcription_result, "language_code", None
+        )
+        probability = getattr(transcription_result, "language_probability", None)
+        cleaned = None
+        if mode in ("auto", "client"):
+            cleaned = apply_client_rules(
+                raw_text,
+                language=choose_cleanup_language(
+                    language,
+                    detected if isinstance(detected, str) else None,
+                    float(probability) if isinstance(probability, (int, float)) else None,
+                ),
+            )
+        transcription_result.text = cleaned.text if cleaned else raw_text
+        transcription_result.cleanup = CLIENT_RULES_PROVENANCE if cleaned else "none"
+        transcription_result.raw_text = raw_text
+        transcription_result.removed = (
+            [
+                {"start": span.start, "end": span.end, "kind": span.kind, "token": span.token}
+                for span in cleaned.removed
+            ]
+            if cleaned
+            else []
         )
 
         # The charge (PR-3): the hub's transcription envelope carries the cost

@@ -327,3 +327,36 @@ def test_the_strip_gate_fails_closed_without_the_constant(monkeypatch: pytest.Mo
     frame = {"op": "steer", "text": "hi", "input_mode": "mixed"}
     daemon_mod._strip_unsupported_annotation(_CapabilityRecord(["input-mode-v1"]), frame)
     assert "input_mode" not in frame
+
+
+def test_the_phone_forwards_the_locale_hint_to_the_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The web client sends navigator.language; the daemon passes it through.
+
+    Normalisation and the Radient wire value are covered at the adapter seam;
+    this pins the route half so a form-field rename cannot silently drop it.
+    """
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"language": "en-US"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["language"] == "en-US"
+
+
+def test_the_phone_omits_the_language_field_when_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["language"] is None

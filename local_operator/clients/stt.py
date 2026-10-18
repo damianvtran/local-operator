@@ -37,6 +37,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from local_operator.stt import RemovedSpan
 from local_operator.stt.cleanup import (
+    CLIENT_RULES_PROVENANCE,
     apply_client_rules,
     choose_cleanup_language,
     normalize_language_hint,
@@ -327,7 +328,7 @@ def _transcribe_radient_sync(
         path="provider_stt_radient",
         raw_text=raw_text,
         language=detected if isinstance(detected, str) else None,
-        cleanup=("client.rules.v1" if cleaned else "none"),
+        cleanup=(CLIENT_RULES_PROVENANCE if cleaned else "none"),
         removed=cleaned.removed if cleaned else (),
     )
 
@@ -498,8 +499,7 @@ async def transcribe_with_backend(
     pass through for the route to classify.
     """
     # Validate before the token lookup so a direct caller of this seam gets the
-    # same 422 sentence as the daemon route, including on the Radient branch
-    # that has no cleanup work in this slice.
+    # same 422 sentence as the daemon route, including on the Radient branch.
     resolve_cleanup(cleanup)
     key = resolve_backend_key(path)
     if key is None:

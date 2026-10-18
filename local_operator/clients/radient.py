@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.agents import MAX_AGENT_NAME_CHARS
@@ -318,6 +318,14 @@ class RadientTranscriptionResponseData(BaseModel):
     status: str
     error: Optional[str] = None
     duration: Optional[float] = None
+    #: Additive cleanup provenance (LOH-5). ``none`` means no client rules ran;
+    #: ``raw_text`` is the provider text before them. ``removed`` is a list of
+    #: span dicts in raw-string coordinates.
+    cleanup: str = "none"
+    raw_text: Optional[str] = None
+    raw_unavailable: str = ""
+    language: Optional[str] = None
+    removed: list[dict[str, Any]] = Field(default_factory=list)
     model_config = {"extra": "allow"}
 
     def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:

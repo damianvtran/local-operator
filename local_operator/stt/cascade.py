@@ -131,7 +131,6 @@ class _RungResult:
     raw_text: str | None = None
     raw_unavailable: str = ""
     language: str | None = None
-    language_probability: float | None = None
     cleanup: str = "none"
     removed: tuple[RemovedSpan, ...] = ()
 
@@ -425,9 +424,6 @@ async def _run_radient_rung(
         provider=provider,
         raw_text=text,
         language=detected if isinstance(detected, str) else None,
-        language_probability=(
-            float(probability) if isinstance(probability, (int, float)) else None
-        ),
         cleanup=CLIENT_RULES_PROVENANCE if cleaned else "none",
         removed=cleaned.removed if cleaned else (),
     )
@@ -487,7 +483,6 @@ async def _run_elevenlabs_rung(
         raw_text=(result.text if cleaned else getattr(result, "raw_text", None)),
         raw_unavailable=("" if cleaned else getattr(result, "raw_unavailable", "")),
         language=getattr(result, "language", None),
-        language_probability=getattr(result, "language_probability", None),
         cleanup=(
             CLIENT_RULES_PROVENANCE if cleaned else (getattr(result, "cleanup", "none") or "none")
         ),

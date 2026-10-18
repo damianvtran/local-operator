@@ -368,9 +368,8 @@ async def transcribe_audio(
     through unchanged for :func:`describe_stt_failure`.
     """
     # Validate before the availability read: an unknown mode is the caller's
-    # 422 on every rung, including the Radient path that has no cleanup work
-    # in this slice. Without this, the phone would accept a value the desktop
-    # route refuses and silently ignore it.
+    # 422 on every rung, including the Radient path. Without this, the phone
+    # would accept a value the desktop route refuses and silently ignore it.
     resolve_cleanup(cleanup)
     answer = (
         availability

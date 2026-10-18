@@ -435,7 +435,7 @@ async def test_transcriptions_forwards_language_and_prompt(
         files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
         data={"language": "en"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert b'name="language_code"' in upstream.requests[0]["body"]
 
 
