@@ -27855,17 +27855,17 @@ class Session:
         if task not in done:
             errors.append(
                 f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)"
-            )  # i18n: ignore internal cleanup diagnostic (dev log)
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if cancelled:
             # Cancellation proves NOTHING about resource state: keep it
             # incomplete and uncached (R3).
             errors.append(
                 "cleanup task was cancelled; owned work state unverified"
-            )  # i18n: ignore internal cleanup diagnostic (dev log)
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if failure is not None:
             errors.append(
                 f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
-            )  # i18n: ignore internal cleanup diagnostic (dev log)
+            )  # i18n: ignore structured eval-harness error (no product UI)
         hook_failures = tuple(self._disposal_hook_failures)
         if hook_failures:
             # Ordinary disposal logs-and-continues past a failing hook; the
@@ -27889,12 +27889,12 @@ class Session:
             complete = False
             errors.append(
                 f"{len(pending_jobs)} owned job(s) still running after cleanup"
-            )  # i18n: ignore internal cleanup diagnostic (dev log)
+            )  # i18n: ignore structured eval-harness error (no product UI)
         if complete and in_flight:
             complete = False
             errors.append(
                 "a descendant provider stream was still in flight after cleanup"
-            )  # i18n: ignore internal cleanup diagnostic (dev log)
+            )  # i18n: ignore structured eval-harness error (no product UI)
         # The observer holder lives on the ROOT stream; a child's stream only
         # REFERENCES it. Reading the child's own attribute would report a
         # local zero while subscriptions and delivery count on the shared
@@ -27981,12 +27981,12 @@ class Session:
             if task.cancelled():
                 reasons.append(
                     "cleanup task was cancelled; owned work state unverified"
-                )  # i18n: ignore internal cleanup diagnostic (dev log)
+                )  # i18n: ignore structured eval-harness error (no product UI)
             else:
                 failure = task.exception()
                 if failure is not None:
                     reasons.append(
-                        # i18n: ignore internal cleanup diagnostic (dev log)
+                        # i18n: ignore structured eval-harness error (no product UI)
                         f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
                     )
         reasons.extend(self._disposal_hook_failures)
@@ -28006,7 +28006,7 @@ class Session:
         """
         for error in errors:
             self._descendant_cleanup_failures.append(
-                # i18n: ignore internal cleanup diagnostic (dev log)
+                # i18n: ignore structured eval-harness error (no product UI)
                 f"descendant {session_id} cleanup unverified: {error}"
             )
 
