@@ -426,7 +426,8 @@ def cache_media(
     older install still preserves audio bytes without a sidecar. The waveform
     route can repair small legacy artifacts within bounded server-side limits;
     otherwise it returns 404/no-waveform. Creation decodes ONLY when the digest
-    has none yet, so re-registering identical bytes pays no second decode. Peaks are NOT part of the returned block: they are a rendering
+    has none yet, so re-registering identical bytes pays no second decode.
+    Peaks are NOT part of the returned block: they are a rendering
     sidecar fetched by digest, never a field every attachment row carries.
     """
     if not raw:
