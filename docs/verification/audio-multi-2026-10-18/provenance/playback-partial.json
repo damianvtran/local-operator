@@ -1,0 +1,32 @@
+[
+  {
+    "item": 1,
+    "ownerId": "sound:cb2000a106f8c461c884e695805fcccc:batch:tool:partial4-call:0:[\"aud_6ad4f640e0050304150a7663\",\"thunder rumble\",1]",
+    "time": 0.03483,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.06056732920653919,
+    "rms": 0
+  },
+  {
+    "item": 2,
+    "ownerId": "sound:b64059ec984c102b92f791f8bf5a2259:batch:tool:partial4-call:1:[\"aud_6ad4f640e73ab027182a5ce2\",\"door creak\",1]",
+    "time": 0.026122,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.13680945022439173,
+    "rms": 0
+  },
+  {
+    "item": 4,
+    "ownerId": "sound:40f552e9258bf764c677c2688288d50a:batch:tool:partial4-call:2:[\"aud_6ad4f642e73ab027182a5ce8\",\"ui blip\",1]",
+    "time": 0.029025,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.05205642174228718,
+    "rms": 0
+  }
+]

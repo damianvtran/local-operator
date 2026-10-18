@@ -1,0 +1,58 @@
+renderer-driver: frame timezone pinned to America/New_York (ambient TZ=America/Toronto)
+[build] current: assets 2026-10-18T16:45:38.504Z >= sources 2026-10-18T15:38:46.974Z
+[note] csp for this run's backend
+        out/renderer/index.html: http://127.0.0.1:64502 added to frame-src, media-src, img-src (build output only; src/ untouched)
+  serve records 1 linked from /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/config/run/serve   (the app admits a daemon only while a record describes one, and a record is a heartbeat)
+local-operator-ui renderer driver
+  repo          /Users/damian/local-operator-ui/.worktrees/multi-capture-626a
+  scratch       /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/lo-renderer-driver-73390
+  frames        /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/frames
+  app cwd       /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/lo-renderer-driver-73390/cwd   (scratch: the repo's .env is not read)
+  backend url   http://127.0.0.1:64502   (--backend: a live isolated backend this run owns)
+  electron      44.3.0   (/Users/damian/local-operator-ui/node_modules/.pnpm/electron@44.3.0/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron)
+  electron pin  44.3.0   (package.json optionalDependencies)
+[PASS] the harness is driving the Electron this branch pins
+[PASS] the scratch backend port is dead
+[note] the app's default backend port (127.0.0.1:1111)
+        a listener is up: this run's main process points elsewhere, and the check below proves the app holds no connection to the URL the RENDERER was built with
+[note] verbs registered by the renderer
+        ["filesFacts","hello","measure","navigate","openCanvasDocument","press","queries","queryFetches","setSidebarWidth","setTheme","soundsArm","soundsEnd","soundsFacts","soundsScrub","soundsScrubFinish","soundsSpeech","stageLiveConsents","state"]
+[PASS] the armed launch said so on stdout
+[PASS] the app's logs went to this run's scratch tree, not the operator's
+[note] renderer's api base URL at hello, against --backend
+        {"apiBaseUrl":"http://127.0.0.1:64502","backend":"http://127.0.0.1:64502"}
+[PASS] the app holds a connection to this run's backend (http://127.0.0.1:64502)
+[PASS] the app holds NO connection to the operator's own backend (http://localhost:1111)
+[note] profile seeded
+        onboarding-storage marks the modal complete, so the app is an existing user rather than a first-run one
+[PASS] headless invisible unfocused
+ARM {"armed":true,"contextState":"running"}
+SILENT_SINK {"sink":{},"state":"running","start":0.005333333333333333,"end":0.112}
+[PASS] graph rearm negative control refuses
+[PASS] Boolean(document.querySelector('[data-session-row="626a00000004"]'))
+[PASS] Boolean(document.querySelector("[data-turn-summary]"))
+[PASS] document.querySelectorAll('[data-sound-batch-item]').length === 4
+[PASS] document.querySelectorAll('[data-sound-batch] [data-sound-player]').length === 3
+[PASS] document.querySelector('[data-sound-batch]').innerText.includes('duration_seconds must be between 0.5 and 30 seconds, got 31')
+[PASS] document.body.innerText.includes('Known total cost $0.006 (billed). Unknown or late charges are not included.')
+partial4 VISIBLE {"body":"Local Operator\nNew chat\n⌘\nN\nSearch\n⌘\nP\nAida\nAgents\nProjects\nSchedules\nBrowser\nAgent hub\n\nAgents\n\nNo agents yet\n\n11 built-in agents are ready to install — aida, architect, coder, copy-reviewer, designer, manager, qa-tester, reviewer, scout, tui-designer and ux-reviewer. You can edit them once installed.\n\nInstall all built-in agents\nCreate agent\nTeams\nCreate team\nPINNED\nScheduled (1 wake)\nAida\n· aida\nnow\n, last active just now\nRight-click or press Shift+F10 (with Fn on most Mac keyboards) for its actions.\nTODAY\nRecent\nGenerate 4 named sound effects. Fresh production provider…\nnow\n, last active just now\nRight-click or press Shift+F10 (with Fn on most Mac keyboards) for its actions.\nRecent\nGenerate 10 named sound effects. Fresh production provider…\nnow\n, last active just now\nRight-click or press Shift+F10 (with Fn on most Mac keyboards) for its actions.\n\nShowing 3 of 3 chats\n\nUser\nGenerate 4 named sound effects. Fresh production provider…\nNo agent\nNo team\n​\nOn this device\nStart of conversation\n\nGenerate 4 named sound effects. Fresh production provider results replayed below.\n\n1 action\nYesterday 2:00 PM\n\nSound effect batch\n\nKnown total cost $0.006 (billed). Unknown or late charges are not included.\n\n3 completed · 1 failed. Needs attention: glass shatter\n\nthunder rumble\n\n0:00\n0:00\n\nCost $0.002 (billed).\n\ndoor creak\n\n0:00\n0:00\n\nCost $0.002 (billed).\n\nglass shatter · Failed\n\nAudio generation failed on every available provider: - Radient: This audio request could not be accepted. (duration_seconds must be between 0.5 and 30 seconds, got 31)\n\nCost not yet known.\n\nui blip\n\n0:00\n0:00\n\nCost $0.002 (billed).\n\nThree effects completed; glass shatter was rejected with HTTP 400. No cost is invented for the rejected item.\n\nSign in to Radient in Settings to enable speaking aloud\nmock-model\nWorking directory:\n~/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE","rows":[{"text":"thunder rumble\n\n0:00\n0:00\n\nCost $0.002 (billed).","rect":{"x":393,"y":354.4921875,"width":560,"height":83.09375,"top":354.4921875,"right":953,"bottom":437.5859375,"left":393}},{"text":"door creak\n\n0:00\n0:00\n\nCost $0.002 (billed).","rect":{"x":393,"y":453.5859375,"width":560,"height":83.09375,"top":453.5859375,"right":953,"bottom":536.6796875,"left":393}},{"text":"glass shatter · Failed\n\nAudio generation failed on every available provider: - Radient: This audio request could not be accepted. (duration_seconds must be between 0.5 and 30 seconds, got 31)\n\nCost not yet known.","rect":{"x":393,"y":552.6796875,"width":560,"height":78.09375,"top":552.6796875,"right":953,"bottom":630.7734375,"left":393}},{"text":"ui blip\n\n0:00\n0:00\n\nCost $0.002 (billed).","rect":{"x":393,"y":646.7734375,"width":560,"height":83.09375,"top":646.7734375,"right":953,"bottom":729.8671875,"left":393}}]}
+[PASS] document.querySelector('[data-sound-batch-item]:nth-child(1) [data-sound-status="playing"]')!==null
+GRAPH {"state":"running","time":0.384,"rate":48000,"ready":4,"network":1,"paused":false}
+PLAY partial4 0 {"ownerId":"sound:cb2000a106f8c461c884e695805fcccc:batch:tool:partial4-call:0:[\"aud_6ad4f640e0050304150a7663\",\"thunder rumble\",1]","status":"playing","time":0.03483,"duration":0.48,"paused":false,"gain":0,"inputRms":0.06056732920653919,"players":[{"status":"playing","clock":"0:00","clip":"inset(0px 93.3021% 0px 0px)","numeric":"tabular-nums"},{"status":"idle","clock":"0:00","clip":"inset(0px 100% 0px 0px)","numeric":"tabular-nums"},{"status":"idle","clock":"0:00","clip":"inset(0px 100% 0px 0px)","numeric":"tabular-nums"}],"rms":0,"src":"blob:file:///0019fa0b-ebc1-4ed6-a41e-d6ff5b582a49","nativeElements":0,"canvas":[]}
+[PASS] partial4 row 1: real decoder local blob and zero output
+[PASS] document.querySelector('[data-sound-batch-item]:nth-child(2) [data-sound-status="playing"]')!==null
+GRAPH {"state":"running","time":1.0933333333333333,"rate":48000,"ready":4,"network":1,"paused":false}
+PLAY partial4 1 {"ownerId":"sound:b64059ec984c102b92f791f8bf5a2259:batch:tool:partial4-call:1:[\"aud_6ad4f640e73ab027182a5ce2\",\"door creak\",1]","status":"playing","time":0.026122,"duration":0.48,"paused":false,"gain":0,"inputRms":0.13680945022439173,"players":[{"status":"idle","clock":"0:00","clip":"inset(0px 100% 0px 0px)","numeric":"tabular-nums"},{"status":"playing","clock":"0:00","clip":"inset(0px 95.7673% 0px 0px)","numeric":"tabular-nums"},{"status":"idle","clock":"0:00","clip":"inset(0px 100% 0px 0px)","numeric":"tabular-nums"}],"rms":0,"src":"blob:file:///d5428920-44bc-4e44-a92d-022d2aa68185","nativeElements":0,"canvas":[]}
+[PASS] partial4 row 2: real decoder local blob and zero output
+[PASS] document.querySelector('[data-sound-batch-item]:nth-child(4) [data-sound-status="playing"]')!==null
+GRAPH {"state":"running","time":1.736,"rate":48000,"ready":4,"network":1,"paused":false}
+PLAY partial4 3 {"ownerId":"sound:40f552e9258bf764c677c2688288d50a:batch:tool:partial4-call:2:[\"aud_6ad4f642e73ab027182a5ce8\",\"ui blip\",1]","status":"playing","time":0.029025,"duration":0.48,"paused":false,"gain":0,"inputRms":0.05205642174228718,"players":[{"status":"idle","clock":"0:00","clip":"inset(0px 100% 0px 0px)","numeric":"tabular-nums"},{"status":"idle","clock":"0:00","clip":"inset(0px 100% 0px 0px)","numeric":"tabular-nums"},{"status":"playing","clock":"0:00","clip":"inset(0px 94.1358% 0px 0px)","numeric":"tabular-nums"}],"rms":0,"src":"blob:file:///564baa92-2883-4ded-b8a5-57d45f425efa","nativeElements":0,"canvas":[]}
+[PASS] partial4 row 4: real decoder local blob and zero output
+[PASS] no process from this run outlived its boot
+
+frames: partial4-completed.png, partial4-playing.png
+frames directory: /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/frames
+app log: /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/lo-renderer-driver-73390/app-scene.log
+scratch kept: /Users/damian/.local-operator/sessions/626adcfcc558/scratchpad/sounds-native-jRrqiE/lo-renderer-driver-73390 (the frames are also in --out)
+
+ALL CHECKS PASSED

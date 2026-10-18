@@ -1,0 +1,24 @@
+{
+  "sounds": [
+    {
+      "name": "thunder rumble",
+      "prompt": "low distant thunder rolling, close perspective",
+      "duration_s": 0.5
+    },
+    {
+      "name": "door creak",
+      "prompt": "old wooden door creaking open slowly",
+      "duration_s": 0.5
+    },
+    {
+      "name": "glass shatter",
+      "prompt": "small glass pane shattering on a hard floor",
+      "duration_s": 31
+    },
+    {
+      "name": "ui blip",
+      "prompt": "short soft digital confirmation blip",
+      "duration_s": 0.5
+    }
+  ]
+}

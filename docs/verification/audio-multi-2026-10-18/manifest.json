@@ -96,5 +96,51 @@
     "digest": "0783b8592c2af5740c0855153284c0a4",
     "request_id": "aud_6ad4e88fe0050304150a759a",
     "cost_usd": 0.002
+  },
+  {
+    "file": "partial4-completed.png",
+    "width": 2760,
+    "height": 2200,
+    "mode": "RGB",
+    "opaque": true,
+    "sha256": "804a391b4649bf18f0c51088ab21167a7c62419da2d306a85cf3cfe2cf64abd7",
+    "original_sha256": "76838175b7ffbd8a3dc568c3d0aac337399e37efe6c565877c022813ba0ce055",
+    "ui_head": "5ffa8dfcb19790e2e3ecb2879ed1e4f7b95c7592",
+    "harness_head": "4dbbc476941f0d20fa843adf25e4f7b088df8723"
+  },
+  {
+    "file": "partial4-playing.png",
+    "width": 2760,
+    "height": 2200,
+    "mode": "RGB",
+    "opaque": true,
+    "sha256": "27b23bf6b613385156e1408a9511e58900f26e577078d7374b58e472854636d0",
+    "original_sha256": "1d782dcd924ef73ab8dd2cdbe410c69773846caa51f4a2a882139664034224e5",
+    "ui_head": "5ffa8dfcb19790e2e3ecb2879ed1e4f7b95c7592",
+    "harness_head": "4dbbc476941f0d20fa843adf25e4f7b088df8723"
+  },
+  {
+    "file": "audio/partial-01-thunder-rumble.mp3",
+    "size_bytes": 8820,
+    "sha256": "cb2000a106f8c461c884e695805fccccd885e9f4fde817161685083a654dd4f7",
+    "digest": "cb2000a106f8c461c884e695805fcccc",
+    "request_id": "aud_6ad4f640e0050304150a7663",
+    "cost_usd": 0.002
+  },
+  {
+    "file": "audio/partial-02-door-creak.mp3",
+    "size_bytes": 8820,
+    "sha256": "b64059ec984c102b92f791f8bf5a225980c6d998b25fe91ca18b1190e287c4b5",
+    "digest": "b64059ec984c102b92f791f8bf5a2259",
+    "request_id": "aud_6ad4f640e73ab027182a5ce2",
+    "cost_usd": 0.002
+  },
+  {
+    "file": "audio/partial-04-ui-blip.mp3",
+    "size_bytes": 8820,
+    "sha256": "40f552e9258bf764c677c2688288d50a795b6735acaeb1a1e6343a0b58e50eb7",
+    "digest": "40f552e9258bf764c677c2688288d50a",
+    "request_id": "aud_6ad4f642e73ab027182a5ce8",
+    "cost_usd": 0.002
   }
 ]

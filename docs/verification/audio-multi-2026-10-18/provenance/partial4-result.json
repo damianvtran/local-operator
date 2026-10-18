@@ -1,0 +1,263 @@
+{
+  "tool_call_id": "partial4-call",
+  "tool_name": "generate_sound_effect",
+  "content": [
+    {
+      "type": "text",
+      "text": "Sound effects: 3 completed, 1 failed, 0 cancelled/stopped. Known total $0.006 (billed); unknown or late charges are not included. \n1/4 thunder rumble: completed\n2/4 door creak: completed\n3/4 glass shatter: failed \u2014 Audio generation failed on every available provider:\n- Radient: This audio request could not be accepted. (duration_seconds must be between 0.5 and 30 seconds, got 31)\n4/4 ui blip: completed"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "cb2000a106f8c461c884e695805fcccc",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "thunder rumble"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "b64059ec984c102b92f791f8bf5a2259",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "door creak"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "40f552e9258bf764c677c2688288d50a",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "ui blip"
+    }
+  ],
+  "details": {
+    "artifacts": [
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "low distant thunder rolling, close perspective",
+        "request_id": "aud_6ad4f640e0050304150a7663",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4f640e0050304150a7663",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "cb2000a106f8c461c884e695805fccccd885e9f4fde817161685083a654dd4f7",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T16:39:30Z"
+        },
+        "usage_record_id": "6ad4f640e0050304150a7665",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4f640e0050304150a7665",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "cb2000a106f8c461c884e695805fcccc",
+        "kind": "audio",
+        "name": "thunder rumble",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "old wooden door creaking open slowly",
+        "request_id": "aud_6ad4f640e73ab027182a5ce2",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4f640e73ab027182a5ce2",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "b64059ec984c102b92f791f8bf5a225980c6d998b25fe91ca18b1190e287c4b5",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T16:39:30Z"
+        },
+        "usage_record_id": "6ad4f640e73ab027182a5ce4",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4f640e73ab027182a5ce4",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "b64059ec984c102b92f791f8bf5a2259",
+        "kind": "audio",
+        "name": "door creak",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "failed",
+            "reason_class": "refused",
+            "message": "This audio request could not be accepted. (duration_seconds must be between 0.5 and 30 seconds, got 31)"
+          }
+        ],
+        "error": "Audio generation failed on every available provider:\n- Radient: This audio request could not be accepted. (duration_seconds must be between 0.5 and 30 seconds, got 31)",
+        "error_type": "audio_rejected",
+        "cost": {
+          "amount_usd": null,
+          "basis": null
+        },
+        "http_status": 400,
+        "name": "glass shatter",
+        "status": "failed",
+        "started": true,
+        "request_id": null,
+        "digest": null,
+        "duration_s": 31.0,
+        "format": null,
+        "cost_usd": null,
+        "units": null,
+        "unit": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "short soft digital confirmation blip",
+        "request_id": "aud_6ad4f642e73ab027182a5ce8",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4f642e73ab027182a5ce8",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "40f552e9258bf764c677c2688288d50a795b6735acaeb1a1e6343a0b58e50eb7",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T16:39:32Z"
+        },
+        "usage_record_id": "6ad4f642e73ab027182a5cea",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4f642e73ab027182a5cea",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "40f552e9258bf764c677c2688288d50a",
+        "kind": "audio",
+        "name": "ui blip",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      }
+    ],
+    "cost_usd": 0.006,
+    "cost_complete": false,
+    "cost": {
+      "amount_usd": 0.006,
+      "basis": "billed"
+    },
+    "completed": 3,
+    "failed": 1,
+    "cancelled": 0
+  },
+  "duration_s": null,
+  "is_error": false,
+  "useless": false
+}
