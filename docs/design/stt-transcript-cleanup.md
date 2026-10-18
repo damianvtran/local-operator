@@ -134,9 +134,9 @@ Scan of the 600 most recently modified session transcripts under
 * 19 of 20 have **no** `input_path` (written before the path carriage); the one
   recorded path is `provider_stt_radient`.
 * A conservative token scan found **90 filler-like tokens** (upper bound: the scan
-  also counted `er`, `mm`, `eh`) across 15 of the 20 messages. Manual inspection of
-  25 contexts confirmed genuine `uh`/`um` hesitations and false starts
-  (`un-untrusted`, `te- like`).
+  also counted `er`, `mm`, `eh`) across **19 of the 20** messages. Manual
+  inspection of 25 contexts confirmed genuine hesitations and false starts; only
+  their types are reported here, never the transcript text.
 * One message contains the non-text cue `[lip smack]`, in the same message that
   describes this workstream. No other bracket cue matched the cue lexicon.
 * No transcript content is reproduced in this note.
@@ -150,8 +150,9 @@ ElevenLabs-only fix would not change a single transcript this machine produced.
 Audio: macOS `say` generated seven short clips (English, Portuguese, Arabic,
 Japanese, Hindi, French, Chinese), converted to 16-bit WAV. These are synthetic
 probes, not user recordings; the transcripts below are the API's actual output, not
-hand-written fixtures. Two calls per clip (`no_verbatim` absent vs `true`), plus four
-`transcript_edit` calls. Key supplied from the encrypted store; never printed.
+hand-written fixtures. Two calls per clip (`no_verbatim` absent vs `true`), plus seven
+`transcript_edit` calls (three in the first pass, four negative controls in the
+second). Key supplied from the encrypted store; never printed.
 
 | Clip | Provider output with `no_verbatim=false` | With `no_verbatim=true` |
 |---|---|---|
@@ -194,7 +195,10 @@ From the live API reference and guides fetched 2026-10-18:
 * `no_verbatim` (boolean): "If true, the transcription will not have any filler
   words, false starts and non-speech sounds. Only supported with scribe_v2 model."
 * `tag_audio_events` (boolean): whether to tag audio events like `(laughter)`,
-  `(footsteps)`. No default is stated in the reference; send `false` explicitly.
+  `(footsteps)`. No default is stated in the reference: cleanup modes that enable
+  provider options send `false` explicitly. `cleanup=off` sends neither cleanup
+  field (see §4.2), so verbatim output may include cues; that is the cost of a
+  byte-identical disabled path.
 * `transcript_edit` (string, max 2000 chars): natural-language instruction applied to
   the finished transcript; `edited_transcript` returned alongside the original.
   Cannot be combined with `entity_detection`, `entity_redaction` or
@@ -223,15 +227,24 @@ untouched when no rule applies.
 
 ### 4.1 One cleanup point
 
-Add `local_operator/stt/cleanup.py` (pure, no I/O, import-light) and call it from the
-cascade executor after the serving rung returns, before `SttOutcome` is built. Both
-the phone route (`transcribe_backend`) and the desktop route (`transcribe_audio`)
-therefore get identical behaviour. The legacy Radient-only route is wired to the same
-pure function in a later slice if it still has callers; the phone does not use it.
+Add `local_operator/stt/cleanup.py` (pure, no I/O, import-light). The functions
+are called from **every serving path**, not only the cascade:
 
-Why not in the phone client: the phone is one surface, the daemon is the one place
-that holds provider keys and sees the provider's raw response, and a client-side
-implementation would diverge from the desktop route immediately.
+* `stt/cascade.py::_run_radient_rung` — the desktop cascade's Radient rung;
+* `clients/stt.py::_transcribe_radient_sync` — the phone's live Radient adapter,
+  which does not go through the cascade at all;
+* `stt/cascade.py::_run_elevenlabs_rung` and `_run_openai_rung` — provider options
+  before the call, client rules after it.
+
+This is what makes the phone and desktop answers identical. The legacy
+Radient-only route (`server/routes/transcription.py`) is wired to the same pure
+function in a later slice if it still has callers; it is not allowed to drift
+silently.
+
+Why the pure function lives in `stt/cleanup.py` and not in the phone client: the
+phone is one surface, the daemon holds the provider keys and sees the provider's
+raw response, and a second implementation in the web client would diverge from
+the desktop route immediately.
 
 ### 4.2 Cleanup modes
 
@@ -240,10 +253,10 @@ vocabulary:
 
 | Mode | ElevenLabs | Radient / OpenAI | Raw copy |
 |---|---|---|---|
-| `auto` (default) | `no_verbatim=true`, `tag_audio_events=false`; then client rules for residual cues/fillers | client rules | provider text; client rules preserve their input as `raw_text` |
+| `auto` (default) | `no_verbatim=true`, `tag_audio_events=false`; **provider-native only**, no client rules on this rung | client rules | **none** on ElevenLabs (`raw_text=null`, `raw_unavailable=provider_no_verbatim`); client rules preserve their input as `raw_text` elsewhere |
 | `provider` | `no_verbatim=true`, `tag_audio_events=false`; no client rules | no-op | none on ElevenLabs; raw == text elsewhere |
 | `client` | `no_verbatim=false`, `tag_audio_events=false`; client rules | client rules | **yes** |
-| `off` | send neither field (verbatim) | no-op | **yes** (raw == text) |
+| `off` | send neither field (verbatim; may include audio-event cues) | no-op | **yes** (raw == text) |
 | `edit` | `no_verbatim=false`, `tag_audio_events=false`, `transcript_edit=<strict instruction>` | client rules (fallback) | **yes** on ElevenLabs (`text` + `edited_transcript`) |
 
 `edit` is the only mode that uses the experimental, surcharged API; it must be
@@ -252,31 +265,49 @@ documented as such wherever it is offered. An invalid `cleanup` value is a 422
 
 ### 4.3 Client rules v1 (conservative)
 
-Rules are keyed by a normalised language code (ISO-639-1 or the provider's
-ISO-639-3 returned as `language_code`). If the language is unknown or not in the
-table, the token rules are a **no-op**; cue removal still applies because the cue
-labels are provider vocabulary, not natural language.
+Rules are keyed by a normalised language code. **Language source, in order:**
+(1) the caller-supplied `language` form field, which is authoritative; (2) the
+provider's `language_code` **only** when its `language_probability` clears a
+threshold (0.8) and the transcript's script is compatible with the rule set;
+(3) otherwise unknown -> the token rules are a **no-op**. Cue removal still
+applies because the cue labels are provider vocabulary, not natural language.
+The probability gate is not optional: the live Hindi probe returned `hin` once
+and `por` twice for the same voice, so a bare label is not trustworthy. On the
+Radient path the response may omit language entirely; without a caller-supplied
+`language`, client rules do nothing. Cue removal still runs.
 
 Token sets (v1):
 
-* `en`: `uh`, `um`, `uhm`, `erm`
+* `en`: `uh`, `uhm`, `erm`
 * `fr`: `euh`
 
-Deliberately absent: `um` for Portuguese (numeral/article), `أم`/`أمي` for Arabic
-(mother), `अरे` for Hindi (vocative), `嗯`/`呃`/`那个` for Chinese, `えーと`/`あの` for
-Japanese, `음`/`어` for Korean, `eh` for Spanish/Portuguese, `er`/`mm` for English.
-Those require a model-assisted pass (`edit`) or a later, evidence-backed rule.
+`um` is deliberately NOT in the English set: it is a real Portuguese
+numeral/article, and a single detected language code cannot distinguish an English
+filler `Um,` from Portuguese `Um livro` inside a code-switched transcript. English
+`um` is cleaned by the provider on the ElevenLabs rung; on the Radient/OpenAI rungs
+it remains until a model-assisted pass. Also deliberately absent: `أم`/`أمي` for
+Arabic (mother), `अरे` for Hindi (vocative), `嗯`/`呃`/`那个` for Chinese,
+`えーと`/`あの` for Japanese, `음`/`어` for Korean, `eh` for Spanish/Portuguese,
+`er`/`mm` for English. Those require `edit` or a later, evidence-backed rule.
 
 Deletion is span-based on the original string:
 
-* match only at a word boundary (`(?<!\w)token(?!\w)`, Unicode-aware), not inside
-  `album`, `sum`, `hum`, `documentum`, or a hyphenated compound;
+* match only at a **code-point boundary** computed with `unicodedata.category`:
+  the adjacent character is not in a letter (`L*`), mark (`M*`), number (`N*`) or
+  connector-punctuation (`Pc`) category, is not `-`, and is not ZWJ/ZWNJ. This
+  keeps `album`, `sum`, `hum`, `documentum` and `uh-huh` intact without the
+  `\w`-class traps: decomposed accents (base + combining mark), ZWJ/ZWNJ joins,
+  RLM/LRM controls and Arabic diacritics are handled by category, not by an
+  ASCII assumption. No normalization is performed; RLM/LRM and marks are
+  preserved even when an adjacent filler is removed;
 * skip all-uppercase tokens (`UM`, `UH`) so abbreviations survive;
 * skip matches inside backtick/code spans and straight/curly double-quoted spans;
 * remove the token plus only the punctuation/space that existed to separate it
-  (`Um, so` -> `so`; `I, uh, think` -> `I think`; `Okay. Um. Let's go.` ->
-  `Okay. Let's go.`); never remove unrelated punctuation, collapse unrelated
-  whitespace, or change case;
+  (`Uh, so` -> `So`; `I, uh, think` -> `I think`; `Okay. Uh. Let's go.` ->
+  `Okay. Let's go.`). Sentence-initial removal keeps sentence case by
+  upper-casing the first letter of the following word **only** when the removed
+  token began a sentence and that word was lowercase; no other case change, no
+  unrelated punctuation removal, no unrelated whitespace collapse;
 * return `removed` spans in raw-string offsets for audit.
 
 Cue removal uses a **closed lexicon**, not generic brackets: `(laughter)`,
@@ -294,13 +325,17 @@ rules twice equals applying them once.
 `SttOutcome` and the wire payload gain:
 
 * `cleanup`: `"none" | "elevenlabs.no_verbatim" | "elevenlabs.transcript_edit" |
-  "elevenlabs.transcript_edit_failed" | "client.rules.v1"` and joined forms such as
-  `"elevenlabs.no_verbatim+client.rules.v1"`;
+  "elevenlabs.transcript_edit_failed" | "client.rules.v1"`; if a later slice
+  combines levers, a joined form such as `"elevenlabs.no_verbatim+client.rules.v1"`;
 * `raw_text`: the text before **client** rules; `None` when the provider itself
-  removed the fillers and returned no raw copy;
+  removed the fillers and returned no raw copy. `raw_unavailable` names the reason
+  (`provider_no_verbatim` today); `None` must never be read as "nothing was
+  removed";
 * `language`: the provider-detected language code when it reports one;
-* `removed`: ordered spans `(start, end, kind, token)` for audit; empty when nothing
-  was removed.
+* `removed`: ordered spans `(start, end, kind, token)` in `raw_text` coordinates
+  for audit; empty when **our** layer removed nothing. A provider-native removal
+  can leave this empty while `raw_unavailable` is set: the spans are unknown
+  upstream, not absent.
 
 The rule is: **our layer never destroys the only copy.** If client rules run, the
 input is returned as `raw_text`. If the provider removes at source (`no_verbatim`),
@@ -347,8 +382,14 @@ Fixtures per language, each with a positive and a negative control:
 
 | Language | Input | Expectation |
 |---|---|---|
-| en | `Um, so I, uh, think we should ship.` | `So I think we should ship.` (exact string pinned by the implementation; no filler left) |
+| en | `Uh, so I, uh, think we should ship.` | `So I think we should ship.` (exact string pinned by the implementation; no filler left) |
 | en negative | `The album is in the sum. Hum a tune.` | byte-identical |
+| en `um` | `Um, the album is in the sum.` | byte-identical — `um` is not in the English set (Portuguese collision) |
+| en hyphen | `uh-huh, that works` | byte-identical (hyphen guard) |
+| NFD accent | `cafe\u0301 um` | byte-identical codepoints; the combining mark is not split from `e` |
+| ZWJ/ZWNJ | `uh\u200d` / `\u200cuh` | byte-identical; joiners preserved |
+| RTL control | `\u200fuh\u200f` | token may be removed if standalone; RLM/LRM controls preserved |
+| Arabic diacritic | `أُمّي` (with harakat) | byte-identical; no mark or letter removed |
 | en abbreviations | `UM and UH are universities.` | byte-identical (all-caps guard) |
 | en quote | `He said "um" and left.` | byte-identical inside quotes |
 | en code | `` `um = 1` `` / fenced block | byte-identical |
@@ -359,7 +400,7 @@ Fixtures per language, each with a positive and a negative control:
 | ur | `امی گھر میں ہیں۔` | byte-identical; RTL preserved |
 | ja | `えーと、今日はいい天気ですね。` | byte-identical |
 | zh | `嗯，我知道了。` | byte-identical |
-| mixed | `Um, but in Portuguese um livro means a book.` | the first `Um` may be removed only if language is `en`; the Portuguese `um` must remain — this is a **known limitation** of a single language code and is covered by a test that documents the chosen behaviour |
+| mixed | `Um, but in Portuguese um livro means a book.` | byte-identical in `client` mode: `um` is absent from the English set, so neither occurrence is touched. Provider `no_verbatim` cleans the English filler on the ElevenLabs rung; this is the documented code-switching limitation. |
 | cue | `I agree. [lip smack] Let's go.` | `I agree. Let's go.` |
 | cue negative | `The label says [inaudible].` | byte-identical |
 | idempotency | clean(clean(x)) == clean(x) | true for every fixture |
@@ -402,13 +443,15 @@ Fixtures per language, each with a positive and a negative control:
    `no_verbatim`/`tag_audio_events`, `SttOutcome` fields (`raw_text`, `cleanup`,
    `language`, `removed`), request field `cleanup` with `auto` default, both routes'
    plumbing, unit tests and fake-transport integration tests. No settings key, no
-   client token rules, no `edit` yet (mode `client` behaves as `off` until slice 3;
-   `edit` is rejected as unsupported until slice 5). This is the first
-   implementation slice.
+   client token rules, no `edit` yet: `client` and `edit` are recognized by the
+   closed vocabulary and rejected with a typed 422 until slices 3 and 5. This is
+   the first implementation slice.
 3. **Conservative client rules v1.** `en`/`fr` token sets, closed cue lexicon,
    quote/code/all-caps guards, span deletion, multilingual fixtures and negative
-   controls, idempotency, `off` byte-equality. Wire into `auto`/`client` for the
-   Radient and OpenAI rungs (the current live path).
+   controls, idempotency, `off` byte-equality. Wire into `auto`/`client` for **both
+   Radient adapters** (`_run_radient_rung` and `_transcribe_radient_sync`) and the
+   OpenAI rung; carry `language_probability` so the language gate is real, and
+   no-op when the caller supplied no language and the provider's label is weak.
 4. **Settings surface.** `speech.transcription.cleanup` in `/settings` (enum,
    LIVE), i18n source + generated keys, consumer-default test, route reads the
    config, per-user opt-out. Design/UX review only if a visible control is added;
@@ -439,9 +482,11 @@ real negative control.
    `अरे` result shows `edit` can remove a valid particle; the raw copy is the
    mitigation, and the mode is opt-in.
 3. **Provider defaults are not contractual.** `tag_audio_events` has no documented
-   default, so it is always sent explicitly. If ElevenLabs changes `no_verbatim`
-   semantics or model support, the wire test and live probe catch it; the cleanup
-   mode remains `off`-able.
+   default, so every cleanup mode that doesn't disable the provider sends it
+   explicitly; `off` sends neither field to stay byte-identical to today, so
+   verbatim output may include cues. If ElevenLabs changes `no_verbatim` semantics
+   or model support, the wire test and live probe catch it; the cleanup mode
+   remains `off`-able.
 4. **Code-switching with a single language code.** Client token rules cannot tell an
    English `um` from a Portuguese `um` inside one transcript. V1 restricts client
    rules to languages where the token is not lexical and documents the mixed-language
@@ -472,17 +517,52 @@ for c in s.list_credentials():
 s.close()
 PY
 
-# Dictated messages: count only, no content
-# (scan ~/.local-operator/sessions/*/transcript.jsonl for entries whose payload
-#  message has input_mode == "dictated"; do not print message bodies)
+# Dictated messages: counts only, no content
+.venv/bin/python - <<'PY'
+import json, os
+root = os.path.expanduser("~/.local-operator/sessions")
+files = sorted(
+    (os.path.getmtime(os.path.join(root, d, "transcript.jsonl")), os.path.join(root, d, "transcript.jsonl"))
+    for d in os.listdir(root)
+    if os.path.isfile(os.path.join(root, d, "transcript.jsonl"))
+)[-600:]
+n = with_path = 0
+for _, path in files:
+    with open(path, "rb") as handle:
+        for line in handle:
+            if b'"input_mode"' not in line or b"dictated" not in line:
+                continue
+            entry = json.loads(line)
+            message = (entry.get("payload") or {}).get("message") or {}
+            if message.get("input_mode") == "dictated":
+                n += 1
+                with_path += bool(message.get("input_path"))
+print({"dictated": n, "with_input_path": with_path, "scanned": len(files)})
+PY
 
-# ElevenLabs live probe
-# POST https://api.elevenlabs.io/v1/speech-to-text
-#   model_id=scribe_v2, tag_audio_events=false, [no_verbatim=true]
-#   header xi-api-key: <from the encrypted store>
-# Compare text/text with no_verbatim absent vs true; for transcript_edit add
-#   transcript_edit="Remove filler words, hesitations and non-speech sounds, but
-#   keep every other word, punctuation, and the original language exactly as spoken."
+# ElevenLabs live probe (synthetic audio; repeat the Python block per clip)
+say -v Samantha -o en.aiff "Um, so I, uh, think we should ship the change."
+afconvert -f WAVE -d LEI16 en.aiff en.wav
+.venv/bin/python - <<'PY'
+import json, subprocess
+import httpx
+
+key = subprocess.check_output(["lop", "secret", "get", "ELEVENLABS_API_KEY"], text=True).strip()
+for no_verbatim in (False, True):
+    data = {"model_id": "scribe_v2", "tag_audio_events": "false"}
+    if no_verbatim:
+        data["no_verbatim"] = "true"
+    with open("en.wav", "rb") as audio:
+        response = httpx.post(
+            "https://api.elevenlabs.io/v1/speech-to-text",
+            headers={"xi-api-key": key},
+            files={"file": ("en.wav", audio, "audio/wav")},
+            data=data,
+            timeout=90,
+        )
+    body = response.json()
+    print(json.dumps({"no_verbatim": no_verbatim, "text": body.get("text")}, ensure_ascii=False))
+PY
 ```
 
 ## Appendix B — Source references
