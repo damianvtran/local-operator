@@ -49,6 +49,7 @@ __all__ = [
     "RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM",
     "SUPPORTED_CLEANUP_MODES",
     "CleanupMode",
+    "InvalidCleanupMode",
     "ProviderCleanupOptions",
     "RemovedSpan",
     "elevenlabs_cleanup_options",
@@ -79,14 +80,24 @@ class ProviderCleanupOptions:
     """The request fields one provider needs for a cleanup mode.
 
     ``None`` means "do not send the field"; the provider's own default applies.
-    ``cleanup`` is the provenance token the served transcript carries (or
-    ``"none"``), and ``raw_unavailable`` states why no raw copy can exist.
+    Provenance is not stored here: the client that actually put a field on the
+    wire reports it, so a fake/older client cannot claim a cleanup it never
+    asked for.
     """
 
     no_verbatim: bool | None = None
     tag_audio_events: bool | None = None
-    cleanup: str = "none"
-    raw_unavailable: str = ""
+
+
+class InvalidCleanupMode(ValueError):
+    """A caller named a mode this build cannot execute.
+
+    A distinct type (still a ValueError for existing callers) so the desktop
+    route can answer 422 instead of inheriting the pre-existing prompt-length
+    400 arm. The mode is never silently downgraded: ``edit`` becoming
+    ``provider`` would spend a different amount and return a different
+    artifact.
+    """
 
 
 def resolve_cleanup(value: str | None) -> CleanupMode:
@@ -103,11 +114,11 @@ def resolve_cleanup(value: str | None) -> CleanupMode:
     mode = str(value).strip().lower()
     if mode not in CLEANUP_MODES:
         allowed = ", ".join(CLEANUP_MODES)
-        raise ValueError(
+        raise InvalidCleanupMode(
             f"Unknown transcription cleanup mode {value!r}. " f"Expected one of: {allowed}."
         )
     if mode not in SUPPORTED_CLEANUP_MODES:
-        raise ValueError(
+        raise InvalidCleanupMode(
             f"Transcription cleanup mode {mode!r} is not available yet. "
             f"Use one of: {', '.join(SUPPORTED_CLEANUP_MODES)}."
         )
@@ -123,15 +134,10 @@ def elevenlabs_cleanup_options(mode: CleanupMode) -> ProviderCleanupOptions:
     stay byte-identical to the pre-cleanup client for a verbatim caller.
     """
     if mode in ("auto", "provider"):
-        return ProviderCleanupOptions(
-            no_verbatim=True,
-            tag_audio_events=False,
-            cleanup="elevenlabs.no_verbatim",
-            raw_unavailable=RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM,
-        )
+        return ProviderCleanupOptions(no_verbatim=True, tag_audio_events=False)
     if mode == "off":
         return ProviderCleanupOptions()
     # ``client`` and ``edit`` are rejected by resolve_cleanup before reaching
     # here; refusing rather than answering a plausible-looking option keeps a
     # future mode from silently behaving like a different one.
-    raise ValueError(f"ElevenLabs cleanup mode {mode!r} is not supported.")
+    raise InvalidCleanupMode(f"ElevenLabs cleanup mode {mode!r} is not supported.")

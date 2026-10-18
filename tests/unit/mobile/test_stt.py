@@ -307,6 +307,13 @@ async def test_an_unknown_cleanup_mode_is_refused_before_availability() -> None:
         await transcribe_audio(b"x", "audio/wav", cleanup="bogus")
 
 
+@pytest.mark.asyncio
+async def test_the_dispatch_seam_validates_cleanup_before_the_token_lookup() -> None:
+    """Direct callers of ``transcribe_with_backend`` get the same refusal."""
+    with pytest.raises(ValueError, match="Unknown transcription cleanup mode"):
+        await transcribe_with_backend("provider_stt_radient", b"x", "audio/wav", cleanup="bogus")
+
+
 # ---------------------------------------------------------------------------
 # Availability
 # ---------------------------------------------------------------------------

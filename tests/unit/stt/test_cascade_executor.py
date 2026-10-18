@@ -368,6 +368,29 @@ async def test_cleanup_client_is_refused_until_its_slice(rig) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cleanup_provider_sends_native_fields_without_client_rules(rig) -> None:
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"}, cleanup="provider")
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_edit_is_refused_until_its_slice(rig) -> None:
+    """The +30% experimental mode is not silently mapped to provider or off."""
+    with pytest.raises(ValueError, match="not available yet"):
+        await rig.run({"elevenlabs": "el-key"}, cleanup="edit")
+
+    assert rig.clients == []
+
+
+@pytest.mark.asyncio
 async def test_the_sniffed_container_beats_the_suffix(rig) -> None:
     """Content over extension: the header is the stronger evidence."""
     mangled = rig.audio_path.with_suffix(".mp3")

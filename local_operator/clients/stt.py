@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from local_operator.stt import RemovedSpan
+from local_operator.stt.cleanup import resolve_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -472,6 +473,10 @@ async def transcribe_with_backend(
     clients raise their own typed errors (:class:`APIError` for Radient) and
     pass through for the route to classify.
     """
+    # Validate before the token lookup so a direct caller of this seam gets the
+    # same 422 sentence as the daemon route, including on the Radient branch
+    # that has no cleanup work in this slice.
+    resolve_cleanup(cleanup)
     key = resolve_backend_key(path)
     if key is None:
         raise SttBackendUnavailable(f"Unknown voice path '{path}'.", path=str(path))

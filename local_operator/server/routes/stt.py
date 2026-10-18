@@ -53,6 +53,7 @@ from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath, AudioPathResolution
 from local_operator.stt import audio as stt_audio
+from local_operator.stt.cleanup import InvalidCleanupMode
 from local_operator.stt.cascade import (
     SttUnavailable,
     resolve_audio_path,
@@ -266,6 +267,13 @@ async def create_stt_transcription_endpoint(
         raise HTTPException(
             status_code=exc.status_code or HTTP_502_BAD_GATEWAY,
             detail=_wm.media_refusal(error=exc.detail or str(exc)).envelope(),
+        )
+    except InvalidCleanupMode as exc:
+        # A cleanup mode this build cannot execute is a client error, not the
+        # prompt-length 400 arm below. The typed class keeps the two apart.
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_wm.media_refusal(error=str(exc)).envelope(),
         )
     except ValueError as ve:  # A client-side validation error (e.g. prompt length)
         raise HTTPException(

@@ -313,8 +313,27 @@ async def test_transcriptions_refuses_an_unknown_cleanup_mode(
         data={"cleanup": "bogus"},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert "Unknown transcription cleanup mode" in response.json()["detail"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_refuses_edit_before_its_slice(
+    test_app_client, store_override, elevenlabs_upstream
+) -> None:
+    """A recognized mode this build cannot execute is 422, never a fallback."""
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(lambda record: (200, {"text": "x"}))
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "edit"},
+    )
+
+    assert response.status_code == 422
+    assert "not available yet" in response.json()["detail"]["text"]
+    assert upstream.requests == []
 
 
 @pytest.mark.asyncio
