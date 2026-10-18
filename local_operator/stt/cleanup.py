@@ -41,12 +41,14 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from local_operator.stt import RemovedSpan
 
 __all__ = [
     "CLEANUP_MODES",
+    "CLEANUP_SETTING_KEY",
     "DEFAULT_CLEANUP",
     "RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM",
     "SUPPORTED_CLEANUP_MODES",
@@ -54,6 +56,7 @@ __all__ = [
     "InvalidCleanupMode",
     "ProviderCleanupOptions",
     "RemovedSpan",
+    "configured_cleanup",
     "elevenlabs_cleanup_options",
     "resolve_cleanup",
 ]
@@ -513,3 +516,50 @@ def choose_cleanup_language(
     if probability is not None and probability >= LANGUAGE_PROBABILITY_THRESHOLD:
         return normalize_language_hint(detected)
     return None
+
+
+#: The `/settings` key this policy reads. One contract: the registry row, the
+#: TUI/UI page, the routes and the docs all name this key.
+CLEANUP_SETTING_KEY = "speech.transcription.cleanup"
+
+
+def configured_cleanup(source: Any) -> CleanupMode:
+    """The configured cleanup mode, or ``auto`` when it cannot be read.
+
+    ``source`` is a ``ConfigManager`` or the config directory itself. The
+    routes call this ONLY when the request names no mode; a per-call
+    ``cleanup`` field always wins.
+
+    The file is re-read HERE rather than through the manager's startup
+    snapshot: a TUI or ``config.yml`` edit made by another process is the
+    normal way this setting changes, and the long-lived server's manager would
+    otherwise answer the old value until a reload (review round 1, M2). The
+    read is a small YAML parse per transcription, off the event loop on the
+    phone route; correctness wins over caching for a per-request setting.
+
+    A hand-edited invalid value falls back to ``auto`` rather than crashing a
+    transcription — writes through ``settings_io`` are rejected before
+    persistence, so this is the unreadable/legacy-file rung, not the normal one.
+    """
+    from local_operator import settings_io
+
+    setting = settings_io.BY_KEY.get(CLEANUP_SETTING_KEY)
+    if setting is None:  # a tree without the row (older plugin/consumer)
+        return DEFAULT_CLEANUP
+    try:
+        from types import SimpleNamespace
+
+        from local_operator.config import read_config_values
+
+        directory = getattr(source, "config_dir", source)
+        values = read_config_values(Path(directory))
+        if values is None:
+            return DEFAULT_CLEANUP
+        # A tiny duck-typed manager: ``read_setting`` only needs
+        # ``get_config().values``, and this read must never construct a
+        # ConfigManager (construction MOVES a malformed file aside, which a
+        # dictation has no business doing — review round 2, r2-M1).
+        snapshot: Any = SimpleNamespace(get_config=lambda: SimpleNamespace(values=values))
+        return resolve_cleanup(settings_io.read_setting(snapshot, setting))
+    except Exception:  # noqa: BLE001 — an unreadable/invalid setting must not fail dictation
+        return DEFAULT_CLEANUP

@@ -656,3 +656,56 @@ async def test_the_radient_adapter_normalises_en_us_and_cleans(
     assert seen["language"] == "en"
     assert outcome.text == "Hello."
     assert outcome.cleanup == "client.rules.v1"
+
+
+@pytest.mark.asyncio
+async def test_the_settings_key_changes_the_radient_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config -> resolver -> Radient adapter -> text: the real chain, not a stub."""
+    from local_operator import settings_io
+    from local_operator.clients import radient as radient_module
+    from local_operator.config import ConfigManager
+    from local_operator.providers import radient_credentials
+    from local_operator.stt.cleanup import configured_cleanup
+
+    class _FakeRadientClient:
+        def __init__(self, api_key: Any, base_url: str) -> None:
+            pass
+
+        def create_transcription(
+            self, *, file_path: str, model: Any, prompt: Any, language: Any
+        ) -> Any:
+            return SimpleNamespace(text="Uh, hello.", provider="radient")
+
+    async def _key(config: Any, base_url: str, *, store: Any = None) -> Any:
+        return SimpleNamespace(get_secret_value=lambda: "fixture-key")
+
+    monkeypatch.setattr(radient_module, "RadientClient", _FakeRadientClient)
+    monkeypatch.setattr(radient_credentials, "resolve_radient_credential", _key)
+
+    manager = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+    settings_io.write_setting(manager, setting, "off")
+
+    off = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake",
+        "audio/wav",
+        language="en",
+        cleanup=configured_cleanup(manager),
+        config_root=tmp_path,
+    )
+    assert off.text == "Uh, hello."
+
+    settings_io.write_setting(manager, setting, "auto")
+    auto = await transcribe_with_backend(
+        "provider_stt_radient",
+        b"RIFFfake",
+        "audio/wav",
+        language="en",
+        cleanup=configured_cleanup(manager),
+        config_root=tmp_path,
+    )
+    assert auto.text == "Hello."
+    assert auto.cleanup == "client.rules.v1"

@@ -59,7 +59,7 @@ from local_operator.stt.cascade import (
     resolve_audio_path,
     transcribe_audio,
 )
-from local_operator.stt.cleanup import InvalidCleanupMode
+from local_operator.stt.cleanup import InvalidCleanupMode, configured_cleanup
 
 router = APIRouter()
 
@@ -235,6 +235,10 @@ async def create_stt_transcription_endpoint(
     finally:
         await file.close()
 
+    # The request field wins; absent, the /settings key supplies the mode.
+    requested_cleanup = cleanup if isinstance(cleanup, str) and cleanup.strip() else None
+    effective_cleanup = requested_cleanup or configured_cleanup(config_manager)
+
     try:
         outcome = await transcribe_audio(
             Path(temp_file_path),
@@ -244,7 +248,7 @@ async def create_stt_transcription_endpoint(
             model=model_spec,
             language=language,
             prompt=prompt,
-            cleanup=cleanup,
+            cleanup=effective_cleanup,
             # The caller's conversation id for the hub correlation header and
             # the emitted record — attribution only; the cascade's credential
             # scope stays as it was (QA round 1, Q4).

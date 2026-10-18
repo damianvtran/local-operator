@@ -1024,3 +1024,34 @@ async def test_create_transcription_edit_is_422(test_app_client, temp_audio_file
 
     assert response.status_code == 422
     mock_radient_client.create_transcription.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_uses_the_live_settings_default(
+    test_app_client, temp_audio_file, mock_config_manager
+) -> None:
+    """The legacy route reads the setting, including an edit from another process."""
+    from local_operator import settings_io
+
+    writer = ConfigManager(mock_config_manager.config_dir)
+    settings_io.write_setting(writer, settings_io.BY_KEY["speech.transcription.cleanup"], "off")
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "[redacted]"
+    mock_radient_client.create_transcription.return_value = RadientTranscriptionResponseData(
+        text="Uh, so I think.", provider="radient", status="completed"
+    )
+
+    app.dependency_overrides[get_radient_client] = lambda: mock_radient_client
+    try:
+        with open(temp_audio_file, "rb") as f:
+            response = await test_app_client.post(
+                "/v1/transcriptions",
+                files={"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")},
+            )
+    finally:
+        del app.dependency_overrides[get_radient_client]
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "Uh, so I think."
+    assert result["cleanup"] == "none"

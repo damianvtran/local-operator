@@ -136,3 +136,32 @@ def test_removed_spans_are_in_raw_coordinates() -> None:
     assert len(result.removed) == 1
     span = result.removed[0]
     assert text[span.start : span.end] == span.token == "uh"
+
+
+def test_configured_cleanup_re_reads_an_external_write(tmp_path) -> None:
+    """A server's startup manager must not pin the setting forever (review r1 M2)."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.stt.cleanup import configured_cleanup
+
+    stale = ConfigManager(tmp_path)
+    writer = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+
+    assert configured_cleanup(stale) == "auto"
+    settings_io.write_setting(writer, setting, "off")
+
+    assert configured_cleanup(stale) == "off"
+    assert configured_cleanup(tmp_path) == "off"
+
+
+def test_configured_cleanup_never_moves_a_malformed_config(tmp_path) -> None:
+    """A dictation during a bad hand-edit must not relocate config.yml (review r2-M1)."""
+    from local_operator.stt.cleanup import configured_cleanup
+
+    config = tmp_path / "config.yml"
+    config.write_text("values: [\n", encoding="utf-8")
+
+    assert configured_cleanup(tmp_path) == "auto"
+    assert config.exists()
+    assert not list(tmp_path.glob("config.yml.bad.*"))

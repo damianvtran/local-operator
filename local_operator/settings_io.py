@@ -5372,6 +5372,40 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         help=_t(_ws.speech_voice_instructions_help()),
     ),
+    Setting(
+        key="speech.transcription.cleanup",
+        path=("speech", "transcription", "cleanup"),
+        section="speech",
+        label=_t(_ws.speech_transcription_cleanup_label()),
+        kind=Kind.ENUM,
+        # The route reads this per request; a request field, when present,
+        # still wins. ``auto`` is the shipped behaviour: provider-native where
+        # the rung has a switch, conservative client rules elsewhere.
+        default="auto",
+        help=_t(_ws.speech_transcription_cleanup_help()),
+        choices=(
+            Choice(
+                "auto",
+                _t(_ws.speech_transcription_cleanup_choice_auto_label()),
+                _t(_ws.speech_transcription_cleanup_choice_auto_description()),
+            ),
+            Choice(
+                "provider",
+                _t(_ws.speech_transcription_cleanup_choice_provider_label()),
+                _t(_ws.speech_transcription_cleanup_choice_provider_description()),
+            ),
+            Choice(
+                "client",
+                _t(_ws.speech_transcription_cleanup_choice_client_label()),
+                _t(_ws.speech_transcription_cleanup_choice_client_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.speech_transcription_cleanup_choice_off_label()),
+                _t(_ws.speech_transcription_cleanup_choice_off_description()),
+            ),
+        ),
+    ),
     # -- team bridge (agent messages, RFC §5) ---------------------------------
     # Defaults are LITERALS here, not imports: this module stays off the import
     # path of the package that reads these keys (it is loaded on every CLI

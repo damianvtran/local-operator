@@ -570,3 +570,56 @@ async def test_transcriptions_cleanup_client_cleans_elevenlabs(
     assert result["raw_text"] == "Uh, so I think."
     assert result["cleanup"] == "client.rules.v1"
     assert result["removed"] == [{"start": 0, "end": 2, "kind": "filler", "token": "Uh"}]
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_use_the_settings_default_when_no_field_is_sent(
+    test_app_client, store_override, elevenlabs_upstream, mock_config_manager
+) -> None:
+    from local_operator import settings_io
+
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+    settings_io.write_setting(mock_config_manager, setting, "off")
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(lambda record: (200, {"text": "Um, hello."}))
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "Um, hello."
+    assert result["cleanup"] == "none"
+    assert b"no_verbatim" not in upstream.requests[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_cleanup_field_still_wins_over_the_setting(
+    test_app_client, store_override, elevenlabs_upstream, mock_config_manager
+) -> None:
+    from local_operator import settings_io
+
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+    settings_io.write_setting(mock_config_manager, setting, "off")
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(
+        lambda record: (
+            200,
+            {"text": "Uh, hello.", "language_code": "eng", "language_probability": 0.99},
+        )
+    )
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "client"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "Hello."
+    assert result["cleanup"] == "client.rules.v1"
+    assert b'name="no_verbatim"' in upstream.requests[0]["body"]
+    assert b"\r\n\r\nfalse\r\n" in upstream.requests[0]["body"]
