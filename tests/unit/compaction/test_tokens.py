@@ -906,6 +906,10 @@ def test_a_cooldown_bounds_the_model_path_to_one_fetch_per_window():
 
     attempts: list[str] = []
     attempts_lock = threading.Lock()
+    # Armed only for the boundary phase; see ``slow_base_fetch``.
+    hold_loader = threading.Event()
+    loader_entered = threading.Event()
+    release_loader = threading.Event()
 
     def slow_model_fetch(_model: str):
         with attempts_lock:
@@ -916,6 +920,14 @@ def test_a_cooldown_bounds_the_model_path_to_one_fetch_per_window():
     def slow_base_fetch(_name: str):
         with attempts_lock:
             attempts.append("get_encoding")
+        # The boundary phase below holds the RETRY LOADER open, so "a loader is
+        # in flight" is a fact for the whole loop. Offline that fetch runs for
+        # 75.7 s, so in production the loader outlives every caller; a fake that
+        # merely sleeps would finish mid-loop and re-arm the cooldown, hiding
+        # the boundary defect behind the window it replaces.
+        if hold_loader.is_set() and threading.current_thread().name == "lop-tokenizer-load":
+            loader_entered.set()
+            release_loader.wait(10.0)
         time.sleep(0.4)
         raise RuntimeError("offline: BPE fetch timed out")
 
@@ -951,7 +963,39 @@ def test_a_cooldown_bounds_the_model_path_to_one_fetch_per_window():
             "model path must consult the latch like the base path does "
             "(pre-fix: two per call, four here)"
         )
+
+        # Boundary case (round 3): once the retry deadline elapses the BASE
+        # path dispatches its retry to a loader thread — but this path has no
+        # loader, so a windowed gate let it fetch INLINE again, two synchronous
+        # fetches per caller for as long as the attempt runs (75.7 s offline).
+        # Pre-fix: these 4 calls made 8 caller-thread fetches. Distinct texts
+        # because nothing memoises counts; the same string would hide repeats.
+        tokens_mod._ENCODING_RETRY_AT = 0.0  # the backoff has elapsed
+        hold_loader.set()
+        assert count_text_tokens(text) == len(text) // 4  # retry now in flight
+        assert loader_entered.wait(5.0), "the retry loader never started"
+        with attempts_lock:
+            before_expiry = len(attempts)
+        for i in range(4):
+            call_text = f"{text} {i}"
+            assert count_text_tokens(call_text, model="gpt-4o") == len(call_text) // 4
+        with attempts_lock:
+            during_loader = len(attempts) - before_expiry
+        assert during_loader == 0, (
+            f"{during_loader} fetch attempts after the retry deadline expired "
+            "while a loader was in flight (pre-fix: two synchronous fetches "
+            "per call, eight here); the model path must be gated for the "
+            "whole failure episode, not just the cooldown window"
+        )
+        # Let the loader publish before the reset below, so its outcome cannot
+        # race teardown (the epoch guard would discard it, but waiting keeps
+        # the test deterministic).
+        release_loader.set()
+        deadline = time.monotonic() + 5.0
+        while tokens_mod._LOAD_EPOCH is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
+        release_loader.set()
         if original is not None:
             sys.modules["tiktoken"] = original
         else:
