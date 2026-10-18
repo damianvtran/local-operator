@@ -1,0 +1,663 @@
+"""The full-page ``/review`` view: this session's code-request ledger.
+
+A MODE of the main screen, cloned from :class:`HarnessImportView` and, through
+it, :class:`SettingsView`: the page takes the transcript's region, leaves the
+dock in place and inert, and owns its own cursor and keys. The layout reuses the
+settings page's CSS classes (title/rule/columns/body/pane/detail/hints) rather
+than adding a second full-page skeleton.
+
+THE DATA PATH IS READ-THEN-FETCH, never a bare network read. The page first
+renders the derived index's rows (no network, no writes), then asks the service
+for one refresh pass over those rows, then re-reads. That ordering is what makes
+the cached frame available on the first tick and a rate-limited host show its
+stored data with the backend's own caption rather than an empty page. Both the
+file reads and the scan of the index happen on a worker thread; the event loop
+never blocks on the disk or a forge.
+
+A FULL-PAGE LIST CLAMPS ITS ARROWS. The list is the whole page and several times
+its viewport, so wrapping would throw the reader out of the group they were in
+(``AGENTS.md``'s documented exception, shared with ``/settings``). Home and End
+are the deliberate ends.
+
+The footer is made of the app's clickable :class:`HintButton`s: the page is
+otherwise pointer-reachable, and a hint that cannot be clicked is a caption.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import TYPE_CHECKING, Any, Mapping, cast
+
+from rich.cells import cell_len
+from rich.style import Style
+from rich.text import Text
+from textual.binding import Binding
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.message import Message
+from textual.widgets import Static
+
+from local_operator.code_requests import ledger as code_request_ledger
+from local_operator.code_requests import service as code_request_service
+from local_operator.i18n import keys as i18n_keys
+from local_operator.i18n.text import tr
+from local_operator.paths import config_dir
+from local_operator.tui import review as review_model
+from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.subagent_view import HintButton
+from local_operator.tui.widgets.tool_card import truncate_cells
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from local_operator.tui.app import OperatorApp
+
+logger = logging.getLogger(__name__)
+
+_t = tr("tui.review")
+_kt = i18n_keys.tui_review
+
+#: One cell per round in a lane's strip. The glyph differs for the "verdict not
+#: stated" role because that mark is a border with no fill, and a filled block
+#: would claim a verdict the wire never carried.
+_SEGMENT_GLYPH = {"warning": "▮", "muted": "▮", "success": "▮", "outline": "▯"}
+
+#: The rule is Chrome, not copy: a run of box-drawing cells that the settings
+#: page also paints, kept out of a `Text(...)` literal so the extraction ratchet
+#: has nothing to flag.
+_RULE_GLYPH = "─"
+
+_CURSOR = "›"
+
+
+class ReviewViewDismissed(Message):
+    """The page's esc hint/key was pressed; the app owns teardown."""
+
+
+class ReviewIndexReadError(RuntimeError):
+    """The derived index exists but cannot be read as this build's ledger.
+
+    ``ledger.read_index`` deliberately answers ``None`` for an absent file AND
+    for a torn or stale-schema one, because its other readers have no honest
+    way to fail. The PAGE does: an absent file is "no code requests yet", while
+    a file that exists and will not parse is an error the reader can retry.
+    """
+
+
+class ReviewView(Vertical):
+    """The session's pull/merge requests, grouped opened then mentioned."""
+
+    can_focus = True
+
+    BINDINGS = [
+        Binding("up", "move(-1)", "Up", show=False),
+        Binding("down", "move(1)", "Down", show=False),
+        Binding("pageup", "page(-1)", "Page up", show=False),
+        Binding("pagedown", "page(1)", "Page down", show=False),
+        Binding("home", "jump(0)", "First", show=False),
+        Binding("end", "jump(1)", "Last", show=False),
+        Binding("enter", "activate", "Open", show=False),
+        Binding("r", "reload", "Refresh", show=False),
+        Binding("escape", "leave", "Back", show=False),
+    ]
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(classes="settings-view review-view")
+        self._session_id = session_id
+        #: Resolved once: the app's own config root. A page never invents one.
+        self._config_dir = config_dir()
+        self._title = Static(classes="settings-view-title")
+        self._rule = Static(classes="settings-view-rule")
+        self._body_text = Static()
+        self._body = ScrollableContainer(self._body_text, classes="settings-view-body")
+        self._body.can_focus = False
+        self._pane = Static(classes="settings-view-pane")
+        self._columns = Horizontal(self._body, self._pane, classes="settings-view-columns")
+        self._detail = Static(classes="settings-view-detail")
+        self._hint_move = HintButton("↑↓", lambda: self.action_move(1))
+        self._hint_enter = HintButton("enter", self.action_activate)
+        self._hint_refresh = HintButton("r", self.action_reload)
+        self._hint_esc = HintButton("esc", self.action_leave)
+        self._hint_order = (
+            self._hint_move,
+            self._hint_enter,
+            self._hint_refresh,
+            self._hint_esc,
+        )
+        self._hints = Horizontal(*self._hint_order, classes="settings-view-hints")
+        #: ``loading`` is the COLD read only; rows already on screen stay painted
+        #: through a refresh, because a skeleton over data claims the data is gone.
+        self._state = "loading"
+        self._error = ""
+        self._refreshing = False
+        self._checked = False
+        self._rows: list[Mapping[str, Any]] = []
+        self._opened: tuple[Mapping[str, Any], ...] = ()
+        self._mentioned: tuple[Mapping[str, Any], ...] = ()
+        self._visible_rows: list[Mapping[str, Any]] = []
+        self._index = 0
+        self._narrow = False
+        self._now_ms = 0.0
+        #: ``(start_line, height)`` per visible row, in the body Text's own lines.
+        self._row_offsets: list[tuple[int, int]] = []
+
+    # -- composition --------------------------------------------------------
+    def compose(self):  # type: ignore[override]
+        yield self._title
+        yield self._rule
+        with self._columns:
+            yield self._body
+            yield self._pane
+        yield self._detail
+        yield self._hints
+
+    def on_mount(self) -> None:
+        self._apply_layout()
+        self._paint()
+        self.call_after_refresh(self._paint)
+        try:
+            self.focus()
+        except Exception:
+            pass
+        self._start(refresh=True)
+
+    def on_resize(self) -> None:
+        self._apply_layout()
+        self._paint()
+        self.call_after_refresh(self._paint)
+
+    def _apply_layout(self) -> None:
+        """Hide the pane where it would squeeze the list below readability."""
+        self._narrow = 0 < self.size.width < 90
+        self._pane.display = not self._narrow
+
+    # -- data ---------------------------------------------------------------
+    def _start(self, *, refresh: bool) -> None:
+        self.run_worker(
+            self._load(refresh=refresh),
+            group="review",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _read_rows(self) -> list[Mapping[str, Any]]:
+        """The index's rows, or a raised error when the file exists but is torn.
+
+        Runs on a worker thread: the read is small but it is still disk, and the
+        page must paint its loading frame before any of it happens.
+        """
+        try:
+            data = code_request_ledger.read_index(self._config_dir, self._session_id)
+            path = code_request_ledger.index_path(self._config_dir, self._session_id)
+        except ValueError:
+            # A session id that cannot become a filename has no ledger.
+            return []
+        if data is None:
+            if path.is_file():
+                raise ReviewIndexReadError(f"unreadable index: {path}")
+            return []
+        rows = data.get("rows")
+        if not isinstance(rows, list):
+            raise ReviewIndexReadError(f"malformed index: {path}")
+        return [row for row in rows if isinstance(row, Mapping)]
+
+    async def _load(self, *, refresh: bool) -> None:
+        cold = self._state != "ready"
+        if cold:
+            self._state = "loading"
+        self._refreshing = refresh
+        self._paint()
+        try:
+            rows = await asyncio.to_thread(self._read_rows)
+        except Exception as exc:  # noqa: BLE001 — the page reports, never crashes
+            self._fail(exc)
+            self._paint()
+            return
+        if refresh:
+            try:
+                await code_request_service.refresh_session(self._config_dir, self._session_id, rows)
+            except Exception:  # noqa: BLE001
+                # A failed fetch pass keeps the last known data standing, and
+                # each row's own ``refresh_error`` is the sentence that says so.
+                # There is nothing useful for the page to add above it.
+                logger.debug("code-request refresh failed for %s", self._session_id, exc_info=True)
+            try:
+                rows = await asyncio.to_thread(self._read_rows)
+            except Exception as exc:  # noqa: BLE001
+                self._fail(exc)
+                self._paint()
+                return
+        try:
+            views = await asyncio.to_thread(code_request_service.view_rows, self._config_dir, rows)
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            self._paint()
+            return
+        self._rows = list(views)
+        groups = review_model.group_rows(self._rows)
+        self._opened, self._mentioned = groups.opened, groups.mentioned
+        self._visible_rows = [*self._opened, *self._mentioned]
+        if self._visible_rows:
+            self._index = max(0, min(self._index, len(self._visible_rows) - 1))
+        else:
+            self._index = 0
+        self._state = "ready"
+        self._refreshing = False
+        # "Checked just now" is a receipt for the READER's press; a cold open's
+        # automatic pass already has its loading frame, and claiming a check
+        # nobody asked for would put a claim on the empty state.
+        self._checked = refresh and not cold
+        self._paint()
+
+    def _fail(self, exc: BaseException) -> None:
+        self._error = f"{type(exc).__name__}: {exc}"
+        self._state = "error"
+        self._refreshing = False
+
+    def _selected_row(self) -> Mapping[str, Any] | None:
+        if 0 <= self._index < len(self._visible_rows):
+            return self._visible_rows[self._index]
+        return None
+
+    # -- keys ---------------------------------------------------------------
+    def action_move(self, delta: int) -> None:
+        if not self._visible_rows:
+            return
+        self._index = max(0, min(len(self._visible_rows) - 1, self._index + delta))
+        self._paint()
+
+    def action_page(self, delta: int) -> None:
+        if not self._visible_rows:
+            return
+        step = max(1, (self._body.size.height or 1) // 2)
+        self._index = max(0, min(len(self._visible_rows) - 1, self._index + delta * step))
+        self._paint()
+
+    def action_jump(self, edge: int) -> None:
+        if not self._visible_rows:
+            return
+        self._index = 0 if edge == 0 else len(self._visible_rows) - 1
+        self._paint()
+
+    def action_activate(self) -> None:
+        row = self._selected_row()
+        if row is None:
+            return
+        url = str(row.get("url") or "")
+        if url:
+            # The app's ONE guarded opener; this page must not grow a second.
+            # Typed through the app rather than duck-typed: a missing opener must
+            # be a static error, not a press that silently does nothing.
+            cast("OperatorApp", self.app).open_transcript_link(url)
+
+    def action_reload(self) -> None:
+        if self._refreshing:
+            return
+        self._start(refresh=True)
+
+    def action_leave(self) -> None:
+        self.post_message(ReviewViewDismissed())
+
+    # -- painting -----------------------------------------------------------
+    def _paint(self) -> None:
+        self._apply_layout()
+        self._now_ms = time.time() * 1000.0
+        self._title.update(Text(_t(_kt.title()), style="bold"))
+        self._rule.update(Text(_RULE_GLYPH * 200, style="dim"))
+        self._pane.update(self._pane_text())
+        width = max(10, self._detail.size.width or self.size.width or 80)
+        self._detail.update(Text(truncate_cells(self._detail_text(), width), style="dim"))
+        self._paint_hints()
+        self._body_text.update(self._body_rich())
+        self._scroll_to_cursor()
+
+    def _paint_hints(self) -> None:
+        visible = self._hint_labels()
+        lead = False
+        for button in self._hint_order:
+            entry = visible.get(button)
+            button.display = entry is not None
+            if entry is None:
+                continue
+            button.paint(entry, lead=lead)
+            lead = True
+
+    def _hint_labels(self) -> dict[HintButton, str]:
+        labels: dict[HintButton, str] = {}
+        if self._visible_rows:
+            labels[self._hint_move] = _t(_kt.hint_move())
+            labels[self._hint_enter] = _t(_kt.hint_open())
+        labels[self._hint_refresh] = _t(_kt.hint_refresh())
+        labels[self._hint_esc] = _t(_kt.hint_back())
+        return labels
+
+    def _detail_text(self) -> str:
+        if self._state == "loading":
+            return _t(_kt.loading())
+        if self._state == "error":
+            return ""
+        if self._refreshing:
+            return _t(_kt.refreshing())
+        row = self._selected_row()
+        if row is not None:
+            title = review_model.row_title(row)
+            # The detail line exists to show the FULL title the list truncates;
+            # a link-only row has no title, only the URL its pane already prints.
+            return "" if title == str(row.get("url") or "") else title
+        if self._checked:
+            return _t(_kt.checked_just_now())
+        return ""
+
+    def _body_rich(self) -> Text:
+        text = Text()
+        if self._state == "loading":
+            text.append(_t(_kt.loading()) + "\n", style="dim")
+            return text
+        if self._state == "error":
+            text.append(_t(_kt.error_header()) + "\n\n", style="bold")
+            text.append(_t(_kt.error_body()) + "\n")
+            text.append(_t(_kt.error_detail(error=self._error)) + "\n", style="dim")
+            text.append(_t(_kt.error_retry()) + "\n", style="dim")
+            return text
+        if not self._visible_rows:
+            text.append(_t(_kt.empty_header()) + "\n\n", style="bold")
+            text.append(_t(_kt.empty_body()) + "\n")
+            return text
+        return self._rows_rich()
+
+    def _rows_rich(self) -> Text:
+        text = Text()
+        width = self._line_width()
+        self._row_offsets = []
+        index = 0
+        for label, rows in (
+            (_t(_kt.group_opened()), self._opened),
+            (_t(_kt.group_mentioned()), self._mentioned),
+        ):
+            if not rows:
+                continue
+            self._append_group_header(text, label, len(rows), width)
+            for row in rows:
+                start = text.plain.count("\n")
+                self._append_row(text, row, selected=index == self._index, width=width)
+                self._row_offsets.append((start, max(1, text.plain.count("\n") - start)))
+                index += 1
+        return text
+
+    def _line_width(self) -> int:
+        return max(20, (self._body.size.width or 60) - 2)
+
+    def _append_group_header(self, text: Text, label: str, count: int, width: int) -> None:
+        count_text = str(count)
+        pad = max(1, width - cell_len(label) - cell_len(count_text))
+        text.append(label, style=Style(color=theme_mod.semantic_color("muted"), bold=True))
+        text.append(" " * pad + count_text, style=Style(color=theme_mod.semantic_color("dim")))
+        text.append("\n")
+
+    def _append_row(
+        self,
+        text: Text,
+        row: Mapping[str, Any],
+        *,
+        selected: bool,
+        width: int,
+    ) -> None:
+        background = theme_mod.semantic_color("tint-select") if selected else None
+        base = Style(bgcolor=background)
+        cursor = Style(
+            color=theme_mod.semantic_color("muted") if selected else None,
+            bgcolor=background,
+        )
+        dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
+        text.append(f"{_CURSOR} " if selected else "  ", style=cursor)
+
+        # Line A: identity, the disambiguating tags, and the state pill pushed
+        # to the right edge. A link-only row has no summary, so no pill.
+        tags = [tag for tag in (review_model.relation_tag(row), review_model.acted_tag(row)) if tag]
+        left = review_model.identity_label(row)
+        if tags:
+            left = f"{left}  {' · '.join(tags)}"
+        pill = review_model.state_pill(row)
+        pill_label = pill.label if pill is not None else ""
+        room = max(8, width - 2 - (cell_len(pill_label) + 1 if pill_label else 0))
+        left = truncate_cells(left, room)
+        text.append(left, style=base)
+        if pill is not None:
+            gap = max(1, width - 2 - cell_len(left) - cell_len(pill_label))
+            text.append(" " * gap, style=base)
+            text.append(
+                pill_label,
+                style=Style(color=_pill_color(pill.variant), bgcolor=background, bold=True),
+            )
+        text.append("\n")
+
+        # Line B: the title, the row's loudest run.
+        text.append_text(
+            _styled_line("  " + truncate_cells(review_model.row_title(row), width - 2), base)
+        )
+
+        # Line C: one line per lane while the request is not link-only.
+        if not row.get("link_only"):
+            for line in review_model.lane_lines(row):
+                self._append_lane_line(text, line, width=width, background=background)
+
+        # Line D: the meta figures, `·`-seamed.
+        meta = self._meta_spans(row, width=width, background=background)
+        if meta is not None:
+            text.append_text(meta)
+
+        # Line E: the one quiet line — loading when the first read is pending,
+        # otherwise the backend's own notice.
+        notice = (
+            _t(_kt.row_fetching())
+            if review_model.row_is_loading(row)
+            else review_model.row_notice(row)
+        )
+        if notice:
+            text.append_text(_styled_line("  " + truncate_cells(notice, width - 2), dim))
+        else:
+            text.append("\n", style=base)
+        # A blank row between requests: a review row is up to eight lines, and
+        # without the gap two rows read as one block.
+        text.append("\n", style=base)
+
+    def _append_lane_line(
+        self, text: Text, line: review_model.LaneLine, *, width: int, background: Any
+    ) -> None:
+        dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
+        muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
+        text.append("  ", style=dim)
+        text.append(f"{line.name:<6} ", style=dim)
+        for tone in line.segments:
+            text.append(
+                _SEGMENT_GLYPH[tone],
+                style=Style(color=_lane_tone_color(tone), bgcolor=background),
+            )
+        strip_width = len(line.segments)
+        gap = 1 if strip_width else 0
+        room = max(6, width - 2 - 7 - strip_width - gap)
+        text.append(" " * gap, style=dim)
+        text.append(truncate_cells(line.clause, room), style=muted)
+        text.append("\n")
+
+    def _meta_spans(self, row: Mapping[str, Any], *, width: int, background: Any) -> Text | None:
+        summary = row.get("summary")
+        if row.get("link_only") or not isinstance(summary, Mapping):
+            return None
+        ci = review_model.ci_clause(summary.get("ci"))
+        comments = review_model.comment_clause(summary.get("comments"))
+        updated_at = summary.get("updated_at")
+        updated = (
+            review_model.updated_clause(updated_at, self._now_ms)
+            if isinstance(updated_at, (int, float))
+            else None
+        )
+        parts: list[tuple[str, Any]] = []
+        if ci is not None:
+            parts.append((ci.text, Style(color=_ci_color(ci.tone), bgcolor=background)))
+        muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
+        if comments:
+            parts.append((comments, muted))
+        if updated:
+            parts.append((updated, muted))
+        if not parts:
+            return None
+        text = Text("  ")
+        room = max(10, width - 2)
+        seam = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
+        for position, (part, style) in enumerate(parts):
+            if position:
+                text.append(" · ", style=seam)
+            remaining = room - (cell_len(text.plain) - 2)
+            if remaining <= 0:
+                break
+            text.append(truncate_cells(part, remaining), style=style)
+        if text.plain.strip() == "":
+            return None
+        return text
+
+    def _pane_text(self) -> Text:
+        text = Text()
+        width = self._pane_line_width()
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        row = self._selected_row()
+        if row is None:
+            text.append(_t(_kt.subtitle()), style=dim)
+            return text
+        text.append(review_model.identity_label(row) + "\n", style="bold")
+        title = review_model.row_title(row)
+        url = str(row.get("url") or "")
+        # A link-only row's `title` IS its URL; printing both would put the same
+        # line twice on a pane that then repeats it once more at the bottom.
+        if title and title != url:
+            for line in _wrap(title, width):
+                text.append(line + "\n")
+        pill = review_model.state_pill(row)
+        summary = row.get("summary")
+        head: list[str] = []
+        if pill is not None:
+            head.append(pill.label)
+        if isinstance(summary, Mapping):
+            ci = review_model.ci_clause(summary.get("ci"))
+            if ci is not None:
+                head.append(ci.text)
+            comments = review_model.comment_clause(summary.get("comments"))
+            if comments:
+                head.append(comments)
+            updated_at = summary.get("updated_at")
+            if isinstance(updated_at, (int, float)):
+                head.append(review_model.updated_clause(updated_at, self._now_ms))
+        if head:
+            text.append("\n")
+            for line in _wrap(" · ".join(head), width):
+                text.append(line + "\n", style=dim)
+        if not row.get("link_only"):
+            lanes = review_model.lane_lines(row)
+            if lanes:
+                text.append("\n")
+                for line in lanes:
+                    first = f"{line.name:<7}"
+                    clause_lines = _wrap(line.clause, max(6, width - 7))
+                    for position, clause in enumerate(clause_lines):
+                        text.append(first if position == 0 else " " * 7, style=dim)
+                        text.append(clause + "\n", style=muted)
+        tags = [tag for tag in (review_model.relation_tag(row), review_model.acted_tag(row)) if tag]
+        if tags:
+            text.append("\n")
+            for line in _wrap(" · ".join(tags), width):
+                text.append(line + "\n", style=muted)
+        notice = review_model.row_notice(row)
+        if notice:
+            text.append("\n")
+            for line in _wrap(notice, width):
+                text.append(line + "\n", style=dim)
+        url = str(row.get("url") or "")
+        if url:
+            text.append("\n")
+            for line in _wrap(url, width):
+                text.append(line + "\n", style=dim)
+        return text
+
+    def _pane_line_width(self) -> int:
+        # `.settings-view-pane` is 34 cells with 3 of left padding; fall back to
+        # that before the first layout pass has measured the widget.
+        return max(10, (self._pane.size.width or 34) - 3)
+
+    def _scroll_to_cursor(self) -> None:
+        """Keep the cursor row in the viewport using the ACTUAL row heights."""
+        if not self._row_offsets:
+            return
+        start, height = self._row_offsets[min(self._index, len(self._row_offsets) - 1)]
+        viewport = max(1, self._body.size.height or 1)
+        y = self._body.scroll_offset.y
+        if start < y:
+            target = start
+        elif start + height > y + viewport:
+            target = start + height - viewport
+        else:
+            return
+        try:
+            self._body.scroll_to(y=max(0, target), animate=False, immediate=True)
+        except Exception:
+            pass
+
+
+def _ci_color(tone: str) -> str:
+    """CI's ink role: ``danger`` red, ``plain`` the default muted ink."""
+    return {
+        "danger": theme_mod.semantic_color("danger"),
+        "muted": theme_mod.semantic_color("dim"),
+        "plain": theme_mod.semantic_color("muted"),
+    }.get(tone, theme_mod.semantic_color("muted"))
+
+
+def _lane_tone_color(tone: str) -> str:
+    """The lane mark's ink role, resolved from the theme's semantic ramp.
+
+    ``outline`` is the role for a review whose verdict was never stated: the
+    desktop draws it as a border with no fill, and the TUI's whole translation
+    of that is the hollow glyph in ``_SEGMENT_GLYPH`` plus the dimmest ink.
+    """
+    return {
+        "warning": theme_mod.semantic_color("warning"),
+        "muted": theme_mod.semantic_color("muted"),
+        "success": theme_mod.semantic_color("success"),
+        "outline": theme_mod.semantic_color("dim"),
+    }.get(tone, theme_mod.semantic_color("dim"))
+
+
+def _pill_color(variant: str) -> str:
+    """The state pill's ink role: one badge vocabulary, no hex in the widget."""
+    return {
+        "info": theme_mod.semantic_color("signal"),
+        "outline": theme_mod.semantic_color("muted"),
+        "success": theme_mod.semantic_color("success"),
+        "neutral": theme_mod.semantic_color("muted"),
+    }.get(variant, theme_mod.semantic_color("muted"))
+
+
+def _styled_line(content: str, style: Style) -> Text:
+    text = Text(content, style=style)
+    text.append("\n")
+    return text
+
+
+def _wrap(value: str, width: int) -> list[str]:
+    """Wrap a sentence to ``width`` cells, never dropping a word."""
+    if width <= 0:
+        return [value]
+    lines: list[str] = []
+    current = ""
+    for word in value.split():
+        candidate = f"{current} {word}".strip()
+        if current and cell_len(candidate) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+__all__ = ["ReviewIndexReadError", "ReviewView", "ReviewViewDismissed"]
