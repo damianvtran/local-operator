@@ -5,8 +5,8 @@
 pair — 33 flagged `help=` findings -> 10 namespaces.
 
 Same ruled classes: prose -> keys; flag/command tokens in situ. **Zero
-ignores**, pinned below. Two recorded extras, extracted under the same
-per-site class decision and COUNT-NEUTRAL by construction:
+ignores**, pinned below. Three unflagged extra sites (two kinds), extracted under
+the same per-site class decision and COUNT-NEUTRAL by construction:
 - `credential_key_help` — a local variable holding shared help text used by
   two `help=` args; the variable-indirection blind spot of the sink scanner.
   The value is now the envelope render; the two references stay untouched.
@@ -80,19 +80,11 @@ def test_the_catalogues_are_the_golden_fixtures() -> None:
 
 def test_every_block_renders_through_its_envelope_and_no_ignore_exists() -> None:
     source = (REPO / CLI).read_text(encoding="utf-8")
-    for alias, count in (
-        ("_me.", 1),
-        ("_cr.", 5),
-        ("_cf.", 9),
-        ("_ad.", 4),
-        ("_sv.", 5),
-        ("_qc.", 5),
-        ("_rc.", 1),
-        ("_li.", 2),
-        ("_lo.", 2),
-        ("_ls.", 2),
-    ):
-        assert source.count(alias) == count, (alias, source.count(alias), count)
+    # Per-SITE shape pins (the teams-slice precedent): every accessor call must
+    # carry the exact bootstrap form, not merely the right count.
+    for alias, key in PINS:
+        shape = f'{alias}.{key}().envelope(locale=help_locale)["text"]'
+        assert shape in source, shape
     # Tranche 6 adds zero ignores: every `# i18n: ignore` pragma in the file
     # (the pre-existing browser-era set, elsewhere in cli.py) must stay away
     # from every T6 accessor -- the absence is pinned per-site, not globally.
@@ -120,7 +112,9 @@ def test_the_ceiling_has_no_slack_and_stays_unactivated(i18n_check) -> None:
     live = _live_cli_count(i18n_check)
     assert baseline["files"].get(CLI) == live, (baseline["files"].get(CLI), live)
     assert live <= CEILING, live
-    assert CLI not in baseline["enforced"], "cli.py is activated without the file being clean"
+    assert not i18n_check.in_enforced_scope(
+        CLI, baseline["enforced"]
+    ), "cli.py is activated without the file being clean"
 
 
 def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check) -> None:
@@ -151,6 +145,48 @@ def test_a_planted_literal_fails_the_checker(tmp_path, monkeypatch, i18n_check) 
     assert i18n_check.main([]) == 1
     target.write_text(source, encoding="utf-8")
     assert i18n_check.main([]) == 0
+
+
+# (accessor alias, key) for every T6 site -- the per-site shape pins above.
+PINS = [
+    ("_me", "memory"),
+    ("_cr", "credential"),
+    ("_cr", "update"),
+    ("_cr", "delete"),
+    ("_cr", "git_helper"),
+    ("_cr", "key"),
+    ("_cf", "config"),
+    ("_cf", "open"),
+    ("_cf", "edit"),
+    ("_cf", "edit_key"),
+    ("_cf", "edit_value"),
+    ("_cf", "list"),
+    ("_cf", "create"),
+    ("_cf", "instructions"),
+    ("_cf", "instructions_description"),
+    ("_ad", "aida"),
+    ("_ad", "note"),
+    ("_ad", "note_description"),
+    ("_ad", "note_text"),
+    ("_sv", "serve"),
+    ("_sv", "host"),
+    ("_sv", "port"),
+    ("_sv", "reload"),
+    ("_sv", "listener_fd"),
+    ("_qc", "qwencloud_ticket"),
+    ("_qc", "set"),
+    ("_qc", "status"),
+    ("_qc", "rm"),
+    ("_qc", "migrate"),
+    ("_rc", "session"),
+    ("_li", "login"),
+    ("_li", "provider"),
+    ("_lo", "logout"),
+    ("_lo", "provider"),
+    ("_ls", "login_status"),
+    ("_ls", "status_alias"),
+]
+assert len(PINS) == 36
 
 
 CASES = [
