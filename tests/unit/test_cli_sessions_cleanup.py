@@ -21,7 +21,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.cli import _content_row_text, sessions_cleanup_command
+from local_operator.cli import (
+    _CLEANUP_TEXT_ROWS,
+    _content_row_text,
+    sessions_cleanup_command,
+)
 from local_operator.config import ConfigManager
 from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
@@ -263,6 +267,40 @@ def test_json_keeps_its_old_keys_and_gains_per_class_objects(store: Path, capsys
     # class to the delegated pass's whole-store count (18 + 19 = 37 here; 15 +
     # 18 = 33 in the review's probe). Asserts the VALUE, not just the key.
     assert payload["scanned"] == _count(store) == 19
+
+
+def test_the_kept_listing_and_json_are_both_capped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """The kept names are CAPPED, so the text must not promise a full ``--json``.
+
+    The pass names at most ``WINDOW_NAMES_CAP`` kept-by-origin sessions (the
+    totals line still carries the true count), and the printer shows at most
+    ``_CLEANUP_TEXT_ROWS`` of those. Past the cap the old line said ``--json
+    lists every row``, which was false: JSON carries the same capped list. One
+    600-session store pins the cap and both truncations at once.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    mark_store(tmp_path / "sessions")
+    for index in range(600):
+        _delegated(tmp_path, f"k{index:03d}", age_h=40 * 24, origin="agent-config")
+
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    printed = [line for line in out.splitlines() if line.startswith("  kept ")]
+    assert len(printed) == _CLEANUP_TEXT_ROWS
+    # The remainder counts against the NAMED list the printer was handed
+    # (500), not the store total: 600 kept, 500 named, 200 printed, 300 more.
+    assert f"... and {dr.WINDOW_NAMES_CAP - _CLEANUP_TEXT_ROWS} more kept" in out
+    assert f"capped at {dr.WINDOW_NAMES_CAP} per group" in out
+    assert "--json lists every row" not in out
+
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    delegated = json.loads(capsys.readouterr().out)["delegated"]
+    assert delegated["kept_by_origin"] == 600
+    assert len(delegated["kept_by_origin_names"]) == dr.WINDOW_NAMES_CAP
+    assert len(delegated["protected"]) == dr.WINDOW_NAMES_CAP
+    assert {entry["guard"] for entry in delegated["protected"]} == {"origin not reapable"}
 
 
 def test_parent_limits_with_the_switch_off_refuse_even_though_delegated_is_on(

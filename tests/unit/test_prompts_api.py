@@ -673,6 +673,15 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
     # otherwise fully capable and the ORDER assertion below reds (round-2
     # review V8). Presence-only, same rule as the gates charted above.
     monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+    # The audio pair's gates read the machine's audio credentials the same way,
+    # and they are TWO predicates (sound effects have no OpenAI path), so both
+    # are stubbed — presence-only, exactly as above.
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
+    )
 
     tools = create_tools(
         ToolContext(

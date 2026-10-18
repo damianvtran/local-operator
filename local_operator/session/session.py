@@ -17781,6 +17781,13 @@ class Session:
             # rows themselves, and this method is the ONE append path for
             # ``video_job_v1`` records (see ``journal_video_job``).
             journal_video_job=self.journal_video_job,
+            # The audio lane's late-settlement pair: a cancelled-but-running
+            # job may finish minutes after the tool returned, so the settle
+            # poll rides the SESSION's background task set (tracked, and
+            # cancelled by dispose) and its record lands through the
+            # session's one append path — the tool can do neither itself.
+            journal_audio_settle=self.journal_audio_settle,
+            spawn_background=self._spawn_background,
             # The send tool's own notice hook, wired for the same reason and
             # with the same shape: the tool cannot write a transcript row
             # itself, and the gate (``send.journal_unconfirmed``, default off) is
@@ -19211,6 +19218,23 @@ class Session:
         swallowing here would hide which writer chose what.
         """
         await self._transcript.append_custom(VIDEO_JOB_CUSTOM_TYPE, record, preserve_mtime=True)
+
+    async def journal_audio_settle(self, record: dict[str, Any]) -> None:
+        """Append one ``audio_settle_v1`` row after a RUNNING cancel.
+
+        The audio contract's cancel is a guaranteed stop ONLY while the job is
+        queued. A job refused mid-flight keeps running and is charged if it
+        produces audio, so the settle poll records what actually happened
+        minutes after the tool returned — a transcript row the tool cannot
+        write itself (the ``journal_video_job`` precedent).
+
+        BOOKKEEPING, like the video record: the write is caused by work the user
+        started earlier, and it must not re-rank the session as freshly worked.
+        Failures PROPAGATE so the caller decides (the settle task logs).
+        """
+        from local_operator.audiogen.settle import AUDIO_SETTLE_CUSTOM_TYPE
+
+        await self._transcript.append_custom(AUDIO_SETTLE_CUSTOM_TYPE, record, preserve_mtime=True)
 
     async def _boot_video_jobs(self) -> None:
         """Cold-follow conversion for pending video jobs (criterion b).

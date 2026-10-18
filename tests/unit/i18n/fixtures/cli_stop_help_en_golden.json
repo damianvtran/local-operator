@@ -1,0 +1,11 @@
+{
+  "cli.stop_help.stop": "Stop a running lop session (graceful, then signals)",
+  "cli.stop_help.target": "conversation-name / session-id / pid / cwd substring (case-insensitive)",
+  "cli.stop_help.pid": "target by exact pid",
+  "cli.stop_help.session": "target by exact session id",
+  "cli.stop_help.all": "stop every session on this machine (prompts on a TTY; --yes to skip)",
+  "cli.stop_help.yes": "skip the --all confirmation (required when stdin is not a TTY)",
+  "cli.stop_help.json": "machine-readable outcome per target",
+  "cli.stop_help.timeout": "graceful-op wait per session before escalating (default 10)",
+  "cli.stop_help.force": "escalate past a refusal or a skip: signal a target whose socket cannot confirm identity, one that reports a turn in flight, or one already leaving after a signal — each of those can cut the turn it is in. Not needed for a cooperative mid-turn runtime: the plain stop ends that one promptly, through its socket"
+}

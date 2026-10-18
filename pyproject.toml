@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.74.0"
+version = "0.75.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -153,6 +153,12 @@ lsp = ["jedi>=0.19"]
 # stdlib html.parser renderer when this extra is absent, so a bare install stays
 # fully functional — the extra only upgrades render quality.
 fetch = ["markdownify"]
+# Waveform peaks for generated audio (the sound-generation feature).
+# miniaudio bundles a compiled decoder but publishes wheels for the supported
+# platforms. The peaks module imports it OPTIONALLY and degrades silently
+# without it — no sidecar, no waveform, no error — so a bare install stays
+# fully functional and the extra only enables the waveform surfaces.
+audio = ["miniaudio>=1.71"]
 # `lsp` belongs here for the same reason `fetch` does: jedi is pure Python
 # with no compiled wheel, so it carries none of the Windows sdist-build
 # fragility the other extras are kept lean to avoid. Omitting it meant
@@ -160,7 +166,7 @@ fetch = ["markdownify"]
 # the createIf gate returns None without jedi, so the user saw an absence
 # rather than an error. Found by the context-budget guard, which asserts it
 # measures the FULL tool surface and reported 23 of 24 on CI.
-all = ["local-operator[server,mcp,images,tokenizer,fetch,lsp]"]
+all = ["local-operator[server,mcp,images,tokenizer,fetch,audio,lsp]"]
 dev = [
     "local-operator[all]",
     # PINNED TO THE VERSION CI RUNS (`.github/workflows/ci.yml` lint job). The

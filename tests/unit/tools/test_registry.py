@@ -168,6 +168,15 @@ def _force_browser_available(monkeypatch):
     )
     monkeypatch.setattr(code_requests_tool, "code_requests_available", lambda context: True)
     monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+    # The audio pair's gates are per DIRECTION (the frozen contract has no
+    # OpenAI sound-effect path), so both predicates are forced here — the
+    # whole-table assertions describe the fully-capable surface.
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
+    )
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -281,16 +290,23 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     tables — and wave 4 slice A's ``setting`` (the unconditionally published
     settings write path) appended after the pair, so THE PIN MOVES WITH THE
     NEWEST APPEND, which is this test's contract. H5d's ``bridge`` (the Team
-    Bridge CoS tool, createIf-gated on the session's bridge runtime) is the
-    newest append and now ends both tables."""
-    assert DEFAULT_TOOL_NAMES[-2:] == ["setting", "bridge"]
-    assert list(TOOL_BUILDERS)[-2:] == ["setting", "bridge"]
-    assert DEFAULT_TOOL_NAMES[-3] == "video_status"
-    assert list(TOOL_BUILDERS)[-3] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-4] == "generate_video"
-    assert list(TOOL_BUILDERS)[-4] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-5] == "no_reply"
-    assert list(TOOL_BUILDERS)[-5] == "no_reply"
+    Bridge CoS tool, createIf-gated on the session's bridge runtime) appended
+    after it, and the sound-generation wave's audio pair
+    (``generate_voiceover``/``generate_sound_effect``, each createIf-gated on
+    a per-direction credential) is the newest append and now ends both
+    tables."""
+    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_voiceover", "generate_sound_effect"]
+    assert list(TOOL_BUILDERS)[-2:] == ["generate_voiceover", "generate_sound_effect"]
+    assert DEFAULT_TOOL_NAMES[-3] == "bridge"
+    assert list(TOOL_BUILDERS)[-3] == "bridge"
+    assert DEFAULT_TOOL_NAMES[-4] == "setting"
+    assert list(TOOL_BUILDERS)[-4] == "setting"
+    assert DEFAULT_TOOL_NAMES[-5] == "video_status"
+    assert list(TOOL_BUILDERS)[-5] == "video_status"
+    assert DEFAULT_TOOL_NAMES[-6] == "generate_video"
+    assert list(TOOL_BUILDERS)[-6] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-7] == "no_reply"
+    assert list(TOOL_BUILDERS)[-7] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:
@@ -475,6 +491,45 @@ def test_the_bridge_tool_is_absent_without_a_runtime() -> None:
     names = [tool.name for tool in create_tools(_engine_context(bridge_runtime=None))]
     assert "bridge" not in names
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "bridge"]
+
+
+def test_the_audio_pair_is_absent_without_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """createIf per direction: no reachable credential, no audio tool.
+
+    The gates read the machine's credentials (``audiogen.availability``), so
+    the autouse forcing above is UNDONE here deliberately — this is the test
+    of the gate itself. A session with no audio credential must pay no schema
+    for the pair (the D9 footprint rule).
+    """
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: False
+    )
+    names = [tool.name for tool in create_tools(_engine_context())]
+    assert "generate_voiceover" not in names
+    assert "generate_sound_effect" not in names
+
+
+def test_the_sound_effect_tool_is_absent_on_an_openai_only_machine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two gates DIFFER: sound effects have no OpenAI path (frozen contract).
+
+    An OpenAI-only machine gets the voiceover tool and must NOT get a
+    sound-effect tool whose every call could only end in "no provider for
+    this request shape".
+    """
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: False
+    )
+    names = [tool.name for tool in create_tools(_engine_context())]
+    assert "generate_voiceover" in names
+    assert "generate_sound_effect" not in names
 
 
 def test_the_console_tool_is_not_hidden(monkeypatch) -> None:

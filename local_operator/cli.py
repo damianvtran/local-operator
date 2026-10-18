@@ -66,7 +66,10 @@ from local_operator.i18n.keys import cli_browser_help as _bh
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_global_help as _gh
 from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_hub_shared_help as _hs
+from local_operator.i18n.keys import cli_install_help as _in
 from local_operator.i18n.keys import cli_login_help as _li
 from local_operator.i18n.keys import cli_login_status_help as _ls
 from local_operator.i18n.keys import cli_logout_help as _lo
@@ -74,12 +77,17 @@ from local_operator.i18n.keys import cli_mcp_help as _mh
 from local_operator.i18n.keys import cli_memory_help as _me
 from local_operator.i18n.keys import cli_mobile_help as _mb
 from local_operator.i18n.keys import cli_model_help as _mo
+from local_operator.i18n.keys import cli_monitor_help as _mn
 from local_operator.i18n.keys import cli_qwencloud_help as _qc
+from local_operator.i18n.keys import cli_refresh_help as _re
 from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
+from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
+from local_operator.i18n.keys import cli_update_help as _up
 from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
@@ -140,17 +148,6 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
-CLI_DESCRIPTION = """
-    Local Operator - An environment for agentic AI models to perform tasks on the local device.
-
-    Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi
-    and Alibaba. Features include interactive chat, safe code execution,
-    context-aware conversation history, and built-in safety checks.
-
-    Configure your preferred model and hosting platform via command line arguments. Your
-    configuration file is located at ~/.local-operator/config.yml and can be edited directly.
-"""
-
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
@@ -181,26 +178,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parent_parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode for verbose output",
+        help=_gh.debug().envelope(locale=help_locale)["text"],
     )
     parent_parser.add_argument(
         "--agent",
         "--agent-name",
         type=str,
-        help="Select a legacy named agent (creates it if missing). Without --train, "
-        "use a separate persisted session; exec --profile attaches a reusable role instead.",
+        help=_gh.agent().envelope(locale=help_locale)["text"],
         dest="agent_name",
     )
     parent_parser.add_argument(
         "--train",
         action="store_true",
-        help="Use the legacy agent history directory (or an autosave agent) instead "
-        "of a separate session. Ordinary sessions are also persisted and resumable; "
-        "--resume takes precedence over this directory selection.",
+        help=_gh.train().envelope(locale=help_locale)["text"],
     )
 
     # Main parser
-    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
+    parser = argparse.ArgumentParser(
+        description=_gh.description().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
 
     parser.add_argument(
         "--resume",
@@ -209,10 +205,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SESSION_ID",
         dest="resume",
-        help="Resume a previous session by id, replaying its transcript. The id is the one"
-        " printed when a session is stopped with Ctrl+C twice, and is the directory name under"
-        " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
-        " session.",
+        help=_gh.resume().envelope(locale=help_locale)["text"],
     )
     # ``installed_version()``, not ``version("local-operator")``: install
     # metadata is written once and never moves when the checkout's
@@ -247,7 +240,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"v{installed_version()}",
-        help="Show program's version number and exit",
+        help=_gh.version().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--hosting",
@@ -275,41 +268,36 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "zai",
             "test",
         ],
-        help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
-        "alibaba, google, mistral, test, openrouter, xai, zai)",
+        help=_gh.hosting().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, "
-        "grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, "
-        "mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, "
-        "the provider's suggested model is used.",
+        help=_gh.model().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--run-in",
         type=str,
-        help="The working directory to run the operator in.  Must be a valid directory.",
+        help=_gh.run_in().envelope(locale=help_locale)["text"],
         dest="run_in",
     )
     # --- Additive root flags (rewrite) ------------------------------------
     parser.add_argument(
         "--yolo",
         action="store_true",
-        help="Auto-approve all tool executions (read/write/exec tiers) without prompting",
+        help=_gh.yolo().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--no-tui",
         action="store_true",
         dest="no_tui",
-        help="Disable the full-screen TUI; use the plain headless REPL instead",
+        help=_gh.no_tui().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--tui",
         action="store_true",
         dest="tui",
-        help="Force the full-screen TUI even when stdout is not a tty "
-        "(errors clearly if the TUI cannot run without a tty)",
+        help=_gh.tui().envelope(locale=help_locale)["text"],
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
@@ -507,7 +495,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=_ag.push_hub_id().envelope(locale=help_locale)["text"],
     )
-    _add_hub_publish_flags(push_parser)
+    _add_hub_publish_flags(push_parser, help_locale=help_locale)
     # Pull command
     pull_parser = agents_subparsers.add_parser(
         "pull", help=_ag.pull().envelope(locale=help_locale)["text"], parents=[parent_parser]
@@ -541,7 +529,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=_ag.sync_all().envelope(locale=help_locale)["text"],
     )
-    _add_hub_sync_flags(sync_parser)
+    _add_hub_sync_flags(sync_parser, help_locale=help_locale)
     sync_parser.add_argument(
         "--force",
         action="store_true",
@@ -636,7 +624,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=_th.push_id().envelope(locale=help_locale)["text"],
     )
-    _add_hub_publish_flags(teams_push)
+    _add_hub_publish_flags(teams_push, help_locale=help_locale)
     teams_pull = teams_subparsers.add_parser(
         "pull",
         help=_th.pull().envelope(locale=help_locale)["text"],
@@ -666,7 +654,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     teams_sync_group.add_argument(
         "--all", action="store_true", help=_th.sync_all().envelope(locale=help_locale)["text"]
     )
-    _add_hub_sync_flags(teams_sync)
+    _add_hub_sync_flags(teams_sync, help_locale=help_locale)
     teams_link = teams_subparsers.add_parser(
         "link",
         help=_th.link().envelope(locale=help_locale)["text"],
@@ -1462,51 +1450,49 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "session", help=_rc.session().envelope(locale=help_locale)["text"]
     )
 
+    # Render help per parser build: pre-startup locale selection must not activate
+    # process-wide state or touch the live runtime just to display these flags.
     stop_parser = subparsers.add_parser(
         "stop",
-        help="Stop a running lop session (graceful, then signals)",
+        help=_st.stop().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     stop_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+        help=_st.target().envelope(locale=help_locale)["text"],
     )
-    stop_parser.add_argument("--pid", type=int, help="target by exact pid")
-    stop_parser.add_argument("--session", dest="session", help="target by exact session id")
+    stop_parser.add_argument("--pid", type=int, help=_st.pid().envelope(locale=help_locale)["text"])
+    stop_parser.add_argument(
+        "--session", dest="session", help=_st.session().envelope(locale=help_locale)["text"]
+    )
     stop_parser.add_argument(
         "--all",
         dest="stop_all",
         action="store_true",
-        help="stop every session on this machine (prompts on a TTY; --yes to skip)",
+        help=_st.all().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--yes",
         action="store_true",
-        help="skip the --all confirmation (required when stdin is not a TTY)",
+        help=_st.yes().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--json",
         action="store_true",
-        help="machine-readable outcome per target",
+        help=_st.json().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="graceful-op wait per session before escalating (default 10)",
+        help=_st.timeout().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--force",
         action="store_true",
-        help=(
-            "escalate past a refusal or a skip: signal a target whose socket "
-            "cannot confirm identity, one that reports a turn in flight, or one "
-            "already leaving after a signal — each of those can cut the turn it "
-            "is in. Not needed for a cooperative mid-turn runtime: the plain "
-            "stop ends that one promptly, through its socket"
-        ),
+        help=(_st.force().envelope(locale=help_locale)["text"]),
     )
 
     # The rotation path (`lop refresh`): ask every live runtime to move to the
@@ -1517,34 +1503,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # that destroyed 32 turns on 2026-09-14: an ad-hoc signal sweep.
     refresh_parser = subparsers.add_parser(
         "refresh",
-        help=(
-            "Ask running sessions to move to the build on disk at their next "
-            "boundary (no signals)"
-        ),
+        help=(_re.refresh().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     refresh_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+        help=_re.target().envelope(locale=help_locale)["text"],
     )
-    refresh_parser.add_argument("--pid", type=int, help="target by exact pid")
-    refresh_parser.add_argument("--session", dest="session", help="target by exact session id")
+    refresh_parser.add_argument(
+        "--pid", type=int, help=_re.pid().envelope(locale=help_locale)["text"]
+    )
+    refresh_parser.add_argument(
+        "--session", dest="session", help=_re.session().envelope(locale=help_locale)["text"]
+    )
     refresh_parser.add_argument(
         "--all",
         dest="refresh_all",
         action="store_true",
-        help="ask every live session on this machine (no confirmation: nothing is ended)",
+        help=_re.all().envelope(locale=help_locale)["text"],
     )
     refresh_parser.add_argument(
-        "--json", action="store_true", help="machine-readable outcome per target"
+        "--json", action="store_true", help=_re.json().envelope(locale=help_locale)["text"]
     )
     refresh_parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="wait per session for its answer (default 10)",
+        help=_re.timeout().envelope(locale=help_locale)["text"],
     )
 
     # Scheduled wakes, and the process that fires them for sessions nobody is
@@ -1695,7 +1682,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # design statement rather than an omission.
     monitor_parser = subparsers.add_parser(
         "monitor",
-        help="Inspect standing monitors and cancel one on a closed session",
+        help=_mn.monitor().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # DEFAULTS ON THE PARENT, the `wake_parser` discipline: `monitor_command`
@@ -1706,37 +1693,37 @@ def build_cli_parser() -> argparse.ArgumentParser:
     monitor_sub = monitor_parser.add_subparsers(dest="monitor_command")
     monitor_status = monitor_sub.add_parser(
         "status",
-        help="every monitor on this machine, soonest first",
+        help=_mn.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    monitor_status.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_status.add_argument(
+        "--json", action="store_true", help=_mn.json().envelope(locale=help_locale)["text"]
+    )
     monitor_cancel = monitor_sub.add_parser(
         "cancel",
-        help=(
-            "cancel a monitor on a session with no runtime open (a live session changes "
-            "its own monitors from inside)"
-        ),
+        help=(_mn.cancel().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    monitor_cancel.add_argument("session", help="session id the monitor belongs to")
-    monitor_cancel.add_argument("monitor_id", metavar="id", help="monitor id (m1, m2, …)")
-    monitor_cancel.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_cancel.add_argument("session", help=_mn.session().envelope(locale=help_locale)["text"])
+    monitor_cancel.add_argument(
+        "monitor_id", metavar="id", help=_mn.monitor_id().envelope(locale=help_locale)["text"]
+    )
+    monitor_cancel.add_argument(
+        "--json", action="store_true", help=_mn.json().envelope(locale=help_locale)["text"]
+    )
 
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
     update_parser = subparsers.add_parser(
         "update",
-        help=(
-            "Upgrade this install from PyPI. Not the lop-update script, "
-            "which rebuilds the global runtime from a local git checkout."
-        ),
+        help=(_up.update().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     update_parser.add_argument(
         "--check",
         action="store_true",
-        help="Print installed vs PyPI; do not install",
+        help=_up.check().envelope(locale=help_locale)["text"],
     )
     # Hidden (``SUPPRESS``): nobody types this, and it is not an upgrade — it is
     # the repair step ``lop update`` runs in a CHILD process from the newly
@@ -1787,12 +1774,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="from_snapshot",
         metavar="DIR_OR_REF",
         default=None,
-        help=(
-            "Install a local source tree (a directory, or a git ref of the current "
-            "repository) into its own install generation. On macOS, a ref that is exactly a "
-            "published release installs the published wheel from PyPI — the only build "
-            "carrying the macOS key agent — and every other ref is built from source."
-        ),
+        help=(_up.from_snapshot().envelope(locale=help_locale)["text"]),
     )
     # The deliberate-downgrade override for --from-snapshot: without it a target
     # STRICTLY OLDER than the install the pointer names is refused before any
@@ -1805,12 +1787,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--allow-downgrade",
         dest="allow_downgrade",
         action="store_true",
-        help=(
-            "Allow --from-snapshot to install a build OLDER than the current install "
-            "(a deliberate rollback; recorded in the install marker). Without "
-            "--from-snapshot it is refused on the PyPI path, which only installs "
-            "newer versions; the refresh flags take precedence."
-        ),
+        help=(_up.allow_downgrade().envelope(locale=help_locale)["text"]),
     )
     # The isolated verified controller has UNKNOWN/PIP kind. These explicit
     # destination arguments authorize ONLY its canonical immutable protocol;
@@ -1821,11 +1798,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--no-services",
         dest="no_services",
         action="store_true",
-        help=(
-            "Do not bring the `lop serve` daemons onto the new build; the supervised "
-            "daemons are still repaired. Use this only when something else will "
-            "start the serves, e.g. a script that owns their launch."
-        ),
+        help=(_up.no_services().envelope(locale=help_locale)["text"]),
     )
     # S3b's per-run override of the mesh-roll switch (note §5): the roll is
     # otherwise queued when this update moves to a newer version and
@@ -1836,10 +1809,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--no-roll",
         dest="no_roll",
         action="store_true",
-        help=(
-            "Do not queue a mesh rollout for this update, whatever "
-            "`network.rollout_on_update` says; `lop network update` still rolls by hand."
-        ),
+        help=(_up.no_roll().envelope(locale=help_locale)["text"]),
     )
 
     # The NON-RUNTIME SERVICES, as one verb group. A service is a long-lived
@@ -1850,56 +1820,39 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # prints can name a command that exists.
     services_parser = subparsers.add_parser(
         "services",
-        help=(
-            "Bring this machine's non-runtime services (serve daemons and the "
-            "supervised daemons) onto the current build, without stopping any "
-            "running conversation"
-        ),
+        help=(_sr.services().envelope(locale=help_locale)["text"]),
         # A reader who opens this page is asking what a "service" IS, and the verb
         # group defined nothing (design review D9). The distinction it draws is the
         # one the whole feature rests on: a RUNTIME is a conversation and is never
         # touched; everything else that serves this machine can be brought along.
-        description=(
-            "Everything local_operator runs for this machine that is not a conversation. "
-            "A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the "
-            "mobile relay, the browser bridge, the tunnel and the wakes agent. "
-            "Runtimes — the processes holding your conversations — are never stopped: "
-            "'restart' reloads a serve daemon in place, keeping its pid and socket."
-        ),
+        description=(_sr.services_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_subparsers = services_parser.add_subparsers(dest="services_command")
     services_subparsers.add_parser(
         "status",
-        help=(
-            "Report each non-runtime service, the build it is serving, and the build "
-            "the install is on"
-        ),
+        help=(_sr.status().envelope(locale=help_locale)["text"]),
         # D9 put the distinction on the GROUP page; a reader who runs `services status
         # --help` directly was still shown no prose at all (design review D10).
-        description=(
-            "Read-only. Names the build the install is on and, for each `lop serve` "
-            "daemon, the build it is SERVING — both sides of every comparison, because "
-            "the ordinary drift on this machine is a same-version rebuild where the "
-            "version alone cannot show that a daemon is behind."
-        ),
+        description=(_sr.status_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_restart = services_subparsers.add_parser(
         "restart",
-        help="Move every service onto the current build (never stops a runtime)",
+        help=_sr.restart().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
+    # Format the code-owned constant exactly as before; the message owns the
+    # surrounding prose and can translate it without freezing the default.
     services_restart.add_argument(
         "--wait",
         type=_positive_seconds,
         default=None,
         metavar="SECONDS",
         help=(
-            "How long to wait for an asked daemon to come back on the new build "
-            f"(default: {DEFAULT_SERVICES_WAIT_S:g}s; must be positive). A daemon that does "
-            "not make it is reported, left serving the build it loaded, and retried by "
-            "the next `lop services restart`."
+            _sr.wait(wait_seconds=f"{DEFAULT_SERVICES_WAIT_S:g}").envelope(locale=help_locale)[
+                "text"
+            ]
         ),
     )
     # The RECOVERY verb, and the only destructive one in this group. It exists
@@ -1911,24 +1864,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # only way out, and the pid to kill discoverable only by `lsof`.
     services_reclaim = services_subparsers.add_parser(
         "reclaim",
-        help=(
-            "End a `lop serve` daemon that is recorded but not serving its address "
-            "(never one that is serving)"
-        ),
-        description=(
-            "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to "
-            "SIGKILL at a bound, after proving the process is this product's serve "
-            "daemon and that it is not the one serving the address its record names. "
-            "`lop services status` lists the daemons this is for. It is never "
-            "automatic: the daemon may be supervising session runtimes, and no reader "
-            "of a record can prove a successor is ready to take its place."
-        ),
+        help=(_sr.reclaim().envelope(locale=help_locale)["text"]),
+        description=(_sr.reclaim_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_reclaim.add_argument(
         "pid",
         type=int,
-        help="The daemon's pid, exactly as `lop services status` prints it",
+        help=_sr.pid().envelope(locale=help_locale)["text"],
     )
 
     # The install LAYOUT's own commands. One verb group rather than flags on
@@ -1978,13 +1921,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser(
         "install",
-        help="Manage the local install generations (layout for the stable `lop` runtime)",
+        help=_in.install().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     install_subparsers = install_parser.add_subparsers(dest="install_command")
     prune_parser = install_subparsers.add_parser(
         "prune",
-        help="Delete install generations nothing is running from",
+        help=_in.prune().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     prune_parser.add_argument(
@@ -1992,20 +1935,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=_generation_count,
         default=DEFAULT_KEEP_GENERATIONS,
         metavar="N",
-        help=(
-            "How many unreferenced generations to keep (default: %(default)s; 0 or "
-            "more). A generation named by a live or saved session, and the one "
-            "`current` points at, are never removed"
-        ),
+        help=(_in.keep().envelope(locale=help_locale)["text"]),
     )
     install_subparsers.add_parser(
         "migrate",
-        help="Copy this install into the generation layout and point `current` at it",
+        help=_in.migrate().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     install_subparsers.add_parser(
         "status",
-        help="Show the install layout: pointer, generations and what a new `lop` would load",
+        help=_in.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
@@ -2214,7 +2153,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
     # argparse re-default quirk that already applies to the legacy parent
     # flags must not swallow this one — ``--yolo exec "task"`` is documented).
-    _propagate_global_flags(parser)
+    _propagate_global_flags(parser, help_locale=help_locale)
 
     return parser
 
@@ -2237,7 +2176,9 @@ def _add_global_flag(parser: argparse.ArgumentParser, flag: str, **kwargs: Any) 
     parser.add_argument(flag, **kwargs)
 
 
-def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
+def _propagate_global_flags(
+    parser: argparse.ArgumentParser, *, help_locale: str | None = None
+) -> None:
     """Re-declare the position-independent global options on every subparser.
 
     Not routed through ``parent_parser``: a shared parent action with a SUPPRESS
@@ -2255,6 +2196,13 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
     the clobber: `--resume bogus config list` exited 0 in silence while
     `config list --resume bogus` exited 1 with the recovery listing.
     """
+
+    # A build owns one snapshot, including every recursive child. Direct
+    # standalone callers still resolve freshly; never cache locale globally.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
     for action in parser._actions:
         if not isinstance(action, argparse._SubParsersAction):
             continue
@@ -2275,12 +2223,9 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                     # ``unattended`` (design §2 OQ4 — the target decides), so the
                     # global sentence would promise the flag something the product
                     # makes conditional. The verb marks itself; see ``network.cli``.
-                    "Conditional for this verb's peer create: the session starts "
-                    "unattended only when the target device grants this one the "
-                    "`unattended` capability"
+                    _gh.yolo_conditional().envelope(locale=help_locale)["text"]
                     if getattr(subparser, "yolo_needs_grant", False)
-                    else "Auto-approve all tool executions (read/write/exec tiers)"
-                    " without prompting"
+                    else _gh.yolo().envelope(locale=help_locale)["text"]
                 ),
             )
             _add_global_flag(
@@ -2291,7 +2236,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 default=argparse.SUPPRESS,
                 metavar="SESSION_ID",
                 dest="resume",
-                help="Resume a previous session by id. Pass with no id for the most recent.",
+                help=_gh.propagated_resume().envelope(locale=help_locale)["text"],
             )
             # The run-shaping trio, for the same reason and by the same
             # mechanism. An external supervisor driving `lop exec` composes its
@@ -2308,7 +2253,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="hosting",
-                help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
+                help=_gh.propagated_hosting().envelope(locale=help_locale)["text"],
             )
             _add_global_flag(
                 subparser,
@@ -2316,7 +2261,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="model",
-                help="Model to use for this run",
+                help=_gh.propagated_model().envelope(locale=help_locale)["text"],
             )
             _add_global_flag(
                 subparser,
@@ -2324,9 +2269,9 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="run_in",
-                help="Working directory to run the operator in",
+                help=_gh.propagated_run_in().envelope(locale=help_locale)["text"],
             )
-            _propagate_global_flags(subparser)
+            _propagate_global_flags(subparser, help_locale=help_locale)
 
 
 def _credential_git_helper_command(args: argparse.Namespace) -> int:
@@ -4724,7 +4669,16 @@ def _print_kept(protected: list[tuple[str, str]]) -> None:
     for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
         print(f"  kept         {name}  ({guard})")
     if len(protected) > _CLEANUP_TEXT_ROWS:
-        print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
+        # The pass caps each kept group at WINDOW_NAMES_CAP while still counting
+        # every member into its total, so ``--json`` carries the same capped
+        # list, not every row. The old text promised the full listing and was
+        # false past the cap; say what the JSON actually holds.
+        from local_operator.session.delegated_retention import WINDOW_NAMES_CAP
+
+        print(
+            f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept "
+            f"(list capped at {WINDOW_NAMES_CAP} per group; --json carries the same capped list)"
+        )
 
 
 def _content_class_counts(rows: list[Any]) -> dict[str, int]:
@@ -4924,6 +4878,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 enabled=policy.delegated_enabled,
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
+                kept_by_origin=getattr(delegated, "kept_by_origin", 0),
+                kept_by_origin_names=getattr(delegated, "kept_by_origin_names", []),
                 remaining=getattr(delegated, "remaining", 0),
                 scratchpad_enabled=policy.delegated_scratchpad_enabled,
                 scratchpad={
@@ -5033,7 +4989,9 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
-                f"newer than {delegated.hours}h (kept); {delegated_verb} {len(delegated.removed)}"
+                f"kept inside {delegated.hours}h or with no usable clock; "
+                f"{delegated.kept_by_origin} kept by origin; "
+                f"{delegated_verb} {len(delegated.removed)}"
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
             _print_kept(delegated.protected)
@@ -10079,7 +10037,9 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     return 0
 
 
-def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
+def _add_hub_publish_flags(
+    parser: argparse.ArgumentParser, *, help_locale: str | None = None
+) -> None:
     """The preview/confirm surface `agents push` and `teams push` share (p2p3 §7.3).
 
     One definition so the two commands cannot drift; the flags only DO anything
@@ -10089,39 +10049,43 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     satisfied, so it never needs refusing.
     """
 
+    # A parser build owns one locale snapshot, so reuse its explicit value.
+    # Standalone callers still need a fresh read-only resolution on every call;
+    # None, not a process cache or truthiness, distinguishes those two paths.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
+
     parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
-        help="Skip the confirmation prompts; does not accept unresolved values "
-        "(use --accept-unresolved for those)",
+        help=_hs.publish_yes().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--preview-only",
         action="store_true",
-        help="Run the preview and print the diff without publishing (exit 2 when it "
-        "would generalize something)",
+        help=_hs.publish_preview_only().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Machine-readable preview output; it carries the reference values and the "
-        "single-use commit pin, so treat it as sensitive",
+        help=_hs.publish_json().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--accept-unresolved",
         action="store_true",
-        help="Acknowledge every value the preview could not classify, publishing " "them as-is",
+        help=_hs.publish_accept_unresolved().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--allow-internal-ops",
         action="store_true",
-        help="Consent to the internal-operations allowance for an organization publish "
-        "(requires --org; shows the consent text interactively)",
+        help=_hs.publish_allow_internal_ops().envelope(locale=help_locale)["text"],
     )
 
 
-def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
+def _add_hub_sync_flags(parser: argparse.ArgumentParser, *, help_locale: str | None = None) -> None:
     """The merge flags `agents sync` and `teams sync` share (design B5.3).
 
     One definition so the two commands cannot drift. `--prefer` is a CONFLICT
@@ -10129,30 +10093,44 @@ def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
     a side wholesale, and neither is reachable from auto-update.
     """
 
+    # A parser build owns one locale snapshot, so reuse its explicit value.
+    # Standalone callers still need a fresh read-only resolution on every call;
+    # None, not a process cache or truthiness, distinguishes those two paths.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
+
     parser.add_argument(
-        "--check", action="store_true", help="Only report what is available; change nothing"
+        "--check", action="store_true", help=_hs.sync_check().envelope(locale=help_locale)["text"]
     )
     parser.add_argument(
         "--prefer",
         choices=("local", "remote"),
         default=None,
-        help="Decide a conflict: keep your side or take the hub's for the sections both changed",
+        help=_hs.sync_prefer().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--accept-unknown-baseline",
         action="store_true",
-        help="Apply when the baseline is unknown: hub additions are taken, nothing of yours goes",
+        help=_hs.sync_accept_unknown_baseline().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--replace",
         action="store_true",
-        help="DISCARD your copy for the hub's (echoes what it discarded; needs --yes)",
+        help=_hs.sync_replace().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--yes", action="store_true", help="Confirm --replace")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Show what would change; write no agent rows"
+        "--yes", action="store_true", help=_hs.sync_yes().envelope(locale=help_locale)["text"]
     )
-    parser.add_argument("--json", action="store_true", help="Emit the report as JSON")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_hs.sync_dry_run().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--json", action="store_true", help=_hs.sync_json().envelope(locale=help_locale)["text"]
+    )
 
 
 def _prepare_sync_flags(args: argparse.Namespace) -> str | None:

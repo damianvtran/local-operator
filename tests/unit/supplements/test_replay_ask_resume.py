@@ -493,7 +493,14 @@ async def test_real_session_numeric_evidence_controls_graphics_question(
     )
     handle._supplements._seam = lambda: vendor
     rendered = []
-    monkeypatch.setattr(handle._supplements, "_render", lambda *args: rendered.append(args))
+
+    def record_render(*args, sounds=()):
+        # Match the runner's keyword-only audio handoff without invoking paid rendering.
+        # This numeric-only turn must still reach graphics with no generated audio.
+        assert list(sounds) == []
+        rendered.append(args)
+
+    monkeypatch.setattr(handle._supplements, "_render", record_render)
     handle.subscribe(lambda: None)
     try:
         await session.prompt("Summarise the verified operational counts.")
