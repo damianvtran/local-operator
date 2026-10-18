@@ -8,9 +8,10 @@ Two layers live here, deliberately in one module so they cannot drift:
    expressiveness, pace 0.5..2.0, language (ISO 639-1), accent, instructions
    (≤8,000 chars) and a model id; ``generate_sound_effect`` takes a prompt
    1..600 chars, a REQUIRED ``duration_s`` 0.5..30, ``loop`` and
-   ``prompt_influence`` 0..1. The class docstrings render verbatim into the
-   wire schema's ``description``, so they stay one line and the constraints
-   live in field descriptors and here.
+   ``prompt_influence`` 0..1. The optional ``sounds`` batch is exclusive with
+   the single prompt/duration and shares these generation settings. The class
+   docstrings render verbatim into the wire schema's ``description``, so they
+   stay one line and the constraints live in field descriptors and here.
 
 2. **Wire builders** — the ONE place the tool params become the server/BYOK
    request bodies. The server contract (frozen v1, Radient Agent Server lane,
@@ -38,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.artifacts import MediaAsset
 
@@ -46,6 +47,7 @@ __all__ = [
     "AudioAsset",
     "AudioJobSpec",
     "GenerateSoundEffectParams",
+    "SoundEffectRequest",
     "GenerateVoiceoverParams",
     "SOUND_EFFECT_PROMPT_MAX_CHARS",
     "VOICEOVER_TEXT_MAX_CHARS",
@@ -125,20 +127,34 @@ class GenerateVoiceoverParams(BaseModel):
     )
 
 
-class GenerateSoundEffectParams(BaseModel):
-    """Arguments for the ``generate_sound_effect`` tool."""
+class SoundEffectRequest(BaseModel):
+    """One named batch request; provider rejection remains an item-level result."""
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str = Field(
+    name: str | None = Field(default=None, max_length=100)
+    prompt: str = Field(min_length=1, max_length=SOUND_EFFECT_PROMPT_MAX_CHARS)
+    # Batch duration bounds belong to the provider: rejecting a single item's
+    # duration here would discard every valid sibling before the paid call.
+    duration_s: float = Field(allow_inf_nan=False)
+
+
+class GenerateSoundEffectParams(BaseModel):
+    """Use prompt + duration_s for one sound, or sounds for a batch (1-50); never both."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str | None = Field(
+        default=None,
         min_length=1,
         max_length=SOUND_EFFECT_PROMPT_MAX_CHARS,
-        description="What to sound like (1-600 characters).",
+        description="Single form: required with duration_s; omit with sounds (1-600 characters).",
     )
-    duration_s: float = Field(
+    duration_s: float | None = Field(
+        default=None,
         ge=SOUND_EFFECT_DURATION_MIN_S,
         le=SOUND_EFFECT_DURATION_MAX_S,
-        description="Length in seconds (0.5-30; required — there is no auto-duration).",
+        description="Single form: required with prompt (0.5-30 s); omit with sounds.",
     )
     loop: bool = Field(default=False, description="Make the clip loop seamlessly.")
     prompt_influence: float = Field(
@@ -147,6 +163,22 @@ class GenerateSoundEffectParams(BaseModel):
     model: str | None = Field(
         default=None, description="Provider model id; its default when omitted."
     )
+
+    sounds: list[SoundEffectRequest] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=50,
+        description="Named sound effects in one approval (1-50); exclusive with prompt/duration_s.",
+    )
+
+    @model_validator(mode="after")
+    def exactly_one_form(self) -> GenerateSoundEffectParams:
+        if self.sounds is not None:
+            if {"prompt", "duration_s"} & self.model_fields_set:
+                raise ValueError("Use either sounds or prompt + duration_s, not both")
+        elif self.prompt is None or self.duration_s is None:
+            raise ValueError("Supply either sounds or both prompt and duration_s")
+        return self
 
 
 @dataclass(frozen=True)
@@ -175,6 +207,8 @@ class AudioJobSpec:
     model: str | None = None
     #: Sound-effect fields (unused for a voiceover).
     duration_s: float | None = None
+    # Only batched submits jitter admission retries; preserve single-call timing.
+    batch_submission: bool = False
     loop: bool = False
     prompt_influence: float | None = None
 
