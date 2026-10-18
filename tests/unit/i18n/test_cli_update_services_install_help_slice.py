@@ -4,6 +4,7 @@ The independent oracle was frozen from d8a799489a's owned argparse AST before
 extraction; catalogue/generator changes cannot silently redefine expected English.
 """
 
+import argparse
 import ast
 import hashlib
 import importlib
@@ -196,20 +197,18 @@ def test_wait_parameter_contract_tracks_the_actual_constant(monkeypatch):
     )
     monkeypatch.setattr(cli, "DEFAULT_SERVICES_WAIT_S", 1.5)
     parser = cli.build_cli_parser()
-    services = next(
-        action
-        for action in parser._actions
-        if hasattr(action, "choices")
-        and isinstance(action.choices, dict)
-        and "services" in action.choices
-    ).choices["services"]
-    restart = next(
-        action
-        for action in services._actions
-        if hasattr(action, "choices")
-        and isinstance(action.choices, dict)
-        and "restart" in action.choices
-    ).choices["restart"]
+    # Narrow the yielded action itself: a generator's choices predicate does
+    # not narrow Action.choices (which may be an Iterable or None) after next().
+    service_actions = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    services = service_actions.choices["services"]
+    assert isinstance(services, argparse.ArgumentParser)
+    restart_actions = next(
+        action for action in services._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    restart = restart_actions.choices["restart"]
+    assert isinstance(restart, argparse.ArgumentParser)
     assert "1.5s; must be positive" in restart.format_help()
 
 
