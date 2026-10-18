@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "Log in to a provider (OAuth or API key)",
+  "cli.login_help.provider": "Provider to log in to (e.g., openai, anthropic, kimi, xai). Omit to list login-capable providers."
+}

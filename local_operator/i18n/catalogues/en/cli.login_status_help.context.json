@@ -1,0 +1,12 @@
+{
+  "cli.login_status_help.login_status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'login_status' argument; flag/command tokens stay in situ"
+  },
+  "cli.login_status_help.status_alias": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status_alias' argument; flag/command tokens stay in situ"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "cli.aida_help.aida": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'aida' argument; flag/command tokens stay in situ"
+  },
+  "cli.aida_help.note": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'note' argument; flag/command tokens stay in situ"
+  },
+  "cli.aida_help.note_text": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'note_text' argument; flag/command tokens stay in situ"
+  },
+  "cli.aida_help.note_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the long-form description; markers wording stays"
+  }
+}

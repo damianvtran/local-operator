@@ -1,0 +1,7 @@
+{
+  "cli.serve_help.serve": "Start the FastAPI server",
+  "cli.serve_help.host": "Host address (default: 127.0.0.1). Loopback-only by policy: every non-loopback bind is refused. File serving is unclamped on loopback connections; reach this API remotely through an explicit tunnel or an SSH port-forward.",
+  "cli.serve_help.port": "Port for the server (default: 1111)",
+  "cli.serve_help.reload": "Enable hot reload for the server",
+  "cli.serve_help.listener_fd": "Adopt an already-bound listening socket instead of binding one. Set by a daemon replacing its own process image onto a new build (`server/reload`), so the port never has a moment with nothing behind it. Not a user-facing flag."
+}
