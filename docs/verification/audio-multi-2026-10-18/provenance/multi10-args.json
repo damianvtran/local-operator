@@ -1,0 +1,54 @@
+{
+  "sounds": [
+    {
+      "name": "thunder rumble",
+      "prompt": "low distant thunder rolling, close perspective",
+      "duration_s": 0.5
+    },
+    {
+      "name": "door creak",
+      "prompt": "old wooden door creaking open slowly",
+      "duration_s": 0.5
+    },
+    {
+      "name": "glass shatter",
+      "prompt": "small glass pane shattering on a hard floor",
+      "duration_s": 0.5
+    },
+    {
+      "name": "ui blip",
+      "prompt": "short soft digital confirmation blip",
+      "duration_s": 0.5
+    },
+    {
+      "name": "rain window",
+      "prompt": "steady rain tapping a window",
+      "duration_s": 0.5
+    },
+    {
+      "name": "coin drop",
+      "prompt": "a coin dropping and spinning on a table",
+      "duration_s": 0.5
+    },
+    {
+      "name": "sword unsheathe",
+      "prompt": "metal sword sliding out of a scabbard",
+      "duration_s": 0.5
+    },
+    {
+      "name": "camera shutter",
+      "prompt": "a DSLR camera shutter click",
+      "duration_s": 0.5
+    },
+    {
+      "name": "water drop",
+      "prompt": "a single water drop into a still pool",
+      "duration_s": 0.5
+    },
+    {
+      "name": "crowd gasp",
+      "prompt": "a small crowd gasping in surprise",
+      "duration_s": 0.5
+    }
+  ]
+}

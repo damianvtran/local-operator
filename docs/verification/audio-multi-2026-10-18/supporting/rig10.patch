@@ -1,0 +1,445 @@
+diff --git a/scripts/renderer-driver.mjs b/scripts/renderer-driver.mjs
+index 25d62eabd0..6bb21af34d 100644
+--- a/scripts/renderer-driver.mjs
++++ b/scripts/renderer-driver.mjs
+@@ -1378,6 +1378,10 @@ async function launchApp({
+ 	 * The BINARY, not `node_modules/.bin/electron` — see `ELECTRON_BIN`. The shim
+ 	 * would make `child.pid` the shim's pid and orphan the app the shim starts.
+ 	 */
++	// Capture with the shipped explicit opaque preference, not the Mac glass
++	// default: hidden native captures have no desktop backing to composite.
++	mkdirSync(`${USER_DATA}-${tag}`, { recursive: true });
++	writeFileSync(join(`${USER_DATA}-${tag}`, "window-glass.json"), JSON.stringify({version: 2, settings: {enabled: false}, explicit: ["enabled"], scheme: "dark"}));
+ 	const child = spawn(
+ 		ELECTRON_BIN,
+ 		[
+@@ -1400,6 +1404,7 @@ async function launchApp({
+ 			`--inspect=${inspectPort}`,
+ 			"--window-mode=headless",
+ 			`--window-size=${WINDOW_SIZE}`,
++            "--use-mock-keychain",
+ 			/*
+ 			 * The app is CHROMIUM, and this run redirects `HOME`: without this switch
+ 			 * OSCrypt finds no login keychain under the scratch home and asks macOS to
+diff --git a/scripts/run-sounds-scene.mjs b/scripts/run-sounds-scene.mjs
+index 0e9be7631a..0f5d57119a 100644
+--- a/scripts/run-sounds-scene.mjs
++++ b/scripts/run-sounds-scene.mjs
+@@ -219,7 +219,9 @@ try {
+ 			process.execPath,
+ 			[
+ 				"scripts/renderer-driver.mjs",
+-				"--scene",
++				"--window-size",
++                "1380x1800",
++                "--scene",
+ 				"sounds",
+ 				"--backend",
+ 				backend,
+diff --git a/scripts/sounds-fixture.mjs b/scripts/sounds-fixture.mjs
+index 737e4af166..090dcab4ab 100644
+--- a/scripts/sounds-fixture.mjs
++++ b/scripts/sounds-fixture.mjs
+@@ -1,134 +1,25 @@
+-import { createHash } from "node:crypto";
+-import { mkdirSync, writeFileSync } from "node:fs";
+-import { join } from "node:path";
+-
+-export const SOUNDS_SESSION = "50a0facade01";
+-/** Non-silent PCM proves that graph silence is routing, not a silent fixture. */
+-export function soundSample() {
+-	const rate = 8000;
+-	const seconds = 12;
+-	const samples = rate * seconds;
+-	const wav = Buffer.alloc(44 + samples * 2);
+-	wav.write("RIFF", 0);
+-	wav.writeUInt32LE(wav.length - 8, 4);
+-	wav.write("WAVEfmt ", 8);
+-	wav.writeUInt32LE(16, 16);
+-	wav.writeUInt16LE(1, 20);
+-	wav.writeUInt16LE(1, 22);
+-	wav.writeUInt32LE(rate, 24);
+-	wav.writeUInt32LE(rate * 2, 28);
+-	wav.writeUInt16LE(2, 32);
+-	wav.writeUInt16LE(16, 34);
+-	wav.write("data", 36);
+-	wav.writeUInt32LE(samples * 2, 40);
+-	for (let i = 0; i < samples; i++)
+-		wav.writeInt16LE(
+-			Math.round(8000 * Math.sin((2 * Math.PI * 220 * i) / rate)),
+-			44 + i * 2,
+-		);
+-	return wav;
+-}
+-export function writeSoundsFixture(
+-	root,
+-	expiredUrl = "http://127.0.0.1:9/expired-signed-audio?expired=1",
+-) {
+-	const bytes = soundSample();
+-	const digest = createHash("sha256").update(bytes).digest("hex").slice(0, 32);
+-	const attachments = join(root, "attachments");
+-	mkdirSync(attachments, { recursive: true });
+-	writeFileSync(join(attachments, `${digest}.bin`), bytes);
+-	writeFileSync(
+-		join(attachments, `${digest}.json`),
+-		JSON.stringify({
+-			digest,
+-			mime_type: "audio/wav",
+-			bytes: bytes.length,
+-			duration_s: 12,
+-			peaks: Array.from(
+-				{ length: 240 },
+-				(_, i) => 0.2 + 0.7 * Math.abs(Math.sin(i / 9)),
+-			),
+-		}),
+-	);
+-	writeFileSync(
+-		join(attachments, `${digest}.peaks.json`),
+-		JSON.stringify({
+-			version: 1,
+-			bars: 240,
+-			peaks: Array.from(
+-				{ length: 240 },
+-				(_, i) => 0.2 + 0.7 * Math.abs(Math.sin(i / 9)),
+-			),
+-		}),
+-	);
+-	const message = (id, role, content, extra = {}) => ({
+-		id,
+-		ts: 1792260000,
+-		type: "message",
+-		payload: { kind: "message", role, content, ...extra },
+-	});
+-	const rows = [
+-		message("sounds-user", "user", [{ text: "Make a short storm sound." }]),
+-		message("sounds-call", "assistant", [], {
+-			tool_calls: [
+-				{
+-					tool_call_id: "sounds-call-1",
+-					tool_name: "generate_sound_effect",
+-					arguments: { prompt: "Storm swell" },
+-				},
+-			],
+-		}),
+-		message(
+-			"sounds-result",
+-			"tool",
+-			[
+-				{ text: "Storm swell" },
+-				{
+-					kind: "audio",
+-					content_type: "audio/wav",
+-					attachment: digest,
+-					mime_type: "audio/wav",
+-					name: "Storm swell.wav",
+-					duration_s: 12,
+-					source_url: expiredUrl,
+-				},
+-			],
+-			{
+-				tool_call_id: "sounds-call-1",
+-				tool_name: "generate_sound_effect",
+-				provider_payload: { duration_s: 1 },
+-			},
+-		),
+-		message("sounds-answer", "assistant", [
+-			{ text: "Here is the storm swell." },
+-		]),
+-		{
+-			id: "sounds-highlights",
+-			ts: 1792260001,
+-			type: "custom",
+-			payload: {
+-				custom_type: "supplement_v1",
+-				details: {
+-					anchor: "sounds-answer",
+-					state: "done",
+-					rev: 1,
+-					sounds: [
+-						{
+-							attachment: digest,
+-							mime: "audio/wav",
+-							title: "Storm swell",
+-							duration_s: 12,
+-						},
+-					],
+-				},
+-			},
+-		},
+-	];
+-	const dir = join(root, "sessions", SOUNDS_SESSION);
+-	mkdirSync(dir, { recursive: true });
+-	writeFileSync(
+-		join(dir, "transcript.jsonl"),
+-		`${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+-	);
+-	return { digest, sessionId: SOUNDS_SESSION, bytes: bytes.length };
++import {mkdirSync,readFileSync,writeFileSync,copyFileSync} from 'node:fs';
++import {join} from 'node:path';
++export const SOUNDS_SESSION='626a00000010';
++export const PARTIAL_SESSION='626a00000004';
++const input=process.env.MULTI_EVIDENCE_INPUT;
++export function writeSoundsFixture(root) {
++  mkdirSync(join(root,'attachments'),{recursive:true});
++  let first;
++  for (const [label,sid] of [['multi10',SOUNDS_SESSION],['partial4',PARTIAL_SESSION]]) {
++    const result=JSON.parse(readFileSync(join(input,`${label}-result.json`),'utf8'));
++    const args=JSON.parse(readFileSync(join(input,`${label}-args.json`),'utf8'));
++    first??=result.content.find(b=>b.attachment)?.attachment;
++    for(const block of result.content.filter(b=>b.attachment)) {
++      for(const ext of ['bin','json','peaks.json']) {
++        const src=join(input,'live-config','attachments',`${block.attachment}.${ext}`);
++        if(ext==='bin')copyFileSync(src,join(root,'attachments',`${block.attachment}.${ext}`));
++        else { const meta=JSON.parse(readFileSync(src,'utf8')); delete meta.source_url; writeFileSync(join(root,'attachments',`${block.attachment}.${ext}`),JSON.stringify(meta)); }
++      }
++    }
++    const msg=(id,role,content,extra={})=>({id,ts:1792260000,type:'message',payload:{kind:'message',role,content,...extra}});
++    const rows=[msg(`${label}-user`,'user',[{text:`Generate ${args.sounds.length} named sound effects. Fresh production provider results replayed below.`}]),msg(`${label}-assistant`,'assistant',[],{tool_calls:[{tool_call_id:`${label}-call`,tool_name:'generate_sound_effect',arguments:args}]}),msg(`${label}-result`,'tool',result.content,{tool_call_id:`${label}-call`,tool_name:'generate_sound_effect',is_error:result.is_error,provider_payload:{details:result.details}}),msg(`${label}-answer`,'assistant',[{text:label==='multi10'?'Ten named effects completed; each row has its own playable preview.':'Three effects completed; glass shatter was rejected with HTTP 400. No cost is invented for the rejected item.'}])];
++    const dir=join(root,'sessions',sid);mkdirSync(dir,{recursive:true});writeFileSync(join(dir,'transcript.jsonl'),rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
++  }
++  return {sessionId:SOUNDS_SESSION,digest:first};
+ }
+diff --git a/scripts/sounds-fixture.test.mjs b/scripts/sounds-fixture.test.mjs
+index 01b488c226..ce3072cd27 100644
+--- a/scripts/sounds-fixture.test.mjs
++++ b/scripts/sounds-fixture.test.mjs
+@@ -1,63 +1,5 @@
+-import assert from "node:assert/strict";
+-import { mkdtempSync, readFileSync } from "node:fs";
+-import { homedir } from "node:os";
+-import { join } from "node:path";
+-import { test } from "node:test";
+-import { build } from "esbuild";
+-import {
+-	SOUNDS_SESSION,
+-	soundSample,
+-	writeSoundsFixture,
+-} from "./sounds-fixture.mjs";
+-
+-const bundle = await build({
+-	stdin: {
+-		contents:
+-			'export {applyHistoryPage, EMPTY_TRANSCRIPT} from "./src/renderer/src/features/chat/canonical/transcript-reducer";',
+-		resolveDir: process.cwd(),
+-	},
+-	bundle: true,
+-	format: "esm",
+-	platform: "node",
+-	write: false,
+-});
+-const { applyHistoryPage, EMPTY_TRANSCRIPT } = await import(
+-	`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`
+-);
+-
+-test("sounds native preflight: journal mounts audio and Highlights; fixture has real nonzero PCM", () => {
+-	assert.match(SOUNDS_SESSION, /^[a-f0-9]{12}$/);
+-	const root = mkdtempSync(join(homedir(), "sounds-fixture-"));
+-	const fixture = writeSoundsFixture(root);
+-	const entries = readFileSync(
+-		join(root, "sessions", fixture.sessionId, "transcript.jsonl"),
+-		"utf8",
+-	)
+-		.trim()
+-		.split("\n")
+-		.map((line) => JSON.parse(line));
+-	const state = applyHistoryPage(EMPTY_TRANSCRIPT, {
+-		entries,
+-		has_more: false,
+-	});
+-	const sound = state.records.find((row) => row.kind === "tool").images[0];
+-	assert.equal(sound.kind, "audio");
+-	assert.equal(sound.attachment, fixture.digest);
+-	assert.equal(sound.durationS, 12);
+-	assert.match(sound.sourceUrl, /expired-signed-audio/);
+-	assert.equal(
+-		state.records.find((row) => row.kind === "supplement").sounds[0].attachment,
+-		fixture.digest,
+-	);
+-	const wav = soundSample();
+-	assert.equal(wav.toString("ascii", 0, 4), "RIFF");
+-	assert.notEqual(
+-		wav.readInt16LE(46),
+-		0,
+-		"zero-gain proof cannot use a silent input sample",
+-	);
+-	const peaks = JSON.parse(
+-		readFileSync(join(root, "attachments", `${fixture.digest}.peaks.json`)),
+-	);
+-	assert.equal(peaks.peaks.length, peaks.bars);
+-});
++import assert from 'node:assert/strict';
++import {mkdtempSync,readFileSync} from 'node:fs';import {join} from 'node:path';import {homedir} from 'node:os';import {test} from 'node:test';import {build} from 'esbuild';import {writeSoundsFixture,SOUNDS_SESSION,PARTIAL_SESSION} from './sounds-fixture.mjs';
++const b=await build({stdin:{contents:'export {applyHistoryPage,EMPTY_TRANSCRIPT} from "./src/renderer/src/features/chat/canonical/transcript-reducer";',resolveDir:process.cwd()},bundle:true,format:'esm',platform:'node',write:false});
++const {applyHistoryPage,EMPTY_TRANSCRIPT}=await import(`data:text/javascript;base64,${Buffer.from(b.outputFiles[0].text).toString('base64')}`);
++test('actual batch ToolResults survive production journal reducer',()=>{const root=mkdtempSync(join(homedir(),'batch-fixture-'));writeSoundsFixture(root);for(const [sid,count] of [[SOUNDS_SESSION,10],[PARTIAL_SESSION,3]]){const entries=readFileSync(join(root,'sessions',sid,'transcript.jsonl'),'utf8').trim().split('\n').map(JSON.parse);const state=applyHistoryPage(EMPTY_TRANSCRIPT,{entries,has_more:false});const tool=state.records.find(r=>r.kind==='tool');console.log('reducer tool',JSON.stringify(tool));assert.equal(tool.images.length,count);assert.equal(tool.details.artifacts.length,sid===SOUNDS_SESSION?10:4);assert.ok(!JSON.stringify(entries).includes('https://'));}});
+diff --git a/scripts/sounds-scene.mjs b/scripts/sounds-scene.mjs
+index 3ead80487e..72c10129f3 100644
+--- a/scripts/sounds-scene.mjs
++++ b/scripts/sounds-scene.mjs
+@@ -1,137 +1,30 @@
+-import { SOUNDS_SESSION } from "./sounds-fixture.mjs";
+-
+-/** Integrated seats, not a gallery. A synthetic journal is the input; the app's
+- * reducer, attachment relay, shared element, decoder and graph are production. */
+-export async function sceneSounds({
+-	cdp,
+-	verb,
+-	capture,
+-	check,
+-	waitForCondition,
+-	factsOf,
+-}) {
+-	const facts = await factsOf(cdp);
+-	if (facts.windowMode !== "headless" || facts.visible || facts.focused)
+-		throw new Error("sounds requires an invisible headless app");
+-	const demand = (label, value) => {
+-		if (!check(label, Boolean(value), JSON.stringify(value)))
+-			throw new Error(label);
+-	};
+-	const waitFor = async (expression) => {
+-		const result = await waitForCondition(cdp, expression, 30000);
+-		if (!result.ok) {
+-			console.log(
+-				"sounds DOM on failure",
+-				await cdp.evaluate("document.body.innerText.slice(-6000)"),
+-			);
+-			await capture(cdp, "sounds-failed-preflight");
+-		}
+-		demand(expression, result.ok);
+-	};
+-	await verb(cdp, "soundsArm");
+-	let refused = false;
+-	try {
+-		await verb(cdp, "soundsArm");
+-	} catch {
+-		refused = true;
+-	}
+-	demand("graph re-arm negative control refuses", refused);
+-	await verb(cdp, "navigate", "/chat");
+-	await waitFor(
+-		`Boolean(document.querySelector('[data-session-row="${SOUNDS_SESSION}"]'))`,
+-	);
+-	await verb(cdp, "press", {
+-		selector: `[data-session-row="${SOUNDS_SESSION}"] [data-chat-row]`,
+-	});
+-	await waitFor('Boolean(document.querySelector("[data-turn-summary]"))');
+-	await verb(cdp, "press", {
+-		selector:
+-			'[data-turn-summary][data-run-ids~="tool:sounds-call-1"] button[aria-expanded]',
+-	});
+-	await waitFor(
+-		"Boolean(document.querySelector('[data-record-id=\"tool:sounds-call-1\"] [data-sound-player] button'))",
+-	);
+-	await capture(cdp, "sounds-transcript-idle");
+-	await verb(cdp, "press", { selector: "[data-sound-player] button" });
+-	await waitFor(
+-		"document.querySelector('[data-sound-status=\"playing\"]') !== null",
+-	);
+-	await new Promise((resolve) => setTimeout(resolve, 1500));
+-	const playing = await verb(cdp, "soundsFacts");
+-	console.log("sounds playing facts", JSON.stringify(playing));
+-	demand(
+-		"real decoder advances; zero-gain analyser stays silent",
+-		playing.time > 0.2 &&
+-			!playing.paused &&
+-			playing.gain === 0 &&
+-			playing.rms === 0 &&
+-			playing.inputRms > 0,
+-	);
+-	demand(
+-		"generated bytes use a digest blob, not the dead signed URL",
+-		playing.src.startsWith("blob:"),
+-	);
+-	await capture(cdp, "sounds-transcript-playing");
+-	const scrub = await verb(cdp, "soundsScrub", {
+-		selector: "[data-sound-player] [data-sound-slider]",
+-		fraction: 0.65,
+-	});
+-	demand(
+-		"pointer handlers enter scrubbing and commit position",
+-		scrub.during === "scrubbing",
+-	);
+-	await capture(cdp, "sounds-transcript-scrubbing");
+-	await verb(cdp, "soundsScrubFinish");
+-	await capture(cdp, "sounds-transcript-scrubbed");
+-	await verb(cdp, "soundsEnd");
+-	await waitFor(
+-		"document.querySelector('[data-sound-status=\"ended\"]') !== null",
+-	);
+-	await capture(cdp, "sounds-transcript-ended");
+-
+-	await verb(cdp, "press", { selector: '[data-panel-rail-item="canvas"]' });
+-	await verb(cdp, "press", {
+-		selector: '[data-tour-tag="canvas-files-view-button"]',
+-	});
+-	await waitFor(
+-		"Boolean(document.querySelector('[data-tour-tag=\"file-row\"] [data-sound-player]'))",
+-	);
+-	await capture(cdp, "sounds-canvas-files");
+-	// Filename opens the indexed document; no path is injected by the rig.
+-	await verb(cdp, "press", {
+-		selector: '[data-tour-tag="file-row"] button.flex-1',
+-	});
+-	await waitFor(
+-		'Boolean(document.querySelector(".bg-sunken [data-sound-player]"))',
+-	);
+-	await capture(cdp, "sounds-canvas-preview");
+-	console.log(
+-		"sounds preview facts",
+-		JSON.stringify(await verb(cdp, "soundsFacts")),
+-	);
+-	await verb(cdp, "press", {
+-		selector: ".bg-sunken [data-sound-player] button",
+-	});
+-	const speech = await verb(cdp, "soundsSpeech");
+-	demand(
+-		"speech store supersedes preview/row on the same element",
+-		speech.ownerId === "speech:sounds-driver",
+-	);
+-	demand(
+-		"preview mounts no independent native audio",
+-		(await verb(cdp, "soundsFacts")).nativeElements === 0,
+-	);
+-	await capture(cdp, "sounds-speech-exclusive");
+-	await verb(cdp, "press", { selector: '[aria-label="Close canvas"]' });
+-	await waitFor(
+-		'Boolean(document.querySelector("[data-supplement-sound-title]"))',
+-	);
+-	await cdp.evaluate(
+-		'document.querySelector("[data-supplement-sound-title]").scrollIntoView({block:"center"})',
+-	);
+-	await capture(cdp, "sounds-highlights");
+-	await verb(cdp, "press", {
+-		selector:
+-			"[data-supplement-sound-title] + div button, [data-supplement-sound-title] ~ [data-sound-player] button",
+-	});
++import {SOUNDS_SESSION,PARTIAL_SESSION} from './sounds-fixture.mjs';
++export async function sceneSounds({cdp,verb,capture,check,waitForCondition,factsOf}) {
++ const demand=(label,value)=>{if(!check(label,Boolean(value),JSON.stringify(value)))throw new Error(label)};
++ const waitFor=async(expr)=>{const r=await waitForCondition(cdp,expr,30000);if(!r.ok)console.log('DOM',await cdp.evaluate('document.body.innerText'));demand(expr,r.ok)};
++ const facts=await factsOf(cdp); demand('headless invisible unfocused',facts.windowMode==='headless'&&!facts.visible&&!facts.focused);
++ await verb(cdp,'soundsArm');let refused=false;try{await verb(cdp,'soundsArm')}catch{refused=true}demand('graph rearm negative control refuses',refused);
++ await verb(cdp,'navigate','/chat');
++ for(const [label,sid,count,total] of [['multi10',SOUNDS_SESSION,10,'0.02']]) {
++  await waitFor(`Boolean(document.querySelector('[data-session-row="${sid}"]'))`);
++  await verb(cdp,'press',{selector:`[data-session-row="${sid}"] [data-chat-row]`});
++  await waitFor('Boolean(document.querySelector("[data-turn-summary]"))');
++  await verb(cdp,'press',{selector:`[data-turn-summary][data-run-ids~="tool:${label}-call"] button[aria-expanded]`});
++  await waitFor(`document.querySelectorAll('[data-sound-batch-item]').length === ${label==='multi10'?10:4}`);
++  await waitFor(`document.querySelectorAll('[data-sound-batch] [data-sound-player]').length === ${count}`);
++  console.log(label,'VISIBLE',await cdp.evaluate('JSON.stringify({body:document.body.innerText,rows:Array.from(document.querySelectorAll("[data-sound-batch-item]")).map(e=>({text:e.innerText,rect:e.getBoundingClientRect().toJSON()}))})'));
++  await capture(cdp,`${label}-completed`);
++  const rowIndexes=label==='multi10'?[0,1,2,3,4,5,6,7,8,9]:[0,1,3];
++  for(const i of rowIndexes) {
++   const selector=`[data-sound-batch-item]:nth-child(${i+1}) [data-sound-player] button`;
++   await verb(cdp,'press',{selector});
++   await waitFor(`document.querySelector('[data-sound-batch-item]:nth-child(${i+1}) [data-sound-status="playing"]')!==null`);
++   await new Promise(r=>setTimeout(r,110));
++   const p=await verb(cdp,'soundsFacts'); console.log('PLAY',label,i,JSON.stringify(p));
++   demand(`${label} row ${i+1}: real decoder local blob and zero output`,p.time>0&&!p.paused&&p.gain===0&&p.rms===0&&p.src.startsWith('blob:'));
++   // Capture one real playing instant, never a fabricated pending state.
++   if(i===0) await capture(cdp,`${label}-playing`);
++   await new Promise(r=>setTimeout(r,600));
++  }
++ }
+ }
