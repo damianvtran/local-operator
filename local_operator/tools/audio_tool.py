@@ -457,6 +457,29 @@ async def _cancel_receipt(
     }
     if receipt.reason:
         details["cancel_reason"] = receipt.reason
+    # The server's pending-settlement facts travel VERBATIM. A surface renders
+    # "awaiting settlement" only from explicit fields — ``settled: null``,
+    # ``cost_usd: null``, ``cost.basis: "quote"`` — so a body the harness
+    # drops is a state no client can show. Nothing is invented: ``cost`` is
+    # the server's own quote object, and ``settled``/``cost_usd`` are written
+    # as null ONLY for a quote-basis pending body (the contract's own
+    # spelling of "not settled" / "no settled figure"); a body that states
+    # either value is forwarded as stated. A cancel body with no cost object
+    # (BYOK, 409 already-completed) adds neither key.
+    server = receipt.server_payload or {}
+    cost = server.get("cost")
+    cost_basis = cost.get("basis") if isinstance(cost, dict) else None
+    for key in ("cancellation", "cost", "note"):
+        if key in server:
+            details[key] = server[key]
+    if "settled" in server:
+        details["settled"] = server["settled"]
+    elif cost_basis == "quote":
+        details["settled"] = None
+    if "cost_usd" in server:
+        details["cost_usd"] = server["cost_usd"]
+    elif cost_basis == "quote":
+        details["cost_usd"] = None
     if receipt.outcome == "already_completed":
         # The cancel conflict is NOT a failure: the surfaces' frozen branch
         # renders it as "already finished" off this pair (the media
