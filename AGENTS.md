@@ -344,13 +344,17 @@ make check-changed      # scripts/ci_scope.py --since <merge-base origin/main> -
 
 It selects its gates from the SAME module the workflow's `changes` job runs, so
 the local answer and CI's answer cannot drift into two opinions, and it runs
-only the jobs whose flags are true for your diff. **Four gated jobs are never
+only the jobs whose flags are true for your diff. **Seven gated jobs are never
 part of a local run** — `filesystem-boundaries-windows` (native Windows
 junction semantics), `cli-sanity` and `server-sanity` (live-LLM: they need
-`OPENROUTER_API_KEY` and spend real tokens), and `pip-audit` (its CI shape is
+`OPENROUTER_API_KEY` and spend real tokens), `pip-audit` (its CI shape is
 `pypa/gh-action-pip-audit`, which installs the project and then audits it inside
-a hermetic venv that cannot be reproduced here). `--run` prints each exclusion
-with its reason, so a local green is not evidence about those four — the audit in
+a hermetic venv that cannot be reproduced here), `packaging-smoke-build` and
+`packaging-smoke` (they build the wheel and install it in throwaway venvs on
+three interpreters; run `scripts/smoke_wheel.py --wheel <wheel>` by hand), and
+`source-import-314` (needs a 3.14 interpreter, which is not guaranteed on every
+dev host). `--run` prints each exclusion
+with its reason, so a local green is not evidence about those seven — the audit in
 particular, since a dependency-touching PR is exactly where a local green and a
 red audit can coexist. Use the four commands above by hand when you want the
 whole-tree form regardless — a release PR, or a diff that touches `.github/**`,

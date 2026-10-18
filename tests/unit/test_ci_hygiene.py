@@ -2449,7 +2449,7 @@ def test_an_explicit_root_is_authoritative_for_base_resolution(tmp_path: Path) -
     )
 
 
-_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
 
 
 def test_agents_doc_names_every_job_a_local_run_skips() -> None:
