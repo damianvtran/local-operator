@@ -325,6 +325,7 @@ class RadientTranscriptionResponseData(BaseModel):
     raw_text: Optional[str] = None
     raw_unavailable: str = ""
     language: Optional[str] = None
+    language_code: Optional[str] = None
     language_probability: Optional[float] = None
     removed: list[dict[str, Any]] = Field(default_factory=list)
     model_config = {"extra": "allow"}

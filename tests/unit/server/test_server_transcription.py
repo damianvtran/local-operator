@@ -931,7 +931,7 @@ async def test_create_transcription_auto_cleans_radient_text(test_app_client, te
         text="Uh, so I think we should ship.",
         provider="radient",
         status="completed",
-        language="eng",
+        language_code="eng",
         language_probability=0.99,
     )
     mock_radient_client.create_transcription.return_value = mock_transcription_response
