@@ -33,6 +33,7 @@ import asyncio
 import time
 from typing import Any, Callable
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
@@ -63,10 +64,13 @@ _RULE_GLYPH = "─"
 #: the list it returns to is one keystroke away.
 _INDENT = "  "
 
-#: The pane's label column. Fixed rather than measured from the labels: the
-#: labels are this namespace's five short nouns, and a measured column would
-#: move between locales for no reader's benefit.
-_LABEL_COLUMN = 9
+#: The FLOOR of the pane's label column. The actual column is measured from the
+#: row's own translated labels per paint (``_detail_column``): a fixed value is
+#: an English-only assumption — Spanish ``Ejecuciones`` is 11 cells and
+#: ``Siguiente`` is 9, so a hardcoded 9 with a bare ``ljust`` glued the label to
+#: its value in the shipped translations. 9 stays the floor so the English pane
+#: keeps its historical left edge.
+_MIN_LABEL_COLUMN = 9
 
 
 class ScheduleViewDismissed(Message):
@@ -727,6 +731,18 @@ class ScheduleView(Vertical):
                 text.append("\n\n")
         return text
 
+    def _detail_column(self, row: schedule_model.ScheduleRow) -> int:
+        """The label column for THIS row's translated labels.
+
+        Measured per paint from the labels actually being drawn, with a
+        two-cell minimum gap: ``max(9, widest + 2)``. A translation longer than
+        the floor therefore moves the values right rather than having the label
+        run into its value; the English labels all sit under the floor, so the
+        untranslated pane is unchanged.
+        """
+        widest = max((cell_len(label) for label, _ in row.detail), default=0)
+        return max(_MIN_LABEL_COLUMN, widest + 2)
+
     def _pane_text(self) -> Text:
         row = self.selected
         if row is None:
@@ -736,9 +752,10 @@ class ScheduleView(Vertical):
         text.append("\n")
         text.append(row.message)
         text.append("\n\n")
+        column = self._detail_column(row)
         for label, value in row.detail:
             text.append(
-                label.ljust(_LABEL_COLUMN),
+                label + " " * (column - cell_len(label)),
                 style=Style(color=theme_mod.semantic_color("muted")),
             )
             wrapped = value.replace("\n", " ")

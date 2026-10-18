@@ -14,9 +14,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 from rich.text import Text
 
 from local_operator.harness.wake_types import WakeSchedule
+from local_operator.i18n import catalogues
+from local_operator.i18n import text as i18n_text
 from local_operator.tui import schedule as schedule_model
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import schedule_view as schedule_view_mod
@@ -458,3 +461,58 @@ def test_the_model_and_the_form_agree_on_what_edit_sends() -> None:
     result = schedule_model.edit(values, [row], "w5", NOW)
     assert result.ok and result.schedule is not None
     assert result.schedule.model_dump() == row.model_dump()
+
+
+#: The shipped locale set the layout has to hold in. Kept as the explicit six
+#: rather than "whatever catalogues exist": a locale silently dropping out of
+#: the loop is the hole this test exists to close.
+_DETAIL_LOCALES = ("en", "es", "fr", "hi", "ru", "vi")
+
+
+@pytest.mark.parametrize("locale", _DETAIL_LOCALES)
+def test_detail_labels_leave_a_two_cell_gap_in_every_shipped_locale(locale: str) -> None:
+    """The pane's label column is MEASURED from the translated labels.
+
+    A fixed 9-cell column was an English-only assumption: Spanish
+    ``Ejecuciones`` is 11 cells and ``Siguiente`` is 9, so the longest label
+    ran into its value (and the 9-cell one had zero gap) in the shipped
+    translations. Every value must start at the same column, with at least two
+    cells between its label and it, in every shipped locale.
+    """
+    if (
+        locale != "en"
+        and not (catalogues.catalogue_root() / locale / "tui.schedule.json").is_file()
+    ):
+        # Phase B's catalogues are delivered separately from this layout fix;
+        # the assertions below run for every one that is on the branch.
+        pytest.skip(f"the {locale} tui.schedule catalogue is not on this branch yet")
+    row = _schedule(
+        "w1", message="check the build", every_ms=DAY, limit=3, fired_count=1, notify=True
+    )
+    view = ScheduleView(ScheduleFakeSession([row]))
+    previous = i18n_text.active_locale()
+    try:
+        i18n_text.set_active_locale("en")
+        view._reload()
+        english_labels = [label for label, _ in (view.selected.detail if view.selected else ())]
+        i18n_text.set_active_locale(locale)
+        # Reload under the locale: a row's detail strings are resolved when the
+        # rows are built, exactly as the page rebuilds them on open.
+        view._reload()
+        selected = view.selected
+        assert selected is not None
+        detail = list(selected.detail)
+        if locale != "en":
+            # Prove the locale actually rendered: a fallback to English would
+            # satisfy any column arithmetic and prove nothing.
+            assert [label for label, _ in detail] != english_labels, locale
+        lines = view._pane_text().plain.splitlines()[-len(detail) :]
+        assert len(lines) == len(detail)
+        starts: list[int] = []
+        for (label, value), line in zip(detail, lines):
+            start = cell_len(line) - cell_len(value)
+            starts.append(start)
+            assert start - cell_len(label) >= 2, (locale, label, start)
+        assert len(set(starts)) == 1, (locale, starts)
+    finally:
+        i18n_text.set_active_locale(previous)
