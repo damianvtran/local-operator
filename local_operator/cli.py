@@ -4729,7 +4729,16 @@ def _print_kept(protected: list[tuple[str, str]]) -> None:
     for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
         print(f"  kept         {name}  ({guard})")
     if len(protected) > _CLEANUP_TEXT_ROWS:
-        print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
+        # The pass caps each kept group at WINDOW_NAMES_CAP while still counting
+        # every member into its total, so ``--json`` carries the same capped
+        # list, not every row. The old text promised the full listing and was
+        # false past the cap; say what the JSON actually holds.
+        from local_operator.session.delegated_retention import WINDOW_NAMES_CAP
+
+        print(
+            f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept "
+            f"(list capped at {WINDOW_NAMES_CAP} per group; --json carries the same capped list)"
+        )
 
 
 def _content_class_counts(rows: list[Any]) -> dict[str, int]:

@@ -2123,9 +2123,7 @@ def run_delegated_pass(
         # Same cap, same place: these were never in the age rule at all (their
         # origin is not reapable) and they have no sidebar row, so the dry run is
         # the only surface that can tell the operator WHICH ones the count means.
-        result.protected.extend(
-            (name, "origin not reapable") for name in scan.kept_by_origin_names
-        )
+        result.protected.extend((name, "origin not reapable") for name in scan.kept_by_origin_names)
     result.freed_bytes = freed
     if not dry_run and result.removed:
         logger.warning(
