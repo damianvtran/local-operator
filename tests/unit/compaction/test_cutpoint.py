@@ -697,7 +697,8 @@ def test_interleaved_multi_call_turn_moves_all_pairs_together():
     for index in (3, 4, 5, 6):
         keep = sum(estimate_tokens(m) for m in messages[index:])
         cut = find_cut_point(messages, keep)
-        assert cut == 2
+        expected = 2 if sum(estimate_tokens(m) for m in messages[2:]) <= 2 * keep else 8
+        assert cut == expected
         assert_partition_pair_integrity(*prepare_partitions(messages, cut))
     # Byte-driven advancement uses the SAME legality rule, not just token cuts.
     advanced = advance_cut_to_wire_band(
@@ -719,7 +720,8 @@ def test_reverse_order_pair_is_not_split():
     ]
     keep = sum(estimate_tokens(m) for m in messages[4:])
     cut = find_cut_point(messages, keep)
-    assert cut == 2
+    # Retaining the large result would exceed twice this small keep budget.
+    assert cut == 6
     assert_partition_pair_integrity(*prepare_partitions(messages, cut))
 
 
@@ -747,20 +749,111 @@ def test_final_pair_guard_survives_a_broken_selector(monkeypatch, reverse):
 
 
 def test_normal_compaction_partitions_are_byte_identical():
-    # Fixed pre-fix control: a complete ordinary tool turn has cut 4. Comparing
-    # serialized partitions also pins metadata and call/result payload bytes.
+    import runpy
+    from pathlib import Path
+
+    baseline = runpy.run_path(str(Path(__file__).with_name("pre_pair_cutpoint_control.py")))
+    messages = []
+    for i in range(8):
+        messages.extend(
+            [
+                _big_user(100),
+                _assistant_with_call(f"normal-{i}"),
+                _tool_result(f"normal-{i}", 100),
+                Message.assistant("answer " * 80),
+            ]
+        )
+    checked = 0
+    for keep in range(1, sum(estimate_tokens(m) for m in messages) + 1, 7):
+        old_cut = baseline["find_cut_point"](messages, keep)
+        if old_cut is None:
+            # R1 intentionally changes non-progressing refusals. Compatibility
+            # here means byte identity for passes the original actually ran.
+            continue
+        cut = find_cut_point(messages, keep)
+        assert cut == old_cut, keep
+        if cut is not None:
+            old_parts = baseline["prepare_partitions"](messages, old_cut)
+            parts = prepare_partitions(messages, cut)
+            assert [[m.model_dump_json() for m in part] for part in parts] == [
+                [m.model_dump_json() for m in part] for part in old_parts
+            ]
+        checked += 1
+    assert checked > 300
+
+
+@pytest.mark.parametrize("extra", [0, 61, 121])
+def test_pair_near_start_must_make_progress(extra):
+    call = _assistant_with_call("a")
+    call.tool_calls.append(ToolCall(id="b", name="bash", arguments={}))
+    messages = [
+        _big_user(121),
+        call,
+        _tool_result("a", 200),
+        Message.user("delivery"),
+        _tool_result("b", 200),
+        Message.assistant("answer " * 60),
+        _big_user(60),
+        Message.assistant("latest " * 60),
+    ]
+    keep = sum(estimate_tokens(m) for m in messages[3:]) + extra
+    cut = find_cut_point(messages, keep)
+    assert cut == 5
+    assert sum(estimate_tokens(m) for m in messages[:cut]) > 500
+    assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+
+
+def test_missing_interior_issuer_is_repaired_forwards():
     messages = [
         _big_user(),
         _big_user(),
-        _assistant_with_call("normal"),
-        _tool_result("normal"),
-        Message.user("next task"),
+        Message.user("delivery"),
+        _tool_result("missing"),
+        Message.assistant("done"),
+    ]
+    cut = find_cut_point(messages, 202)
+    assert cut == 4
+    assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+
+
+@pytest.mark.parametrize("prefix_count", [0, 1])
+def test_oversized_pair_does_not_pin_cut_to_start(prefix_count):
+    call = _assistant_with_call("a")
+    call.tool_calls.append(ToolCall(id="b", name="bash", arguments={}))
+    messages = [
+        *[_big_user() for _ in range(prefix_count)],
+        call,
+        _tool_result("a", 15000),
+        Message.user("delivery"),
+        _tool_result("b", 15000),
+        Message.assistant("done"),
+        Message.user("next"),
+    ]
+    # A broad sweep pins progress even when the token walk starts on the call,
+    # on either tool result, or on the interleaved delivery.
+    for keep in range(1000, 29000, 2000):
+        cut = find_cut_point(messages, keep)
+        assert cut is not None, (prefix_count, keep)
+        assert cut >= prefix_count + 4
+        assert sum(estimate_tokens(m) for m in messages[:cut]) > 29000
+        assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+
+
+def test_oversized_backward_repair_is_bounded_even_with_useful_prefix():
+    call = _assistant_with_call("a")
+    call.tool_calls.append(ToolCall(id="b", name="bash", arguments={}))
+    messages = [
+        _big_user(),
+        _big_user(),
+        call,
+        _tool_result("a", 15000),
+        Message.user("delivery"),
+        _tool_result("b", 200),
         Message.assistant("done"),
     ]
     keep = sum(estimate_tokens(m) for m in messages[4:])
+    assert sum(estimate_tokens(m) for m in messages[2:]) > 2 * keep
     cut = find_cut_point(messages, keep)
-    assert cut == 4
-    partitions = prepare_partitions(messages, cut)
-    actual = [[m.model_dump_json() for m in part] for part in partitions]
-    expected = [[m.model_dump_json() for m in part] for part in (messages[:4], messages[4:])]
-    assert actual == expected
+    assert cut == 6
+    assert sum(estimate_tokens(m) for m in messages[:cut]) > 15000
+    assert_partition_pair_integrity(*prepare_partitions(messages, cut))

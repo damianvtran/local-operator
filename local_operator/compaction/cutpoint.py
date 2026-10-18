@@ -245,6 +245,15 @@ def _pairing_safe_cuts(messages: Sequence[AgentMessage]) -> set[int]:
         if message.role == "tool" and message.tool_call_id:
             results_at.setdefault(message.tool_call_id, []).append(index)
     changes = [0] * (len(messages) + 1)
+    missing_results = [
+        i for cid, indices in results_at.items() if cid not in calls_at for i in indices
+    ]
+    if missing_results and max(missing_results) < len(messages) - 1:
+        # An issuer absent from the entire history cannot be restored by moving
+        # backwards. Drop an interior orphan with the prefix; a trailing orphan
+        # has no nonempty repair and must still reach the final invariant guard.
+        changes[0] += 1
+        changes[max(missing_results) + 1] -= 1
     for call_id, calls in calls_at.items():
         results = results_at.get(call_id)
         if not results:
@@ -292,6 +301,17 @@ def _is_valid_cut(
         safe_cuts = _pairing_safe_cuts(messages)
     if index not in safe_cuts:
         return False
+    return _is_role_valid_cut(messages, index, result_at)
+
+
+def _is_role_valid_cut(
+    messages: Sequence[AgentMessage], index: int, result_at: dict[str, int] | None = None
+) -> bool:
+    """Historical role/own-call check, not a pairing-invariant bypass switch.
+
+    Only the initial compatibility snap uses this weaker predicate; every
+    boundary it proposes must subsequently pass the global pairing check.
+    """
     message = messages[index]
     if _is_compaction_marker(message):
         return True
@@ -309,7 +329,10 @@ def _is_valid_cut(
 
 
 def _snap_to_valid_cut(
-    messages: Sequence[AgentMessage], index: int, result_at: dict[str, int]
+    messages: Sequence[AgentMessage],
+    index: int,
+    result_at: dict[str, int],
+    keep_recent_tokens: int | None = None,
 ) -> int | None:
     """Snap to a pair-safe boundary; ``None`` if no legal cut exists.
 
@@ -341,32 +364,68 @@ def _snap_to_valid_cut(
     # First retain the historical local-role snap. If its selected boundary
     # already keeps pairs intact, normal compaction must remain byte-identical.
     forward = index
-    while forward < total and not _is_valid_cut(messages, forward, result_at, {forward}):
+    while forward < total and not _is_role_valid_cut(messages, forward, result_at):
         forward += 1
     if forward < total:
         candidate = forward
     else:
         backward = min(index, total - 1)
-        while backward >= 0 and not _is_valid_cut(messages, backward, result_at, {backward}):
+        while backward >= 0 and not _is_role_valid_cut(messages, backward, result_at):
             backward -= 1
         if backward < 0:
             return None
         candidate = backward
 
     safe_cuts = _pairing_safe_cuts(messages)
-    if candidate in safe_cuts:
+    # A backward repair must buy real headroom, not just legal wire history.
+    # Prefix counts and suffix token sums keep candidate search linear even on
+    # a long interleaved tool turn. Markers/preserved prompts are replayed, not
+    # summarized; they cannot make a prefix count as progress.
+    counts = [0]
+    prefix_tokens = [0]
+    suffix_tokens = [0] * (total + 1)
+    for message in messages:
+        real = not _is_compaction_marker(message) and not _is_preserved_user_turn(message)
+        counts.append(counts[-1] + int(real))
+        prefix_tokens.append(prefix_tokens[-1] + (_message_tokens(message) if real else 0))
+    for position in range(total - 1, -1, -1):
+        suffix_tokens[position] = suffix_tokens[position + 1] + _message_tokens(messages[position])
+
+    def makes_progress(boundary: int) -> bool:
+        return boundary > 1 and (
+            counts[boundary] > 1
+            or (counts[boundary] == 1 and prefix_tokens[boundary] >= (keep_recent_tokens or 0))
+        )
+
+    def bounded_retention(boundary: int) -> bool:
+        # Twice the requested tail tolerates modest interleaving but cannot
+        # pin a 30k-token interval behind a few-hundred-token recency budget.
+        return keep_recent_tokens is None or suffix_tokens[boundary] <= 2 * keep_recent_tokens
+
+    candidate_message = messages[candidate]
+    opens_pair = isinstance(candidate_message, Message) and bool(candidate_message.tool_calls)
+    if candidate in safe_cuts and (
+        not opens_pair or (makes_progress(candidate) and bounded_retention(candidate))
+    ):
         return candidate
-    # A split pair is a selection error, not a fatal episode error. Prefer
-    # the nearest earlier legal boundary: it loses NO extra context, unlike
-    # dropping the result by advancing. This also repairs a locally legal snap
-    # reached from a tool result, not just the token walk's initial candidate.
+    # Retain extra context only when it remains bounded AND leaves useful work
+    # to summarize. Otherwise clear the whole interval forwards. Apply the same
+    # policy on both calls (including find_cut_point's recency retry), so a
+    # retry cannot restore the non-progressing boundary we just rejected.
     for backward in range(candidate - 1, -1, -1):
-        if _is_valid_cut(messages, backward, result_at, safe_cuts):
+        if (
+            makes_progress(backward)
+            and bounded_retention(backward)
+            and _is_valid_cut(messages, backward, result_at, safe_cuts)
+        ):
             return backward
     for forward in range(candidate + 1, total):
-        if _is_valid_cut(messages, forward, result_at, safe_cuts):
+        if makes_progress(forward) and _is_valid_cut(messages, forward, result_at, safe_cuts):
             return forward
-    return None
+    # If no useful forward cut exists, retaining the safe pair is preferable
+    # to inventing an invalid boundary; the existing trivial-prefix rule may
+    # still refuse this genuinely uncompactable history.
+    return candidate if candidate in safe_cuts else None
 
 
 def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) -> int | None:
@@ -415,7 +474,7 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     # Snap to the nearest valid cut message. Skipping tool results and
     # pending-tool-call assistants keeps call/result pairing intact: the pair
     # always moves to the kept side together.
-    snapped = _snap_to_valid_cut(messages, index, result_at)
+    snapped = _snap_to_valid_cut(messages, index, result_at, keep_recent_tokens)
     if snapped is None:
         return None
     index = snapped
@@ -430,10 +489,31 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     if kept_tokens < keep_recent_tokens // 2 and index > 0:
         retry = backwards_walk(index - 1)
         if retry is not None:
-            snapped = _snap_to_valid_cut(messages, retry, result_at)
-            if snapped is None:
-                return None
-            index = snapped
+            snapped = _snap_to_valid_cut(messages, retry, result_at, keep_recent_tokens)
+            # The recency retry is advisory: never replace a useful cut with
+            # a trivial prefix (or only replayed marker/preserved rows). That
+            # would undo forward repair and silently refuse forever next pass.
+            retry_prefix = (
+                [
+                    m
+                    for m in messages[:snapped]
+                    if not _is_compaction_marker(m) and not _is_preserved_user_turn(m)
+                ]
+                if snapped is not None
+                else []
+            )
+            if (
+                snapped is not None
+                and snapped > 1
+                and (
+                    len(retry_prefix) > 1
+                    or (
+                        len(retry_prefix) == 1
+                        and _message_tokens(retry_prefix[0]) >= keep_recent_tokens
+                    )
+                )
+            ):
+                index = snapped
 
     # Defensive invariant (the predicate already excludes violations; the
     # assertion makes a future regression loud instead of silent). GENERAL

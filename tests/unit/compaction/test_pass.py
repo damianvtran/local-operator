@@ -683,3 +683,62 @@ async def test_interleaved_tool_result_compacts_and_continues() -> None:
     )
     assert continued.ran, continued.reason
     assert len(summarizer.prompts) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preserved_prefix", [False, True])
+async def test_large_interleaved_pair_compacts_again_after_rebuild(preserved_prefix):
+    call = Message.assistant("calling")
+    call.tool_calls = [ToolCall(id=cid, name="bash", arguments={}) for cid in ("a", "b")]
+
+    def result(cid):
+        return Message(
+            role="tool",
+            content=[TextContent(text="result " * 15000)],
+            tool_call_id=cid,
+            tool_name="bash",
+        )
+
+    history = [
+        Message.user("older " * 8000),
+        Message.assistant("earlier " * 4000),
+        call,
+        result("a"),
+        Message.user("delivery"),
+        result("b"),
+        Message.assistant("answer " * 1600),
+        Message.user("latest " * 1600),
+    ]
+    from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+    from local_operator.compaction.tokens import estimate_tokens
+
+    settings = CompactionSettings(keep_recent_tokens=sum(estimate_tokens(m) for m in history[4:]))
+    summarize = _Summarizer("Short summary.")
+    first = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert first.ran, first.reason
+    assert first.tokens_before - first.tokens_after > 3000
+    rebuilt = list(first.messages)
+    if preserved_prefix:
+        prompt = Message.user("preserved operator constraint")
+        prompt.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+        rebuilt.insert(1, prompt)
+    second = await run_compaction_pass(
+        rebuilt,
+        model=_model(),
+        settings=settings,
+        summarize=summarize,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert second.ran, second.reason
+    assert second.tokens_before - second.tokens_after > 25000
+    assert len(summarize.prompts) == 2
