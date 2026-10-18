@@ -611,8 +611,25 @@ async def test_a_completed_job_cancel_renders_the_already_completed_pair(monkeyp
     details = _details(result)
     assert details["error_type"] == "media_already_completed"
     assert "already completed" in details["error"]
-    assert spawned == [], "nothing left to observe"
-    assert spent[0].status == "cancelled"
+    assert len(spawned) == 1, "409 must observe the already completed charge"
+    from local_operator.audiogen import settle as audio_settle
+
+    async def observed(**kwargs):
+        return audio_settle.SettleOutcome(
+            status="COMPLETED",
+            terminal=True,
+            cost_usd=0.042,
+            billing_basis="billed",
+            usage_record_id="usage-409",
+        )
+
+    monkeypatch.setattr(audio_settle, "observe_audio_settlement", observed)
+    await spawned[0]
+    assert spent[-1].amount_micro == 42000
+    assert spent[-1].billing_basis == "billed"
+    assert spent[-1].usage_record_id == "usage-409"
+    assert spent[-1].record_id == spent[0].record_id
+    assert spent[-1].rev == 1
 
 
 @pytest.mark.asyncio
@@ -639,3 +656,238 @@ async def test_a_busy_failure_surfaces_the_wire_word_beside_the_retry_class(monk
     details = _details(result)
     assert details["error_type"] == "audio_rate_limited"
     assert details["attempts"][0]["reason_class"] == "transient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [None, "sha", "download", "store", "vendor_zero", "status_billed", "immediate_billed"],
+)
+async def test_accepted_radient_charge_survives_artifact_delivery(monkeypatch, tmp_path, failure):
+    """Exercise the real tool -> cascade -> HTTP rung, never a paid service."""
+    import hashlib
+
+    import httpx
+
+    from local_operator.audiogen import cascade
+    from local_operator.session.channel_spend import ChannelSpend, ChannelSpendRecord
+
+    spent = []
+    calls = []
+    data = b"synthetic verified audio"
+    terminal_cost = {
+        "amount_usd": 0 if failure == "vendor_zero" else 0.042,
+        "basis": "billed",
+        "units": 30,
+        "unit": "chars",
+        "usage_record_id": "usage-known",
+    }
+
+    def respond(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/voiceover"):
+            assert spent == [], "the accepted row must originate at submit, not delivery"
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "accepted-42",
+                    "status": "COMPLETED" if failure == "immediate_billed" else "IN_QUEUE",
+                    "cost": (
+                        terminal_cost
+                        if failure == "immediate_billed"
+                        else {"amount_usd": 0.05, "basis": "quote"}
+                    ),
+                },
+            )
+        if request.url.path.endswith("/status"):
+            assert spent[0].amount_micro == 50000 and spent[0].rev == 0
+            assert spent[0].billing_basis == "estimated"
+            if failure == "vendor_zero":
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "COMPLETED",
+                        "error_type": "audio_failed",
+                        "cost": terminal_cost,
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    **({"cost": terminal_cost} if failure == "status_billed" else {}),
+                },
+            )
+        if request.url.path.endswith("/result"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    "cost": terminal_cost,
+                    "audio": {
+                        "url": "https://fixture.invalid/audio",
+                        "content_type": "audio/mpeg",
+                        "sha256": (
+                            "0" * 64 if failure == "sha" else hashlib.sha256(data).hexdigest()
+                        ),
+                    },
+                },
+            )
+        assert spent[-1].amount_micro == 42000, "billed money exists before the CDN read"
+        return httpx.Response(
+            403 if failure == "download" else 200,
+            content=data,
+            headers={"content-type": "audio/mpeg"},
+        )
+
+    monkeypatch.setattr(
+        audio_availability, "radient_available", lambda config_dir=None, **kwargs: True
+    )
+    monkeypatch.setattr(
+        audio_availability,
+        "elevenlabs_key",
+        lambda config_dir=None, **kwargs: "available-but-unused",
+    )
+    monkeypatch.setattr(
+        audio_availability, "openai_audio_key", lambda config_dir=None, **kwargs: None
+    )
+
+    async def pause(seconds):
+        return None
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        async def dispatch(route, **kwargs):
+            assert route == AudioRoute.RADIENT, "accepted jobs cannot buy another provider"
+            return await audio_rungs.run_radient(
+                kwargs["spec"],
+                credential="synthetic",
+                base_url="https://fixture.invalid/v1",
+                handle=kwargs["handle"],
+                emit=kwargs["emit"],
+                pause=pause,
+                client=client,
+            )
+
+        monkeypatch.setattr(cascade, "_run_route", dispatch)
+        if failure == "store":
+            monkeypatch.setattr(
+                "local_operator.session.attachments.cache_media", lambda *a, **k: None
+            )
+        result = await audio_tool.execute_generate_voiceover(
+            "accepted-test", {"text": "hello"}, None, None, _context(tmp_path, spent)
+        )
+    assert spent, (_text(result), calls)
+    assert result.is_error == (failure not in {None, "status_billed", "immediate_billed"})
+    assert [row.rev for row in spent] == [0, 1]
+    assert len({row.record_id for row in spent}) == 1
+    assert all(row.request_id == "accepted-42" for row in spent)
+    terminal = spent[-1]
+    assert terminal.amount_micro == (0 if failure == "vendor_zero" else 42000)
+    assert terminal.billing_basis == "billed" and terminal.cost_source == "server_reported"
+    assert terminal.usage_record_id == "usage-known" and terminal.units == 30
+    assert ChannelSpendRecord.from_details(terminal.to_details()) == terminal
+    folded = ChannelSpend()
+    for row in spent:
+        folded.apply(row)
+    assert folded.rows() == [terminal]
+    assert folded.total_known_micro() == terminal.amount_micro
+    if failure in {"sha", "download", "store"}:
+        assert "billed but the artifact could not be stored" in _text(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancel_outcome,vendor_stopped",
+    [
+        ("cancelled", True),
+        ("cancelled", False),
+        ("already_completed", None),
+    ],
+)
+async def test_accepted_cancel_revises_the_same_charge(
+    monkeypatch, tmp_path, cancel_outcome, vendor_stopped
+):
+    import hashlib
+
+    import httpx
+
+    from local_operator.audiogen import settle
+
+    spent, spawned = [], []
+    data = b"settled audio"
+
+    async def accepted_then_cancelled(**kwargs):
+        handle = kwargs["handle"]
+        handle.provider = AudioRoute.RADIENT
+        handle.request_id = "accepted-cancel"
+        handle.base_url = "https://fixture.invalid/v1"
+        handle.credential = SecretStr("synthetic")
+        audio_rungs._observe_cost(
+            handle, {"cost": {"amount_usd": 0.05, "basis": "quote"}}, terminal=False
+        )
+        assert spent[0].amount_micro == 50000 and spent[0].rev == 0
+        raise AudioGenerationCancelled("stopped")
+
+    async def cancel(handle):
+        return audio_rungs.AudioCancelReceipt(outcome=cancel_outcome, vendor_stopped=vendor_stopped)
+
+    paths = []
+
+    def respond(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "COMPLETED"})
+        if request.url.path.endswith("/result"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    "cost": {
+                        "amount_usd": 0.042,
+                        "basis": "billed",
+                        "units": 31,
+                        "unit": "chars",
+                        "usage_record_id": "usage-cancel",
+                    },
+                    "audio": {
+                        "url": "https://fixture.invalid/audio",
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "content_type": "audio/mpeg",
+                    },
+                },
+            )
+        return httpx.Response(200, content=data, headers={"content-type": "audio/mpeg"})
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", accepted_then_cancelled)
+    monkeypatch.setattr(audio_rungs, "best_effort_cancel", cancel)
+    original = settle.observe_audio_settlement
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        async def observe(**kwargs):
+            return await original(**kwargs, client=client)
+
+        monkeypatch.setattr(settle, "observe_audio_settlement", observe)
+        result = await audio_tool.execute_generate_voiceover(
+            "cancel-test",
+            {"text": "hello"},
+            None,
+            None,
+            _context(tmp_path, spent, spawn_background=spawned.append),
+        )
+        assert result.is_error
+        if vendor_stopped:
+            assert spawned == [] and paths == []
+            assert spent[-1].status == "cancelled" and spent[-1].amount_micro == 0
+        else:
+            assert (
+                len(spent) == 1 and spent[0].amount_micro == 50000
+            ), "running cancel retains acceptance"
+            assert len(spawned) == 1
+            await spawned[0]
+            assert spent[-1].amount_micro == 42000 and spent[-1].usage_record_id == "usage-cancel"
+            assert spent[-1].units == 31
+            assert paths == ["/v1/tools/audio/status", "/v1/tools/audio/result", "/audio"]
+        assert [row.rev for row in spent] == [0, 1]
+        assert len({row.record_id for row in spent}) == 1
+        assert spent[-1].billing_basis == "billed"

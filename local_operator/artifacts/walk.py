@@ -112,6 +112,7 @@ def all_failed_message(
     labels: Mapping[str, str],
     *,
     action: str = "generation",
+    terminal_exceptions: tuple[type[Exception], ...] = (),
 ) -> str:
     """The exhausted-walk sentence: one header plus one line per attempt.
 
@@ -182,6 +183,7 @@ async def run_job_walk(
     on_exhausted: Callable[[str, tuple[JobAttempt, ...]], BaseException],
     pre_attempts: Mapping[str, JobAttempt] | None = None,
     action: str = "generation",
+    terminal_exceptions: tuple[type[Exception], ...] = (),
 ) -> JobOutcome:
     """Run the walk. See the module docstring for the failure contract.
 
@@ -287,6 +289,10 @@ async def run_job_walk(
                 error_type=error_type or reason_class,
                 num_images=spec.count,
             )
+            # Some lanes have already admitted a billable provider job. Their
+            # failures must not fail forward and accidentally buy another one.
+            if isinstance(exc, terminal_exceptions):
+                raise on_exhausted(message, tuple(attempts)) from exc
             continue
         attempts.append(JobAttempt(route=route, outcome="ok"))
         return JobOutcome(

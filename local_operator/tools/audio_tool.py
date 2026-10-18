@@ -368,7 +368,7 @@ def _spawn_settlement(
     happening. A host with no session (a library caller, a test) returns False
     and the receipt stays exactly as honest, just shorter.
     """
-    if receipt.outcome in {"none", "not_found", "already_completed"}:
+    if receipt.outcome in {"none", "not_found"}:
         return False
     if receipt.outcome == "cancelled" and receipt.vendor_stopped is True:
         return False
@@ -383,6 +383,7 @@ def _spawn_settlement(
     from local_operator.session.channel_spend import new_record_id
 
     payload = {
+        "tool": spec.tool,
         "request_id": handle.request_id,
         "base_url": handle.base_url,
         "credential": handle.credential.get_secret_value(),
@@ -391,7 +392,7 @@ def _spawn_settlement(
         # The SAME deterministic id the cancel row used, so a settled charge
         # supersedes that row instead of appearing as a second one.
         "record_id": new_record_id("audio", handle.request_id),
-        "rev": 0,
+        "rev": handle.cost_rev,
         # The same count and unit the cancel row carried, so the settled
         # revision means the same thing as the row it supersedes.
         "units": _spend_units(spec)[0],
@@ -430,6 +431,21 @@ async def _cancel_receipt(
     _emit_cancel_stage(progress, spec, handle, "cancelling", "Stopping the generation…")
     receipt = await audio_rungs.best_effort_cancel(handle)
     byok = handle.provider is None and active.get("route") in ("elevenlabs", "openai")
+    if receipt.outcome == "cancelled" and receipt.vendor_stopped is True:
+        _record_audio_channel(
+            context,
+            spec=spec,
+            route=str(handle.provider or "radient"),
+            model=str(handle.model or ""),
+            amount_usd=0.0,
+            cost_source="reported",
+            billing_basis="billed",
+            cost_provenance=None,
+            status="cancelled",
+            request_id=str(handle.request_id or ""),
+            rev=1,
+            detail="stopped before the vendor was called; guaranteed no charge",
+        )
     settling = _spawn_settlement(context, spec, handle, receipt)
     text = audio_rungs.cancel_receipt_text(receipt, byok=byok, settling=settling)
     _emit_cancel_stage(progress, spec, handle, "cancelled", text)
@@ -470,6 +486,10 @@ def _record_audio_channel(
     status: str,
     request_id: str,
     detail: str = "",
+    rev: int = 0,
+    usage_record_id: str = "",
+    units: float | None = None,
+    unit: str | None = None,
 ) -> None:
     """Hand ONE generation's money to the ``audio`` channel, best-effort.
 
@@ -500,22 +520,24 @@ def _record_audio_channel(
             price_version=cost_provenance,
             has_amount=amount_usd is not None,
         )
-        units, unit = _spend_units(spec)
+        default_units, default_unit = _spend_units(spec)
         callback(
             ChannelSpendRecord(
                 record_id=new_record_id("audio", request_id),
+                rev=rev,
                 ts_ms=now_ms(),
                 channel="audio",
                 provider=route,
                 model=model,
-                units=units,
-                unit=unit,
+                units=default_units if units is None else units,
+                unit=default_unit if unit is None else unit,
                 amount_micro=usd_to_micro(amount_usd),
                 billing_basis=basis,
                 cost_source=source,
                 price_version=price_version,
                 status=status,
                 request_id=request_id,
+                usage_record_id=usage_record_id,
                 detail=detail,
             )
         )
@@ -540,6 +562,46 @@ async def _execute_audio(
     from local_operator.paths import config_dir
 
     handle = audio_rungs.CancelHandle()
+    # Financial observations precede delivery: a failed CDN read must never
+    # erase the accepted quote or the server's authoritative terminal charge.
+    recorded_cost: dict[str, Any] | None = None
+    recorded_rev = -1
+
+    def observe_cost(payload: dict[str, Any], terminal: bool) -> None:
+        nonlocal recorded_cost, recorded_rev
+        cost = audio_rungs._cost_from_payload(payload)
+        if cost is None:
+            return  # retain the accepted figure until an authoritative revision arrives
+        if cost == recorded_cost and (
+            not terminal or recorded_rev >= 1 or cost["basis"] != "billed"
+        ):
+            return  # identical terminal status/result reads are idempotent
+        # The first terminal figure is rev 1. A genuinely revised terminal
+        # receipt needs a higher rev because the fold ignores equal revisions.
+        recorded_rev = max(recorded_rev + 1, 1 if terminal else 0)
+        handle.cost_rev = recorded_rev
+        recorded_cost = cost
+        _record_audio_channel(
+            context,
+            spec=spec,
+            route=str(handle.provider or "radient"),
+            model=str(handle.model or ""),
+            amount_usd=cost["amount_usd"],
+            cost_source="reported",
+            billing_basis=cost["basis"],
+            cost_provenance=cost.get("price_version"),
+            status="failed" if payload.get("error_type") else "ok",
+            request_id=str(handle.request_id or ""),
+            rev=recorded_rev,
+            usage_record_id=str(
+                cost.get("usage_record_id") or payload.get("usage_record_id") or ""
+            ),
+            units=cost.get("units"),
+            unit=cost.get("unit"),
+            detail="terminal server charge" if terminal else "accepted server quote",
+        )
+
+    handle.observe_cost = observe_cost
     active: dict[str, str | None] = {"route": None}
     progress = _progress_emitter(on_update, active)
     try:
@@ -552,23 +614,24 @@ async def _execute_audio(
         )
     except AudioGenerationCancelled:
         text, details = await _cancel_receipt(spec, handle, progress, active, context)
-        _record_audio_channel(
-            context,
-            spec=spec,
-            route=str(handle.provider or active.get("route") or ""),
-            model=str(handle.model or ""),
-            amount_usd=None,
-            cost_source=None,
-            billing_basis=None,
-            cost_provenance=None,
-            status="cancelled",
-            request_id=str(handle.request_id or ""),
-            detail=(
-                "cancelled after the generation completed; its result was discarded"
-                if details.get("error_type") == "media_already_completed"
-                else "cancelled before settlement was observed; the job may still be charged"
-            ),
-        )
+        if handle.cost is None:
+            _record_audio_channel(
+                context,
+                spec=spec,
+                route=str(handle.provider or active.get("route") or ""),
+                model=str(handle.model or ""),
+                amount_usd=None,
+                cost_source=None,
+                billing_basis=None,
+                cost_provenance=None,
+                status="cancelled",
+                request_id=str(handle.request_id or ""),
+                detail=(
+                    "cancelled after the generation completed; its result was discarded"
+                    if details.get("error_type") == "media_already_completed"
+                    else "cancelled before settlement was observed; the job may still be charged"
+                ),
+            )
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name=spec.tool,
@@ -582,37 +645,43 @@ async def _execute_audio(
         # abandons it. The terminal updates go through the guarded emitter
         # for the same reason.
         await _cancel_receipt(spec, handle, progress, active, context)
-        _record_audio_channel(
-            context,
-            spec=spec,
-            route=str(handle.provider or active.get("route") or ""),
-            model=str(handle.model or ""),
-            amount_usd=None,
-            cost_source=None,
-            billing_basis=None,
-            cost_provenance=None,
-            status="cancelled",
-            request_id=str(handle.request_id or ""),
-            detail="cancelled by the loop; the job may still be charged",
-        )
+        if handle.cost is None:
+            _record_audio_channel(
+                context,
+                spec=spec,
+                route=str(handle.provider or active.get("route") or ""),
+                model=str(handle.model or ""),
+                amount_usd=None,
+                cost_source=None,
+                billing_basis=None,
+                cost_provenance=None,
+                status="cancelled",
+                request_id=str(handle.request_id or ""),
+                detail="cancelled by the loop; the job may still be charged",
+            )
         raise
     except AudioGenerationUnavailable as exc:
-        _record_audio_channel(
-            context,
-            spec=spec,
-            route=str(exc.attempts[-1].route if exc.attempts else ""),
-            model=str(handle.model or ""),
-            amount_usd=None,
-            cost_source=None,
-            billing_basis=None,
-            cost_provenance=None,
-            status="failed",
-            request_id=str(handle.request_id or ""),
-            # Documented presumption (the image lane's §4.1): an unreported
-            # failure with no charge claim is audited as failed/None and does
-            # NOT degrade the knowledge.
-            detail="walk exhausted with no charged figure reported; presumed unbilled",
-        )
+        if handle.cost is None:
+            _record_audio_channel(
+                context,
+                spec=spec,
+                route=str(exc.attempts[-1].route if exc.attempts else ""),
+                model=str(handle.model or ""),
+                amount_usd=None,
+                cost_source=None,
+                billing_basis=None,
+                cost_provenance=None,
+                status="failed",
+                request_id=str(handle.request_id or ""),
+                # Documented presumption (the image lane's §4.1): an unreported
+                # failure with no charge claim is audited as failed/None and does
+                # NOT degrade the knowledge.
+                detail=(
+                    "accepted job; the server has not reported its charge"
+                    if handle.request_id
+                    else "walk exhausted with no charged figure reported; presumed unbilled"
+                ),
+            )
         text = _unavailable_text(exc, handle)
         details = {
             "attempts": _attempt_list(exc.attempts),
@@ -639,23 +708,24 @@ async def _execute_audio(
         )
 
     result = _generated_result(tool_call_id, spec, outcome, handle)
-    _record_audio_channel(
-        context,
-        spec=spec,
-        route=str(outcome.route),
-        model=str(outcome.model or ""),
-        amount_usd=outcome.cost_usd,
-        cost_source=outcome.cost_source,
-        billing_basis=outcome.billing_basis,
-        cost_provenance=outcome.cost_provenance,
-        status="ok",
-        request_id=str(outcome.generation_id or ""),
-        detail=(
-            ""
-            if outcome.cost_usd is not None
-            else "no per-call figure was stated for this generation"
-        ),
-    )
+    if handle.cost is None:
+        _record_audio_channel(
+            context,
+            spec=spec,
+            route=str(outcome.route),
+            model=str(outcome.model or ""),
+            amount_usd=outcome.cost_usd,
+            cost_source=outcome.cost_source,
+            billing_basis=outcome.billing_basis,
+            cost_provenance=outcome.cost_provenance,
+            status="ok",
+            request_id=str(outcome.generation_id or ""),
+            detail=(
+                ""
+                if outcome.cost_usd is not None
+                else "no per-call figure was stated for this generation"
+            ),
+        )
     return result
 
 
@@ -791,14 +861,18 @@ def _generated_result(
     facts: dict[str, Any] | None = None
     voicing: dict[str, Any] | None = None
     for index, asset in enumerate(outcome.assets, start=1):
-        block = cache_media(
-            asset.data,
-            asset.content_type or "application/octet-stream",
-            kind="audio",
-            name=_artifact_name(outcome.model, asset.content_type, index),
-            source_url=asset.source_url or None,
-            duration_s=asset.duration_s,
-        )
+        try:
+            block = cache_media(
+                asset.data,
+                asset.content_type or "application/octet-stream",
+                kind="audio",
+                name=_artifact_name(outcome.model, asset.content_type, index),
+                source_url=asset.source_url or None,
+                duration_s=asset.duration_s,
+            )
+        except Exception:  # noqa: BLE001 - the server charge already exists
+            logger.debug("audio artifact registration failed", exc_info=True)
+            block = None
         if block is None:
             failed.append(asset.source_url or "(no source url)")
             continue
@@ -862,7 +936,12 @@ def _generated_result(
             content=[
                 TextContent(
                     text=(
-                        f"Generated a {noun} with {label} ({outcome.model}) but it could not be "
+                        (
+                            "The generation was billed but the artifact could not be stored. "
+                            if outcome.billing_basis == "billed"
+                            else ""
+                        )
+                        + f"Generated a {noun} with {label} ({outcome.model}) but it could not be "
                         "registered in the session's attachment store "
                         f"(source: {', '.join(failed)})."
                     )

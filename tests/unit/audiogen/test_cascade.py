@@ -222,3 +222,47 @@ def test_the_rung_declarations_cover_the_wired_executors():
         assert route in cascade.AUDIO_RUNG_LABELS
         assert cascade.AUDIO_RUNG_DIRECTIONS[route], "a rung with no directions cannot run"
     assert cascade.AUDIO_RUNG_DIRECTIONS[AudioRoute.OPENAI] == frozenset({"voiceover"})
+
+
+@pytest.mark.asyncio
+async def test_admitted_terminal_rate_limit_never_fails_forward(monkeypatch):
+    import httpx
+
+    from local_operator.audiogen import rungs
+
+    _pin_probes(monkeypatch, radient=True, elevenlabs=True)
+    seen = []
+
+    def respond(request):
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "admitted",
+                    "status": "COMPLETED",
+                    "error_type": "audio_rate_limited",
+                    "error": "busy after admission",
+                },
+            )
+        raise AssertionError("terminal failure must not poll")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        async def route(route, **kwargs):
+            seen.append(route)
+            assert route == AudioRoute.RADIENT
+            return await rungs.run_radient(
+                kwargs["spec"],
+                credential="synthetic",
+                base_url="https://fixture.invalid/v1",
+                handle=kwargs["handle"],
+                emit=kwargs["emit"],
+                pause=kwargs["pause"],
+                client=client,
+            )
+
+        monkeypatch.setattr(cascade, "_run_route", route)
+        with pytest.raises(cascade.AudioGenerationUnavailable) as caught:
+            await cascade.run_audio_cascade(spec=_spec())
+    assert seen == [AudioRoute.RADIENT]
+    assert caught.value.attempts[-1].error_type == "audio_rate_limited"
