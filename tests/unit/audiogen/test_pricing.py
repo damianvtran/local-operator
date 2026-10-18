@@ -49,3 +49,28 @@ def test_an_unpinned_model_prices_on_what_the_rung_would_run():
     assert unpinned is not None and pinned is not None
     assert unpinned.amount_usd == pinned.amount_usd
     assert unpinned.units == 1000.0 and unpinned.unit == "chars"
+
+
+def test_every_byok_model_the_rungs_send_is_priceable():
+    """A model the rung sends MUST have a rate row, or every estimate is None.
+
+    The table keys are literals (it is data), so this is the drift pin: the
+    ids the rungs default to — voiceover and Flash voiceover per provider, and
+    the sound-effect model — are exactly the ids the table prices.
+    """
+    from local_operator.audiogen.models import (
+        ELEVENLABS_SOUND_EFFECT_MODEL,
+        ELEVENLABS_VOICEOVER_FLASH_MODEL,
+        ELEVENLABS_VOICEOVER_MODEL,
+        OPENAI_VOICEOVER_MODEL,
+    )
+
+    voiceover_keys = set(pricing.VOICEOVER_RATES_PER_1K_CHARS)
+    assert ("elevenlabs", ELEVENLABS_VOICEOVER_MODEL) in voiceover_keys
+    assert ("elevenlabs", ELEVENLABS_VOICEOVER_FLASH_MODEL) in voiceover_keys
+    assert ("openai", OPENAI_VOICEOVER_MODEL) in voiceover_keys
+    assert ("elevenlabs", ELEVENLABS_SOUND_EFFECT_MODEL) in set(
+        pricing.SOUND_EFFECT_RATES_PER_SECOND
+    )
+    # And no row prices a model the lane cannot send (a typo would be dead data).
+    assert all(provider in {"elevenlabs", "openai"} for provider, _model in voiceover_keys)

@@ -40,7 +40,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from local_operator.artifacts import ArtifactKind, MediaAsset
+from local_operator.artifacts import MediaAsset
 
 __all__ = [
     "AudioAsset",
@@ -268,8 +268,3 @@ def sound_effect_request_body(spec: AudioJobSpec) -> dict[str, Any]:
     if spec.prompt_influence is not None:
         body["prompt_influence"] = float(spec.prompt_influence)
     return body
-
-
-#: The artifact kind every walk-produced outcome carries (the generic
-#: ``JobOutcome`` default is ``image``; the audio lane always overrides).
-AUDIO_KIND = ArtifactKind.AUDIO
