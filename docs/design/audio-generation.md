@@ -153,6 +153,14 @@ its no-waveform state.
 - `already_completed` (409): not a failure; the surfaces' frozen
   `media_already_completed` pair rides `details` so the card renders "already
   finished" rather than an error.
+- Pending settlement rides the cancel result: the server's own `cost` object
+  (`basis:"quote"`, its quote, units and usage id), `cancellation` and `note`
+  are forwarded verbatim, and a quote-basis body also carries explicit
+  `settled:null` / `cost_usd:null` — the contract's spelling of "not settled /
+  no settled figure" — because a surface renders the pending state only from
+  those explicit fields. Nothing is synthesised: a body without a quote adds
+  neither key, and a later settled poll states the real `settled:true` and
+  billed figure.
 
 **The settle poll (a running stop is not an answer).** Because a refused
 mid-flight cancel leaves the job running, the tool starts ONE bounded

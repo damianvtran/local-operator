@@ -322,6 +322,53 @@ async def test_a_running_cancel_never_claims_no_charge():
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_response_keeps_the_servers_pending_settlement_body():
+    """The contract's pending facts survive parsing for the tool to forward.
+
+    Live capture (``aud_6ad466c8e73ab027182a54fd``): a CANCELLED response
+    carries ``cost`` at ``quote`` basis plus ``cancellation`` and ``note``, and
+    NO settled figure. The parser must keep that object instead of discarding
+    everything but the status word — the tool result is the only channel a
+    surface has to render "awaiting settlement".
+    """
+    body = {
+        "request_id": "aud_6ad466c8e73ab027182a54fd",
+        "status": "CANCELLED",
+        "cancellation": {
+            "requested": True,
+            "vendor_stopped": False,
+            "reason": "provider_has_no_cancel_api",
+            "detail": (
+                "The provider has no cancellation endpoint. The generation continues "
+                "and will be charged if it produces audio."
+            ),
+        },
+        "cost": {
+            "v": 1,
+            "amount_usd": 0.0216,
+            "basis": "quote",
+            "units": 540,
+            "unit": "char",
+            "unit_price_usd": 4e-05,
+            "provider": "radient",
+            "model": "radient/voiceover-flash",
+            "tool_type": "speech_generation",
+            "usage_record_id": "6ad466c8e73ab027182a54ff",
+            "price_version": "audio-rates@2026-10-17",
+        },
+        "note": (
+            "Cancellation is best-effort: the request settles at its terminal outcome. "
+            "A completed generation is charged normally."
+        ),
+    }
+    receipt = await _cancel_against(lambda request: httpx.Response(200, json=body))
+    assert receipt.outcome == "cancelled"
+    assert receipt.vendor_stopped is False
+    assert receipt.reason == "provider_has_no_cancel_api"
+    assert receipt.server_payload == body
+
+
+@pytest.mark.asyncio
 async def test_a_repeat_queued_cancel_is_idempotent():
     """Cancelling an already-queued-cancelled job answers 200 vendor_stopped:true."""
     receipt = await _cancel_against(

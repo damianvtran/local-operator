@@ -460,6 +460,119 @@ def _cancelled_run(*, request_id: str | None = "req-cancel"):
     return fake_run
 
 
+def _pending_cancel_body() -> dict[str, Any]:
+    """The live cancel response for a running Radient job (captured 2026-10-18).
+
+    Pending settlement is spelled by ``cost.basis="quote"`` with no settled
+    figure; the surface needs the explicit ``settled``/``cost_usd`` nulls too.
+    """
+    return {
+        "request_id": "aud_6ad466c8e73ab027182a54fd",
+        "status": "CANCELLED",
+        "cancellation": {
+            "requested": True,
+            "vendor_stopped": False,
+            "reason": "provider_has_no_cancel_api",
+            "detail": (
+                "The provider has no cancellation endpoint. The generation continues "
+                "and will be charged if it produces audio."
+            ),
+        },
+        "cost": {
+            "v": 1,
+            "amount_usd": 0.0216,
+            "basis": "quote",
+            "units": 540,
+            "unit": "char",
+            "unit_price_usd": 4e-05,
+            "provider": "radient",
+            "model": "radient/voiceover-flash",
+            "tool_type": "speech_generation",
+            "usage_record_id": "6ad466c8e73ab027182a54ff",
+            "price_version": "audio-rates@2026-10-17",
+        },
+        "note": (
+            "Cancellation is best-effort: the request settles at its terminal outcome. "
+            "A completed generation is charged normally."
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_result_forwards_the_servers_pending_settlement_fields(
+    monkeypatch, tmp_path
+):
+    """A surface renders "awaiting settlement" only from these explicit fields.
+
+    The server's quote/cancellation/note facts ride through verbatim, and the
+    two nulls the UI's predicate requires are present — never a fabricated
+    amount, never a charge claim. The cancel receipt's own fields stay.
+    """
+    spent: list[Any] = []
+    body = _pending_cancel_body()
+
+    async def fake_cancel(handle):
+        return audio_rungs.AudioCancelReceipt(
+            outcome="cancelled",
+            vendor_stopped=False,
+            reason="provider_has_no_cancel_api",
+            server_payload=body,
+        )
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", _cancelled_run())
+    monkeypatch.setattr(audio_rungs, "best_effort_cancel", fake_cancel)
+    result = await audio_tool.execute_generate_voiceover(
+        "call-cancel-fields", {"text": "Hello there."}, None, None, _context(tmp_path, spent)
+    )
+    assert result.is_error
+    details = _details(result)
+    assert details["settled"] is None
+    assert details["cost_usd"] is None
+    assert details["cost"]["basis"] == "quote"
+    assert details["cost"]["amount_usd"] == pytest.approx(0.0216)
+    assert details["cost"]["units"] == 540 and details["cost"]["unit"] == "char"
+    assert details["cost"]["usage_record_id"] == "6ad466c8e73ab027182a54ff"
+    assert details["cancellation"]["vendor_stopped"] is False
+    assert details["cancellation"]["reason"] == "provider_has_no_cancel_api"
+    assert "no cancellation endpoint" in details["cancellation"]["detail"]
+    assert "best-effort" in details["note"]
+    # The receipt's existing fields are untouched.
+    assert details["stage"] == "cancelled"
+    assert details["vendor_stopped"] is False
+    assert details["cancel_handle"]["request_id"] == "req-cancel"
+    assert details["cancel_reason"] == "provider_has_no_cancel_api"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_body_without_a_quote_fabricates_no_settlement_fields(
+    monkeypatch, tmp_path
+):
+    """No cost object (BYOK / a bare body) adds no settled or cost keys.
+
+    Forwarding is verbatim plus the contract's pending nulls; anything else is
+    the harness inventing a state the server never stated.
+    """
+    spent: list[Any] = []
+
+    async def fake_cancel(handle):
+        return audio_rungs.AudioCancelReceipt(
+            outcome="cancelled",
+            vendor_stopped=True,
+            server_payload={"status": "CANCELLED", "cancellation": {"vendor_stopped": True}},
+        )
+
+    monkeypatch.setattr(audio_tool, "run_audio_cascade", _cancelled_run())
+    monkeypatch.setattr(audio_rungs, "best_effort_cancel", fake_cancel)
+    result = await audio_tool.execute_generate_voiceover(
+        "call-cancel-bare", {"text": "Hello there."}, None, None, _context(tmp_path, spent)
+    )
+    details = _details(result)
+    assert "settled" not in details
+    assert "cost_usd" not in details
+    assert "cost" not in details
+    assert details["cancellation"] == {"vendor_stopped": True}
+
+
 @pytest.mark.asyncio
 async def test_a_queued_stop_says_no_charge_and_starts_no_watch(monkeypatch, tmp_path):
     """`vendor_stopped: true` is the ONE branch allowed to promise no charge."""
