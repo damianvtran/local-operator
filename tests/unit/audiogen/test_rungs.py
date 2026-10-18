@@ -598,7 +598,11 @@ async def test_elevenlabs_sound_effect_body_carries_the_required_duration():
     assert body["prompt_influence"] == 0.7
     assert body["loop"] is True
     assert body["model_id"] == "eleven_text_to_sound_v2"
-    assert outcome.cost_usd == pytest.approx(0.002 * 3.5)
+    # 3.5 s is FOUR started seconds: the estimate prices whole units, the same
+    # count the ledger row carries (a fractional 3.5 × rate under-quoted it).
+    assert outcome.cost_usd == pytest.approx(0.002 * 4)
+    assert outcome.cost_source == "rate_table"
+    assert outcome.billing_basis == "estimated"
 
 
 # ---------------------------------------------------------------------------
