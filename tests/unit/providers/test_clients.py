@@ -7233,3 +7233,102 @@ async def test_a_recording_counts_as_content_for_the_empty_assistant_drop() -> N
     )
 
     assert _is_empty_assistant(message) is False
+
+
+def _radient_leak_sse(content_chunks: Sequence[str], *, with_call: bool) -> bytes:
+    """A radient/auto chat stream shaped like the live leak: reasoning, prose and
+    native-markup residue on ``delta.content``, and (optionally) the parsed call."""
+    events: list[dict[str, Any]] = [
+        {"id": "gen-1", "choices": [{"delta": {"reasoning_content": "Plan the call."}}]}
+    ]
+    events += [{"id": "gen-1", "choices": [{"delta": {"content": c}}]} for c in content_chunks]
+    if with_call:
+        events.append(
+            {
+                "id": "gen-1",
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "read_channel",
+                                        "arguments": '{"channel_id": "C0EXAMPLE01"}',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ],
+            }
+        )
+    events.append(
+        {
+            "id": "gen-1",
+            "choices": [{"delta": {}, "finish_reason": "tool_calls" if with_call else "stop"}],
+        }
+    )
+    return _sse(events)
+
+
+_LEAK_CHUNKS = [
+    "Reading the channel again.",
+    "\n\n\uff5cDS",
+    'ML\uff5c parameter name="channel_id" str',
+    'ing="true">C0EXAMPLE01',
+]
+
+
+@pytest.mark.parametrize(
+    ("chunks", "with_call", "expected"),
+    [
+        pytest.param(_LEAK_CHUNKS, True, "Reading the channel again.", id="dsml-split-with-call"),
+        pytest.param(
+            ['parameter name="channel_id" ', 'string="true">C0EXAMPLE01'],
+            True,
+            "",
+            id="bare-whole-turn-with-call",
+        ),
+        pytest.param(
+            ["Example:\n", 'parameter name="channel_id" ', 'string="true">C0EXAMPLE01'],
+            False,
+            'Example:\nparameter name="channel_id" string="true">C0EXAMPLE01',
+            id="bare-without-call-kept",
+        ),
+    ],
+)
+async def test_openai_compat_strips_leaked_tool_markup_from_text_and_replay(
+    chunks: list[str], with_call: bool, expected: str
+) -> None:
+    """Live deltas and the native replay text carry the same cleaned string."""
+    from local_operator.providers.replay import visible_fingerprint
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_radient_leak_sse(chunks, with_call=with_call),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://api.test.example/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    request = ChatRequest(
+        model=_spec("radient", "auto"), system_blocks=[], messages=[Message.user("go")]
+    )
+    events = await _collect(client.stream(request, "sk-test"))
+
+    streamed = "".join(e.delta for e in events if isinstance(e, StreamTextDelta))
+    assert streamed == expected
+    assert all(e.delta for e in events if isinstance(e, StreamTextDelta))
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    calls = (
+        [{"id": "call_1", "name": "read_channel", "args": {"channel_id": "C0EXAMPLE01"}}]
+        if with_call
+        else []
+    )
+    native = (end.provider_payload or {})["native_replay"]
+    assert native["visible"] == visible_fingerprint(expected, calls)
