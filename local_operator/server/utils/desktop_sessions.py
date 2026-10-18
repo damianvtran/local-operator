@@ -7699,6 +7699,48 @@ class DesktopSessions:
 
         return await asyncio.to_thread(read)
 
+    async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
+        """The waveform payload ``{version, bars, peaks}`` for one attachment.
+
+        Peaks are a sidecar of the SAME content-addressed store the bytes
+        live in (``<digest>.peaks.json``), computed once at artifact creation
+        (``session.attachments.cache_media``) and read here — never decoded
+        on this path, which is what keeps a render loop off the CPU. The
+        session gate is :meth:`attachment`'s, verbatim: the id is an
+        EXISTENCE check over the durable user-session namespace (plus the
+        peer-row door), and a digest held by another device raises
+        :class:`PeerAttachmentUnavailable` so the 409 branch is the same one
+        the byte route answers with. A digest with no sidecar — a pre-peaks
+        artifact, a host whose optional decoder was absent at creation, a
+        damaged sidecar — is ``KeyError``, an ordinary 404: the surface
+        draws its no-waveform state, exactly as a missing image degrades to
+        a placeholder.
+        """
+
+        def read() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
+            if not path.is_dir() or not is_user_session(path):
+                from local_operator.session.remote_open import remote_row_for
+
+                row = remote_row_for(session_id, self.root)
+                if row is None:
+                    raise KeyError("Unknown session")
+                # THIS DEVICE'S STORE FIRST, exactly as the byte route does:
+                # a moved conversation that kept a local copy still serves it.
+                payload = store.get_peaks(digest)
+                if payload is None:
+                    raise PeerAttachmentUnavailable(session_id, row)
+                return payload
+            payload = store.get_peaks(digest)
+            if payload is None:
+                raise KeyError("Unknown waveform")
+            return payload
+
+        return await asyncio.to_thread(read)
+
     async def supplement_document(self, session_id: str, digest: str) -> str:
         """The assembled HTML document of one stored supplement component.
 
@@ -7886,6 +7928,27 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def child_attachment_waveform(
+        self, session_id: str, child_id: str, digest: str
+    ) -> dict[str, Any]:
+        """The waveform payload for one CHILD transcript's attachment.
+
+        The mirror of :meth:`attachment_waveform`, and the same containment
+        proof runs before the store is touched
+        (:func:`_contained_child_dir`) — a child read cannot become a way to
+        enumerate another conversation's media. The 404/no-sidecar rule and
+        the no-decode-on-read rule are identical to the parent's.
+        """
+
+        def read() -> dict[str, Any]:
+            _contained_child_dir(self.root, session_id, child_id)
+            payload = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get_peaks(digest)
+            if payload is None:
+                raise KeyError("Unknown waveform")
+            return payload
 
         return await asyncio.to_thread(read)
 

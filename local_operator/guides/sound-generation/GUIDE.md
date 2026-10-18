@@ -1,0 +1,103 @@
+---
+name: sound-generation
+description: Generate voiceover speech or sound-effect audio via the configured provider — routes, setup, cost and estimates, limits, cancellation, and the attached result.
+---
+
+# Generating audio (voiceover and sound effects)
+
+Two tools, one per request shape: `generate_voiceover` turns text into spoken
+audio (narrations, replies phrased aloud, voice memos), and
+`generate_sound_effect` turns a prompt into a timed sound clip (a thunderclap,
+a UI blip, ambience). Both attach the result to the session and return in the
+same turn — the wait is seconds to tens of seconds, so there is no background
+job to poll and no `*_status` tool beside them.
+
+When NOT to use them:
+
+- The user wants the app (or `lop`) to SPEAK something out loud right now —
+  the harness's own Speak control / speech playback is the route for that;
+  `generate_voiceover` produces an audio FILE as an artifact, it does not play
+  anything on the user's machine.
+- The user wants to transcribe audio — that is the STT path, not this one.
+
+## Which provider runs
+
+Fixed, append-only order, first credential wins; a refusal falls forward to
+the next:
+
+| Order | Provider | Needs | Directions |
+|---|---|---|---|
+| 1 | Radient (the platform) | a signed-in account (`lop login radient`) | voiceover + sound effects |
+| 2 | ElevenLabs (BYOK) | a stored `elevenlabs` key | voiceover + sound effects |
+| 3 | OpenAI (BYOK) | an `openai-key` platform key | **voiceover only** |
+
+Sound effects have no OpenAI path (the vendor has no sound-effect endpoint):
+an OpenAI-only machine gets the voiceover tool and not the sound-effect tool.
+Store keys with `lop credential update ELEVENLABS_API_KEY` / `OPENAI_API_KEY`
+(see `guide://credentials`), or `/login` for the Radient account.
+
+The tools exist only where a route is reachable — a session built before a
+login picks them up at the NEXT session start.
+
+## Cost, honestly
+
+- **Radient** quotes the price when the job runs and settles it at billing.
+  Only the server's `cost.amount_usd` is authoritative; a quote reads
+  `estimated` and a settled figure reads `billed`.
+- **BYOK** (ElevenLabs / OpenAI direct) reports NO per-call figure at all.
+  The harness estimates from its one central rate table (`audio-rates@…`,
+  dated) and labels it `estimated` — never a charge. The user's provider
+  account shows the real bill.
+- The approval prompt (write tier) shows the route and, where the rate table
+  can price the call, the estimated amount BEFORE the spend.
+- Spend lands in the `audio` channel of the session's cost ledger (and the
+  analytics store) as "Generated audio", with the estimate flag preserved.
+
+## Limits worth knowing
+
+- Voiceover text: 1–10,000 characters. Sound-effect prompt: 1–600 characters.
+- `duration_s` on a sound effect is REQUIRED (0.5–30 s): there is no
+  auto-duration, and the length is the main cost knob for effects.
+- `language` is honoured only by the flash models
+  (`radient/voiceover-flash`, `eleven_flash_v2_5`); the multilingual default
+  (`radient/voiceover`, `eleven_multilingual_v2`) pronounces whatever it is
+  given and IGNORES the field — the result's voicing notes say what was
+  ignored or clamped rather than failing.
+- There are NO pronunciation dictionaries or phoneme control. For tricky
+  names, spell the pronunciation in the text or use `instructions` (honoured
+  where the provider takes an instructions field).
+- Output is **MP3 only** (no WAV). Radient serves a signed URL the harness
+  downloads immediately (24 h life — nobody should rely on the URL later);
+  the artifact is the attached copy, not the URL.
+- The generated duration comes from the provider, never derived client-side.
+- BYOK voice ids: `female` / `male` map to the vendors' canonical voices;
+  a vendor id (an ElevenLabs voice id, an OpenAI voice name) passes through.
+  A voice id for one vendor is not copied onto another during failover.
+
+## Cancelling
+
+Esc / steering stops the wait and asks the server to cancel — best-effort,
+and the receipt says exactly what happened:
+
+- the server reports `vendor_stopped: true` → nothing further is generated
+  and the request is not charged;
+- `vendor_stopped: false` (the normal answer once a vendor is already
+  running — the vendors behind the server have no cancel API) → the work may
+  still complete upstream and may still be charged;
+- a BYOK call: the harness stopped waiting, but the user's provider may still
+  bill for work already delivered.
+
+Nothing is resumed after a cancel: call again for a fresh generation.
+
+## The result
+
+The result is one caption plus the audio attached to the session
+(`AttachmentContent(kind="audio", duration_s=…)`), registered once through
+the content-addressed store — `details.artifacts` carries the digest for the
+session-files index, and `details.audio` the provider's facts. A waveform is
+available to surfaces straight off the stored sidecar (240 bars, computed
+once at creation); the model itself does not need the bytes.
+
+Do not re-save generated audio to disk unless the user asks for a file — the
+attachment IS the delivery, and a copy on disk is a second copy the session
+does not own.

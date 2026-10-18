@@ -52,6 +52,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "scratchpad",
         "sessions",
         "skills",
+        "sound-generation",
         "system-tools",
         "teams",
         "tunnel",
@@ -106,6 +107,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("generate an image of a cat", "image-generation"),
         ("generate a video from a photo", "video-generation"),
+        # The sound-generation wave's row: "voiceover" is vocabulary the
+        # lexical router can see, and the guide's description carries it —
+        # the same shape the image/video rows above pin.
+        ("make a voiceover of this text", "sound-generation"),
         # The edit lane's router-honest row: "image to image" is vocabulary
         # the lexical router can see (measured 2026-10-10), so the
         # post-hub-slice edit capability is routable. A task that only says
