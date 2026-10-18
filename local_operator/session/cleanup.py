@@ -65,8 +65,8 @@ sees ONLY directories the sidebar lists. Hidden-origin directories belong to
 ``session.cleanup.delegated.*``, which is on by default with a bounded age; the
 class split is ``_is_delegated_dir``, i.e. ``resume.is_user_session_origin``.
 That is a LISTING question, and it is deliberately NOT the deletion rule: what
-the delegated class may reap is the narrower :data:`DELETABLE_ORIGINS`
-(:func:`_is_deletable_dir`). The two were once one predicate, and reusing the
+the delegated class may reap is the narrower :func:`deletable_origins`
+allow-list (:func:`_is_deletable_dir`). The two were once one predicate, and reusing the
 visibility answer as the disposition answer made every origin minted later
 deletable by default. The hard guards, ``remove_session_dir`` and the log below
 are shared by both classes.
@@ -121,7 +121,7 @@ DEFAULT_REMOVE_EMPTY = False
 #: The DELEGATED class (hidden-origin sessions: subagents, agent-shell runs,
 #: agent-config runs and any future non-user origin — the class split is
 #: ``resume.is_user_session_origin``, while what it may DELETE is the narrower
-#: :data:`DELETABLE_ORIGINS` below) has its OWN switch and its OWN clock,
+#: :func:`deletable_origins` allow-list below) has its OWN switch and its OWN clock,
 #: nested one level deeper so it can never be confused with the parent-class
 #: keys above. Unlike ``enabled`` it defaults to TRUE: a delegated transcript is
 #: machine bookkeeping nobody opens (measured on the operator's store, 2026-10-09:
@@ -130,51 +130,62 @@ DEFAULT_REMOVE_EMPTY = False
 DELEGATED_PATH: tuple[str, ...] = CLEANUP_PATH + ("delegated",)
 DEFAULT_DELEGATED_ENABLED = True
 
-#: The origins the DELEGATED pass may REAP — retention's own answer to "may this
-#: directory go?".
+#: The reap allow-list, cached after its first build (see
+#: :func:`deletable_origins`). ``None`` means "not built yet".
 #:
-#: WHY IT IS SEPARATE FROM ``resume.USER_ORIGINS``. That constant answers a
-#: LISTING question ("should a human see this session?"), and this one answers a
-#: DESTRUCTION question ("may the harness delete it?"). They used to be one: the
-#: class predicate's negation was the deletion rule, so any origin value minted
-#: by a later code path was deletable by DEFAULT until somebody registered it as
-#: user-visible, and a hidden-but-operator-initiated origin was reaped with no
-#: one having decided that. Naming the reapable origins here makes deletability
-#: an explicit, deliberate edit like listing is, rather than a side effect of
-#: leaving a name out of the other set.
+#: WHY IT IS DERIVED FROM ``resume``'S CONSTANTS, NOT WRITTEN AS LITERALS. The
+#: literals used to be spelled out here, so renaming ``resume.ORIGIN_SUBAGENT``
+#: or ``resume.ORIGIN_AGENT_SHELL`` would have left a stale spelling behind: the
+#: set would silently stop matching the origin actually written to disk, which
+#: stops reaping entirely, and the stale literal is exactly what a later editor
+#: would "fix" in the wrong direction. Reading the constants makes a rename a
+#: type/import failure at the one place that must be updated.
 #:
-#: AN ALLOW-LIST, and the fallback is KEEP. That is the safe direction: a value
-#: this build does not know (an origin minted by a newer build, a typo, a future
-#: feature) costs disk instead of a session nobody can recover. A missing,
-#: truncated or non-object ``origin.json`` reads as ``""`` through
-#: ``resume.session_origin``, is not named here, and so is kept — the same
-#: settlement the parent class has always had for it.
-#:
-#: Values are literal because this module stays light: ``resume`` is heavyweight
-#: and imported lazily at the point of use, so the constant each spelling mirrors
-#: is named beside it instead.
-DELETABLE_ORIGINS: frozenset[str] = frozenset(
-    {
-        # ``resume.ORIGIN_SUBAGENT`` — an agent's delegated child run: machine
-        # bookkeeping nobody opens, and (measured on this operator's store,
-        # 2026-10-09) the bulk of the bytes this class exists for.
-        "subagent",
-        # ``resume.ORIGIN_AGENT_SHELL`` — a one-off command run through
-        # ``lop exec``; the same disposition for the same reason.
-        "agent-shell",
-        # ``resume.ORIGIN_AGENT_CONFIG`` is DELIBERATELY ABSENT — a stated
-        # disposition decision, not an omission inherited from the old
-        # inversion. The operator starts those runs from the Agents page to
-        # author agents and teams; reaping one destroys the operator's own chore
-        # irreversibly, while keeping it costs a little disk. Its LISTING answer
-        # (hidden) and its DELETION answer (keep) are therefore different on
-        # purpose. What would change it: the operator asking for finished config
-        # runs to be reaped, or the Agents page growing its own deletion that
-        # makes this one redundant. ``fork`` / ``agent-workstream`` are absent
-        # for the older reason — they are in ``resume.USER_ORIGINS``, and a
-        # listed conversation is never this pass's to remove.
-    }
-)
+#: WHY IT IS LAZY. ``resume`` is heavyweight and this module must stay light for
+#: the runtime child — the same constraint ``_is_delegated_dir`` honours by
+#: importing at the point of use. The scan asks once per over-age directory, so
+#: the built frozenset is cached in this slot.
+_DELETABLE_ORIGINS: frozenset[str] | None = None
+
+
+def deletable_origins() -> frozenset[str]:
+    """The origins the DELEGATED pass may REAP — retention's own answer.
+
+    WHY IT IS SEPARATE FROM ``resume.USER_ORIGINS``. That constant answers a
+    LISTING question ("should a human see this session?"), and this answers a
+    DESTRUCTION question ("may the harness delete it?"). They used to be one:
+    the class predicate's negation was the deletion rule, so any origin value
+    minted by a later code path was deletable by DEFAULT until somebody
+    registered it as user-visible, and a hidden-but-operator-initiated origin
+    was reaped with no one having decided that. Naming the reapable origins
+    here makes deletability an explicit, deliberate edit like listing is,
+    rather than a side effect of leaving a name out of the other set.
+
+    AN ALLOW-LIST, and the fallback is KEEP. That is the safe direction: a value
+    this build does not know (an origin minted by a newer build, a typo, a
+    future feature) costs disk instead of a session nobody can recover. A
+    missing, truncated or non-object ``origin.json`` reads as ``""`` through
+    ``resume.session_origin``, is not named here, and so is kept — the same
+    settlement the parent class has always had for it.
+
+    ``resume.ORIGIN_AGENT_CONFIG`` is DELIBERATELY ABSENT — a stated disposition
+    decision, not an omission inherited from the old inversion. The operator
+    starts those runs from the Agents page to author agents and teams; reaping
+    one destroys the operator's own chore irreversibly, while keeping it costs a
+    little disk. Its LISTING answer (hidden) and its DELETION answer (keep) are
+    therefore different on purpose. What would change it: the operator asking
+    for finished config runs to be reaped, or the Agents page growing its own
+    deletion that makes this one redundant. ``fork`` / ``agent-workstream`` are
+    absent for the older reason — they are in ``resume.USER_ORIGINS``, and a
+    listed conversation is never this pass's to remove.
+    """
+    global _DELETABLE_ORIGINS
+    if _DELETABLE_ORIGINS is None:
+        from local_operator.resume import ORIGIN_AGENT_SHELL, ORIGIN_SUBAGENT
+
+        _DELETABLE_ORIGINS = frozenset({ORIGIN_SUBAGENT, ORIGIN_AGENT_SHELL})
+    return _DELETABLE_ORIGINS
+
 
 #: The delegated class's SECOND switch, for the scratchpad-CONTENT layer
 #: (``delegated_retention``'s "THE CONTENT LAYER"): with it on, the pads of
@@ -1676,7 +1687,7 @@ def _is_delegated_dir(directory: Path) -> bool:
     (``resume.is_user_session_origin``) — the same one every user-facing surface
     asks — so it is what keeps a hidden directory out of the PARENT class. It is
     NOT the deletion rule: :func:`_is_deletable_dir` is, and the two are kept
-    apart on purpose (see :data:`DELETABLE_ORIGINS`). Reads CLOSED toward the
+    apart on purpose (see :func:`deletable_origins`). Reads CLOSED toward the
     user: a missing, truncated or non-object ``origin.json`` reads as ``""``
     (the user's own), which puts the directory in the PARENT class — the one
     class the delegated pass never touches. Lazy import: ``resume`` is heavy and
@@ -1690,7 +1701,7 @@ def _is_delegated_dir(directory: Path) -> bool:
 def _is_deletable_dir(directory: Path) -> bool:
     """Whether the delegated pass may REAP ``directory``, by its recorded origin.
 
-    An allow-list (:data:`DELETABLE_ORIGINS`), never an inversion of the
+    An allow-list (:func:`deletable_origins`), never an inversion of the
     visibility predicate. Everything else — an origin minted by a later build, a
     value this build does not know, and a missing/corrupt/empty marker (which
     reads as ``""``) — is kept. Ambiguity therefore costs disk, never a session
@@ -1698,7 +1709,7 @@ def _is_deletable_dir(directory: Path) -> bool:
     """
     from local_operator.resume import session_origin
 
-    return session_origin(directory) in DELETABLE_ORIGINS
+    return session_origin(directory) in deletable_origins()
 
 
 def _has_transcript(directory: Path) -> bool:
