@@ -138,7 +138,10 @@ _DEFAULT_ACTION_SETTLE_POLICY = "throughput"
 _ACTION_SETTLE_SECONDS = 3.0
 # Diagnostic prefixes (``_diagnostic`` renders ``<TypeName>: ...``) that mean
 # a secret stopped the run before allocation; both are name-only by contract.
-_SECRET_DIAGNOSTICS = ("MissingSecret:", "UnusableSecret:")
+# The resolution budget's timeout joined 2026-10-17: it, too, stops a run
+# BEFORE any allocation, and the script's contract says those exit 2. The
+# diagnostic prefix is the exception class name (runner.episode._diagnostic).
+_SECRET_DIAGNOSTICS = ("MissingSecret:", "UnusableSecret:", "SecretResolutionTimeout:")
 
 # Names the OSWorld adapter (and any adapter following its contract) declares
 # as secrets when it is asked ``inspect_requirements``. The runner resolves
@@ -164,12 +167,29 @@ class _LayeredResolver:
         self._store = store
 
     def resolve(self, names: Sequence[str]) -> tuple[ResolvedSecret, ...]:
+        # THE STORE CALLS ARE BATCHED, and that is a BOUND as much as a saving:
+        # the store resolver's budget is per ``resolve()`` invocation, and the
+        # per-name loop this replaces made one single-name call per ref -- each
+        # of whose deadline checks saw ~0 elapsed -- so an 18-ref boot against
+        # a broker that accepts and never answers (10 s each,
+        # ``REQUEST_TIMEOUT_S``) spent ~180 s with the budget never firing
+        # (review MAJOR-1, 2026-10-17). One store call per layered resolve keeps
+        # the budget's unit aligned with the boot it protects.
         resolved: list[ResolvedSecret] = []
+        by_name: dict[str, ResolvedSecret] | None = None
         for name in names:
             if name in self._env_names:
                 resolved.extend(self._env.resolve([name]))
             elif self._store is not None:
-                resolved.extend(self._store.resolve([name]))
+                if by_name is None:
+                    # Batched lazily at the FIRST store-bound ref so ordering
+                    # is preserved where it was observable: env-side refusals
+                    # still raise at their own position, and the store's own
+                    # MissingSecret still names the first missing store ref.
+                    # De-duplicated for the call; emitted per occurrence below.
+                    ordered = list(dict.fromkeys(n for n in names if n not in self._env_names))
+                    by_name = {secret.name: secret for secret in self._store.resolve(ordered)}
+                resolved.append(by_name[name])
             else:
                 raise MissingSecret(name)
         return tuple(resolved)
@@ -1317,6 +1337,11 @@ _OWNER_ENV_NAMES = (
     "LOCAL_OPERATOR_CONFIG_DIR",
     "LOP_RUN_SCRATCH_ROOT",
     "LOCAL_OPERATOR_HOME",
+    # The resolution budget's knob travels WITH its reader: the credential
+    # resolver executes in the OWNER, so an operator who exports this without
+    # it here would be changing nothing -- a silent no-op inside the artifact
+    # meant to end silent no-ops (review MAJOR-2, 2026-10-17).
+    "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS",
 )
 
 
