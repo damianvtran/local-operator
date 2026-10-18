@@ -400,3 +400,24 @@ def test_the_request_cleanup_field_wins_over_the_setting(
 
     assert response.status_code == 200
     assert calls[0]["cleanup"] == "client"
+
+
+def test_a_request_cleanup_does_not_read_the_settings_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-call field wins, so the YAML read is skipped entirely (review r1 m1)."""
+    from local_operator.stt import cleanup as cleanup_policy
+
+    def _must_not_read(source: Any) -> str:
+        raise AssertionError(f"configured_cleanup called for {source!r}")
+
+    monkeypatch.setattr(cleanup_policy, "configured_cleanup", _must_not_read)
+    calls = _stub_dispatch(
+        monkeypatch,
+        outcome=SttOutcome(text="hello", provider="radient", path="provider_stt_radient"),
+    )
+    client = _logged_in()
+    response = client.post("/api/transcribe", data={"cleanup": "client"}, **_audio())
+
+    assert response.status_code == 200
+    assert calls[0]["cleanup"] == "client"

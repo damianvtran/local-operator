@@ -52,16 +52,11 @@ __all__ = [
     "RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM",
     "SUPPORTED_CLEANUP_MODES",
     "CleanupMode",
-    "ClientRulesResult",
-    "ISO_639_1",
     "InvalidCleanupMode",
     "ProviderCleanupOptions",
     "RemovedSpan",
-    "apply_client_rules",
-    "choose_cleanup_language",
     "configured_cleanup",
     "elevenlabs_cleanup_options",
-    "normalize_language_hint",
     "resolve_cleanup",
 ]
 
@@ -527,14 +522,23 @@ def choose_cleanup_language(
 CLEANUP_SETTING_KEY = "speech.transcription.cleanup"
 
 
-def configured_cleanup(manager: Any) -> CleanupMode:
+def configured_cleanup(source: Any) -> CleanupMode:
     """The configured cleanup mode, or ``auto`` when it cannot be read.
 
-    The routes call this ONLY when the request names no mode; a per-call
-    ``cleanup`` field always wins. A hand-edited invalid value falls back to
-    ``auto`` rather than crashing a transcription — writes through
-    ``settings_io`` are rejected before persistence, so this is the
-    unreadable/legacy-file rung, not the normal one.
+    ``source`` is a ``ConfigManager`` or the config directory itself. The
+    routes call this ONLY when the request names no mode; a per-call
+    ``cleanup`` field always wins.
+
+    The file is re-read HERE rather than through the manager's startup
+    snapshot: a TUI or ``config.yml`` edit made by another process is the
+    normal way this setting changes, and the long-lived server's manager would
+    otherwise answer the old value until a reload (review round 1, M2). The
+    read is a small YAML parse per transcription, off the event loop on the
+    phone route; correctness wins over caching for a per-request setting.
+
+    A hand-edited invalid value falls back to ``auto`` rather than crashing a
+    transcription — writes through ``settings_io`` are rejected before
+    persistence, so this is the unreadable/legacy-file rung, not the normal one.
     """
     from local_operator import settings_io
 
@@ -542,6 +546,14 @@ def configured_cleanup(manager: Any) -> CleanupMode:
     if setting is None:  # a tree without the row (older plugin/consumer)
         return DEFAULT_CLEANUP
     try:
-        return resolve_cleanup(settings_io.read_setting(manager, setting))
+        from local_operator.config import ConfigManager
+
+        if not hasattr(source, "get_config"):
+            source = ConfigManager(source)
+        else:
+            directory = getattr(source, "config_dir", None)
+            if directory is not None:
+                source = ConfigManager(directory)
+        return resolve_cleanup(settings_io.read_setting(source, setting))
     except Exception:  # noqa: BLE001 — an unreadable/invalid setting must not fail dictation
         return DEFAULT_CLEANUP
