@@ -458,6 +458,7 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsViewStartRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
+from local_operator.tui.widgets.review_view import ReviewView, ReviewViewDismissed
 from local_operator.tui.widgets.session_picker import (
     AIDA_MARKER,
     PICKER_FLEET_ASKS,
@@ -6154,6 +6155,11 @@ class OperatorApp(App[None]):
         # holds the widget so teardown and the Esc chain can close it.
         self._import_view: Any | None = None
         self._import_focus_restore: Any | None = None
+        # The review mode (``/review``): the same full-page MODE contract, read-
+        # only and fed by the derived code-request index. Held here so teardown
+        # and the Esc chain close it exactly like its siblings.
+        self._review_view: Any | None = None
+        self._review_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
@@ -25964,6 +25970,8 @@ class OperatorApp(App[None]):
         # owns itself: its OWN Esc handler runs the ladder first (editor, then
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
+        if self._close_review_view():
+            return
         if self._close_import_view():
             return
         if self._close_settings_view():
@@ -30064,6 +30072,7 @@ class OperatorApp(App[None]):
             and self._org_chart_view is None
             and self._projects_view is None
             and self._import_view is None
+            and self._review_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -36435,6 +36444,81 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_import_view()
 
+    def _cmd_review(self, notice: NoticeFn) -> None:
+        """``/review`` — open the full-page code-request ledger.
+
+        Frontend-LOCAL (see ``_FRONTEND_LOCAL_SLASHES``): the rows come from
+        THIS machine's derived index and fetch cache. The page is the receipt,
+        so nothing is printed behind it; the only refusal is a session that has
+        not booted yet, whose message has to be real copy rather than a crash
+        on ``None.session_id``.
+        """
+        from local_operator.i18n.keys import tui_review
+        from local_operator.i18n.text import tr
+
+        session = self._session
+        if session is None:
+            notice(tr("tui.review")(tui_review.session_unavailable()), "warning")
+            return
+        self._open_review_view(session_id=session.session_id, cwd=getattr(session, "cwd", ""))
+
+    def _open_review_view(self, session_id: str, *, cwd: str = "") -> None:
+        """Enter the full-page review mode.
+
+        Same MODE contract as :meth:`_open_import_view`: the transcript is
+        hidden, the dock stays in place and inert, and the page owns focus. Its
+        loading is async in the widget's own worker, so the first frame is the
+        loading state rather than a blocked app.
+        """
+        if self._review_view is not None:
+            return
+        if self._settings_view is not None:
+            self._close_settings_view()
+        if self._import_view is not None:
+            self._close_import_view()
+        self._review_focus_restore = self.focused
+        view = ReviewView(session_id, cwd=cwd)
+        self._review_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        # The review page shares the settings page's region contract, so it
+        # reuses that layout class (the same greyed dock, the same transcript
+        # slot) rather than introducing a second full-page skeleton.
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_review_view(self) -> bool:
+        """Leave the review mode and restore the conversation. True if open."""
+        view = self._review_view
+        if view is None:
+            return False
+        self._review_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._review_focus_restore
+        self._review_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_review_view_dismissed(self, message: ReviewViewDismissed) -> None:
+        """The page's esc hint/key — same exit as the mode's own Esc chain."""
+        message.stop()
+        self._close_review_view()
+
     def _cmd_settings(self, notice: NoticeFn) -> None:
         """``/settings`` — open the full-page settings surface.
 
@@ -36650,10 +36734,12 @@ class OperatorApp(App[None]):
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
 
-        The import page shares this region, so it is torn down here too: every
-        session-swap, /clear, approval and ctrl+C path already calls this
-        method, and a second copy of those nine call sites would drift.
+        The import and review pages share this region, so they are torn down
+        here too: every session-swap, /clear, approval and ctrl+C path already
+        calls this method, and a second copy of those nine call sites would
+        drift.
         """
+        self._close_review_view()
         self._close_import_view()
         view = self._settings_view
         if view is None:
@@ -40146,6 +40232,8 @@ class OperatorApp(App[None]):
             self._cmd_settings(notice)
         elif command == "/import":
             self._cmd_import(arg, notice)
+        elif command == "/review":
+            self._cmd_review(notice)
         elif command == "/hub":
             # The Hub links surface. The action is SYNC and owns its own worker,
             # the fleet-door and usage-panel pattern: calling it directly keeps

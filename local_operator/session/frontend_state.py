@@ -1016,6 +1016,11 @@ _FRONTEND_LOCAL_SLASHES = {
     # config/session root; a follower routed here would inspect and import on
     # the owner's host instead. Same rule `/settings` states for config.yml.
     "import",
+    # Reads THIS machine's derived code-request index and fetch cache, which
+    # live under the config root the PAGE reads. Routed to the runtime it would
+    # list the runtime host's PR ledger while the user is looking at this
+    # screen — `/import`'s wrong-machine answer, with nothing written.
+    "review",
     "provider",
     "search",
     "accounts",
