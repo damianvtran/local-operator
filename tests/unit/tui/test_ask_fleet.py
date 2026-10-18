@@ -922,25 +922,111 @@ async def test_a_fleet_row_of_another_session_answers_through_the_engage_chain(
         assert record["closed"] is True
 
 
-async def test_a_fleet_decline_and_dismiss_ride_the_same_chain(
-    enabled, isolated_index, monkeypatch
-):
+async def test_a_fleet_decline_rides_the_engage_chain(enabled, isolated_index, monkeypatch):
+    # The DISMISS half of this cell moved to its own test (fork A, §14): a
+    # decline is an answer to the agent, so it still needs a runtime; a dismissal
+    # no longer does, and asserting both through one engage record would hide
+    # which arm each op takes.
     record: dict[str, Any] = {}
     _patch_engage(monkeypatch, record)
-    _seed(isolated_index, "s-other", [_row("b1"), _row("b2", status="timed_out")])
+    _seed(isolated_index, "s-other", [_row("b1")])
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
-        rows = ask_rows(
-            [
-                _row("b1", session_id="s-other"),
-                _row("b2", status="timed_out", session_id="s-other"),
-            ]
-        )
+        rows = ask_rows([_row("b1", session_id="s-other")])
         await app._fleet_ask_worker(rows[0], "decline", None)
         assert record["decline"] == ("b1", "terminal")
-        await app._fleet_ask_worker(rows[1], "dismiss", None)
-        assert record["dismiss"] == ("b2", "terminal")
+
+
+async def test_a_fleet_dismiss_takes_the_no_boot_path(enabled, isolated_index, monkeypatch):
+    """FORK A (§14): a fleet dismiss boots NOTHING, not even the row's session.
+
+    A fleet row belongs to a conversation that is not running — that is why it is
+    in the fleet list at all — so the engage chain would boot one for a view
+    action. The no-boot door answers instead, with the row's own session and id,
+    and the engage seam is never touched.
+    """
+    from local_operator.asks import dismiss as dismiss_module
+
+    calls: list[tuple[str, str, str]] = []
+
+    async def spy(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+        calls.append((session_id, ask_id, by))
+        return {"ok": True}
+
+    monkeypatch.setattr(dismiss_module, "dismiss_cold", spy)
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b2", status="timed_out")])
+    app = _app()
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "dismiss", None)
+    assert calls == [("s-other", "b2", "terminal")]
+    # No engage, no dial, no client: the record is written by the spy above and
+    # by nothing else.
+    assert record == {}
+
+
+async def test_a_refused_fleet_dismiss_says_so_in_the_asks_own_words(
+    enabled, isolated_index, monkeypatch
+):
+    """A no-boot refusal reaches the user in the queue's words, through the same
+    toast a refused answer uses — the refusal is the message, and it must not be
+    swallowed into a silent row."""
+    from local_operator.asks import dismiss as dismiss_module
+
+    async def refuse(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+        return {"ok": False, "error": "only a timed-out ask can be dismissed; it is still open."}
+
+    monkeypatch.setattr(dismiss_module, "dismiss_cold", refuse)
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b2", status="timed_out")])
+    app = _app()
+    seen: list[str] = []
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        monkeypatch.setattr(app, "_ask_gesture_refusal", lambda text: seen.append(text))
+        row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "dismiss", None)
+    assert seen == ["only a timed-out ask can be dismissed; it is still open."]
+    assert record == {}
+
+
+async def test_an_unexpected_fleet_dismiss_failure_is_worded_as_a_dismissal(
+    enabled, isolated_index, monkeypatch
+):
+    """Design round 1, D2: the TUI's fallback sentence must name the act that failed.
+
+    ``_fleet_ask_worker``'s fallback is "the answer could not be delivered.", which
+    is the right sentence for the three ops that HAVE an answer to deliver — and
+    the wrong one for a dismissal, whose whole promise is that nothing is sent. It
+    fires only when the exception carries no message (every refusal from
+    ``dismiss_cold`` carries its own), and then the user is told an answer failed
+    to arrive when no answer was ever in play.
+    """
+    from local_operator.asks import dismiss as dismiss_module
+
+    async def boom(config_dir, session_id, ask_id, *, by="", now_ms=None):  # noqa: ANN001
+        # The empty-message shape this branch is about — a write error with no
+        # sentence of its own is exactly what D2 measured.
+        raise RuntimeError("")
+
+    monkeypatch.setattr(dismiss_module, "dismiss_cold", boom)
+    record: dict[str, Any] = {}
+    _patch_engage(monkeypatch, record)
+    _seed(isolated_index, "s-other", [_row("b2", status="timed_out")])
+    app = _app()
+    seen: list[str] = []
+    async with app.run_test(size=(130, 30)) as pilot:
+        await _settle(pilot)
+        monkeypatch.setattr(app, "_ask_gesture_refusal", lambda text: seen.append(text))
+        row = ask_rows([_row("b2", status="timed_out", session_id="s-other")])[0]
+        await app._fleet_ask_worker(row, "dismiss", None)
+    assert seen == ["the dismissal could not be recorded."]
+    assert record == {}
 
 
 async def test_a_refused_fleet_answer_says_so_in_the_asks_own_words(

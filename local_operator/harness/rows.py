@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The five, and why each is persisted:
+    The SEVEN, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
@@ -159,6 +159,13 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
       no text and no tool calls on a clean stop; the live run showed a notice
       instead.
+    - ``LENGTH_STOP_RECOVERY_PROMPT`` — the re-ask after a turn was cut off at
+      the model's OUTPUT limit with nothing visible, on a model with no cheaper
+      effort rung to retreat to; the live run showed a notice instead.
+    - ``CONTINUE_TRUNCATED_ANSWER_PROMPT`` — the continuation after the output
+      limit cut a delegated CHILD's answer off mid-prose; the live run showed a
+      notice instead, and the child finishes the deliverable rather than its
+      parent paying a resume for the rest.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -169,7 +176,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     Imported lazily and gathered here rather than listed per host: this list
     having been copied INCOMPLETELY into the phone fold (it suppressed the
     third and rendered the first two) is the drift this function exists to
-    make impossible. A fourth prompt is added in one place.
+    make impossible. A new prompt is added in one place.
 
     This tuple is the EXACT-match half of the decision only. Chrome prompts
     with a family of shapes rather than a single string live in the producer's
@@ -185,6 +192,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     """
     from local_operator.harness.loop import (
         CONNECTIVITY_CONTINUATION_PROMPT,
+        CONTINUE_TRUNCATED_ANSWER_PROMPT,
+        LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
     )
@@ -197,6 +206,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
+        LENGTH_STOP_RECOVERY_PROMPT,
+        CONTINUE_TRUNCATED_ANSWER_PROMPT,
     )
 
 
@@ -211,7 +222,7 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the prompts that are
-    single fixed strings (the five listed above); a producer-side recogniser covers each family the
+    single fixed strings (the seven listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's

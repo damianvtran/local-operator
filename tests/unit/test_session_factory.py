@@ -2865,6 +2865,78 @@ async def test_a_real_session_carries_the_language_line(
 
 
 @pytest.mark.asyncio
+async def test_account_affinity_never_replays_an_old_language_prefix(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lease selects a credential, never a previously built request body.
+
+    Drive the real session_factory prefix capture, not fabricated language
+    strings: the active session stays stable while a newly spawned one uses
+    the updated language, even with the same account/model/cache key.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import process_watcher
+    from local_operator.harness.types import ChatRequest, Message, ModelSpec
+    from local_operator.providers.account_affinity import request_compatibility
+    from local_operator.providers.clients import AnthropicClient
+
+    # The shared fixture's manager root is a child of its env override; align
+    # them so the engine resolver reads the file whose setting we actually edit.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_config_dir))
+    manager = ConfigManager(tmp_config_dir)
+    manager.set_config_value("language", "en")
+    watcher = process_watcher(tmp_config_dir)
+
+    async def prefixes(session: object) -> list[str]:
+        provider = getattr(session, "_system_blocks_provider", None)
+        assert callable(provider), "real factory must expose its captured prefix builder"
+        produced = provider()
+        blocks = await produced if inspect.isawaitable(produced) else produced
+        assert isinstance(blocks, list)
+        assert all(isinstance(block, str) for block in blocks)
+        return blocks
+
+    sessions = []
+    client = AnthropicClient()
+    try:
+        first = await create_session(
+            _args(hosting="test", model="test", yolo=True), manager, AgentRegistry(tmp_config_dir)
+        )
+        sessions.append(first)
+        english = await prefixes(first)
+        manager.set_config_value("language", "fr")
+        # Language reads the validated watcher snapshot, not raw file bytes.
+        # Accept this disk edit explicitly: Linux has polling, while macOS
+        # kqueue can deliver it during the next await. No timing-based sleep.
+        watcher.poll_now()
+        active = await prefixes(first)
+        assert active[0] == english[0]
+        second = await create_session(
+            _args(hosting="test", model="test", yolo=True), manager, AgentRegistry(tmp_config_dir)
+        )
+        sessions.append(second)
+        french = await prefixes(second)
+        assert "preferred language is French (fr)" in french[0]
+        spec = ModelSpec(provider="anthropic", model_id="claude-sonnet-5")
+        en_request = ChatRequest(
+            model=spec,
+            system_blocks=english,
+            messages=[Message.user("synthetic")],
+            prompt_cache_key="synthetic-language-session",
+        )
+        fr_request = en_request.model_copy(update={"system_blocks": french})
+        assert request_compatibility(en_request) != request_compatibility(fr_request)
+        body = client._build_body(fr_request)
+        assert "preferred language is French (fr)" in str(body["system"])
+        assert "preferred language is English (en)" not in str(body["system"])
+    finally:
+        await client.aclose()
+        for session in sessions:
+            await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_subagent_carries_the_language_line(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

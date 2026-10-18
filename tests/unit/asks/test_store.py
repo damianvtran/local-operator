@@ -65,6 +65,16 @@ def _answered(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
     }
 
 
+def _dismissed(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
+    return {
+        "v": store.EVENT_SCHEMA,
+        "kind": store.EVENT_DISMISSED,
+        "ask_id": ask_id,
+        "at": at,
+        "by": {"surface": "phone"},
+    }
+
+
 # ---------------------------------------------------------------------------
 # The fold: one row per rule in §2.2's precedence table
 # ---------------------------------------------------------------------------
@@ -326,6 +336,83 @@ def _withdrawn(ask_id: str = "a-1", *, at: int) -> dict[str, Any]:
         "at": at,
         "by": {"surface": "agent"},
     }
+
+
+# ---------------------------------------------------------------------------
+# dismissed: the notice a dismissal does not erase (fork A, §14)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dismissal_after_the_deadline_still_owes_the_notice():
+    """A DISMISSAL puts the ask away; it does not tell the model anything.
+
+    The dismissal's promise is about the USER's view ("the ask is gone from my
+    list"), and the deadline notice is the AGENT's fact ("you have no answer and
+    must proceed"). They are different facts, so a dismissal whose notice was
+    never delivered still owes it — before this the record folded to
+    ``dismissed``, left ``INJECTING_STATUSES`` and dropped the row for good, so
+    the agent was never told it had been waiting on nobody.
+    """
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(events, BASE + 200_001)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["dismissed_at"] == BASE + 200_000
+    assert record["notice_owed"] is True
+    # ``delivered_hint`` is UNCHANGED (decision D22): dismissed still means "any
+    # row present", so this reads False until the notice actually lands.
+    assert record["delivered"] is False
+    assert store.expected_row_ids(record) == [store.timeout_row_id("a-1")]
+
+
+def test_a_dismissed_notice_is_not_owed_past_the_late_window():
+    """The 7 d window is the notice's own bound, and a dismissal inherits it.
+
+    Past the window the notice is stale by exactly the rule that governs an
+    unanswered deadline (``fold`` rule 7), so a dismissal there owes nothing and
+    must not resurrect a row a week late.
+    """
+    expires_at = BASE + 120_000
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    past = expires_at + store.LATE_WINDOW_S * 1000 + 1
+    (record,) = store.fold(events, past)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
+
+
+def test_a_dismissal_before_the_deadline_owes_nothing():
+    """Only a deadline that had ALREADY passed can leave a notice undelivered.
+
+    A hand-written log may carry a dismissal dated inside the window (no surface
+    offers one — ``AskQueue.dismiss`` refuses a non-lapsed ask — but the fold is
+    total, so it has to answer). Nothing was owed at that instant, and the
+    dismissal does not invent an owed notice.
+    """
+    events = [_queued(at=BASE, timeout_s=3600), _dismissed(at=BASE + 1_000)]
+    (record,) = store.fold(events, BASE + 2_000)
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
+
+
+def test_a_dismissed_notice_already_in_the_transcript_is_not_owed():
+    """The field says a row is still OWED, so a durable one clears it.
+
+    ``notice_owed`` was read off the dates alone, so a dismissed ask whose
+    ``ask-timeout-<id>`` row had already landed still said ``notice_owed: True``
+    (agent review round 1, MINOR-2) — and ``expected_row_ids``, the queue's
+    reconcile and every future reader take that field at its word. The fold has
+    the facts (``present_ids``), so it answers the question it is asked rather
+    than the rule behind it. ``delivered`` is the any-row form (see
+    ``delivered_hint``): a settled row a dismissal arrived AFTER is the answer
+    the model already has, which the notice's own N8 rule lets stand.
+    """
+    events = [_queued(at=BASE, timeout_s=120), _dismissed(at=BASE + 200_000)]
+    (record,) = store.fold(events, BASE + 200_001, present_ids=[store.timeout_row_id("a-1")])
+    assert record["status"] == store.STATUS_DISMISSED
+    assert record["delivered"] is True
+    assert record["notice_owed"] is False
+    assert store.expected_row_ids(record) == []
 
 
 def test_a_withdrawn_row_folds_to_withdrawn_and_leaves_the_outstanding_set():
@@ -618,16 +705,24 @@ def test_append_creates_the_session_directory(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_is_outstanding_covers_open_and_timed_out_and_no_settled_status():
-    """The rule the wire's tally, the index and every surface share.
+def test_a_timed_out_ask_is_settled_but_still_injects_its_notice():
+    """The rule the wire's tally, the index and every surface share (#2388).
 
-    It is the flip precondition for ``LOP_ASK_NONBLOCKING``: a timed-out but
-    UNANSWERED ask is still outstanding — a late answer reaches the agent
-    (design §2.2, the spec's item 3) — while a settled one is not.
+    An ask settles when the AGENT is told — by its deadline or by an answer —
+    not only when the user acts: a timed-out ask is no longer outstanding, so no
+    surface counts it as owed. Settling it must not cost the agent its notice:
+    ``timed_out`` still injects, and the fold still requires exactly the
+    deadline row.
     """
+    assert store.OUTSTANDING_STATUSES == frozenset({store.STATUS_OPEN})
     assert store.is_outstanding(store.STATUS_OPEN)
-    assert store.is_outstanding(store.STATUS_TIMED_OUT)
+    assert not store.is_outstanding(store.STATUS_TIMED_OUT)
+    assert store.STATUS_TIMED_OUT in store.INJECTING_STATUSES
+    (record,) = store.fold([_queued(at=BASE, timeout_s=3600)], BASE + 3_600_001)
+    assert record["status"] == store.STATUS_TIMED_OUT
+    assert store.expected_row_ids(record) == [store.timeout_row_id("a-1")]
     for settled in (
+        store.STATUS_TIMED_OUT,
         store.STATUS_ANSWERED,
         store.STATUS_LATE,
         store.STATUS_DECLINED,
@@ -642,31 +737,18 @@ def test_is_outstanding_covers_open_and_timed_out_and_no_settled_status():
     assert not store.is_outstanding("")
 
 
-def test_outstanding_asks_and_pending_asks_are_one_set_by_construction():
-    """``pending_asks`` (notice owed) delegates to the outstanding set.
+def test_open_asks_is_the_cap_set_and_a_timed_out_ask_holds_no_slot():
+    """The cap counts OPEN asks only, and so does the outstanding set (#2388).
 
-    They coincide because an ask owes its timeout notice exactly while it is
-    outstanding; a second spelling of either rule is what produced the wrong
-    wire tally, so there is only one.
-    """
-    events = [_queued(at=BASE, timeout_s=3600)]
-    (record,) = store.fold(events, BASE + 3_600_001)
-    assert record["status"] == store.STATUS_TIMED_OUT
-    assert [row["ask_id"] for row in store.outstanding_asks([record])] == ["a-1"]
-    assert store.pending_asks([record]) == store.outstanding_asks([record])
-
-
-def test_open_asks_is_the_narrower_cap_set():
-    """The cap counts OPEN asks only; the display set counts outstanding ones.
-
-    A timed-out ask must not hold a slot a fresh question needs, and it must not
-    vanish from a surface either — two questions, two sets, one definition each.
+    A timed-out ask must not hold a slot a fresh question needs, and it is no
+    longer owed either: the agent was told and moved on. It stays SHOWN (the
+    row is a settled receipt), which is the readers' business, not this set's.
     """
     events = [_queued(at=BASE, timeout_s=3600)]
     (record,) = store.fold(events, BASE + 3_600_001)
     assert record["status"] == store.STATUS_TIMED_OUT
     assert store.open_asks([record]) == []
-    assert len(store.outstanding_asks([record])) == 1
+    assert store.outstanding_asks([record]) == []
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from lop_osworld_v2_adapter import guest_loss
 from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_INSTANCE_ABSENT,
     EVIDENCE_INSTANCE_TERMINATED,
@@ -51,6 +52,8 @@ class FakeProvider:
         blind_observations: int = 0,
         blind_after_observe_calls: int = 0,
         blind_cause: str | None = None,
+        transport_failures: int = 0,
+        probe_reachable: bool = True,
         has_user_simulator: bool = False,
         simulator_answer: str = "simulated user answer",
         evaluator_prints: tuple[str, ...] = (),
@@ -86,6 +89,20 @@ class FakeProvider:
         # ``None`` is the provider that knows nothing: it reproduces upstream's
         # silent ``None`` exactly, so the absent-cause path is unchanged.
         self._blind_cause = blind_cause
+        # How many upcoming execute() calls raise the AMBIGUOUS DELIVERY the
+        # guest's control server produces when it drops an in-flight request --
+        # the failure the session arm's probe gate exists for. Raised through
+        # the same ``guest_loss`` helper the AWS provider uses, so the wire
+        # token cannot drift between providers. The fake fails BEFORE any
+        # statement runs: the provably-cleanest reading of "ambiguous", which
+        # is exactly why the model is still told "may or may not have applied".
+        self._transport_failures = transport_failures
+        # What the probe answers. False models a genuinely dead guest: the
+        # harness must then end the episode exactly as it did before the probe
+        # existed (fail closed). Counted below so tests can pin that a failed
+        # probe is not retried, and that a spent re-bind budget is not probed.
+        self._probe_reachable = probe_reachable
+        self.probe_calls = 0
         self._has_user_simulator = has_user_simulator
         self._simulator_answer = simulator_answer
         # The in-memory registry stands in for EC2: ref -> state. Teardown
@@ -163,9 +180,35 @@ class FakeProvider:
         # ``settle`` is accepted to satisfy the provider protocol; the fake has
         # no desktop to repaint, so there is nothing to pause for. Recorded so
         # a test can still assert that a split batch settles exactly once.
+        if self._transport_failures > 0:
+            # Imported here, not at module top: the exception lives beside the
+            # AWS provider that first raised it, and pulling that module in
+            # would defeat the fake's whole point of running with no cloud
+            # client in sight.
+            from lop_osworld_v2_adapter.providers.aws import GuestExecutionError
+
+            self._transport_failures -= 1
+            raise GuestExecutionError(
+                guest_loss.describe_failed_action(
+                    0, guest_loss.TransportVerdict(guest_loss.DELIVERY_AMBIGUOUS)
+                ),
+                delivery=guest_loss.DELIVERY_AMBIGUOUS,
+            )
         self.executed_statements.extend(statements)
         self.settle_flags.append(settle)
         self._sequence += 1
+
+    async def probe_control_server(self, timeout: float) -> bool:
+        """The fake's liveness answer: a scripted reachability, no transport.
+
+        Counted so a test can pin the probe's economics -- one per cleared
+        delivery, none for a spent budget or a dead guest -- and scripted so
+        both branches of the session's gate are reachable in-process.
+        """
+
+        del timeout
+        self.probe_calls += 1
+        return self._probe_reachable
 
     async def evaluate(self) -> Any:
         self.evaluate_calls += 1

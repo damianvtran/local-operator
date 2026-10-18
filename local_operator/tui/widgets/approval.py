@@ -731,7 +731,14 @@ class ApprovalBlock(TranscriptBlock):
                 # already say. `allowed ` costs 8 cells where `allow ` costs 6,
                 # which is why the receipt used to lose the clause two columns
                 # before the live ask did.
-                question.append("allowed " if allowed else "denied ", style=muted)
+                question.append(
+                    _t(
+                        copy.approval_decision_allowed()
+                        if allowed
+                        else copy.approval_decision_denied()
+                    ),
+                    style=muted,
+                )
         # The RAW tool name, always whole, where the ledger row two lines below
         # shows the shortened `display_name`. The divergence is intended and is
         # not a consistency bug to fix: a security prompt must name exactly what

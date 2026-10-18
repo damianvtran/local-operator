@@ -55,6 +55,8 @@ from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
@@ -65,6 +67,7 @@ from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.tool_card import truncate_cells
 
+_t = tr("tui.small")
 #: The read-only pane's width in cells, MIRRORED from `.settings-view-pane` in
 #: local_operator.tcss. Duplicated deliberately: the widths have to be known
 #: before layout runs (see `_list_width`), and Textual offers no way to read a
@@ -3782,7 +3785,7 @@ class SettingsView(Vertical):
                 # `(default)` says what `r` would give back, so the user can
                 # see the difference between "I chose this" and "this is what
                 # it came with" before touching anything.
-                line.append("  (default)", style=dim)
+                line.append(_t(_x.settings_view_default_marker()), style=dim)
             if row.choice.description:
                 line.append(f"  {row.choice.description}", style=faint)
             return line
@@ -3793,7 +3796,10 @@ class SettingsView(Vertical):
             line.append(marker, style=accent if selected else dim)
             line.append("▾ " if self._chain == row.chain else "▸ ", style=dim)
             line.append(row.chain, style=base)
-            line.append(f"  {len(hops)} hop{'' if len(hops) == 1 else 's'}", style=faint)
+            line.append(
+                _t(_x.settings_view_hop_count(count=len(hops), shown=str(len(hops)))),
+                style=faint,
+            )
             return line
 
         if row.kind == "hop":
@@ -3806,7 +3812,7 @@ class SettingsView(Vertical):
             else:
                 line.append(row.hop, style=base)
                 if selected:
-                    line.append("  shift+↑↓ reorder · d delete", style=faint)
+                    line.append(_t(_x.settings_view_reorder_hint()), style=faint)
             return line
 
         if row.kind in ("hop_add", "chain_add"):
@@ -3892,7 +3898,7 @@ class SettingsView(Vertical):
                     line.append(shown, style=accent)
                     line.append(" ?", style=accent)
                 else:
-                    line.append("press a key\u2026", style=accent)
+                    line.append(_t(_x.settings_view_press_key()), style=accent)
                 return line
             # `display_key`, not `format_key_display`: a desktop value maps its
             # platform tokens for display in its OWN scope (primary reads
@@ -4530,13 +4536,13 @@ class SettingsView(Vertical):
         elif row is None:
             pass
         elif row.kind == "hop":
-            text.append("shift+↑↓ reorder · d delete · enter edits this hop", style=faint)
+            text.append(_t(_x.settings_view_hop_row_hint()), style=faint)
         elif row.kind == "chain":
-            text.append("enter opens the chain · d deletes it", style=faint)
+            text.append(_t(_x.settings_view_chain_row_hint()), style=faint)
         elif row.kind == "chain_add":
-            text.append("enter, then type: <chain-key> <provider>/<model>", style=faint)
+            text.append(_t(_x.settings_view_chain_add_hint()), style=faint)
         elif row.kind == "hop_add":
-            text.append("enter, then type: <provider>/<model>", style=faint)
+            text.append(_t(_x.settings_view_hop_add_hint()), style=faint)
         elif row.setting is not None and self._bridge_lock_note(row.setting) is not None:
             # §5.6 F on the section's OWN rows (review round 1, Q3 / design
             # round 1, D3): the flow cannot resume, so the row's explanation
@@ -5226,7 +5232,9 @@ class SettingsView(Vertical):
             # `providers` header. A pane that shows a roster-ish line without
             # saying it is read-only is the failure D2 and D6 are both about;
             # a pane showing only `read-only` is merely small.
-            return Text("read-only", style=dim, no_wrap=True, overflow="ellipsis")
+            return Text(
+                _t(_x.settings_view_read_only_pane()), style=dim, no_wrap=True, overflow="ellipsis"
+            )
         # Two rows for the caption block (its blank separator and the word),
         # collapsing to one when the pane cannot afford the separator. The
         # separator is a SPACING row, so it sheds later than the roster but
@@ -5360,7 +5368,7 @@ class SettingsView(Vertical):
             # The count rides on the tab row itself. The tab row keeps its own
             # accent because it still names the live pane; the count follows in
             # `dim` so it reads as a fact rather than as a third tab.
-            text.append(f"  … {spilled} more", style=dim)
+            text.append(_t(_x.settings_view_overflow_more(spilled=str(spilled))), style=dim)
         text.append("\n")
         for segments in roster_block():
             for chunk, style in segments:
@@ -5368,7 +5376,7 @@ class SettingsView(Vertical):
             text.append("\n")
         if separator:
             text.append("\n")
-        text.append("  read-only", style=dim)
+        text.append(_t(_x.settings_view_read_only_label()), style=dim)
         return text
 
     def _budget_pane_rows(
@@ -5550,7 +5558,7 @@ class SettingsView(Vertical):
         dim = Style(color=theme_mod.semantic_color("dim"))
         head = Style(color=theme_mod.semantic_color("fg"), bold=True)
         title = Text(no_wrap=True, overflow="ellipsis")
-        title.append("settings", style=head)
+        title.append(_t(_x.settings_view_title()), style=head)
         title.append("  ·  ", style=muted)
         # The FILE is named on the title, because "where did that go?" is the
         # question an immediate write raises and the answer is not guessable.
@@ -6195,10 +6203,41 @@ class _Row:
 #: The two members a BOOL row expands into, in the order they are offered.
 #: `on` first so the list reads the way the value column does, and so the
 #: cursor's resting position on a defaulted flag is the top row.
-_BOOL_CHOICES = (
-    settings_io.Choice(value=True, label="on"),
-    settings_io.Choice(value=False, label="off"),
-)
+def _bool_choices() -> tuple[settings_io.Choice, ...]:
+    """The two members a BOOL row expands into, built from the live locale.
+
+    A builder rather than a bare tuple so :func:`_reload_copy` can re-run the
+    SAME expression the import-time binding uses: two spellings of one list
+    could drift, and this module is now an activated file where drift is a
+    finding rather than a nuisance.
+    """
+    return (
+        settings_io.Choice(value=True, label=_t(_x.settings_view_bool_on())),
+        settings_io.Choice(value=False, label=_t(_x.settings_view_bool_off())),
+    )
+
+
+_BOOL_CHOICES: tuple[settings_io.Choice, ...] = _bool_choices()
+
+
+def _reload_copy() -> None:
+    """Re-materialise this module's import-time copy after a locale move.
+
+    ``local_operator.i18n.text`` runs registered re-materialisers when the
+    process's ACTIVE language changes (``/language``, the config watcher,
+    boot). Only CONSTANTS need an entry: everything this module resolves per
+    paint reads the active locale at each call and follows on its own.
+
+    Without this the two BOOL labels would keep the language in force at
+    import — the exact failure ``register_refresh`` exists to prevent
+    (docs/I18N.md, "Resolve at render time"), and the one QA round 1 (Q1)
+    reproduced with a fixture catalogue before this was added.
+    """
+    global _BOOL_CHOICES
+    _BOOL_CHOICES = _bool_choices()
+
+
+register_refresh(_reload_copy)
 
 
 def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:

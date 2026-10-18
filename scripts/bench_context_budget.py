@@ -1529,7 +1529,18 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: one). The ceiling is head + the existing 55-token band on both arms —
 #: 29,680 / 26,724 — and that raise is NOT self-approved: it is stated here
 #: and in the PR thread for a reviewer to verify before it settles.
-BUDGET_BILLED_TOKENS = 29_680
+# RAISED 29,680 -> 30,000 for the ``harness_import`` agent tool (LOH-14 agent
+# slice), after trimming it first: removing every per-field description and the
+# action list from its wire description took tool_schemas 56,700 -> 56,036
+# chars (-664 chars, -239 billed tokens). The remainder is the published schema
+# and its one inventory line, which cannot shrink further without removing the
+# capability. Measured on THIS head with this script:
+#   top    83,198 chars = ~29,927 billed  (73 tokens under 30,000)
+#   child  75,057 chars = ~26,999 billed  (101 tokens under 27,100)
+# The tool is a setup-time capability, not an every-session one, but it is in
+# the default surface today; the raise is the explicit decision the guard exists
+# to force, not an unrelated budget increase.
+BUDGET_BILLED_TOKENS = 30_000
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1630,7 +1641,7 @@ BUDGET_BILLED_TOKENS = 29_680
 #:   delta                             +249 chars = ~+90
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 26_724
+BUDGET_CHILD_BILLED_TOKENS = 27_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

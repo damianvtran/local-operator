@@ -1,0 +1,27 @@
+{
+  "cli.serve_help.serve": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'serve' argument; flag/command tokens stay in situ"
+  },
+  "cli.serve_help.host": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "loopback policy prose; the tunnel/SSH advice stays in situ"
+  },
+  "cli.serve_help.port": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'port' argument; flag/command tokens stay in situ"
+  },
+  "cli.serve_help.reload": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'reload' argument; flag/command tokens stay in situ"
+  },
+  "cli.serve_help.listener_fd": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the daemon-internal note is user-visible copy; keep tokens"
+  }
+}

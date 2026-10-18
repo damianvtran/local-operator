@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.loop import (
+    LENGTH_STOP_RECOVERY_PROMPT,
     NAMELESS_CALL_RECOVERY_PROMPT,
     AgentLoop,
     LoopContext,
@@ -300,7 +301,67 @@ async def test_empty_truncation_retreat_still_retries_without_a_cancel() -> None
     assert stream.calls == 2, "the retreat retry must still be spent"
     assert config.model.reasoning_effort == "medium", "the retry must step one rung down"
     notices = [event.text for event in events if isinstance(event, NoticeEvent)]
-    assert any("retrying at effort medium" in text for text in notices)
+    assert any("retrying once at effort medium" in text for text in notices)
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and not ends[-1].aborted
+
+
+#: A model with NO ladder: ``_lower_effort`` always answers ``None``, so the
+#: no-rung RE-ASK is the arm that owns its silent length stops (the
+#: ``radient/auto`` sentinel's shape without needing the router registry).
+_NO_LADDER_MODEL = ModelSpec(provider="test", model_id="m")
+
+
+@pytest.mark.asyncio
+async def test_the_no_rung_reask_does_not_spend_a_request_after_the_cancel() -> None:
+    """The new re-ask arm reads the same boundary as its siblings.
+
+    A silent length stop on a no-rung model is the ONE case the loop
+    self-completes (``MAX_LENGTH_SILENT_RECOVERIES``), and a re-ask spends a
+    provider request -- so a stop the caller requested must not pay for it,
+    exactly as the lower-effort retreat above must not. The boundary is the
+    same predicate at the same point (``_graceful_cancel_requested``), read
+    before the ``continue`` that would spend request N+1.
+    """
+    stream = _SilentLengthThenText(cancel_on_silent=True)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(
+        stream, model=_NO_LADDER_MODEL, graceful_cancel_requested=lambda: stream.cancelled
+    )
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 1, "no re-ask request may be spent after the cancel"
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    assert ends and ends[-1].aborted is True
+    # A REQUESTED stop is not branded as an involuntary cut-off: it ends as the
+    # deliberate aborted shape, with no output-limit cause riding it.
+    assert ends[-1].cut_off_cause == ""
+    assert all(
+        LENGTH_STOP_RECOVERY_PROMPT not in getattr(message, "text", "")
+        for message in ends[-1].messages
+    ), "the recovery prompt must not be on the wire"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    # The silent-arm notice fires (there is nothing on screen to explain the
+    # ending), and it must NOT claim a re-ask that was never spent.
+    assert any("no visible output" in text for text in notices)
+    assert not any("re-asking" in text for text in notices), "no re-ask was attempted"
+
+
+@pytest.mark.asyncio
+async def test_the_no_rung_reask_still_reasks_without_a_cancel() -> None:
+    """Control for the cell above: the re-ask is spent when nothing asked for a stop.
+
+    Without this pair the cancel test would also pass on a loop that never
+    re-asks at all, which is the exact regression the arm was added to prevent.
+    """
+    stream = _SilentLengthThenText(cancel_on_silent=False)
+    context = LoopContext(tools=[_tool()])
+    config = make_config(stream, model=_NO_LADDER_MODEL, graceful_cancel_requested=lambda: False)
+    events = [event async for event in AgentLoop().run([Message.user("go")], context, config, None)]
+
+    assert stream.calls == 2, "the re-ask must be spent"
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("re-asking it to continue the work" in text for text in notices)
     ends = [event for event in events if isinstance(event, AgentEndEvent)]
     assert ends and not ends[-1].aborted
 

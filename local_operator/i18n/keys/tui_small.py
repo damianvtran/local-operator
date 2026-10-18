@@ -14,6 +14,14 @@ def approval_allow_verb() -> Msg:
     return Msg("tui.small.approval.allow_verb", {})
 
 
+def approval_decision_allowed() -> Msg:
+    return Msg("tui.small.approval.decision_allowed", {})
+
+
+def approval_decision_denied() -> Msg:
+    return Msg("tui.small.approval.decision_denied", {})
+
+
 def aside_off_the_record() -> Msg:
     return Msg("tui.small.aside.off_the_record", {})
 
@@ -46,6 +54,14 @@ def ask_queue_waiting_clause(*, shown: str) -> Msg:
     return Msg("tui.small.ask_queue.waiting_clause", {"shown": shown})
 
 
+def command_picker_entries(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.command_picker.entries", {"count": count, "shown": shown})
+
+
+def command_picker_projects(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.command_picker.projects", {"count": count, "shown": shown})
+
+
 def copy_code_count(*, shown: str) -> Msg:
     return Msg("tui.small.copy.code_count", {"shown": shown})
 
@@ -70,12 +86,52 @@ def draft_attachment_count(*, images: int | float, shown: str) -> Msg:
     return Msg("tui.small.draft.attachment_count", {"images": images, "shown": shown})
 
 
+def goal_panel_done_suffix() -> Msg:
+    return Msg("tui.small.goal_panel.done_suffix", {})
+
+
+def goal_panel_judge_absent() -> Msg:
+    return Msg("tui.small.goal_panel.judge_absent", {})
+
+
+def goal_panel_judge_line(*, words: str) -> Msg:
+    return Msg("tui.small.goal_panel.judge_line", {"words": words})
+
+
+def goal_panel_judge_run(*, run: str, cap: str) -> Msg:
+    return Msg("tui.small.goal_panel.judge_run", {"run": run, "cap": cap})
+
+
+def goal_panel_more_settled(*, hidden: str) -> Msg:
+    return Msg("tui.small.goal_panel.more_settled", {"hidden": hidden})
+
+
+def goal_panel_more_settled_indent(*, hidden: str) -> Msg:
+    return Msg("tui.small.goal_panel.more_settled_indent", {"hidden": hidden})
+
+
+def goal_panel_no_goal_hint() -> Msg:
+    return Msg("tui.small.goal_panel.no_goal_hint", {})
+
+
+def goal_panel_none_yet() -> Msg:
+    return Msg("tui.small.goal_panel.none_yet", {})
+
+
+def goal_panel_settled_heading() -> Msg:
+    return Msg("tui.small.goal_panel.settled_heading", {})
+
+
 def info_panel_busy_word() -> Msg:
     return Msg("tui.small.info_panel.busy_word", {})
 
 
 def info_panel_deeper_below_depth(*, deeper: str, depth: str) -> Msg:
     return Msg("tui.small.info_panel.deeper_below_depth", {"deeper": deeper, "depth": depth})
+
+
+def info_panel_install_info_heading() -> Msg:
+    return Msg("tui.small.info_panel.install_info_heading", {})
 
 
 def info_panel_last_heartbeat_ago(*, age: str) -> Msg:
@@ -86,12 +142,88 @@ def info_panel_needs_pending(*, pending: str) -> Msg:
     return Msg("tui.small.info_panel.needs_pending", {"pending": pending})
 
 
+def info_panel_not_answering() -> Msg:
+    return Msg("tui.small.info_panel.not_answering", {})
+
+
 def link_picker_title() -> Msg:
     return Msg("tui.small.link_picker.title", {})
 
 
+def model_picker_default(*, value: str) -> Msg:
+    return Msg("tui.small.model_picker.default", {"value": value})
+
+
+def model_picker_effort(*, value: str) -> Msg:
+    return Msg("tui.small.model_picker.effort", {"value": value})
+
+
+def model_picker_no_matching_models() -> Msg:
+    return Msg("tui.small.model_picker.no_matching_models", {})
+
+
+def model_picker_no_models_available() -> Msg:
+    return Msg("tui.small.model_picker.no_models_available", {})
+
+
+def model_picker_none_word() -> Msg:
+    return Msg("tui.small.model_picker.none_word", {})
+
+
+def model_picker_released(*, value: str) -> Msg:
+    return Msg("tui.small.model_picker.released", {"value": value})
+
+
 def model_picker_window_position(*, shown: str, total: str) -> Msg:
     return Msg("tui.small.model_picker.window_position", {"shown": shown, "total": total})
+
+
+def network_panel_checking_indent() -> Msg:
+    return Msg("tui.small.network_panel.checking_indent", {})
+
+
+def network_panel_identity_row(*, identity: str) -> Msg:
+    return Msg("tui.small.network_panel.identity_row", {"identity": identity})
+
+
+def network_panel_installed_row(*, value: str) -> Msg:
+    return Msg("tui.small.network_panel.installed_row", {"value": value})
+
+
+def network_panel_member_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.network_panel.member_count", {"count": count, "shown": shown})
+
+
+def network_panel_mesh_networks_heading() -> Msg:
+    return Msg("tui.small.network_panel.mesh_networks_heading", {})
+
+
+def network_panel_no_members() -> Msg:
+    return Msg("tui.small.network_panel.no_members", {})
+
+
+def network_panel_relay_checking_indent() -> Msg:
+    return Msg("tui.small.network_panel.relay_checking_indent", {})
+
+
+def network_panel_relay_not_running() -> Msg:
+    return Msg("tui.small.network_panel.relay_not_running", {})
+
+
+def network_panel_relay_running(*, pid: str, state: str) -> Msg:
+    return Msg("tui.small.network_panel.relay_running", {"pid": pid, "state": state})
+
+
+def network_panel_stale_tag() -> Msg:
+    return Msg("tui.small.network_panel.stale_tag", {})
+
+
+def network_panel_suspect_tag() -> Msg:
+    return Msg("tui.small.network_panel.suspect_tag", {})
+
+
+def network_panel_trust_field(*, trust: str) -> Msg:
+    return Msg("tui.small.network_panel.trust_field", {"trust": trust})
 
 
 def org_chart_view_chart_suffix() -> Msg:
@@ -114,6 +246,10 @@ def org_chart_view_zoom_clause(*, tier: str) -> Msg:
     return Msg("tui.small.org_chart_view.zoom_clause", {"tier": tier})
 
 
+def panels_scroll_hint() -> Msg:
+    return Msg("tui.small.panels.scroll_hint", {})
+
+
 def picker_of_separator() -> Msg:
     return Msg("tui.small.picker.of_separator", {})
 
@@ -124,6 +260,10 @@ def picker_showing_prefix() -> Msg:
 
 def session_resume_hint(*, hint: str) -> Msg:
     return Msg("tui.small.session.resume_hint", {"hint": hint})
+
+
+def session_panel_diagnostics_heading() -> Msg:
+    return Msg("tui.small.session_panel.diagnostics_heading", {})
 
 
 def session_picker_all_archived(*, total: str) -> Msg:
@@ -150,8 +290,96 @@ def session_picker_type_to_filter() -> Msg:
     return Msg("tui.small.session_picker.type_to_filter", {})
 
 
+def session_sidebar_asks_suffix() -> Msg:
+    return Msg("tui.small.session_sidebar.asks_suffix", {})
+
+
+def session_sidebar_hide_suffix() -> Msg:
+    return Msg("tui.small.session_sidebar.hide_suffix", {})
+
+
+def session_sidebar_lead_focus() -> Msg:
+    return Msg("tui.small.session_sidebar.lead_focus", {})
+
+
+def session_sidebar_lead_return() -> Msg:
+    return Msg("tui.small.session_sidebar.lead_return", {})
+
+
+def session_sidebar_opened_by(*, role: str) -> Msg:
+    return Msg("tui.small.session_sidebar.opened_by", {"role": role})
+
+
+def session_sidebar_pin_suffix() -> Msg:
+    return Msg("tui.small.session_sidebar.pin_suffix", {})
+
+
+def settings_view_bool_off() -> Msg:
+    return Msg("tui.small.settings_view.bool_off", {})
+
+
+def settings_view_bool_on() -> Msg:
+    return Msg("tui.small.settings_view.bool_on", {})
+
+
+def settings_view_chain_add_hint() -> Msg:
+    return Msg("tui.small.settings_view.chain_add_hint", {})
+
+
+def settings_view_chain_row_hint() -> Msg:
+    return Msg("tui.small.settings_view.chain_row_hint", {})
+
+
+def settings_view_default_marker() -> Msg:
+    return Msg("tui.small.settings_view.default_marker", {})
+
+
+def settings_view_hop_add_hint() -> Msg:
+    return Msg("tui.small.settings_view.hop_add_hint", {})
+
+
+def settings_view_hop_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.settings_view.hop_count", {"count": count, "shown": shown})
+
+
+def settings_view_hop_row_hint() -> Msg:
+    return Msg("tui.small.settings_view.hop_row_hint", {})
+
+
+def settings_view_overflow_more(*, spilled: str) -> Msg:
+    return Msg("tui.small.settings_view.overflow_more", {"spilled": spilled})
+
+
+def settings_view_press_key() -> Msg:
+    return Msg("tui.small.settings_view.press_key", {})
+
+
+def settings_view_read_only_label() -> Msg:
+    return Msg("tui.small.settings_view.read_only_label", {})
+
+
+def settings_view_read_only_pane() -> Msg:
+    return Msg("tui.small.settings_view.read_only_pane", {})
+
+
+def settings_view_reorder_hint() -> Msg:
+    return Msg("tui.small.settings_view.reorder_hint", {})
+
+
+def settings_view_title() -> Msg:
+    return Msg("tui.small.settings_view.title", {})
+
+
 def spend_channel_not_itemised() -> Msg:
     return Msg("tui.small.spend.channel_not_itemised", {})
+
+
+def subagent_panel_ctrl_g_expand() -> Msg:
+    return Msg("tui.small.subagent_panel.ctrl_g_expand", {})
+
+
+def subagent_panel_ctrl_g_shrink() -> Msg:
+    return Msg("tui.small.subagent_panel.ctrl_g_shrink", {})
 
 
 def subagent_view_no_longer_on_ledger() -> Msg:
@@ -172,6 +400,58 @@ def subagents_title() -> Msg:
 
 def timing_no_samples() -> Msg:
     return Msg("tui.small.timing.no_samples", {})
+
+
+def todo_panel_blocked() -> Msg:
+    return Msg("tui.small.todo_panel.blocked", {})
+
+
+def todo_panel_collapse() -> Msg:
+    return Msg("tui.small.todo_panel.collapse", {})
+
+
+def todo_panel_done_hidden(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.done_hidden", {"count": count})
+
+
+def todo_panel_dropped(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.dropped", {"count": count})
+
+
+def todo_panel_dropped_row() -> Msg:
+    return Msg("tui.small.todo_panel.dropped_row", {})
+
+
+def todo_panel_expand() -> Msg:
+    return Msg("tui.small.todo_panel.expand", {})
+
+
+def todo_panel_header() -> Msg:
+    return Msg("tui.small.todo_panel.header", {})
+
+
+def todo_panel_more_below(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_below", {"count": count})
+
+
+def todo_panel_more_below_padded(*, pad: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_below_padded", {"pad": pad})
+
+
+def todo_panel_more_hidden(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_hidden", {"count": count})
+
+
+def todo_panel_more_todos(*, count: str) -> Msg:
+    return Msg("tui.small.todo_panel.more_todos", {"count": count})
+
+
+def todo_panel_resolved(*, resolved: str, total: str) -> Msg:
+    return Msg("tui.small.todo_panel.resolved", {"resolved": resolved, "total": total})
+
+
+def todo_panel_stage(*, stage: str, total: str) -> Msg:
+    return Msg("tui.small.todo_panel.stage", {"stage": stage, "total": total})
 
 
 def tool_card_http_blocked(*, status: str, reason: str, clause: str) -> Msg:
@@ -210,6 +490,10 @@ def wake_panel_monitors_need_attention(*, count: int | float, shown: str, total:
 
 def wake_panel_monitors_title() -> Msg:
     return Msg("tui.small.wake_panel.monitors_title", {})
+
+
+def wake_panel_scheduled_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.small.wake_panel.scheduled_count", {"count": count, "shown": shown})
 
 
 def wake_panel_wakes_title() -> Msg:

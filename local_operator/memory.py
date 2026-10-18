@@ -23,6 +23,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -393,6 +394,46 @@ def safe_segment(value: Any, *, structural: bool = False) -> str:
     return value
 
 
+#: The shapes a value may legitimately BE as a structural REFERENCE, each one cited at
+#: the source that mints it. A reference is not prose, so the free-text guard is the
+#: wrong question to ask of one: its hex runs can satisfy the IBAN/mod-97 or card/Luhn
+#: shape BY CHANCE — that collision refused every put on an install whose device id
+#: happened to pass mod-97 (the write path fixed it through ``safe_segment``), and its
+#: read-side twin refused every recall whose QUERY was such an id.
+_REFERENCE_SHAPES = (
+    # network.identity.device_id_for: "d_" + sha256(DEVICE_ID_DOMAIN + key).hexdigest()[:32].
+    re.compile(r"d_[0-9a-f]{32}"),
+    # memory._id(): the canonical UUID string minted for entity and operation ids —
+    # the SCOPE/ID the CLI prints and the version=REV a read accepts. The store mints
+    # UUIDv7, but this guard is shape-based and pins no version/variant nibble, so any
+    # canonical UUID spelling matches.
+    re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+)
+
+
+def structural_reference(value: Any) -> bool:
+    """True iff ``value`` IS exactly one minted structural reference, nothing else.
+
+    A recall query is a READ and may legitimately BE an identifier this codebase mints
+    and hands back (a device id, or an entity/operation id) rather than user prose, so
+    ``guard()``'s store-oriented refusal — keep only the NAME — is the wrong verdict for
+    it. Callers skip the free-text guard for a value this admits, and for that value
+    alone: the match is a FULL match, so a secret-shaped token inside prose, a labelled
+    value and any multi-token string are not references and keep the guard.
+
+    The admitted set is exactly the two shapes above, each justified by the function
+    that mints it. A shape with no such source is not a reference here: a bare 64-hex
+    ``body_sha`` digest is spelled ``[0-9a-f]{64}`` at its validation, but it is an
+    integrity value over the operation payload the store compares, never a *lookup*
+    handle — it does ride op records (``memory_capture.py`` computes one per captured
+    op) and no code path searches by it, since ``search()`` takes no body-hash input —
+    and the free-text guard already admits it. This is a READ-side classification only;
+    a WRITE keeps the guard, because storing a value is not the same act as looking one
+    up.
+    """
+    return isinstance(value, str) and any(shape.fullmatch(value) for shape in _REFERENCE_SHAPES)
+
+
 def guard(value: Any, *, opaque: bool = False) -> None:
     """Inspect every string, including metadata and wire-only fields, without echo.
 
@@ -446,6 +487,71 @@ def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+#: Total wire budget for the suggestion tail: the WHOLE block, wrapper
+#: included. One number, shared by the renderer and the admission rule in
+#: :meth:`MemoryStore.search` — when the two disagreed the documented
+#: ``limit=3`` silently rendered 2.
+SUGGESTION_TOKENS = 180
+
+#: The suggestion block's fixed wrapper. ``memory_capture._session_tail``
+#: renders these around the admitted lines; both it and the admission budget
+#: charge them, because "180 tokens" is the block on the wire, not its lines.
+#: Measured 19 tokens (14 header + 5 closing): charging only the lines let three
+#: 156-char titles be admitted at 166 and then dropped by the tail's exact
+#: check, so a documented ``limit=3`` rendered 2 — the same defect class the
+#: per-line ruler fixed, confined to long titles.
+SUGGESTION_BLOCK_HEADER = (
+    "<memory_suggestions>\nUntrusted recall candidates; read before relying.\n"
+)
+SUGGESTION_BLOCK_CLOSING = "</memory_suggestions>"
+
+
+def suggestion_block(lines: str) -> str:
+    """The exact text ``lines`` renders as: header, admitted lines, closing.
+
+    ONE authority for the wrapper, for the same reason :func:`suggest_line` is
+    one for the lines: the tail builds the block with this and the admission
+    check in :meth:`MemoryStore.search` measures the block this returns, so the
+    two cannot drift apart on what a candidate costs.
+    """
+    return SUGGESTION_BLOCK_HEADER + lines + SUGGESTION_BLOCK_CLOSING
+
+
+def suggest_line(item: Mapping[str, Any]) -> str:
+    """The single rendered line a suggestion actually costs on the wire.
+
+    ONE authority for this string, for two readers that must agree: the
+    prompt tail (``memory_capture._session_tail``) renders it, and the
+    suggestion budget in :meth:`MemoryStore.search` measures it. Before this
+    existed the budget measured ``_dump(item)`` — the whole candidate record,
+    ~87-90 tokens against the 32-35 the rendered line costs — so the
+    documented ``tokens=180, limit=3`` admitted only TWO candidates and
+    silently crowded out the third relevant fact in every measured fixture.
+    """
+    captured = " (captured)" if item["status"] == "candidate" else ""
+    return f"- memory://{item['scope']}/{item['id']}: {json.dumps(item['title'])}{captured}\n"
+
+
+def _suggestion_key(fact: Mapping[str, Any]) -> str:
+    """Identity of a suggestion by its FACT, not its record.
+
+    Distinct rows often carry one fact: capture writes the same body under
+    slightly different titles ("Mercury deployment", "... corrected", "...
+    again"). Collapsing on the normalized body makes them cost one slot; the
+    title is only the fallback for a body-less row. Normalization is
+    whitespace/case only — a fuzzy match would merge genuinely distinct facts,
+    which is worse than showing two. Explicit ``search`` does NOT collapse
+    (a reader may legitimately want every revision), so this key is only
+    consulted on the suggestion path.
+    """
+    text = str(fact.get("body") or fact.get("title") or "")
+    # ``casefold`` is the normalization that means case-insensitive: it folds
+    # non-ASCII pairs ``lower`` misses (ß vs SS, final sigma). Identical for
+    # ASCII, so this is the correctness of the collapse rule, not a behaviour
+    # change for existing rows.
+    return " ".join(text.casefold().split())
+
+
 def _id() -> str:
     # UUIDv7 layout without depending on Python 3.14 (the supported floor is 3.12).
     bits = (int(time.time() * 1000) << 80) | (7 << 76) | (uuid.uuid4().int & ((1 << 76) - 1))
@@ -487,6 +593,20 @@ class MemoryIdentity:
             except MemoryError:
                 continue
         return result
+
+
+#: The status vocabulary a stored fact may carry. Exported so a READER
+#: (``memory_inspect``) gates the same closed set the writer enforces instead of
+#: restating it: an imported row can hold any string in this column, and the
+#: reader echoes it to the screen. Two spellings of "valid status" is how one
+#: surface ends up showing a value the other refuses.
+FACT_STATUSES = ("active", "candidate", "disputed", "superseded", "expired")
+
+#: The inclusive upper bound on any stored freshness timestamp (year 3000).
+#: Named and exported for the same reason as ``FACT_STATUSES``: the read-only
+#: inspector gates fields with the writer's rule, and a second literal in that
+#: reader is how the two drift apart silently.
+MAX_FACT_TIMESTAMP = 32503680000
 
 
 def validate_fact(raw: Any) -> dict[str, Any]:
@@ -551,14 +671,11 @@ def validate_fact(raw: Any) -> dict[str, Any]:
             raise MemoryError(
                 "Tags/aliases must contain at most 12 short strings (64 characters each)."
             )
-    if (
-        fact["status"] not in ("active", "candidate", "disputed", "superseded", "expired")
-        or type(fact["pinned"]) is not bool
-    ):
+    if fact["status"] not in FACT_STATUSES or type(fact["pinned"]) is not bool:
         raise MemoryError("Invalid memory status or pinned flag.")
     for key in ("verified_at", "expires_at", "created_at", "source_time"):
         x = fact[key]
-        if x is not None and (type(x) not in (int, float) or not 0 <= x <= 32503680000):
+        if x is not None and (type(x) not in (int, float) or not 0 <= x <= MAX_FACT_TIMESTAMP):
             raise MemoryError("Freshness timestamps must be finite Unix seconds or null.")
     source = fact["source"]
     if (
@@ -1505,7 +1622,16 @@ class MemoryStore:
         limit: int = 10,
         suggest: bool = False,
     ) -> list[dict[str, Any]]:
-        guard(query)
+        # ``guard`` is the free-text STORE guard: its own message asks for the value to
+        # be kept as a secret NAME. A recall query is a READ and may legitimately BE a
+        # minted structural reference (see structural_reference), so running the store
+        # guard over it refused a benign identifier lookup with store-oriented advice.
+        # Prose takes the guard below, exactly as before. Nothing is weakened off this
+        # call site: search() persists nothing, and the journal/provider-payload copy of
+        # the same arguments is guarded independently by memory_privacy.retained_arguments,
+        # which fails closed — an admitted query spelling is still never retained.
+        if not structural_reference(query):
+            guard(query)
         if (
             not isinstance(query, str)
             or len(query) > 2048
@@ -1558,6 +1684,17 @@ class MemoryStore:
             ).fetchall()
             result: list[dict[str, Any]] = []
             used = 0
+            # The suggestion budget is the WHOLE emitted block, matching
+            # ``suggestion_block`` byte for byte: header and closing are fixed
+            # costs the renderer pays, so admitting lines up to the full budget
+            # over-commits by the 19-token wrapper and the tail's own exact
+            # check then drops the last admitted line.
+            block = ""
+            # One slot per distinct FACT on the suggestion path, keyed by body.
+            # Two rows carrying the same body are one fact and must charge the
+            # budget once, or they crowd out a distinct matching fact (measured:
+            # 2 entries / 1 fact, the third relevant fact never rendered).
+            seen: set[str] = set()
             # Document frequency is indexed, not an O(bank) Python pass. Ask FTS
             # itself for per-term matches so porter stemming cannot disagree.
             authorized_count = db.execute(
@@ -1589,6 +1726,10 @@ class MemoryStore:
                     coverage = len(hits) / len(terms)
                     if not ((len(hits) >= 2 and coverage >= 0.4) or (specific and coverage >= 0.5)):
                         continue
+                    key = _suggestion_key(fact)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                 item = {
                     "id": row[0],
                     "scope": row[1],
@@ -1605,10 +1746,23 @@ class MemoryStore:
                         verified_at=fact["verified_at"],
                         expires_at=fact["expires_at"],
                     )
-                cost = count_text_tokens(_dump(item))
-                if used + cost <= tokens:
-                    result.append(item)
-                    used += cost
+                # The suggestion budget is a WIRE budget: charge the block the
+                # tail actually renders, not the full candidate record.
+                # ``_dump(item)`` is ~3x the rendered line, which silently made
+                # ``tokens=180, limit=3`` a 2-entry cap on every fixture; and a
+                # per-line charge without the wrapper did the same to long
+                # titles. An explicit search keeps the record-shaped charge,
+                # since that is what a caller receives there.
+                if suggest:
+                    line = suggest_line(item)
+                    if count_text_tokens(suggestion_block(block + line)) <= tokens:
+                        result.append(item)
+                        block += line
+                else:
+                    cost = count_text_tokens(_dump(item))
+                    if used + cost <= tokens:
+                        result.append(item)
+                        used += cost
                 if len(result) >= min(limit, 3 if suggest else limit):
                     break
             return result

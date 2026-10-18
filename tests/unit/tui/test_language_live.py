@@ -82,8 +82,20 @@ def _fr_catalogues(tmp_path: Path) -> Path:
     (root / "en").mkdir(parents=True)
     (root / "fr").mkdir(parents=True)
     real = catalogues.catalogue_root()
-    for namespace in ("tui.welcome", "tui.status"):
+    # "tui.app" rides along: the config-change receipt is a catalogue key now
+    # (slice 9), so a fixture root without it would render the key CODE instead
+    # of the notice text — the extraction moved the literal, and every root that
+    # renders a receipt has to carry the namespace it moved into.
+    for namespace in ("tui.welcome", "tui.status", "tui.app"):
         shutil.copyfile(real / "en" / f"{namespace}.json", root / "en" / f"{namespace}.json")
+    # Marker fr values for the same namespace too: the receipt in THIS test is
+    # built before the move, so it renders en — but a receipt resolved under
+    # the fixture's fr locale must not fall back to a key code either.
+    shipped = json.loads((real / "en" / "tui.app.json").read_text(encoding="utf-8"))
+    (root / "fr" / "tui.app.json").write_text(
+        json.dumps({key: "FR:" + value for key, value in shipped.items()}),
+        encoding="utf-8",
+    )
     (root / "fr" / "tui.status.json").write_text(
         json.dumps(
             {
@@ -232,6 +244,11 @@ async def test_a_change_from_another_process_applies_and_is_announced(
         assert status_line_mod.TUNNEL_PARKED_TEXT == "FR:parked"
         # ...and the announcement names the key that moved.
         notices = [n for n in _notices(app) if "config.yml changed" in n]
+        # EN, not the marker locale: the receipt is built BEFORE the move is
+        # applied (it announces the change in the language in force when it
+        # fires, and the new language governs the next paint). So this asserts
+        # the en bytes of the extracted key, which is the invariant the
+        # extraction must preserve.
         assert notices == ["config.yml changed: applied: language"], notices
 
 

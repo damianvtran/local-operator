@@ -67,6 +67,7 @@ from local_operator.model.speed import (
     FastModeSupport,
     fast_mode_support,
 )
+from local_operator.providers.account_affinity import set_wire_hint
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.failover import ProviderError
 from local_operator.providers.replay import (
@@ -3095,6 +3096,10 @@ class OpenAICompatClient:
                 provider_obj["ignore"] = sorted(request.provider_avoid)
         if provider_obj:
             body["provider"] = provider_obj
+        if self._base_url == "https://api.openai.com/v1" and body.get("prompt_cache_key"):
+            # Legacy public chat caching has no universal guaranteed retention;
+            # compatible gateways do not inherit even this bounded heuristic.
+            set_wire_hint(request, "openai:chat", 300_000, "bounded-heuristic")
         return body
 
     @staticmethod
@@ -3188,6 +3193,26 @@ class OpenAICompatClient:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
 
+    def account_cache_endpoint_mode(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None" = None
+    ) -> str | None:
+        """Selection-time compatibility uses the same decision as the wire.
+
+        Codex is credential-derived and ignores the public API setting; a
+        Responses-capable model can still be explicitly sent through Chat.
+        """
+        if not request.model.supports_prompt_cache or not request.prompt_cache_key:
+            return None
+        if self._codex_responses_mode(oauth_access):
+            return "codex:responses"
+        if self._base_url != "https://api.openai.com/v1":
+            return None
+        return (
+            "openai:responses"
+            if self._public_responses_mode(request, oauth_access)
+            else "openai:chat"
+        )
+
     def _codex_responses_mode(self, oauth_access: "OAuthAccess | None") -> bool:
         """Whether this credential is a ChatGPT subscription OAuth grant."""
         return bool(
@@ -3208,6 +3233,7 @@ class OpenAICompatClient:
         self, request: ChatRequest, *, endpoint: str | None = None, scope: str | None = None
     ) -> dict[str, Any]:
         """Public Responses body using native input items and flat tools."""
+        affinity_request = request
         request = bind_native_context(
             request,
             endpoint or f"{self._base_url}/responses",
@@ -3263,6 +3289,19 @@ class OpenAICompatClient:
                 request.model, endpoint or f"{self._base_url}/responses"
             ):
                 body["prompt_cache_retention"] = "24h"
+        actual_endpoint = endpoint or f"{self._base_url}/responses"
+        if actual_endpoint == "https://api.openai.com/v1/responses" and body.get(
+            "prompt_cache_key"
+        ):
+            modern = _modern_public_cache_defaults(request.model, actual_endpoint)
+            # Public API documentation is not evidence about a compatible
+            # gateway or OAuth. Legacy retention is deliberately a heuristic.
+            set_wire_hint(
+                affinity_request,
+                "openai:responses",
+                1_800_000 if modern or body.get("prompt_cache_retention") == "24h" else 300_000,
+                "documented-default" if modern else "bounded-heuristic",
+            )
         return body
 
     def _build_codex_responses_body(
@@ -3283,6 +3322,10 @@ class OpenAICompatClient:
         body.pop("max_output_tokens", None)
         body.pop("temperature", None)
         body.pop("top_p", None)
+        if body.get("prompt_cache_key"):
+            # Codex has no documented cache lifetime here; this bounded local
+            # lease must never be described as guaranteed OAuth cache retention.
+            set_wire_hint(request, "codex:responses", 300_000, "bounded-heuristic")
         return body
 
     async def stream(
@@ -3978,6 +4021,36 @@ def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
     )
 
 
+def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
+    """Read legal cache marker positions, never nested user/tool JSON fields.
+
+    The builder owns these exact top-level system/tool and message-block
+    markers. Recursing arbitrary inputs could mistake a tool argument named
+    cache_control for provider caching evidence when no marker was emitted.
+    """
+    blocks = []
+    for field in ("system", "tools"):
+        value = body.get(field)
+        if isinstance(value, list):
+            blocks.extend(block for block in value if isinstance(block, dict))
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                blocks.extend(block for block in content if isinstance(block, dict))
+    lifetimes = []
+    for block in blocks:
+        marker = block.get("cache_control")
+        if not isinstance(marker, dict) or marker.get("type") != "ephemeral":
+            continue
+        if marker.get("ttl") in (None, "5m"):
+            lifetimes.append(300_000)
+        elif marker.get("ttl") == "1h":
+            lifetimes.append(3_600_000)
+    return min(lifetimes, default=0)
+
+
 class AnthropicClient:
     """``POST {base}/v1/messages`` streaming.
 
@@ -4345,6 +4418,11 @@ class AnthropicClient:
             if isinstance(block, dict):
                 block["cache_control"] = self._cache_control(ttl)
 
+    def account_cache_endpoint_mode(
+        self, request: ChatRequest, oauth_access: "OAuthAccess | None" = None
+    ) -> str | None:
+        return "anthropic:messages" if self._base_url == ANTHROPIC_API_URL else None
+
     def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         for message in _without_unrenderable_tool_calls(request.messages):
@@ -4538,6 +4616,12 @@ class AnthropicClient:
             body["speed"] = fast.value
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
+        if self._base_url == ANTHROPIC_API_URL:
+            lifetime = _anthropic_cache_marker_ttl_ms(body)
+            if lifetime:
+                # Read actual marker locations shaped above, not a separate
+                # context-size approximation or arbitrary nested tool input.
+                set_wire_hint(request, "anthropic:messages", lifetime, "explicit-wire")
         return body
 
     async def stream(

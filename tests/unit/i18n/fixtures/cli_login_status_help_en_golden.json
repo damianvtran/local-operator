@@ -1,0 +1,4 @@
+{
+  "cli.login_status_help.login_status": "List stored provider credentials and their status",
+  "cli.login_status_help.status_alias": "Alias for login-status: list stored provider credentials"
+}

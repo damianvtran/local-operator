@@ -1,0 +1,27 @@
+{
+  "cli.model_help.model": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'model' argument; flag/command tokens stay in situ"
+  },
+  "cli.model_help.target": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'target' argument; flag/command tokens stay in situ"
+  },
+  "cli.model_help.selector": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the provider/model metavar and example in situ"
+  },
+  "cli.model_help.pid": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'pid' argument; flag/command tokens stay in situ"
+  },
+  "cli.model_help.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'session' argument; flag/command tokens stay in situ"
+  }
+}

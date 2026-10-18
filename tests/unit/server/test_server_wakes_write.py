@@ -90,6 +90,27 @@ def _request_id(n: int) -> str:
     return f"00000000-0000-4000-8000-{n:012d}"
 
 
+def _skill_payload(typed: str) -> str:
+    """A ``$skill`` invocation as a CLIENT sends it: the expanded payload.
+
+    Expansion is the client's duty, so a schedule whose prompt invokes a skill
+    stores and posts the payload — the shape this title is derived from.
+    """
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import parse_invocation, render_invocation
+
+    skill = Skill(
+        name="research",
+        description="research things",
+        file_path=Path("/skills/research/SKILL.md"),
+        base_dir=Path("/skills/research"),
+        source="user",
+    )
+    invocation = parse_invocation(typed, {"research": skill})
+    assert invocation is not None
+    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+
+
 def _snapshot_count(directory: Path) -> int:
     """How many ``wake_schedules`` entries the transcript holds — the write log.
 
@@ -218,6 +239,61 @@ async def test_a_new_scheduled_task_is_one_request_and_one_conversation(desktop)
 
     listing = (await client.get("/v1/desktop/wakes")).json()["result"]
     assert [entry["session_id"] for entry in listing["entries"]] == [session_id]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_prompt_that_is_a_skill_payload_names_the_typed_line(desktop) -> None:
+    """The prompt-derived half of the birth title is a USER ROW (D8).
+
+    A schedule's prompt is sent as the client expanded it, so a ``$skill``
+    invocation arrives here as the payload. Stored raw, the row read "The user
+    invoked the `research` skill…" with the whole SKILL.md body behind it.
+    """
+    from local_operator.resume import session_name
+
+    client, root = desktop
+
+    response = await client.post(
+        "/v1/desktop/wakes",
+        json={
+            "request_id": _request_id(20),
+            "cwd": str(root),
+            "message": _skill_payload("$research the widget market"),
+            "in": "2h",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    directory = root / "sessions" / response.json()["result"]["session_id"]
+    assert session_name(directory) == "$research the widget market"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_wake_title_is_never_read_as_a_row(desktop) -> None:
+    """``user_set`` is the frame's own claim, and it decides which half is read.
+
+    A name the USER typed is stored verbatim; only the fallback derived from a
+    prompt goes through the row rule. Both halves are in this request, so a
+    transform applied to the wrong one fails here.
+    """
+    from local_operator.resume import session_name
+
+    client, root = desktop
+
+    response = await client.post(
+        "/v1/desktop/wakes",
+        json={
+            "request_id": _request_id(21),
+            "cwd": str(root),
+            "message": _skill_payload("$research the widget market"),
+            "title": "Quarterly cleanup",
+            "in": "2h",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    directory = root / "sessions" / response.json()["result"]["session_id"]
+    assert session_name(directory) == "Quarterly cleanup"
 
 
 @pytest.mark.asyncio

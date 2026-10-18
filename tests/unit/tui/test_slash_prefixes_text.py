@@ -122,6 +122,9 @@ PREFIXES_TEXT_POLICY = {
     # The PAGE is the receipt; these take no argument at all, so any trailing
     # text is by definition not theirs.
     "settings": False,
+    # The import vocabulary is the command's own controls, never prose sent to
+    # a model; an inline engage splices-and-runs.
+    "import": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -210,6 +213,9 @@ ARGUMENT_SHAPE_POLICY = {
     "fast": ArgumentShape.WORD,
     "provider": ArgumentShape.WORD,
     "settings": ArgumentShape.WORD,
+    # The import page owns its subcommand vocabulary (`list`, `preview …`,
+    # `run …`, `status`, `cancel`), so a whole-draft `/import …` is the command.
+    "import": ArgumentShape.ANY,
     "search": ArgumentShape.WORD,
     "accounts": ArgumentShape.WORD,
     "usage": ArgumentShape.WORD,

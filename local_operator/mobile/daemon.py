@@ -2424,16 +2424,19 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     return data
 
 
-#: The ops that ANSWER a queued ask (design §2.4). They are answered by id and
-#: OUTLIVE the runtime that queued them — durability is the feature — so a relay
-#: with no live entry must ENGAGE rather than refuse: `ask_respond`/`ask_revise`/
-#: `ask_decline`/`ask_dismiss` all settle a durable question whose reader is the
-#: model, and "session not connected" (the pre-engage answer) left the phone
-#: accepting an answer nobody would ever read.
+#: The ops that settle a queued ask on a session with NO live runtime (design
+#: §2.4). They are answered by id and OUTLIVE the runtime that queued them —
+#: durability is the feature — so a relay with no live entry takes the COLD ARM for
+#: them rather than refusing: `ask_respond`/`ask_revise`/`ask_decline` all settle a
+#: durable question whose reader is the model, and "session not connected" (the
+#: pre-engage answer) left the phone accepting an answer nobody would ever read.
 #:
-#: `ask_dismiss` is deliberately in the set: it injects nothing, but it is still
-#: a view change against the durable log, and a session that cannot be engaged
-#: to record it must say so rather than paint a settled row that never landed.
+#: The COLD ARM is not one behaviour, though, and `ask_dismiss` is why (fork A,
+#: §14). It is in this set because it is still a settle op on the durable log, and it
+#: takes the same arm — the same gates, the same `ask_session_gone` refusal — but
+#: inside it, a dismissal goes to `asks/dismiss.py` and BOOTS NOTHING: it has no
+#: reader, so engaging for it started a session (a boot reconcile, the deadline
+#: notice and a paid turn) behind a button labelled "send no reply".
 _ASK_ANSWER_OPS = ("ask_respond", "ask_revise", "ask_decline", "ask_dismiss")
 
 
@@ -3127,6 +3130,18 @@ class MobileDaemon:
     async def _repaint_stopped_screen(self, session_id: str) -> None:
         """Re-fold one watched stopped screen and push the frame to its subscribers."""
         try:
+            # A RETAINED PAYLOAD PREDATES THE CHANGE THAT ASKED FOR THIS REPAINT, and
+            # the generation fence serves it straight back: for a session whose death
+            # this daemon already captured, ``capture_subagent_details`` answers
+            # ``state.terminal and not terminal`` with the retained frame rather than
+            # a fold — correct for a repaint that is only a re-send, wrong for one
+            # that follows a write, where that frame is the frame from BEFORE the
+            # write. The visibility follower drops the payload for the same reason
+            # before it schedules this repaint; doing it here makes the repaint mean
+            # what its name says for every caller. The generation LEDGER stays (it is
+            # what republishes the fresh fold at the retained epoch, and what a live
+            # owner's next frame advances).
+            self.session_projections.pop(session_id, None)
             # The SSE route's own rule for the ended receipt (U7): a stopped
             # screen is ended iff an ended entry for it exists.
             ended = any(
@@ -4997,6 +5012,47 @@ def build_app(daemon: MobileDaemon):
             },
         )
 
+    async def api_account_routing(request: Request) -> Response:
+        """The authenticated phone may edit ONE non-security routing setting.
+
+        Keep this projection narrow: adding a settings key later requires an
+        explicit server change, never a caller-supplied arbitrary config path.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile.account_routing import (
+            AccountRoutingError,
+            policy_payload,
+        )
+        from local_operator.paths import config_dir
+
+        patch = None
+        if request.method == "PATCH":
+            try:
+                patch = await request.json()
+            except (ValueError, UnicodeDecodeError):
+                from local_operator.i18n.keys import wire_settings_account_policy as _ap
+
+                return JSONResponse(
+                    {
+                        "code": "invalid_setting",
+                        "error": _ap.error_invalid_json().envelope()["text"],
+                    },
+                    status_code=422,
+                )
+        try:
+            payload = await asyncio.to_thread(
+                policy_payload, config_dir(), patch, write=request.method == "PATCH"
+            )
+        except AccountRoutingError as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": str(exc)},
+                status_code=exc.status,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
     async def api_config_events(request: Request) -> Response:
         """SSE for the RESOLVED language: a settings change reaches the phone live.
 
@@ -6202,9 +6258,10 @@ def build_app(daemon: MobileDaemon):
                 # after its runtime exited must ENGAGE that session rather than
                 # refuse: the pre-engage "session not connected" was a queue with
                 # no reader — the phone accepted the answer and no model ever saw
-                # it. `ask_respond`/`ask_revise`/`ask_decline`/`ask_dismiss` all
-                # take this arm; a decline and a dismiss settle the ask just as an
-                # answer does, so they engage too.
+                # it. `ask_respond`/`ask_revise`/`ask_decline` take the DIAL below;
+                # `ask_dismiss` takes the arm and then the no-boot door inside it
+                # (fork A, §14) — it settles the ask without a runtime because it
+                # tells the runtime nothing.
                 #
                 # THE CONDITION IS ``_session_is_live``, THE SAME PREDICATE THE
                 # CARD READS. `entry is None` was too narrow: an entry whose dial
@@ -6231,6 +6288,54 @@ def build_app(daemon: MobileDaemon):
                         {"error": _ask_gone_copy(op), "code": "ask_session_gone"},
                         status_code=409,
                     )
+                if op == "ask_dismiss":
+                    # THE NO-BOOT DISMISSAL (fork A, §14). A dismissal has no reader:
+                    # it is one append plus an index rewrite, decided by the fold.
+                    # The engage arm below would BOOT the conversation for it — and
+                    # that boot's own reconcile would deliver the deadline notice the
+                    # dismissal had not cancelled yet, running a paid turn the card
+                    # promised would not happen ("dismiss — send no reply").
+                    from local_operator.asks.dismiss import dismiss_cold
+
+                    outcome = await dismiss_cold(
+                        config_dir(),
+                        session_id,
+                        str(body.get("ask_id") or ""),
+                        # The phone's body carries no ``by``; the empty word is the
+                        # remote door, which is what ``dismiss_cold`` records for it
+                        # (the same word the live op's own door defaults to).
+                        by=str(body.get("by") or ""),
+                    )
+                    if outcome.get("ok"):
+                        # THE SCREEN IS REPAINTED HERE BECAUSE NOTHING ELSE WILL (UX
+                        # round 1, U1): no runtime means no fold publishing a frame,
+                        # and the dock/chip read ``projection.asks``. The same detail
+                        # the live op answers with, because it IS the same op: only
+                        # the door differs.
+                        #
+                        # IT IS THE DAEMON'S OWN STOPPED-SCREEN REPAINT, not a
+                        # second publish spelling (agent review round 2, M-3/M-4).
+                        # Two properties ride on that reuse and both were missing
+                        # from the spelling this replaced:
+                        #
+                        # * the ENDED RECEIPT. ``_repaint_stopped_screen`` computes
+                        #   ``ended`` from the table the way the SSE route does, and
+                        #   the composer reads ``projection.ended`` — a conversation
+                        #   this daemon has watched die must not come back to life on
+                        #   the phone because a dismissal repainted it;
+                        # * the failure is the PAINT's, not the dismissal's. The
+                        #   dismissal is durable before this line, so a fold that
+                        #   raises is logged and the user is still told what they
+                        #   asked for, rather than served a 422/502 for a settled
+                        #   ask.
+                        await daemon._repaint_stopped_screen(session_id)
+                        return JSONResponse({"ok": True, "detail": "dismissed"})
+                    # ONLY a live owner falls back to the dial, and only because that
+                    # owner settles the ask itself. Every other refusal is the ANSWER
+                    # (an unknown ask, an ask that is not lapsed), and engaging to ask
+                    # a runtime the same question would spend a boot to be told it.
+                    if outcome.get("code") != "ask_owner_present":
+                        raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
                 if not daemon.dial_registrants:
                     raise RuntimeError("observer daemon cannot wake sessions")
                 from local_operator.mobile.attach_client import engage_session_client
@@ -7604,6 +7709,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/models", api_models),
         Route("/api/usage", api_usage),
         Route("/api/config/events", api_config_events),
+        Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),

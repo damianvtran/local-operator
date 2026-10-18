@@ -37,6 +37,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "delivery",
         "extensions",
         "failover",
+        "harness-import",
         "highlights",
         "i18n",
         "image-generation",
@@ -776,6 +777,20 @@ def test_scratchpad_guide_names_the_exported_path_and_the_pad_local_mktemp() -> 
     assert "unset in the user's terminal" in body
 
 
+def test_browser_guide_routes_a_typed_credential_through_secret_ref() -> None:
+    """A literal credential in `type`'s `text` is the incident shape (KOHO
+    analytics QA, 2026-10-16): the guide must name the ref before a model
+    reaches for `text`, and name the manual fallback."""
+    guides = {guide.name: guide for guide in discover_guides()}
+    resolver = make_guide_resolver(guides)
+
+    browser = resolver("guide://browser")
+    assert browser is not None
+    assert "secret_ref" in browser
+    assert "never `text`" in browser
+    assert "sign in by hand" in browser
+
+
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
     guides = {guide.name: guide for guide in discover_guides()}
     resolver = make_guide_resolver(guides)
@@ -899,3 +914,15 @@ def test_a_looping_guide_base_dir_does_not_escape_the_resolver(tmp_path: Path) -
     child = resolver("guide://demo/references")
     assert child is not None and "not found" in child
     assert resolver("guide://demo") is not None
+
+
+def test_harness_import_guide_states_the_safe_preview_first_flow() -> None:
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://harness-import")
+    assert body is not None
+    assert "preview_token" in body
+    assert "confirm=true" in body
+    assert "no default-all" in body.lower()
+    assert "read-only on the other harness" in body
+    assert "Re-run is safe" in body
+    assert "No filesystem path is accepted" in body

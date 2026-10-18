@@ -2447,7 +2447,7 @@ async def test_a_boundary_length_name_keeps_the_row_on_one_line(
         assert page._selectables[page.selected_index] is row
         await pilot.press("space")
         await _settle_preview(pilot)
-        again = page._selectables[page.selected_index]
+        again = await _settled_selected_row(pilot, page)
         assert again.size.height == 1, "the row wrapped once the picture was mounted"
         await pilot.resize_terminal(*other)
         for _ in range(3):
@@ -2460,6 +2460,32 @@ async def _settle_preview(pilot: Any) -> None:
     """Let the reveal's passes and the page's own re-fit all land."""
     for _ in range(10):
         await pilot.pause()
+
+
+async def _settled_selected_row(pilot: Any, page: Any, *, frames: int = 40) -> Any:
+    """The selected row, once its box has been re-measured at its fit.
+
+    WHY THIS EXISTS. ``_settle_preview``'s fixed ten pauses bet that the picture
+    mount's cascade — re-show, deferred refit, and the layout pass that
+    re-measures the re-authored line — completes inside a count of loop turns.
+    Each hop is a message on its own pump, and a loaded shard processes fewer
+    of them per turn: the read landed between the refit and the re-measure and
+    saw the row at its PRE-fit box (measured: a boundary-length name at the
+    60-column frame is four rows before the fit, one after; reproduced
+    deterministically by deferring the refit behind the pause budget). CI job
+    116820540042 hit exactly that read: ``assert 4 == 1`` at this file's :2451.
+    Wait on the fact the assertion reads — the row back on one line — with the
+    frame count kept only as a deadlock backstop, the shape ``_boot`` and the
+    archive suite's ``_await_notice`` already use. The row is re-read every turn
+    because a late re-show replaces the selectables it holds.
+    """
+    row = page._selectables[page.selected_index]
+    for _ in range(frames):
+        if row.size.height == 1:
+            return row
+        await pilot.pause()
+        row = page._selectables[page.selected_index]
+    return row
 
 
 @pytest.mark.asyncio

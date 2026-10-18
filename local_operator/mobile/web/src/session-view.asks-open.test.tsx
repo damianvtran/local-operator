@@ -126,7 +126,8 @@ function projection(patch: Partial<SessionProjection> = {}): SessionProjection {
  *  capability proxy, and only an explicit zero is an answer). */
 function frame(rows: PendingAsk[] | null, extra: Partial<SessionProjection> = {}) {
 	if (rows === null) return projection(extra);
-	const outstanding = rows.filter((r) => r.status === "open" || r.status === "timed_out").length;
+	// Open only: a timed-out ask is settled on the runtime's tally (#2388).
+	const outstanding = rows.filter((r) => r.status === "open").length;
 	return projection({
 		asks: rows.length > 0 ? rows : undefined,
 		asks_open: outstanding,

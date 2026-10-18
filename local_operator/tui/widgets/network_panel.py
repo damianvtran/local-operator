@@ -48,9 +48,13 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.resume import UNNAMED_DEVICE, doctor_detail_words, peer_reason_words
 from local_operator.tui.network_cli import LISTING_TIMEOUT_S, NetworkRun, run_network
 from local_operator.tui.widgets.aside_panel import ASIDE_COPY_KEY
+
+_t = tr("tui.small")
 
 #: The minimum content width a row may be laid out in. The panel is 90% of the
 #: terminal (the shared `.analytics-panel` rule), so this only bites on a very
@@ -766,7 +770,7 @@ class NetworkScreen(ModalScreen[None]):
         """
         width = max(1, self._card_width())
         text = Text(
-            "Mesh networks\n" + "─" * width,
+            _t(_x.network_panel_mesh_networks_heading()) + "─" * width,
             no_wrap=True,
             overflow="crop",
         )
@@ -1031,7 +1035,7 @@ class NetworkScreen(ModalScreen[None]):
         # the frame contradicting itself about the one fact both lines are about.
         # So the pending sentence here is the SAME pending sentence there, and the
         # verdict is said once, by the section that measured it.
-        body.append("  relay: checking…\n", style="dim")
+        body.append(_t(_x.network_panel_relay_checking_indent()), style="dim")
 
     def _repair_lines(self, width: int) -> list[str]:
         """The open credential-repair notices, in the doctor's own words.
@@ -1223,11 +1227,13 @@ class NetworkScreen(ModalScreen[None]):
             # left this row and went to the detail heading — it is protocol
             # vocabulary with no legend here, and the detail view is where a
             # reader who wants it can see it beside the members it counts.
-            fields.append(f"{entry.members} member" + ("" if entry.members == 1 else "s"))
+            fields.append(
+                _t(_x.network_panel_member_count(count=entry.members, shown=str(entry.members)))
+            )
             if entry.trust and entry.trust != "active":
-                fields.append(f"trust {entry.trust}")
+                fields.append(_t(_x.network_panel_trust_field(trust=str(entry.trust))))
             if entry.stale:
-                fields.append("[stale]")
+                fields.append(_t(_x.network_panel_stale_tag()))
             self._row(body, fields, width, lead=f"{cursor} ")
 
     def _detail_section(self, body: Text, width: int) -> None:
@@ -1241,11 +1247,11 @@ class NetworkScreen(ModalScreen[None]):
         suffix = "" if epoch is None else f" · epoch {epoch}"
         self._header(body, f"{label} · members{suffix}")
         if self.detail is None:
-            body.append("  checking…\n", style="dim")
+            body.append(_t(_x.network_panel_checking_indent()), style="dim")
             return
         members = self.detail.get("members_detail")
         if not isinstance(members, list) or not members:
-            body.append("  no members reported\n", style="dim")
+            body.append(_t(_x.network_panel_no_members()), style="dim")
             return
         for member in members:
             if not isinstance(member, dict):
@@ -1257,7 +1263,7 @@ class NetworkScreen(ModalScreen[None]):
             caps = member.get("capabilities") or []
             body.append(f" {', '.join(str(cap) for cap in caps)}")
             if member.get("suspect"):
-                body.append("  [suspect: key may be copied]", style="yellow")
+                body.append(_t(_x.network_panel_suspect_tag()), style="yellow")
             body.append("\n")
 
     def _detail_label(self) -> str:
@@ -1374,7 +1380,7 @@ class NetworkScreen(ModalScreen[None]):
             # the section notes say what they are waiting ON (``checking with the
             # relay…``), and the two lines whose whole subject is the relay do
             # not say its name twice.
-            body.append("  checking…\n", style="dim")
+            body.append(_t(_x.network_panel_checking_indent()), style="dim")
             return
         payload = self.status_run.payload()
         if payload is None:
@@ -1384,9 +1390,11 @@ class NetworkScreen(ModalScreen[None]):
             for line in self.status_run.lines:
                 body.append(f"  {line}\n", style="yellow")
             return
-        body.append(f"  installed:  {'yes' if payload.get('installed') else 'no'}\n")
+        body.append(
+            _t(_x.network_panel_installed_row(value="yes" if payload.get("installed") else "no"))
+        )
         identity = "present" if payload.get("identity_present") else "missing"
-        body.append(f"  identity:   {identity}\n")
+        body.append(_t(_x.network_panel_identity_row(identity=identity)))
         relay = payload.get("relay") or {}
         if payload.get("relay_running"):
             state = "answering" if payload.get("relay_answering") else "NOT answering"
@@ -1400,9 +1408,9 @@ class NetworkScreen(ModalScreen[None]):
             # talking about. Both absent (a payload with neither block) prints the same
             # sentinel on all three surfaces — that shape is shared, not this one's.
             pid = relay.get("pid") or (payload.get("record") or {}).get("pid")
-            body.append(f"  relay:      running, pid {pid} — {state}\n")
+            body.append(_t(_x.network_panel_relay_running(pid=str(pid), state=state)))
         else:
-            body.append("  relay:      not running\n")
+            body.append(_t(_x.network_panel_relay_not_running()))
         # THE AUDIT ROW IS NOT IN THIS BLOCK ANY MORE (design round 4, D46/D47). It was
         # round 3's, painted between ``relay:`` and ``log:`` in the CLI's own order, and
         # it is now the title block's third row: the block is the last thing in a region

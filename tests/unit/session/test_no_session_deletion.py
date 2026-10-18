@@ -72,6 +72,20 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # Dedicated credential-root cache, never a transcript path: path_for hashes
+    # the opaque session id under account-affinity/<auth-db namespace>/*.json.
+    # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
+    # that mkstemp file. Neither operation accepts a session directory/name.
+    (
+        "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
+        "os.replace",
+        "Atomic local cache JSON only; credential-root namespace + hashed id, not sessions/ paths.",
+    ),
+    (
+        "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
+        "os.unlink",
+        "Only the failed sibling mkstemp regular file; never a session or transcript.",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -1641,6 +1655,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "dir_fd-bound FILE unlink",
     ),
+    # The orphan sweep (failure-diagnostic recovery). Both calls unlink a name
+    # that `os.listdir(artifacts_fd)` returned, resolved with
+    # `dir_fd=self._artifacts_fd`: the bundle's OWN `artifacts/` directory,
+    # opened with `_DIR_FLAGS` under the bundle root and confined by openat
+    # semantics. The two admissible shapes are this writer's staging file
+    # (`.artifact.<32 hex>.tmp`) and a 64-hex artifact digest; neither is a
+    # session directory or a transcript, both live one level under
+    # `artifacts/`, and `unlink` cannot remove a directory at all (EISDIR).
+    (
+        "local_operator/evaluation/evidence/store.py"
+        "::EvidenceWriter.discard_unreferenced_artifacts",
+        "os.unlink",
+        "dir_fd-confined to the bundle's artifacts/ dir; names are this writer's "
+        ".artifact.*.tmp staging file or 64-hex artifact digests, never a session "
+        "path, and unlink cannot remove a directory",
+        2,
+    ),
     (
         "local_operator/fork.py::consume_boot_prompt",
         "<path>.unlink",
@@ -2192,6 +2223,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/transcript.py::Transcript.subscribe_admitted_commands.unsubscribe",
         "<path>.remove",
         "list.remove",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_import_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/harness_import/service.py::HarnessImportService._create",
+        "shutil.rmtree",
+        "only a target this call created, with no transcript row committed",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._close_org_chart_view",
@@ -2933,6 +2974,37 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/owned_process.py::retire_owned_job",
         "<path>.unlink",
         "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
+    ),
+    # -- harness_import: private import bookkeeping under <config>/imports ----
+    # These writers are called only with `<config>/imports/{snapshots,...}`,
+    # `<config>/imports/.lock`, and the target session's OWN sidecars
+    # (`harness-import.json`, `title.json`, `created_at.json`). None accepts a
+    # session ID or a caller-supplied path, so none can name a directory or
+    # transcript under `sessions/`.
+    (
+        "local_operator/harness_import/store.py::atomic_write_text",
+        "os.replace",
+        "Atomic temp->target replace for import manifests/index/instruction review only",
+    ),
+    (
+        "local_operator/harness_import/store.py::atomic_write_text",
+        "os.unlink",
+        "Cleans its own same-directory temp file after replace or on failure",
+    ),
+    (
+        "local_operator/harness_import/store.py::sqlite_snapshot",
+        "shutil.rmtree",
+        "Deletes only the private <config>/imports/snapshots/<hash>/ copy it created",
+    ),
+    (
+        "local_operator/harness_import/store.py::ImportLock.acquire",
+        "<path>.unlink",
+        "Removes the stale <config>/imports/.lock file before re-creating it",
+    ),
+    (
+        "local_operator/harness_import/store.py::ImportLock.release",
+        "<path>.unlink",
+        "Removes the same <config>/imports/.lock file this process created",
     ),
 )
 

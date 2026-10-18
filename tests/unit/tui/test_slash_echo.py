@@ -115,6 +115,9 @@ ECHO_POLICY = {
     # replaces the transcript region, so a user row printed behind it would
     # only be readable after leaving. It takes no argument at all.
     "settings": False,
+    # The PAGE is the receipt; its preview/import controls do the writing, and
+    # nothing typed after `/import` reaches the model.
+    "import": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -233,6 +236,8 @@ PROMPT_POLICY = {
     # replaces the transcript region, so a user row printed behind it would
     # only be readable after leaving. It takes no argument at all.
     "settings": False,
+    # The argument is a subcommand/source/id selection, never a prompt.
+    "import": False,
     "sidebar": False,
     "search": False,
     "accounts": False,

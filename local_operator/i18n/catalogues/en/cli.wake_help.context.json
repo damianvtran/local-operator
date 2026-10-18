@@ -1,0 +1,87 @@
+{
+  "cli.wake_help.wake": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the `wake` command's one-liner; the supervisor concept stays as-is"
+  },
+  "cli.wake_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the shared --json wording (three sites in this block share the key because the text is identical)"
+  },
+  "cli.wake_help.status_install": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status_install' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.status_uninstall": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status_uninstall' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.install": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'install' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.create": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.create_session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_session' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.create_when": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "duration/clock-time examples in situ; quoted forms stay"
+  },
+  "cli.wake_help.create_message": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the {max} placeholder is the shared MAX_WAKE_MESSAGE_CHARS cap, passed as str() so EN output stays byte-identical to the f-string it replaces"
+  },
+  "cli.wake_help.create_every": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "DURATION metavar and quoted examples in situ"
+  },
+  "cli.wake_help.create_until": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "time bounds; quoted examples in situ"
+  },
+  "cli.wake_help.create_limit": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create_limit' argument; flag/command tokens stay in situ"
+  },
+  "cli.wake_help.create_notify": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "default-quiet semantics; the contract reference stays"
+  },
+  "cli.wake_help.serve": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the LaunchAgent reference stays (product machinery name)"
+  },
+  "cli.wake_help.serve_once": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'serve_once' argument; flag/command tokens stay in situ"
+  }
+}

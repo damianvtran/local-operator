@@ -321,6 +321,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
     "local_operator/logger.py": (1, "the process log at the store root"),
+    "local_operator/tools/harness_import_tool.py": (
+        1,
+        "``TOOL_NAME`` (``harness_import``) is the model-facing registry key, "
+        "not a path or an entry of a session directory; the tool reads foreign "
+        "stores through the import adapters and writes transcripts through the "
+        "session store, so it owns no copy-set filename.",
+    ),
+    "local_operator/harness_import/manifest.py": (
+        1,
+        "``INDEX_NAME`` ('index.json') is the O(1) already-imported cache under "
+        "``<config>/imports/``, a machine-local build aid beside the source "
+        "manifests — never an entry of a session directory. ``MANIFEST_NAME`` "
+        "itself is classified in ``COPY_SET_NAMES``.",
+    ),
     "local_operator/agent_profiles.py": (
         3,
         "``SEED_NOTICES_NAME`` (``.seed-notices.json``) and ``SEED_SYNC_LOCK_NAME`` "

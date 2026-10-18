@@ -1,0 +1,47 @@
+{
+  "cli.config_help.config": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'config' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.open": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'open' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.edit": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'edit' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.edit_key": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'edit_key' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.edit_value": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'edit_value' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'list' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.create": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'create' argument; flag/command tokens stay in situ"
+  },
+  "cli.config_help.instructions": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "paths-and-sizes promise; in situ"
+  },
+  "cli.config_help.instructions_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "the long-form description for the command's own --help"
+  }
+}

@@ -1894,7 +1894,8 @@ class SessionHandle(Protocol):
     # ask_decline(ask_id, by="") -> str: the explicit "no answer, decide
     #   yourself" (today's Esc). Optional, same shape.
     # ask_dismiss(ask_id, by="") -> str: view-only removal of a TIMED-OUT ask;
-    #   injects nothing. Optional, same shape.
+    #   asks the model nothing (it can still deliver the deadline notice that ask
+    #   never got — design §14). Optional, same shape.
     # receive_peer_message(text, *, mode="mailbox", wake=False, sender=None)
     #   -> str: deliver a message from another local lop session (`lop send`).
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
@@ -6533,6 +6534,7 @@ class RuntimeServer:
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
+                AsideAdoptRefused,
                 AsideUnanswered,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
@@ -6546,6 +6548,7 @@ class RuntimeServer:
             if isinstance(
                 exc,
                 (
+                    AsideAdoptRefused,
                     AsideUnanswered,
                     AttachmentUnavailable,
                     AudioInputUnsupported,
@@ -6589,6 +6592,9 @@ class RuntimeServer:
                 # so the only thing that may ride along is a value the class
                 # enumerates. Absent, the far side composes the generic sentence,
                 # which is what an older peer's frame reads as anyway.
+                frame["error_reason"] = exc.reason
+            if isinstance(exc, AsideAdoptRefused) and exc.reason:
+                # The same closed-set token carriage as ``ForkRefused`` above.
                 frame["error_reason"] = exc.reason
             if isinstance(exc, AudioInputUnsupported):
                 # THE REFUSAL'S FACTS, AS THEIR OWN FIELDS rather than prose

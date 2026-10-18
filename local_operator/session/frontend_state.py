@@ -1012,6 +1012,10 @@ _FRONTEND_LOCAL_SLASHES = {
     # user is not sitting at — the same rule `/model default` states explicitly
     # when it refuses to run on a follower.
     "settings",
+    # Reads THIS machine's foreign source stores and writes THIS machine's
+    # config/session root; a follower routed here would inspect and import on
+    # the owner's host instead. Same rule `/settings` states for config.yml.
+    "import",
     "provider",
     "search",
     "accounts",
@@ -3468,11 +3472,11 @@ class FrontendSessionState(BaseModel):
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     #: The session's queued asks, newest first with the OPEN ones in front, and
-    #: how many of them are still OUTSTANDING — ``open`` or ``timed_out`` and
-    #: still answerable late (design §2.2; the rule lives in
-    #: ``asks.store.OUTSTANDING_STATUSES``). It is NOT "open asks": a timed-out
-    #: ask the user can still answer still counts, which is exactly the state a
-    #: queue of nothing but timed-out asks is in.
+    #: how many of them are still OUTSTANDING — ``open`` asks, the ones still
+    #: waiting on the user (the rule lives in ``asks.store.OUTSTANDING_STATUSES``).
+    #: A ``timed_out`` ask is settled (#2388): its row rides ``asks`` as a
+    #: dismissible receipt, but the tally does not count it, so a queue of
+    #: nothing but timed-out asks publishes rows beside ``asks_open: 0``.
     #:
     #: PRESENCE IS THE CAPABILITY PROXY (design §4/N2, and the UI contract's own
     #: rule, amended by the WIRE FIX): a client may take "``asks`` OR
@@ -4343,7 +4347,7 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #:   the ellipsis is the only signal that anything is missing.
 #:
 #: So the rule here, and the constraint a later editor must keep: on the
-#: ANSWERING surface a bound may bound the NUMBER of things carried, never the
+#: ANSWERING surface a bound may bound the NUMBER of asks carried, never the
 #: LENGTH of a field the user must read or act on. A truncated LIST is
 #: recoverable — ``dropped`` marks it (``asks_truncated`` on the wire), the true
 #: count still rides (``asks_open``), and the aggregate routes
@@ -4359,13 +4363,24 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 #: notice, and the TUI picker keeps its labels whole instead of cutting them
 #: (``ask_picker._labels_must_all_fit``). Neither is this surface.
 #:
-#: The counts below are that bound, and a review finding is why they exist
-#: rather than symmetry: with only a byte budget the FIRST row was exempt from
-#: it, so one ask carrying a hundred questions could spend the whole frame by
-#: itself. An ask is put to a human one screen at a time, so the wire carries a
-#: screenful and ``dropped`` says when it could not.
-ASK_WIRE_QUESTIONS_MAX = 12
-ASK_WIRE_OPTIONS_MAX = 10
+#: The same rule one level up: A BOUND MAY DROP WHOLE ROWS, NEVER PART OF ONE.
+#: An ask is answered atomically — ``AskQueue.respond`` refuses an answer that
+#: leaves any question out (``_partial_answer_error``) — so a row missing a
+#: question is a row nobody can submit, and a row missing an option is a choice
+#: the reader never saw. Earlier revisions capped each row at 12 questions and
+#: 10 options; a live 16-question ask then rendered 12, the card answered those
+#: 12, and the queue refused every submit ("every question must be answered at
+#: once: … has no entry"). A row-level drop is recoverable (``dropped`` /
+#: ``asks_truncated``, and the aggregate routes carry the rest); a partial row
+#: is not. What bounds the BYTES of one huge head row is the frame, not this
+#: function, and each route has its own backstop. On the attach snapshot,
+#: ``_yield_asks_when_the_frame_has_no_room`` drops the asks field (with
+#: ``asks_open``) and says so. On the delta route nothing yields the field
+#: alone: ``fit_frame_for_wire`` → ``relay_frame_or_degraded`` sheds the WHOLE
+#: ``frontend_update`` body — every other change in that delta with it — as a
+#: sequenced ``degraded`` placeholder, and the viewer re-syncs. Either way the
+#: ask stays answerable through the aggregate ``GET /v1/desktop/asks``.
+#:
 #: The ask field's text budget, and the allowance for the TAIL only. Spent in the
 #: fold's own order (open first) so the rows that survive are the ones a user
 #: must answer; a row that would push the field past it is left out WHOLE
@@ -4389,21 +4404,20 @@ def bound_ask_rows(
     for jobs ("a bound placed only at the snapshot boundary holds for the first
     frame and leaks on every one after it").
 
-    TEXT IS NOT CUT (see the constants above for the measured corruption that
-    clipping caused): the bounds drop whole QUESTIONS past
-    ``ASK_WIRE_QUESTIONS_MAX``, whole OPTIONS past ``ASK_WIRE_OPTIONS_MAX`` and
-    whole ROWS past the budget, so every string a surface shows — and the label
-    an answer records — is the string the model wrote. A bound removes a whole
-    unit or nothing; it never trims a field the reader or the answer needs.
+    NOTHING INSIDE A ROW IS CUT (see the comment block above for the measured
+    corruption that clipping text, and capping question counts, caused): the
+    bound drops whole ROWS past the budget and nothing else, so every question,
+    every option and every string a surface shows — and the label an answer
+    records — is what the model wrote, and the ask a surface shows is one it
+    can submit.
 
-    The FIRST row always survives, bounded only in its question and option
-    COUNTS, and it does NOT spend the tail's allowance: it is the ask the user
-    must answer, so charging its bytes into the budget would leave the field
-    already over and drop every later row — an over-budget head ask silently
-    taking the tail asks off the wire is the opposite of what the exemption is
-    for (review round 1, MAJOR-1). ``dropped`` says whether anything was left
-    out, so a client can be told the list is a prefix instead of inferring it
-    from a count.
+    The FIRST row always survives whole, and it does NOT spend the tail's
+    allowance: it is the ask the user must answer, so charging its bytes into
+    the budget would leave the field already over and drop every later row — an
+    over-budget head ask silently taking the tail asks off the wire is the
+    opposite of what the exemption is for (review round 1, MAJOR-1).
+    ``dropped`` says whether anything was left out, so a client can be told the
+    list is a prefix instead of inferring it from a count.
     """
     if not isinstance(rows, list):
         return [], False
@@ -4414,18 +4428,14 @@ def bound_ask_rows(
         if not isinstance(row, dict):
             continue
         raw_questions = [q for q in (row.get("questions") or []) if isinstance(q, dict)]
-        if len(raw_questions) > ASK_WIRE_QUESTIONS_MAX:
-            dropped = True
         questions: list[dict[str, Any]] = []
         charge = 0
-        for question in raw_questions[:ASK_WIRE_QUESTIONS_MAX]:
+        for question in raw_questions:
             raw_options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
-            if len(raw_options) > ASK_WIRE_OPTIONS_MAX:
-                dropped = True
             # ``dict(option)`` rather than a rebuilt pair: the whole option rides,
             # and any key a later schema adds rides with it instead of being
             # dropped by a two-key reconstruction.
-            options = [dict(option) for option in raw_options[:ASK_WIRE_OPTIONS_MAX]]
+            options = [dict(option) for option in raw_options]
             questions.append({**question, "options": options})
             charge += len(str(question.get("question") or ""))
             charge += sum(
@@ -4477,7 +4487,7 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
     snapshot["asks"] = kept
     if dropped:
         # ``asks_open`` keeps its meaning (how many of the session's asks are
-        # still OUTSTANDING — open or timed out and answerable); this says the
+        # still OUTSTANDING — the open ones, #2388); this says the
         # frame could not carry every row. Present only when true, so absence
         # reads as "nothing was dropped" — the additive-defaulted shape the rest
         # of this payload uses. The catalogue's ``model_catalogue_truncated`` is
@@ -7086,6 +7096,53 @@ class FrontendStateStore:
         )
         if payload is not None:
             state = state.model_copy(update={"spend_channels": payload})
+        # OCCUPANCY IS RECONCILED HERE FOR THE SAME REASON THE MONEY ABOVE IS.
+        # The checkpoint is written at a turn end, and a headless host between
+        # turns is exactly the case it lags: the runtime keeps serving (and the
+        # pane keeps painting) receipts that the journal has not yet taken, so
+        # restoring the row's ``context_tokens`` verbatim starts the runtime on a
+        # reading the conversation has already passed. The desktop host's adopt
+        # edge re-materializes the pair before it serves a frame
+        # (``runtime/serving.py``), but every other headless host constructs the
+        # store HERE, and the first frame it publishes must not disagree with
+        # the journal's own newest receipt. ``_replayed_context_change`` is the
+        # one rule both replay sites already share: an equal or absent receipt
+        # moves nothing (a settled post-compaction estimate stands), a different
+        # one is a newer call and wins.
+        restore = getattr(session, "restored_usage", None)
+        usage = restore() if callable(restore) else None
+        if isinstance(usage, Usage):
+            # THE PAIR MOVES TOGETHER, AND ONLY WHEN THE RECEIPT CARRIES A
+            # READING. ``refresh_restored_usage`` is the sibling seam and it
+            # republishes ``last_usage`` beside the occupancy: an advanced
+            # ``context_tokens`` beside the checkpoint's older receipt would
+            # state one reading two ways, and the next replay compares those two
+            # fields against each other (review round 1, R1-1).
+            #
+            # The receipt is replaced ONLY in that case. A wire that reported
+            # input/output and no context number says nothing about occupancy,
+            # so the shared rule's answer is ``{}`` — and installing its receipt
+            # anyway would blank the pair AND disarm the equal-receipt guard: the
+            # next replay would see a different receipt and revert a settled
+            # post-compaction estimate (review round 2, R2-1).
+            #
+            # AND ONLY WHEN THE CHECKPOINT HAS A PAIR TO MOVE. A row written
+            # before the pair existed restores ``last_usage: None`` and the
+            # serving host RE-MATERIALIZES it at adopt (``refresh_frontend_usage``,
+            # pinned by ``test_serving``'s "restored checkpoint must lack the
+            # pair"); installing one here would take that seam's job and change
+            # the first-frame contract other hosts assert. The numerator still
+            # advances — it is the count the conversation actually has.
+            changes = _replayed_context_change(state, usage.context_tokens)
+            if changes and state.last_usage is not None:
+                # Through the wire form and back, as every other writer of this
+                # field does: ``model_copy`` does not validate, so the receipt
+                # has to be a ``FrontendUsage`` rather than the dump itself
+                # (``_seed_cold_usage``'s own comment).
+                changes["last_usage"] = FrontendUsage.model_validate(
+                    _usage_with_decode_window(usage)
+                )
+            state = state.model_copy(update=changes)
         return cls(state)
 
     @staticmethod
@@ -9189,15 +9246,14 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     frontend state, the projection and the list rows cannot disagree about which
     asks are OUTSTANDING.
 
-    THE TALLY IS OUTSTANDING, NOT ``open`` — this is the fix for a queue whose
-    asks have all timed out: it used to fold to ``0`` (and, with no rows left in
-    the tally's own eye, could read as absence) while the ask bar still offered
-    the asks and a late answer still reached the agent. An ask is outstanding
-    while the user can still act on it — ``open`` OR ``timed_out``-and-unanswered
-    — and SETTLED once answered, declined or dismissed (design §2.2, the spec's
-    item 3). The statuses live in ONE place (``asks.store.OUTSTANDING_STATUSES``)
-    precisely because four surfaces read this rule; see that constant for why a
-    second spelling is what produced the wrong count here.
+    THE TALLY IS THE OUTSTANDING SET, which is ``open`` alone: an ask settles
+    once the agent is told — by its deadline (``timed_out``, #2388) or by an
+    answer — and a settled row still rides the rows (a timed-out one as a
+    dismissible receipt) without being counted. The queue still attributes a
+    late answer, but no surface offers one (D10). The statuses live in ONE
+    place (``asks.store.OUTSTANDING_STATUSES``) precisely because four surfaces
+    read this rule; see that constant for why a second spelling is what
+    produced a wrong count here.
 
     Returns ABSENCE — ``None`` — for the ROWS whenever they are not there, and
     the TALLY is the capability signal: a live queue with nothing to fold returns

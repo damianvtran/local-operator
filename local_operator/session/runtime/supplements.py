@@ -804,6 +804,10 @@ class SupplementRunner:
             )
             components = await self._store(outcome.components)
             error = outcome.error if not components else ""
+            # The cause describes the TERMINAL failure exactly as ``error`` does: with blocks
+            # kept the row settles ``done``, and both are cleared together (round-1 review
+            # R2 -- a done row carried ``cause`` while its ``error`` had been cleared).
+            cause = outcome.cause if not components else ""
             state = "failed" if error else "done"
 
             def build_final(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
@@ -833,6 +837,12 @@ class SupplementRunner:
                     # reported here, never as ``error`` on a ``done`` row (memo §2.5 as
                     # amended; round-1 R7).
                     final["detail"] = list(outcome.detail)
+                if cause:
+                    # The typed cause of a provider-terminal failure: the allowlisted
+                    # ``provider_<kind>`` vocabulary only (``generator.failure_kind``), never
+                    # provider prose (secret-safety rule). Cleared with the error on a
+                    # components-kept row (round-1 review R2).
+                    final["cause"] = cause
                 return final
 
             final = await self._commit_row(
@@ -927,7 +937,10 @@ class SupplementRunner:
         resolve_tier = getattr(self._session, "_resolve_subagent_model", None)
         if callable(resolve_tier):
             try:
-                tier = resolve_tier("task", "hi")
+                # The tier's MODEL only: this is not a delegated role, and its
+                # per-turn token cap counts reasoning, so a ``hi`` tier's
+                # ``max`` effort must not ride along (#2428).
+                tier = resolve_tier("task", "hi", apply_tier_effort=False)
             except Exception:  # noqa: BLE001 -- a bad tier is not a failed job
                 logger.debug("supplements: hi tier could not be resolved", exc_info=True)
         return generator.resolve_design_model(

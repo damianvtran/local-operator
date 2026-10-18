@@ -1,9 +1,9 @@
 """A LAPSED ask on the TUI: collapsed behind a status word, read-only, never opened.
 
 Decisions D10-D12 (ask-lapsed retention record, 2026-10-15). An ask whose
-deadline fired (the fold's ``timed_out``) is still OUTSTANDING to the store — a
-late answer through chat is still accepted and the wire's ``asks_open`` still
-counts it — but no surface OFFERS an answer any more: Ben's words were "it's
+deadline fired (the fold's ``timed_out``) is settled to the store since #2388 —
+``asks_open`` no longer counts it — though a late answer through chat is still
+accepted. No surface OFFERS an answer to it any more: Ben's words were "it's
 expired… we don't need to allow people to see and focus it".
 
 So on the TUI a lapsed row reads the way a DECLINED row already reads: one
@@ -65,9 +65,10 @@ async def _settle(pilot, turns: int = 3) -> None:
 # -- the store's one predicate ------------------------------------------------
 
 
-async def test_the_lapsed_set_is_timed_out_alone_and_a_subset_of_outstanding():
-    """D10: ``is_lapsed`` sits beside ``is_outstanding`` and never widens the tally."""
-    assert store.LAPSED_STATUSES <= store.OUTSTANDING_STATUSES
+async def test_the_lapsed_set_is_timed_out_alone_and_disjoint_from_outstanding():
+    """D10, #2388: a lapsed ask is settled by its deadline — shown, dismissible,
+    and never counted in the outstanding tally."""
+    assert store.LAPSED_STATUSES.isdisjoint(store.OUTSTANDING_STATUSES)
     assert store.is_lapsed(store.STATUS_TIMED_OUT)
     for status in (
         store.STATUS_OPEN,
@@ -257,10 +258,10 @@ async def test_a_card_mounted_from_the_list_returns_to_the_list_after_lapse(enab
 
 
 async def test_read_queue_calls_a_lapsed_only_frame_settled():
-    """D12: the tally counts lapsed rows, so it must not read as a hidden pending ask."""
+    """D12: a pre-#2388 tally counts lapsed rows, so it must not read as a hidden ask."""
     t0 = 1_000_000
     # Two rows published, both lapsed: no outstanding ``created_at`` to name, and the
-    # wire tally is 2 because ``asks_open`` still counts timed-out asks.
+    # wire tally is 2 as a runtime from before #2388 counts timed-out asks.
     assert (
         read_queue(published=2, outstanding_created_ms=[], tally=2, opened_at_ms=t0, lapsed=2)
         is QueueReading.SETTLED
