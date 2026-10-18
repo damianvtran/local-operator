@@ -1,0 +1,7 @@
+{
+  "cli.memory_help.memory": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'memory' argument; flag/command tokens stay in situ"
+  }
+}

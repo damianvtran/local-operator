@@ -1,0 +1,12 @@
+{
+  "cli.logout_help.logout": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'logout' argument; flag/command tokens stay in situ"
+  },
+  "cli.logout_help.provider": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'provider' argument; flag/command tokens stay in situ"
+  }
+}
