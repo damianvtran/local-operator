@@ -41,6 +41,11 @@ REASON_CLASSES = frozenset(
         "media_failed",
         "media_rate_limited",
         "media_unavailable",
+        # The audio tools' own failure word (frozen server contract v1): a
+        # COMPLETED status carrying ``error_type: "audio_failed"`` is the
+        # audio lane's failure shape, branched on as a pair — never on the
+        # status alone.
+        "audio_failed",
         "unknown",
     }
 )

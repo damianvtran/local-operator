@@ -64,12 +64,15 @@ class ArtifactKind(StrEnum):
 
     ``video`` is DECLARED, not built (media wave-2): the kind is the
     designated additive field for a future payload and the seam-proof test
-    exercises the walk against it today. Only kinds with a real rung set are
+    exercises the walk against it today. ``audio`` is BUILT by the audio lane
+    (voiceover / sound effects): one artifact per job, an ``AudioAsset``
+    carrying the kind's own extra facts. Only kinds with a real rung set are
     ever EMITTED on a wire.
     """
 
     IMAGE = "image"
     VIDEO = "video"
+    AUDIO = "audio"
 
 
 #: One rung's outcome in an executor attempt. ``skipped`` is not "not

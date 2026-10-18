@@ -289,6 +289,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
     # shows an estimated figure when the response carries usage.
     "generate_image": 931,
+    # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
+    # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
+    # what it costs, the estimate rules and the honest cancel paragraphs.
+    # The wire description carries one sentence; this holds the rest. Both
+    # audio entries were measured by this test's own printed table (the
+    # ``count_text_tokens`` ledger path) in the canonical arm.
+    "generate_sound_effect": 431,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -299,6 +306,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # same fact twice); re-measured deliberately, and it is the ONLY entry
     # this remediation moved.
     "generate_video": 790,
+    # NEW (sound-generation wave, 2026-10-17): the ``generate_voiceover`` doc
+    # — the three rungs and the failover rule, cost and estimates, the
+    # language-on-flash limit (no pronunciation dictionaries), MP3-only and
+    # the honest cancel paragraphs.
+    "generate_voiceover": 628,
     "glob": 87,
     "grep": 333,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
