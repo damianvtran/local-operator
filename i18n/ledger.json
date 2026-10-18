@@ -2223,6 +2223,101 @@
       },
       "status": "passed",
       "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "clean terminal; no findings. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "clean terminal; no findings. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "clean terminal; no findings. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "one MINOR (detail_status) fixed by the implementer after audit; no re-audit required. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "clean terminal; no findings. Independent audit: 61 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
     }
   ]
 }
