@@ -1,0 +1,62 @@
+{
+  "cli.hub_shared_help.publish_yes": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared agents/teams push --yes/-y: skips confirmation prompts but does not accept unresolved preview values. Preserve --accept-unresolved as the separate explicit consent flag."
+  },
+  "cli.hub_shared_help.publish_preview_only": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared push --preview-only prints a diff without publishing. Preserve exit 2 specifically when the preview would generalize a value."
+  },
+  "cli.hub_shared_help.publish_json": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared push --json preview includes reference values and a single-use commit pin; preserve the warning that this machine-readable output is sensitive."
+  },
+  "cli.hub_shared_help.publish_accept_unresolved": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared push --accept-unresolved explicitly acknowledges all unclassifiable preview values and publishes those values unchanged; preserve the consent meaning."
+  },
+  "cli.hub_shared_help.publish_allow_internal_ops": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared push --allow-internal-ops consents to an organization-publish allowance; requires the literal --org flag and displays consent text interactively."
+  },
+  "cli.hub_shared_help.sync_check": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --check is report-only and must not change anything."
+  },
+  "cli.hub_shared_help.sync_prefer": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --prefer chooses the winner only for conflicting sections changed on both sides. Command choices local/remote remain parser tokens, not translated prose."
+  },
+  "cli.hub_shared_help.sync_accept_unknown_baseline": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --accept-unknown-baseline applies hub additions when ancestry is unknown without removing the local copy contents. Preserve the no-loss promise."
+  },
+  "cli.hub_shared_help.sync_replace": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --replace discards the local copy for the hub version; keep strong DISCARD emphasis and the literal --yes requirement."
+  },
+  "cli.hub_shared_help.sync_yes": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --yes confirms the destructive --replace operation; preserve the flag token."
+  },
+  "cli.hub_shared_help.sync_dry_run": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --dry-run reports prospective changes and writes no agent rows; preserve this no-write promise for both callers."
+  },
+  "cli.hub_shared_help.sync_json": {
+    "role": "shared agents/teams CLI flag help",
+    "tone": "terse, operator-facing, preserves safety and consent distinctions",
+    "note": "Shared sync --json emits the report as JSON; JSON is a format name."
+  }
+}

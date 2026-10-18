@@ -67,6 +67,7 @@ from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_hub_shared_help as _hs
 from local_operator.i18n.keys import cli_install_help as _in
 from local_operator.i18n.keys import cli_login_help as _li
 from local_operator.i18n.keys import cli_login_status_help as _ls
@@ -10046,35 +10047,37 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     satisfied, so it never needs refusing.
     """
 
+    # These helpers are also called independently of build_cli_parser: resolve
+    # its read-only pre-startup locale on every call, not from cached/global EN.
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+    help_locale = resolve_help_locale()
+
     parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
-        help="Skip the confirmation prompts; does not accept unresolved values "
-        "(use --accept-unresolved for those)",
+        help=_hs.publish_yes().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--preview-only",
         action="store_true",
-        help="Run the preview and print the diff without publishing (exit 2 when it "
-        "would generalize something)",
+        help=_hs.publish_preview_only().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Machine-readable preview output; it carries the reference values and the "
-        "single-use commit pin, so treat it as sensitive",
+        help=_hs.publish_json().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--accept-unresolved",
         action="store_true",
-        help="Acknowledge every value the preview could not classify, publishing " "them as-is",
+        help=_hs.publish_accept_unresolved().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--allow-internal-ops",
         action="store_true",
-        help="Consent to the internal-operations allowance for an organization publish "
-        "(requires --org; shows the consent text interactively)",
+        help=_hs.publish_allow_internal_ops().envelope(locale=help_locale)["text"],
     )
 
 
@@ -10086,30 +10089,42 @@ def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
     a side wholesale, and neither is reachable from auto-update.
     """
 
+    # These helpers are also called independently of build_cli_parser: resolve
+    # its read-only pre-startup locale on every call, not from cached/global EN.
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+    help_locale = resolve_help_locale()
+
     parser.add_argument(
-        "--check", action="store_true", help="Only report what is available; change nothing"
+        "--check", action="store_true", help=_hs.sync_check().envelope(locale=help_locale)["text"]
     )
     parser.add_argument(
         "--prefer",
         choices=("local", "remote"),
         default=None,
-        help="Decide a conflict: keep your side or take the hub's for the sections both changed",
+        help=_hs.sync_prefer().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--accept-unknown-baseline",
         action="store_true",
-        help="Apply when the baseline is unknown: hub additions are taken, nothing of yours goes",
+        help=_hs.sync_accept_unknown_baseline().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--replace",
         action="store_true",
-        help="DISCARD your copy for the hub's (echoes what it discarded; needs --yes)",
+        help=_hs.sync_replace().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--yes", action="store_true", help="Confirm --replace")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Show what would change; write no agent rows"
+        "--yes", action="store_true", help=_hs.sync_yes().envelope(locale=help_locale)["text"]
     )
-    parser.add_argument("--json", action="store_true", help="Emit the report as JSON")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_hs.sync_dry_run().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--json", action="store_true", help=_hs.sync_json().envelope(locale=help_locale)["text"]
+    )
 
 
 def _prepare_sync_flags(args: argparse.Namespace) -> str | None:

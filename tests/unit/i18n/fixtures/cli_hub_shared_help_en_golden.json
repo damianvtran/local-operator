@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "Skip the confirmation prompts; does not accept unresolved values (use --accept-unresolved for those)",
+  "cli.hub_shared_help.publish_preview_only": "Run the preview and print the diff without publishing (exit 2 when it would generalize something)",
+  "cli.hub_shared_help.publish_json": "Machine-readable preview output; it carries the reference values and the single-use commit pin, so treat it as sensitive",
+  "cli.hub_shared_help.publish_accept_unresolved": "Acknowledge every value the preview could not classify, publishing them as-is",
+  "cli.hub_shared_help.publish_allow_internal_ops": "Consent to the internal-operations allowance for an organization publish (requires --org; shows the consent text interactively)",
+  "cli.hub_shared_help.sync_check": "Only report what is available; change nothing",
+  "cli.hub_shared_help.sync_prefer": "Decide a conflict: keep your side or take the hub's for the sections both changed",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "Apply when the baseline is unknown: hub additions are taken, nothing of yours goes",
+  "cli.hub_shared_help.sync_replace": "DISCARD your copy for the hub's (echoes what it discarded; needs --yes)",
+  "cli.hub_shared_help.sync_yes": "Confirm --replace",
+  "cli.hub_shared_help.sync_dry_run": "Show what would change; write no agent rows",
+  "cli.hub_shared_help.sync_json": "Emit the report as JSON"
+}
