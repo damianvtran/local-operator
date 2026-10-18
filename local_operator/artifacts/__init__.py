@@ -184,7 +184,11 @@ class JobAttempt:
     ``reason_class`` is a small closed token (see
     :data:`local_operator.artifacts.errors.REASON_CLASSES`) so consumers can
     group failures without parsing prose; ``message`` is the human-facing
-    sentence.
+    sentence. ``error_type`` is the WIRE's own structured code when the
+    provider sent one, which a surface branches on instead of the retryability
+    class — the audio contract's ``audio_rate_limited`` arriving on a
+    ``transient`` failure is the case that made the two distinct (a 429 is
+    retryable AND a quota-ish signal, and a card must say which).
     """
 
     route: str
@@ -192,6 +196,7 @@ class JobAttempt:
     reason_class: str = ""
     message: str = ""
     status_code: int | None = None
+    error_type: str | None = None
 
 
 @dataclass(frozen=True)

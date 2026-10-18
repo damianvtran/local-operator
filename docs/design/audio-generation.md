@@ -70,12 +70,22 @@ remedy instead of failing later.
   **sha256 is verified before the bytes are attached and a mismatch fails
   closed** (the payload is discarded and the rung fails, with the cascade's
   standard fail-forward).
-- Cancellation: `POST /tools/audio/cancel` — best-effort by contract. The
-  receipt reports the server's own `cancellation.vendor_stopped`:
-  `true` = the vendor was stopped, nothing further generated, the request is
-  not charged; `false` (the expected answer once a vendor is running — there
-  is no cancel API behind it) = the work may complete and may be charged.
-  Nothing ever promises a guaranteed stop.
+- Cancellation (settled contract, security round 1): **a guaranteed stop only
+  while QUEUED.** `POST /tools/audio/cancel` answers
+  `CANCELLED` + `cancellation.vendor_stopped:true` before the provider was
+  called → nothing is charged, and the receipt may say so. Once the job is
+  RUNNING it answers `CANCELLED` + `vendor_stopped:false` +
+  `reason:"provider_has_no_cancel_api"` → the generation continues and is
+  charged if it produces audio. A repeat cancel of a queued-cancelled job is
+  idempotent (200, `vendor_stopped:true`); a completed/failed job refuses with
+  **409 `audio_already_completed`**. Nothing claims a guaranteed stop.
+- Admission bound (HTTP 429, code `audio_rate_limited`, no `Retry-After`): a
+  SUBMIT refusal happens before a job row exists, so it is retried with
+  bounded backoff (2, 4, 8 s; four attempts) and surfaced as
+  `reason_class="transient"` with `error_type="audio_rate_limited"` and the
+  server's sentence. An ADMITTED job that hits a vendor rate limit settles
+  `COMPLETED` + `error_type:"audio_rate_limited"` with zero cost — never
+  retried automatically; a resubmit is the caller's decision.
 
 ## 4. Cost rules
 
@@ -128,14 +138,32 @@ its no-waveform state.
 
 ## 6. Cancellation honesty (all paths)
 
-- Radient: the server's answer, quoted (see §3). `vendor_stopped` absent →
-  "the server did not report whether the vendor stopped", which still says
-  the work may bill — a receipt never invents an outcome.
+- Radient: the server's answer, quoted (see §3). `vendor_stopped:true` is the
+  one branch allowed to promise "you will not be charged"; `false` says the
+  provider has no cancellation endpoint and the generation continues; absent
+  says the server did not report whether the provider was called, which still
+  says the work may bill — a receipt never invents an outcome.
 - BYOK: there is no server-side job; the harness stopped waiting, and the
   receipt says the user's provider may still bill for work already delivered.
-- `already_completed`: not a failure; the surfaces' frozen
+- `already_completed` (409): not a failure; the surfaces' frozen
   `media_already_completed` pair rides `details` so the card renders "already
   finished" rather than an error.
+
+**The settle poll (a running stop is not an answer).** Because a refused
+mid-flight cancel leaves the job running, the tool starts ONE bounded
+observation when the server did not stop it: `audiogen.settle` polls
+`GET /tools/audio/status` every 3 s for up to 120 s, on the SESSION's
+background task set (`ToolContext.spawn_background`, cancelled by `dispose`).
+No new job system, no wake schedule, no blocking of the turn. The status read
+alone carries a late charge (`settled:true`, billed cost) and lands as a
+ledger REVISION of the cancel row (`rev 1`, `billed`/`server_reported`); the
+artifact is a bonus — when the result read and the sha256-verified download
+succeed it is registered through the same `cache_media` path and its digest
+rides an `audio_settle_v1` bookkeeping transcript row (via
+`Session.journal_audio_settle`). If nothing terminal is observed inside the
+bound the row says "settlement not observed" and no amount is invented. A
+process death stops the observation only: the server's settlement is
+authoritative and the audit gap is the same one a killed tool call leaves.
 
 ## 7. BYOK voicing (one map, two callers)
 

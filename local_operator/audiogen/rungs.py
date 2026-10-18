@@ -57,8 +57,8 @@ import contextlib
 import hashlib
 import logging
 import time
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -87,6 +87,7 @@ from local_operator.stt.errors import api_error_from_httpx_response
 
 __all__ = [
     "AudioCancelReceipt",
+    "SettlementFacts",
     "CancelReceipt",
     "best_effort_cancel",
     "cancel_receipt_text",
@@ -107,6 +108,24 @@ RADIENT_AUDIO_SOUND_EFFECTS_PATH = "/tools/audio/sound-effects"
 RADIENT_AUDIO_STATUS_PATH = "/tools/audio/status"
 RADIENT_AUDIO_RESULT_PATH = "/tools/audio/result"
 RADIENT_AUDIO_CANCEL_PATH = "/tools/audio/cancel"
+
+#: How many times the SUBMIT may be attempted when the server answers the
+#: admission bound (HTTP 429, ``audio_rate_limited``). The contract calls this
+#: refusal retryable-on-purpose: it happens before a job row exists, so nothing
+#: is charged, and a burst of retries is what the bound itself is protecting
+#: against — hence the small cap rather than an unbounded loop.
+SUBMIT_MAX_ATTEMPTS = 4
+#: The backoff before each retry (2, 4, 8; a fourth refusal is surfaced).
+#: Capped at 30 s by the contract; the values never reach it.
+SUBMIT_BACKOFF_S = (2.0, 4.0, 8.0, 16.0)
+#: The server's fixed sentence for the admission bound (there is no
+#: ``Retry-After`` header to read — the contract says so explicitly).
+AUDIO_RATE_LIMITED_SENTENCE = "Audio generation is busy right now. Wait a moment and try again."
+
+#: Injected sleeper for the submit backoff. Module-level so a unit test can
+#: bind a recorder and never pay the wall clock — the same seam the rung's
+#: ``pause`` uses for its polls.
+_submit_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 #: The terminal vocabulary the contract defines. A status outside it is an
 #: unreadable payload (``invalid_response``) rather than an infinite poll loop:
@@ -262,6 +281,79 @@ def _is_transient_api_error(exc: APIError) -> bool:
     if isinstance(exc.code, str) and exc.code in _TRANSIENT_API_CODES:
         return True
     return exc.status_code in _TRANSIENT_STATUS_CODES
+
+
+def _is_admission_refusal(exc: APIError) -> bool:
+    """Whether this submit failure is the admission bound (retryable) — nothing else.
+
+    Two spellings count: the HTTP status (429) and the contract's code
+    (``audio_rate_limited``) in either the parsed ``code`` or the details map.
+    A 429 from an INTERMEDIARY would not be safe to retry blindly, so the code
+    is what decides when it is present; the bare status is the fallback for a
+    deployment whose body is not JSON.
+    """
+    if exc.code == "audio_rate_limited":
+        return True
+    if exc.details.get("error_type") == "audio_rate_limited":
+        return True
+    return exc.status_code == 429
+
+
+def _rate_limited_error(exc: APIError) -> APIError:
+    """The surfaced failure for an exhausted admission retry.
+
+    ``reason_class`` (the ``code``) is ``transient``: a busy process is a
+    retry-later condition, never a balance or credential signal. The wire's
+    ``error_type`` rides the details so a surface can say which refusal it was,
+    and the message is the server's own sentence when it sent one.
+    """
+    message = str(exc).strip() or AUDIO_RATE_LIMITED_SENTENCE
+    return APIError(
+        message,
+        status_code=exc.status_code or 429,
+        code="transient",
+        details={"error_type": "audio_rate_limited"},
+    )
+
+
+async def _submit_with_backoff(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    body: dict[str, Any],
+    credential: str,
+) -> dict[str, Any]:
+    """POST the submit, retrying ONLY the admission-bound refusal.
+
+    Why retry this one and nothing else: the contract states a refused submit
+    leaves no job row and no quote, so a retry cannot double-queue or
+    double-bill; every other submit error fails straight through (the comment
+    on ``_request_json`` is the general rule, and this is its one sanctioned
+    exception, spelled by the server). Backoff is bounded and the sleeper is
+    injectable so tests never sleep.
+    """
+    last: APIError | None = None
+    for attempt in range(SUBMIT_MAX_ATTEMPTS):
+        try:
+            return await _request_json(
+                client,
+                "POST",
+                url,
+                label="Radient",
+                timeout_s=HTTP_TIMEOUT_SUBMIT_S,
+                secrets=(credential,),
+                headers=_bearer_headers(credential),
+                json=body,
+            )
+        except APIError as exc:
+            if not _is_admission_refusal(exc):
+                raise
+            last = exc
+            if attempt >= SUBMIT_MAX_ATTEMPTS - 1:
+                break
+            await _submit_sleep(SUBMIT_BACKOFF_S[min(attempt, len(SUBMIT_BACKOFF_S) - 1)])
+    assert last is not None
+    raise _rate_limited_error(last)
 
 
 async def _request_json(
@@ -461,15 +553,11 @@ async def run_radient(
         else sound_effect_request_body(spec)
     )
     async with _client_scope(client) as http:
-        submit = await _request_json(
+        submit = await _submit_with_backoff(
             http,
-            "POST",
             f"{base}{submit_path}",
-            label="Radient",
-            timeout_s=HTTP_TIMEOUT_SUBMIT_S,
-            secrets=(credential,),
-            headers=_bearer_headers(credential),
-            json=body,
+            body=body,
+            credential=credential,
         )
         request_id = _as_str(submit.get("request_id"))
         if request_id is None:
@@ -587,54 +675,11 @@ async def run_radient(
         if isinstance(result_voicing, dict):
             voicing = result_voicing
 
-        audio = result_payload.get("audio")
-        if not isinstance(audio, dict):
-            raise APIError(
-                "Radient's result carried no audio block.",
-                status_code=None,
-                code="invalid_response",
-            )
-        url = _as_str(audio.get("url"))
-        if url is None:
-            raise APIError(
-                "Radient's audio block carried no url.",
-                status_code=None,
-                code="invalid_response",
-            )
-        asset = await download_asset(
-            url,
-            client=http,
-            fallback_content_type=_as_str(audio.get("content_type")),
+        audio_asset = await _download_audio_asset(
+            result_payload.get("audio"), http=http, voicing_notes=voicing
         )
-        expected_sha = _as_str(audio.get("sha256"))
-        if expected_sha:
-            digest = hashlib.sha256(asset.data).hexdigest()
-            if digest.lower() != expected_sha.lower():
-                # Fail closed: bytes that fail their own digest are never
-                # attached. The rung fails and the cascade fails forward per
-                # its contract; the message says exactly what happened.
-                raise APIError(
-                    "The downloaded audio failed its sha256 verification and was discarded.",
-                    status_code=None,
-                    code="invalid_response",
-                )
         return RungResult(
-            assets=[
-                AudioAsset(
-                    data=asset.data,
-                    content_type=asset.content_type,
-                    source_url=url,
-                    duration_s=_as_float(audio.get("duration_seconds")),
-                    format=_as_str(audio.get("format")),
-                    sample_rate_hz=_as_int(audio.get("sample_rate_hz")),
-                    channels=_as_int(audio.get("channels")),
-                    bitrate_kbps=_as_int(audio.get("bitrate_kbps")),
-                    provider_model_id=_as_str(audio.get("provider_model_id")),
-                    expires_at=str(audio.get("expires_at")) if audio.get("expires_at") else None,
-                    sha256=expected_sha,
-                    voicing_notes=voicing,
-                )
-            ],
+            assets=[audio_asset],
             model=model_id or "radient",
             generation_id=request_id,
             cost_usd=(cost or {}).get("amount_usd"),
@@ -643,6 +688,168 @@ async def run_radient(
             cost_provenance=_cost_provenance(cost_path, cost) if cost is not None else None,
             usage_record_id=usage_record_id,
         )
+
+
+async def _download_audio_asset(
+    audio: Any, *, http: httpx.AsyncClient, voicing_notes: dict[str, Any] | None = None
+) -> AudioAsset:
+    """Download, verify and shape the result's ``audio`` block. Fails closed.
+
+    One path for the rung's own result read and the post-cancel settlement
+    fetch, so a late-settled artifact is verified and shaped exactly like a
+    first-class one. Bytes that fail their own sha256 are NEVER returned: the
+    caller fails the rung (or the settlement records a settlement without an
+    artifact) rather than attach something the server cannot vouch for.
+    """
+    if not isinstance(audio, dict):
+        raise APIError(
+            "Radient's result carried no audio block.",
+            status_code=None,
+            code="invalid_response",
+        )
+    url = _as_str(audio.get("url"))
+    if url is None:
+        raise APIError(
+            "Radient's audio block carried no url.",
+            status_code=None,
+            code="invalid_response",
+        )
+    downloaded = await download_asset(
+        url,
+        client=http,
+        fallback_content_type=_as_str(audio.get("content_type")),
+    )
+    expected_sha = _as_str(audio.get("sha256"))
+    if expected_sha:
+        digest = hashlib.sha256(downloaded.data).hexdigest()
+        if digest.lower() != expected_sha.lower():
+            raise APIError(
+                "The downloaded audio failed its sha256 verification and was discarded.",
+                status_code=None,
+                code="invalid_response",
+            )
+    return AudioAsset(
+        data=downloaded.data,
+        content_type=downloaded.content_type,
+        source_url=url,
+        duration_s=_as_float(audio.get("duration_seconds")),
+        format=_as_str(audio.get("format")),
+        sample_rate_hz=_as_int(audio.get("sample_rate_hz")),
+        channels=_as_int(audio.get("channels")),
+        bitrate_kbps=_as_int(audio.get("bitrate_kbps")),
+        provider_model_id=_as_str(audio.get("provider_model_id")),
+        expires_at=str(audio.get("expires_at")) if audio.get("expires_at") else None,
+        sha256=expected_sha,
+        voicing_notes=voicing_notes,
+    )
+
+
+@dataclass(frozen=True)
+class SettlementFacts:
+    """What one status/result read says about a job that refused cancellation.
+
+    ``terminal`` is the ONLY gate on recording money: the contract states that
+    the STATUS read alone carries a late charge (``settled: true`` + billed
+    cost), so the artifact below is a bonus, never a precondition. ``asset`` is
+    ``None`` when the job has not finished, failed, or its bytes could not be
+    vouched for; ``asset_error`` then says why, without inventing a charge.
+    """
+
+    status: str
+    terminal: bool
+    cost_usd: float | None = None
+    billing_basis: str | None = None
+    usage_record_id: str | None = None
+    error_type: str | None = None
+    message: str = ""
+    asset: AudioAsset | None = None
+    asset_error: str = ""
+
+
+async def fetch_radient_settlement(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    credential: str,
+    request_id: str,
+) -> SettlementFacts:
+    """One bounded observation of a Radient audio job (status, then result).
+
+    Read-only and idempotent throughout: this is what the post-cancel poll
+    calls every few seconds, so it must never submit, cancel or mutate. A
+    failure to fetch the artifact does NOT hide a settled charge — the status
+    read's cost is returned even when the result or the download fails.
+    """
+    base = base_url.rstrip("/")
+    status_payload = await _request_json(
+        client,
+        "GET",
+        f"{base}{RADIENT_AUDIO_STATUS_PATH}",
+        label="Radient",
+        timeout_s=HTTP_TIMEOUT_POLL_S,
+        secrets=(credential,),
+        transient_retries=1,
+        headers=_bearer_headers(credential),
+        params={"request_id": request_id},
+    )
+    status = (status_payload.get("status") or "").upper()
+    if status not in RADIENT_TERMINAL_STATUSES:
+        return SettlementFacts(status=status, terminal=False)
+    failure = _audio_failure(status_payload)
+    cost = _cost_from_payload(status_payload)
+    facts = SettlementFacts(
+        status=status,
+        terminal=True,
+        cost_usd=(cost or {}).get("amount_usd"),
+        billing_basis=(cost or {}).get("basis"),
+        usage_record_id=_as_str(status_payload.get("usage_record_id"))
+        or (cost or {}).get("usage_record_id"),
+        error_type=failure.code if failure is not None else None,
+        message=str(failure) if failure is not None else "",
+    )
+    if failure is not None:
+        return facts
+    try:
+        result_payload = await _request_json(
+            client,
+            "GET",
+            f"{base}{RADIENT_AUDIO_RESULT_PATH}",
+            label="Radient",
+            timeout_s=HTTP_TIMEOUT_RESULT_S,
+            secrets=(credential,),
+            transient_retries=1,
+            headers=_bearer_headers(credential),
+            params={"request_id": request_id},
+        )
+        result_failure = _audio_failure(result_payload)
+        if result_failure is not None:
+            return replace(
+                facts,
+                error_type=result_failure.code,
+                message=str(result_failure),
+            )
+        result_cost = _cost_from_payload(result_payload)
+        voicing = (
+            result_payload.get("voicing")
+            if isinstance(result_payload.get("voicing"), dict)
+            else None
+        )
+        asset = await _download_audio_asset(
+            result_payload.get("audio"), http=client, voicing_notes=voicing
+        )
+    except APIError as exc:
+        return replace(facts, asset_error=str(exc), error_type=facts.error_type or exc.code)
+    return replace(
+        facts,
+        cost_usd=(
+            (result_cost or {}).get("amount_usd") if result_cost is not None else facts.cost_usd
+        ),
+        billing_basis=(
+            (result_cost or {}).get("basis") if result_cost is not None else facts.billing_basis
+        ),
+        usage_record_id=(result_cost or {}).get("usage_record_id") or facts.usage_record_id,
+        asset=asset,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -964,6 +1171,11 @@ class AudioCancelReceipt:
     outcome: str
     vendor_stopped: bool | None = None
     detail: str = ""
+    #: The server's structured reason (``cancellation.reason``), e.g.
+    #: ``provider_has_no_cancel_api``. Read for the receipt's honesty: the
+    #: "will be charged if it produces audio" sentence belongs to THAT reason,
+    #: not to every unstopped cancel.
+    reason: str = ""
 
 
 #: The closed cancel-outcome tokens (mirrors the image lane's set).
@@ -998,65 +1210,91 @@ BYOK_CANCEL_NOTE = (
     "stopped waiting, but your provider may still bill for work already delivered"
 )
 
-#: The server-said sentences. ``vendor_stopped: true`` means the vendor was
-#: stopped before completing, so nothing further is charged for this request;
-#: ``false`` is the contract's honest expectation once a vendor is running.
+#: The server-said sentences (settled contract, security round 1). A cancel is
+#: a GUARANTEED STOP only while the job is still queued: ``vendor_stopped:
+#: true`` means the provider was never called, so the request is not charged.
+#: Once a job is running the vendor has no cancel endpoint at all
+#: (``reason: "provider_has_no_cancel_api"``) and the generation continues.
 VENDOR_STOPPED_TRUE = (
-    "the server reports the vendor was stopped before completing — nothing further "
-    "will be generated, and this request is not charged"
+    "the generation was stopped before the provider was called; you will not be charged"
 )
 VENDOR_STOPPED_FALSE = (
-    "the server reports the vendor could NOT be stopped — the work may still complete "
-    "upstream and may still be charged (cancellation is best-effort; no guaranteed stop)"
+    "the provider has no cancellation endpoint; the generation continues and will be "
+    "charged if it produces audio"
 )
 VENDOR_STOPPED_UNKNOWN = (
-    "the server did not report whether the vendor stopped — a request already running "
-    "may still complete and may still be charged (cancellation is best-effort)"
+    "the server did not report whether the provider was called — a request already "
+    "running may still complete and be charged if it produces audio"
 )
 
+#: The sentence for a running job whose settlement is being watched. Appended
+#: only when the tool actually started the bounded poll — a receipt must not
+#: promise a check that is not happening.
+SETTLEMENT_WATCH_NOTE = "Checking for settlement."
 
-def cancel_receipt_text(receipt: AudioCancelReceipt, *, byok: bool = False) -> str:
+
+def cancel_receipt_text(
+    receipt: AudioCancelReceipt, *, byok: bool = False, settling: bool = False
+) -> str:
     """The one receipt sentence for a cancel, from what actually happened.
 
-    ``byok`` marks a cancel of a direct provider call: the harness stopped
-    waiting, the vendor cannot be cancelled, and the user may still be billed —
-    stated plainly rather than promised away. A Radient receipt says what the
-    SERVER said (``vendor_stopped``), including the expected
-    ``false`` — never a claim of a guaranteed stop.
+    The settled contract draws one line that the prose must not blur: a queued
+    job can be stopped for certain (nothing was charged), a RUNNING job cannot
+    (the provider has no cancel endpoint, and the work is charged if it
+    produces audio). ``byok`` marks a direct provider call, where the harness
+    stops waiting but the user's provider may still bill. ``settling`` is true
+    only when the bounded settle poll was actually started, so the receipt can
+    say a check is happening without promising an outcome.
     """
     if byok:
-        return f"Cancelled — {BYOK_CANCEL_NOTE}."
+        return f"Stop requested — {BYOK_CANCEL_NOTE}."
     phrase = _CANCEL_PHRASES.get(receipt.outcome, receipt.outcome)
     if receipt.outcome == "cancelled":
         if receipt.vendor_stopped is True:
             return f"Cancelled: {VENDOR_STOPPED_TRUE}."
         if receipt.vendor_stopped is False:
-            return f"Cancelled: {VENDOR_STOPPED_FALSE}."
-        return f"Cancelled: {VENDOR_STOPPED_UNKNOWN}."
+            text = f"Stop requested: {VENDOR_STOPPED_FALSE}."
+            return f"{text} {SETTLEMENT_WATCH_NOTE}" if settling else text
+        text = f"Stop requested: {VENDOR_STOPPED_UNKNOWN}."
+        return f"{text} {SETTLEMENT_WATCH_NOTE}" if settling else text
     return f"Not cancelled — {phrase}."
 
 
-def _parse_cancel_body(response: httpx.Response) -> tuple[str, bool | None]:
-    """``(token, vendor_stopped)`` from a cancel response, tolerantly.
+def _parse_cancel_body(response: httpx.Response) -> tuple[str, bool | None, str]:
+    """``(token, vendor_stopped, reason)`` from a cancel response, tolerantly.
 
     The settled vocabulary is a small closed set spelled in a JSON field or a
     body depending on the deployment; a body neither reads nor parses just
     fails the marker test and the HTTP status decides. ``vendor_stopped`` is
-    read only when the payload genuinely carries a bool.
+    read only when the payload genuinely carries a bool; ``reason`` is the
+    server's own word (``provider_has_no_cancel_api`` today) and is surfaced
+    for the receipt rather than parsed into behaviour.
     """
     vendor_stopped: bool | None = None
+    reason = ""
     try:
         payload = response.json()
     except ValueError:
         payload = None
     if isinstance(payload, dict):
         cancellation = payload.get("cancellation")
-        if isinstance(cancellation, dict) and isinstance(cancellation.get("vendor_stopped"), bool):
-            vendor_stopped = cancellation["vendor_stopped"]
-        token = payload.get("status") or payload.get("state") or payload.get("result")
+        if isinstance(cancellation, dict):
+            if isinstance(cancellation.get("vendor_stopped"), bool):
+                vendor_stopped = cancellation["vendor_stopped"]
+            raw_reason = cancellation.get("reason")
+            if isinstance(raw_reason, str):
+                reason = raw_reason.strip()
+        token = (
+            payload.get("status")
+            or payload.get("state")
+            or payload.get("result")
+            # A 409 body carries the CODE, not a status word (settled
+            # contract): ``{"code": "audio_already_completed"}``.
+            or payload.get("code")
+        )
         if isinstance(token, str):
-            return token.upper(), vendor_stopped
-    return (response.text or "").upper(), vendor_stopped
+            return token.upper(), vendor_stopped, reason
+    return (response.text or "").upper(), vendor_stopped, reason
 
 
 async def best_effort_cancel(handle: CancelHandle | None) -> AudioCancelReceipt:
@@ -1101,13 +1339,22 @@ async def best_effort_cancel(handle: CancelHandle | None) -> AudioCancelReceipt:
             return AudioCancelReceipt(outcome="failed")
         if response.status_code == 404:
             return AudioCancelReceipt(outcome="not_found")
-        token, vendor_stopped = _parse_cancel_body(response)
-        if "ALREADY_COMPLETED" in token:
-            return AudioCancelReceipt(outcome="already_completed", vendor_stopped=vendor_stopped)
+        token, vendor_stopped, reason = _parse_cancel_body(response)
+        # The settled contract spells a completed/failed job's refusal as 409
+        # ``audio_already_completed``, not a 200 status word — and a status
+        # word spelled ALREADY_COMPLETED is still honoured (older deployments).
+        if response.status_code == 409 or "ALREADY_COMPLETED" in token:
+            return AudioCancelReceipt(
+                outcome="already_completed", vendor_stopped=vendor_stopped, reason=reason
+            )
         if 200 <= response.status_code < 300:
-            return AudioCancelReceipt(outcome="cancelled", vendor_stopped=vendor_stopped)
+            return AudioCancelReceipt(
+                outcome="cancelled", vendor_stopped=vendor_stopped, reason=reason
+            )
         if "CANCELLED" in token:
-            return AudioCancelReceipt(outcome="cancelled", vendor_stopped=vendor_stopped)
+            return AudioCancelReceipt(
+                outcome="cancelled", vendor_stopped=vendor_stopped, reason=reason
+            )
         return AudioCancelReceipt(outcome="failed")
 
     async def _guarded() -> AudioCancelReceipt:

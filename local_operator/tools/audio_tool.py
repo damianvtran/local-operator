@@ -349,11 +349,76 @@ def _unavailable_text(exc: AudioGenerationUnavailable, handle: audio_rungs.Cance
     return text
 
 
+def _spawn_settlement(
+    context: ToolContext | None,
+    spec: AudioJobSpec,
+    handle: audio_rungs.CancelHandle,
+    receipt: audio_rungs.AudioCancelReceipt,
+) -> bool:
+    """Start the bounded settle poll for a stop that cannot be guaranteed.
+
+    The contract's line: a QUEUED job stops for certain (``vendor_stopped:
+    true``) and is never charged; a RUNNING one keeps going and is charged if
+    it produces audio, and a timeout/failed cancel tells us nothing. For those
+    cases the session owns one bounded observation (``audiogen.settle``) so the
+    late charge lands in the ledger and a paid artifact does not vanish.
+
+    Returns True only when the task was actually started, because the receipt's
+    "Checking for settlement." sentence must never describe a check that is not
+    happening. A host with no session (a library caller, a test) returns False
+    and the receipt stays exactly as honest, just shorter.
+    """
+    if receipt.outcome in {"none", "not_found", "already_completed"}:
+        return False
+    if receipt.outcome == "cancelled" and receipt.vendor_stopped is True:
+        return False
+    if handle.provider != AudioRoute.RADIENT:
+        return False
+    if not handle.request_id or not handle.base_url or handle.credential is None:
+        return False
+    spawn = getattr(context, "spawn_background", None) if context is not None else None
+    if not callable(spawn):
+        return False
+    from local_operator.audiogen.settle import settle_cancelled_audio
+    from local_operator.session.channel_spend import new_record_id
+
+    payload = {
+        "request_id": handle.request_id,
+        "base_url": handle.base_url,
+        "credential": handle.credential.get_secret_value(),
+        "provider": str(handle.provider),
+        "model": str(handle.model or ""),
+        # The SAME deterministic id the cancel row used, so a settled charge
+        # supersedes that row instead of appearing as a second one.
+        "record_id": new_record_id("audio", handle.request_id),
+        "rev": 0,
+        # The same count and unit the cancel row carried, so the settled
+        # revision means the same thing as the row it supersedes.
+        "units": _spend_units(spec)[0],
+        "unit": _spend_units(spec)[1],
+    }
+    journal = context.journal_audio_settle if context is not None else None
+    record_spend = context.record_channel_spend if context is not None else None
+    try:
+        spawn(
+            settle_cancelled_audio(
+                payload,
+                record_spend=record_spend,
+                journal=journal,
+            )
+        )
+        return True
+    except Exception:  # noqa: BLE001 - a failed spawn must not fail the cancel
+        logger.debug("audio settlement task could not be started", exc_info=True)
+        return False
+
+
 async def _cancel_receipt(
     spec: AudioJobSpec,
     handle: audio_rungs.CancelHandle,
     progress: ProgressFn | None,
     active: dict[str, str | None],
+    context: ToolContext | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """The honest receipt for a stopped generation, and its ``details``.
 
@@ -362,15 +427,20 @@ async def _cancel_receipt(
     and its receipt says the harness stopped waiting while the provider may
     still bill — never that something was cancelled server-side.
     """
-    _emit_cancel_stage(progress, spec, handle, "cancelling", "Cancelling the generation…")
+    _emit_cancel_stage(progress, spec, handle, "cancelling", "Stopping the generation…")
     receipt = await audio_rungs.best_effort_cancel(handle)
     byok = handle.provider is None and active.get("route") in ("elevenlabs", "openai")
-    text = audio_rungs.cancel_receipt_text(receipt, byok=byok)
+    settling = _spawn_settlement(context, spec, handle, receipt)
+    text = audio_rungs.cancel_receipt_text(receipt, byok=byok, settling=settling)
     _emit_cancel_stage(progress, spec, handle, "cancelled", text)
     details: dict[str, Any] = {
         "cancel_handle": _cancel_handle_details(handle),
         "stage": "cancelled",
+        "settling": settling,
+        "vendor_stopped": receipt.vendor_stopped,
     }
+    if receipt.reason:
+        details["cancel_reason"] = receipt.reason
     if receipt.outcome == "already_completed":
         # The cancel conflict is NOT a failure: the surfaces' frozen branch
         # renders it as "already finished" off this pair (the media
@@ -481,7 +551,7 @@ async def _execute_audio(
             emit=progress,
         )
     except AudioGenerationCancelled:
-        text, details = await _cancel_receipt(spec, handle, progress, active)
+        text, details = await _cancel_receipt(spec, handle, progress, active, context)
         _record_audio_channel(
             context,
             spec=spec,
@@ -511,7 +581,7 @@ async def _execute_audio(
         # never raises and never masks the cancellation — a second stop
         # abandons it. The terminal updates go through the guarded emitter
         # for the same reason.
-        await _cancel_receipt(spec, handle, progress, active)
+        await _cancel_receipt(spec, handle, progress, active, context)
         _record_audio_channel(
             context,
             spec=spec,
@@ -548,8 +618,15 @@ async def _execute_audio(
             "attempts": _attempt_list(exc.attempts),
             "error": str(exc).strip() or text,
             # The last attempt's classification is the walk's final word;
-            # ``attempts`` beside it carries the full story.
-            "error_type": exc.attempts[-1].reason_class if exc.attempts else None,
+            # ``attempts`` beside it carries the full story. The provider's own
+            # structured code wins over the retryability class when it sent
+            # one (the contract's ``audio_rate_limited`` on a ``transient``
+            # failure is exactly that case).
+            "error_type": (
+                (exc.attempts[-1].error_type or exc.attempts[-1].reason_class)
+                if exc.attempts
+                else None
+            ),
         }
         if handle.request_id:
             details["request_id"] = handle.request_id

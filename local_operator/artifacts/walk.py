@@ -42,7 +42,7 @@ from local_operator.artifacts import (
     JobOutcome,
     JobSpec,
 )
-from local_operator.artifacts.errors import failure_reason_class
+from local_operator.artifacts.errors import error_type_of, failure_reason_class
 from local_operator.artifacts.progress import (
     ProgressFn,
     emit_progress,
@@ -265,6 +265,7 @@ async def run_job_walk(
         except Exception as exc:  # noqa: BLE001 - every rung failure fails forward
             reason_class = failure_reason_class(exc)
             message = attempt_message(exc)
+            error_type = error_type_of(exc)
             attempts.append(
                 JobAttempt(
                     route=route,
@@ -272,6 +273,9 @@ async def run_job_walk(
                     reason_class=reason_class,
                     message=message,
                     status_code=status_code_of(exc),
+                    # The provider's own token, when it sent one: a surface
+                    # branches on this, not on the retryability class.
+                    error_type=error_type,
                 )
             )
             emit_rung_failure(
@@ -280,7 +284,7 @@ async def run_job_walk(
                 labels=labels,
                 tool=tool,
                 message=message,
-                error_type=reason_class,
+                error_type=error_type or reason_class,
                 num_images=spec.count,
             )
             continue
