@@ -128,6 +128,9 @@ PREFIXES_TEXT_POLICY = {
     # /review is a TUI-only page with no argument vocabulary; trailing text is
     # never a model prompt.
     "review": False,
+    # `/schedule` is the same shape: the page's n/e/d keys are its own, and a
+    # sentence after the command word is a message rather than its argument.
+    "schedule": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -221,6 +224,9 @@ ARGUMENT_SHAPE_POLICY = {
     "import": ArgumentShape.ANY,
     # /review takes no arguments (ArgumentMode.NONE).
     "review": ArgumentShape.NONE,
+    # NONE, `/review`'s class: the page takes no trailing text (its own keys
+    # create, edit and cancel), and the handler drops any argument typed.
+    "schedule": ArgumentShape.NONE,
     "search": ArgumentShape.WORD,
     "accounts": ArgumentShape.WORD,
     "usage": ArgumentShape.WORD,

@@ -256,6 +256,10 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 "notifications",
                 # TUI-only request ledger; no desktop destination ships.
                 "review",
+                # TUI-only: one conversation's live wakes, written through that
+                # session. The desktop's schedules page reads the machine-wide
+                # index instead, so there is no destination to point at.
+                "schedule",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The

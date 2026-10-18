@@ -13,7 +13,13 @@ desktop at all (see ``/mobile``).
 
 from typing import Any, Mapping, Sequence
 
-from local_operator.i18n.keys import tui_import, tui_review, wire_memory, wire_slash
+from local_operator.i18n.keys import (
+    tui_import,
+    tui_review,
+    tui_schedule,
+    wire_memory,
+    wire_slash,
+)
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
@@ -1530,6 +1536,21 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "review",
         _tr(tui_review.slash_help()),
+    ),
+    # The schedule page is a MODE over THIS conversation's LIVE scheduler
+    # (`session.wake_scheduler.schedules`) and writes through the session's own
+    # `set_wake_schedules`. It is deliberately TUI-only: no
+    # `desktop_destination` means no palette row, and the desktop already owns
+    # a machine-wide schedules page reading the wake index — a destination here
+    # would offer that page for a command whose subject is one conversation and
+    # whose writer is this process. `_FRONTEND_LOCAL_SLASHES` keeps a follower
+    # from listing and rewriting the runtime host's wakes instead.
+    #
+    # No `wakes` alias: the machine-wide index is what "wakes" means on the
+    # desktop and CLI, and an alias would teach the narrower meaning first.
+    SlashCommand(
+        "schedule",
+        _tr(tui_schedule.slash_help()),
     ),
     SlashCommand(
         "sidebar",

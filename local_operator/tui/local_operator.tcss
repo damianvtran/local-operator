@@ -2262,6 +2262,72 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page schedule view ───────────────────────────────────────────── *
+ *
+ * The seventh sibling MODE (see the org-chart, settings, projects, import and
+ * review blocks): opened by `/schedule`, it takes the transcript's region and
+ * leaves the dock greyed. It reuses `.settings-view*` wholesale — same rows,
+ * same body scroll contract, same hint row — and its form state reuses
+ * `.projects-form-*`, because a second full-page skeleton or a second form
+ * vocabulary is how two pages drift apart.
+ *
+ * Only the two facts this page differs by live here: the pane's width (the
+ * detail is a short labelled record, not a review's long lane prose) and the
+ * form's own title/refusal/keys rows. ROW INK IS NOT CSS, for the same reason
+ * `/review` states: the cursor ground and the two inks are painted as rich
+ * `Text` spans from `theme.semantic_color`, which a widget class cannot reach
+ * inside one Static. */
+.schedule-view .settings-view-pane {
+    width: 42;
+    /* The selected row's FULL record: Tab focuses the pane and its own keys
+     * scroll it, so a long prompt is reachable rather than clipped. */
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.schedule-view-pane-text {
+    width: 1fr;
+    height: auto;
+}
+
+/* The form's three pinned rows around the scrolling fields. The title is the
+ * page title's replacement while the form is up; the refusal and the key
+ * legend sit UNDER the fields, where a sentence about what was typed is read
+ * after the thing it is about. */
+.schedule-form-title {
+    height: 1;
+}
+
+.schedule-form-refusal {
+    width: 1fr;
+    height: auto;
+    padding-left: 1;
+}
+
+.schedule-form-keys {
+    width: 1fr;
+    height: 1;
+    padding-left: 1;
+    color: $lo-muted;
+}
+
+.schedule-form-fields {
+    height: 1fr;
+}
+
+/* The footer is a SENTENCE, not a one-line caption: the supervisor notice is
+ * 71 cells and the 60-column frame clipped it mid-word ("...while"). `auto`
+ * gives it the second line it needs THERE; at 100 columns it still measures
+ * one line, so the taller page layout does not shift. */
+.schedule-view .settings-view-detail {
+    height: auto;
+}
+
+
 /* ── full-page projects view ───────────────────────────────────────────── *
  *
  * The fourth sibling MODE (see the org-chart and settings blocks above):
