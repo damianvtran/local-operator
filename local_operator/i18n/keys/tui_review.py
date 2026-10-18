@@ -262,6 +262,10 @@ def row_fetching() -> Msg:
     return Msg("tui.review.row_fetching", {})
 
 
+def scan_failed() -> Msg:
+    return Msg("tui.review.scan_failed", {})
+
+
 def session_unavailable() -> Msg:
     return Msg("tui.review.session_unavailable", {})
 

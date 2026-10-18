@@ -314,6 +314,11 @@
     "role": "TUI code-review ledger page",
     "tone": "terse, operator-facing, one fact per sentence"
   },
+  "tui.review.scan_failed": {
+    "note": "one-line page status when the transcript scan failed but recorded rows are still shown",
+    "role": "TUI code-review ledger page",
+    "tone": "terse, operator-facing, one fact per sentence"
+  },
   "tui.review.session_unavailable": {
     "note": "refusal when /review runs before a session exists",
     "role": "TUI code-review ledger page",

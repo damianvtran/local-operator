@@ -36460,9 +36460,9 @@ class OperatorApp(App[None]):
         if session is None:
             notice(tr("tui.review")(tui_review.session_unavailable()), "warning")
             return
-        self._open_review_view(session.session_id)
+        self._open_review_view(session_id=session.session_id, cwd=getattr(session, "cwd", ""))
 
-    def _open_review_view(self, session_id: str) -> None:
+    def _open_review_view(self, session_id: str, *, cwd: str = "") -> None:
         """Enter the full-page review mode.
 
         Same MODE contract as :meth:`_open_import_view`: the transcript is
@@ -36477,7 +36477,7 @@ class OperatorApp(App[None]):
         if self._import_view is not None:
             self._close_import_view()
         self._review_focus_restore = self.focused
-        view = ReviewView(session_id)
+        view = ReviewView(session_id, cwd=cwd)
         self._review_view = view
         self._transcript_view().display = False
         self.screen.mount(view, before=self.query_one("#input-dock"))

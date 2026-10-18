@@ -420,3 +420,98 @@ def test_the_namespace_has_key_parity_across_shipped_locales() -> None:
 def test_the_view_does_not_shadow_textual_s_api() -> None:
     for name in ("query", "visible", "render", "_render"):
         assert name not in ReviewView.__dict__, name
+
+
+def _seed_transcript(text: str) -> Path:
+    """A real session journal holding one user message, and NO derived index."""
+    session_dir = config_dir() / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    journal = ledger.transcript_path(session_dir)
+    journal.write_text(
+        json.dumps(
+            {
+                "id": "m1",
+                "ts": 1.0,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "user",
+                    "content": [{"text": text}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return journal
+
+
+@pytest.mark.asyncio
+async def test_open_scans_the_transcript_when_no_index_exists(refreshes) -> None:
+    """A TUI-only machine has never run the desktop route that builds the index.
+
+    The conversation's PR link must reach the page through the SAME scan the
+    routes use, not stay invisible because the derived file is absent.
+    """
+    url = "https://github.com/damianvtran/local-operator/pull/1904"
+    _seed_transcript(f"opened this for review: {url}")
+    assert not ledger.index_path(config_dir(), SESSION_ID).exists()
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_review(pilot, app)
+
+        assert view._state == "ready"
+        body = _plain(view._body_text)
+        assert "Mentioned" in body
+        assert "damianvtran/local-operator #1904" in body
+        assert "Fetching current state" in body
+        # The scan published the derived index, so a second reader sees it cold.
+        assert ledger.index_path(config_dir(), SESSION_ID).is_file()
+        entry = ledger.read_index(config_dir(), SESSION_ID)
+        assert entry is not None and entry["rows"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_scan_keeps_cached_rows_and_shows_the_notice(refreshes, monkeypatch) -> None:
+    """A torn transcript must not erase what this machine already recorded."""
+    _populated(1)
+
+    async def broken(*args, **kwargs):
+        raise OSError("journal is unreadable")
+
+    monkeypatch.setattr(ledger, "refresh_async", broken)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 34)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_review(pilot, app)
+
+        assert view._state == "ready"
+        body = _plain(view._body_text)
+        assert "damianvtran/local-operator #1" in body
+        assert "23/23 passed" in body
+        assert "Couldn't scan this conversation; showing what was already recorded." in _plain(
+            view._detail
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_scan_with_no_recorded_rows_is_the_error_state(
+    refreshes, monkeypatch
+) -> None:
+    """With nothing cached, "no code reviews yet" would be a claim we cannot make."""
+
+    async def broken(*args, **kwargs):
+        raise OSError("journal is unreadable")
+
+    monkeypatch.setattr(ledger, "refresh_async", broken)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_review(pilot, app)
+
+        assert view._state == "error"
+        body = _plain(view._body_text)
+        assert "Code reviews could not be read." in body
+        assert "No code reviews yet" not in body

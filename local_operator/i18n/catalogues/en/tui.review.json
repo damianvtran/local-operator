@@ -62,6 +62,7 @@
   "tui.review.relation_unknown": "unknown — possibly opened",
   "tui.review.relation_unknown_title": "Possibly opened by this session; the evidence did not prove it was.",
   "tui.review.row_fetching": "Fetching current state…",
+  "tui.review.scan_failed": "Couldn't scan this conversation; showing what was already recorded.",
   "tui.review.session_unavailable": "No session is open yet.",
   "tui.review.slash_help": "Review this session's pull and merge requests",
   "tui.review.state_closed": "Closed",

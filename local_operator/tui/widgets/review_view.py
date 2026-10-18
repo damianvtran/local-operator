@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, cast
 
 from rich.cells import cell_len
@@ -100,9 +101,14 @@ class ReviewView(Vertical):
         Binding("escape", "leave", "Back", show=False),
     ]
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, *, cwd: str = "") -> None:
         super().__init__(classes="settings-view review-view")
         self._session_id = session_id
+        #: The session's working directory when the runtime exposes one. The
+        #: scan builds its host context from it (a self-hosted forge URL is
+        #: confirmed by that checkout's remotes), so an empty value falls back
+        #: to the recorded runtime/wake cwd rather than scanning with none.
+        self._cwd = cwd
         #: Resolved once: the app's own config root. A page never invents one.
         self._config_dir = config_dir()
         self._title = Static(classes="settings-view-title")
@@ -130,6 +136,10 @@ class ReviewView(Vertical):
         self._error = ""
         self._refreshing = False
         self._checked = False
+        #: The transcript scan failed on the last pass. Rows already recorded
+        #: still paint; the page's one-line status says the scan is the part
+        #: that did not happen.
+        self._scan_failed = False
         self._rows: list[Mapping[str, Any]] = []
         self._opened: tuple[Mapping[str, Any], ...] = ()
         self._mentioned: tuple[Mapping[str, Any], ...] = ()
@@ -158,7 +168,7 @@ class ReviewView(Vertical):
             self.focus()
         except Exception:
             pass
-        self._start(refresh=True)
+        self._start(force_scan=False)
 
     def on_resize(self) -> None:
         self._apply_layout()
@@ -171,12 +181,54 @@ class ReviewView(Vertical):
         self._pane.display = not self._narrow
 
     # -- data ---------------------------------------------------------------
-    def _start(self, *, refresh: bool) -> None:
+    def _start(self, *, force_scan: bool) -> None:
         self.run_worker(
-            self._load(refresh=refresh),
+            self._load(force_scan=force_scan),
             group="review",
             exclusive=True,
             exit_on_error=False,
+        )
+
+    def _session_dir(self) -> Path:
+        """Where this session's own files live — the transcript the scan reads.
+
+        Composed from the config root with the canonical ``sessions`` name
+        (``session/cleanup.py``, the same constant the app's other session-store
+        readers use) rather than a second literal: an attached viewer knows its
+        session id, not the path its owner stores it at.
+        """
+        from local_operator.session.cleanup import SESSIONS_DIRNAME
+
+        return self._config_dir / SESSIONS_DIRNAME / self._session_id
+
+    async def _scan(self, *, force: bool) -> None:
+        """Bring the derived index up to date from the session's transcript.
+
+        THE INDEX IS DERIVED, and nothing in a TUI-only run writes it: the
+        desktop routes are today's only scan trigger. Without this pass a
+        machine that never opened the desktop Code review pane shows an empty
+        page while the conversation plainly holds PR/MR links. The scan itself
+        is read-only over the transcript, and ``refresh_async`` is the same
+        worker-thread entry the routes call.
+
+        ``force`` rescans the whole journal (the ``r`` press); an open uses the
+        signature ladder so an unchanged transcript costs one stat.
+        """
+        from local_operator.code_requests.hook import load_context_async
+        from local_operator.code_requests.refs import EMPTY_CONTEXT
+
+        cwd = self._cwd
+        if not cwd:
+            cwd = await asyncio.to_thread(
+                code_request_ledger.session_cwd, self._config_dir, self._session_id
+            )
+        context = await load_context_async(cwd) if cwd else EMPTY_CONTEXT
+        await code_request_ledger.refresh_async(
+            self._config_dir,
+            self._session_id,
+            self._session_dir(),
+            context=context,
+            force=force,
         )
 
     def _read_rows(self) -> list[Mapping[str, Any]]:
@@ -200,11 +252,12 @@ class ReviewView(Vertical):
             raise ReviewIndexReadError(f"malformed index: {path}")
         return [row for row in rows if isinstance(row, Mapping)]
 
-    async def _load(self, *, refresh: bool) -> None:
+    async def _load(self, *, force_scan: bool) -> None:
         cold = self._state != "ready"
         if cold:
             self._state = "loading"
-        self._refreshing = refresh
+        self._refreshing = not cold
+        self._scan_failed = False
         self._paint()
         try:
             rows = await asyncio.to_thread(self._read_rows)
@@ -212,7 +265,24 @@ class ReviewView(Vertical):
             self._fail(exc)
             self._paint()
             return
-        if refresh:
+        scan_error: Exception | None = None
+        try:
+            await self._scan(force=force_scan)
+        except Exception as exc:  # noqa: BLE001
+            # The scan is best-effort against the CACHED ledger: a torn or
+            # unreadable transcript must not throw away rows this machine has
+            # already recorded. With no recorded rows it IS the answer, and the
+            # error state below says so instead of claiming the session is empty.
+            logger.debug("code-request scan failed for %s", self._session_id, exc_info=True)
+            scan_error = exc
+            self._scan_failed = True
+        try:
+            rows = await asyncio.to_thread(self._read_rows)
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            self._paint()
+            return
+        if rows:
             try:
                 await code_request_service.refresh_session(self._config_dir, self._session_id, rows)
             except Exception:  # noqa: BLE001
@@ -232,6 +302,12 @@ class ReviewView(Vertical):
             self._fail(exc)
             self._paint()
             return
+        if scan_error is not None and not views:
+            # Nothing was recorded and the conversation could not be read: the
+            # empty state would be a claim this page cannot make.
+            self._fail(scan_error)
+            self._paint()
+            return
         self._rows = list(views)
         groups = review_model.group_rows(self._rows)
         self._opened, self._mentioned = groups.opened, groups.mentioned
@@ -245,7 +321,7 @@ class ReviewView(Vertical):
         # "Checked just now" is a receipt for the READER's press; a cold open's
         # automatic pass already has its loading frame, and claiming a check
         # nobody asked for would put a claim on the empty state.
-        self._checked = refresh and not cold
+        self._checked = force_scan and not cold
         self._paint()
 
     def _fail(self, exc: BaseException) -> None:
@@ -292,7 +368,7 @@ class ReviewView(Vertical):
     def action_reload(self) -> None:
         if self._refreshing:
             return
-        self._start(refresh=True)
+        self._start(force_scan=True)
 
     def action_leave(self) -> None:
         self.post_message(ReviewViewDismissed())
@@ -335,6 +411,8 @@ class ReviewView(Vertical):
             return _t(_kt.loading())
         if self._state == "error":
             return ""
+        if self._scan_failed:
+            return _t(_kt.scan_failed())
         if self._refreshing:
             return _t(_kt.refreshing())
         row = self._selected_row()
