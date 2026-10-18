@@ -154,7 +154,7 @@ hand-written fixtures. Two calls per clip (`no_verbatim` absent vs `true`), plus
 `transcript_edit` calls (three in the first pass, four negative controls in the
 second). Key supplied from the encrypted store; never printed.
 
-| Clip | Provider output with `no_verbatim=false` | With `no_verbatim=true` |
+| Clip | Provider output with `no_verbatim` absent | With `no_verbatim=true` |
 |---|---|---|
 | en | `Um, so I, uh, think we should ship the change. Uh, can you check the build?` | `So I think we should ship the change. Can you check the build?` |
 | fr | `Euh, je ne sais pas` | `Je ne sais pas` |
@@ -412,8 +412,9 @@ Fixtures per language, each with a positive and a negative control:
 * `POST /v1/stt/transcriptions` with a fake ElevenLabs transport: response has the
   cleaned text, `cleanup` token, `raw_text` (or null), `language`, and the existing
   `path`/`attempts` fields unchanged.
-* `POST /api/transcribe` on the mobile daemon: same fields; composer's `joinDraft`
-  still receives a string; no phone code change required in slice 1.
+* `POST /api/transcribe` on the mobile daemon: same fields, carried through the
+  mobile `SttOutcome` mirror, `_adopt_outcome`, and the daemon JSON; composer's
+  `joinDraft` still receives a string; no phone web-client change in slice 2.
 * Cascade fall-forward: ElevenLabs refuses -> OpenAI serves -> cleanup rules apply
   to the OpenAI text; provenance names the serving rung, not ElevenLabs.
 * `cleanup=off` returns exactly the provider's text, byte-for-byte.
@@ -440,12 +441,14 @@ Fixtures per language, each with a positive and a negative control:
    plan. Docs-only PR. No product code.
 2. **Shared cleanup module + provider-native ElevenLabs request fields.** Add
    `stt/cleanup.py` with the mode resolver and provider request options,
-   `no_verbatim`/`tag_audio_events`, `SttOutcome` fields (`raw_text`, `cleanup`,
-   `language`, `removed`), request field `cleanup` with `auto` default, both routes'
-   plumbing, unit tests and fake-transport integration tests. No settings key, no
-   client token rules, no `edit` yet: `client` and `edit` are recognized by the
-   closed vocabulary and rejected with a typed 422 until slices 3 and 5. This is
-   the first implementation slice.
+   `no_verbatim`/`tag_audio_events`, the **cascade** `SttOutcome` fields
+   (`raw_text`, `raw_unavailable`, `cleanup`, `language`, `removed`), the matching
+   **mobile mirror** in `clients/stt.py::SttOutcome`, its `_adopt_outcome` copy, and
+   the daemon's `/api/transcribe` JSON, request field `cleanup` with `auto` default,
+   both routes' plumbing, unit tests and fake-transport integration tests. No
+   settings key, no client token rules, no `edit` yet: `client` and `edit` are
+   recognized by the closed vocabulary and rejected with a typed 422 until slices 3
+   and 5. This is the first implementation slice.
 3. **Conservative client rules v1.** `en`/`fr` token sets, closed cue lexicon,
    quote/code/all-caps guards, span deletion, multilingual fixtures and negative
    controls, idempotency, `off` byte-equality. Wire into `auto`/`client` for **both
