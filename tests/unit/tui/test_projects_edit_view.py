@@ -24,12 +24,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.projects_form import ProjectsFormPage
 from local_operator.tui.widgets.projects_milestone import MilestonePrompt
 from local_operator.tui.widgets.subagent_view import HintButton
-from tests.unit.tui.test_projects_view import (
-    _boot,
-    _factory,
-    _open,
-    _ProjectSession,
-)
+from tests.unit.tui.test_projects_view import _boot, _factory, _open, _ProjectSession
 
 pytestmark = pytest.mark.asyncio
 

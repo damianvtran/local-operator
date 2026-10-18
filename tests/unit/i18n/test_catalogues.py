@@ -145,9 +145,11 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
     # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
     # namespace, added here with its own ledger row; `tui.schedule` is P1's,
     # carried only now that its audit row exists (the carried-namespace gate
-    # un-ships a locale for an unaudited file).
+    # un-ships a locale for an unaudited file); `tui.projects_edit` is P2's
+    # audited namespace, carried the same way on top of the union.
     locale = "hi"
     namespaces = (
+        "tui.projects_edit",
         "tui.review",
         "tui.schedule",
         "tui.status",
