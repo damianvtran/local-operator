@@ -153,8 +153,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/procname.py::_plant_runtime",
         "shutil.rmtree",
-        "Removes only this plant's own staging tree, or a CORRUPT <runtime root>/<key>",
-        3,
+        # Four: the failed-build staging tree (a clone that died on ENOSPC must
+        # never be renamed onto the build key), a staging tree whose rename lost
+        # to a healthy concurrent planter, a CORRUPT <runtime root>/<key>, and a
+        # staging tree that could not be published. Every one is either this
+        # plant's own staging entry or an interpreter-derived key.
+        "Removes this plant's own staging tree, or a CORRUPT <runtime root>/<key>",
+        4,
     ),
     (
         "local_operator/procname.py::_link_to",

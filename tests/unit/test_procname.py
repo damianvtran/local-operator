@@ -1664,6 +1664,15 @@ class TestCrossTreeSpawnSites:
         from local_operator.session.runtime import launch as launch_module
 
         monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+        # A FAKE venv for "this process", never the worktree's real one. This
+        # cell runs the REAL plant for ``sys.prefix``, so with the real prefix it
+        # re-pointed the developer's ``<worktree>/.venv/bin/Local Operator`` into
+        # pytest's tmp tree (observed twice) and left it dangling once that tree
+        # was pruned. ``sys.prefix``/``base_prefix`` are patched the way the
+        # ``branded`` fixture does it; the runtime root is the per-test one.
+        prefix = _fake_venv(tmp_path / "own-venv")
+        monkeypatch.setattr(sys, "prefix", str(prefix))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "own-base"))
         calls: list[str] = []
         real_pair = procname.spawn_identity
         real_cross = procname.spawn_identity_for_interpreter
@@ -1795,7 +1804,9 @@ class TestStableRuntimeImage:
 
         assert executable is not None
         assert os.readlink(executable) == os.readlink(branded)
-        assert len([p for p in procname.runtime_root().iterdir() if p.is_dir()]) == 1
+        root = procname.runtime_root()
+        assert root is not None
+        assert len([p for p in root.iterdir() if p.is_dir()]) == 1
 
     def test_a_new_interpreter_build_publishes_a_new_image(self, tmp_path):
         """A replaced interpreter is a NEW key; the old image is left alone."""
@@ -1816,8 +1827,19 @@ class TestStableRuntimeImage:
         for name, mtime in before.items():
             assert after[name] == mtime, "the published directory is immutable"
 
-    def test_a_broken_image_falls_back_to_python3_in_the_daemon_shim(self, tmp_path, branded):
-        """The shim asks the stdlib question, and falls back rather than failing."""
+    def test_the_daemon_shim_runs_the_branded_image_and_falls_back_when_broken(
+        self, tmp_path, branded
+    ):
+        """The shim asks the stdlib question at the IMAGE's directory, then uses it.
+
+        BOTH halves are named, because the first version of this cell could not
+        see the bug it was written for: its "good" tree asserted only that the
+        interpreter printed ``ok``, which the FALLBACK interpreter prints too,
+        and the glob probed ``<key>/bin/lib`` where the plant publishes
+        ``<key>/lib``. The positive control now asks the KERNEL which image ran
+        (``proc_name``), so a fallback cannot satisfy it, and the negative
+        replaces the sibling interpreter with a script that says so.
+        """
         from local_operator import update as update_mod
 
         def shim_tree(image: Path) -> Path:
@@ -1834,12 +1856,21 @@ class TestStableRuntimeImage:
             (bin_dir / "python3").symlink_to(Path(os.path.realpath(sys.executable)))
             return written
 
+        probe = (
+            "import ctypes, os;"
+            "l=ctypes.CDLL('/usr/lib/libSystem.dylib');"
+            "b=ctypes.create_string_buffer(64);"
+            "l.proc_name(ctypes.c_int(os.getpid()),b,ctypes.c_uint(64));"
+            "print(b.value.decode())"
+        )
         image = Path(os.readlink(branded))
         good = shim_tree(image)
-        ran = subprocess.run(
-            [str(good), "-c", "print('ok')"], capture_output=True, text=True, timeout=60
+        ran = subprocess.run([str(good), "-c", probe], capture_output=True, text=True, timeout=60)
+        assert ran.returncode == 0, ran.stderr
+        assert ran.stdout.strip() == procname.BRAND, (
+            "the shim must exec the branded image, not the fallback interpreter "
+            f"(kernel reported {ran.stdout.strip()!r})"
         )
-        assert ran.returncode == 0 and ran.stdout.strip() == "ok", ran.stderr
 
         # Same layout and same name, but the image's stdlib no longer resolves:
         # the shim must exec the sibling interpreter instead of that image, and
@@ -1895,14 +1926,166 @@ class TestStableRuntimeImage:
         hardlink rung below it must then leave a HEALTHY runtime symlink alone.
         Replacing it would give the child a second path (a second privacy
         prompt) and undo what its parent planted.
+
+        THE STEADY STATE IS NOT THE STATE THIS GUARD LIVES IN, so the cell has
+        to be driven past it: the previous version of this test passed with the
+        guard replaced by ``if False:`` because a healthy link is already
+        returned by :func:`_needs_replant` one branch above. Here the build key
+        MOVED (``runtime_image`` names a key nothing published, which is what
+        ``uv tool install --force`` does to an installed tree) and the plant is
+        refused, which is the pair of facts that reaches the guard.
         """
         image = Path(os.readlink(branded))
+        moved = image.parent.parent.parent / "a-key-nothing-published" / "bin" / procname.BRAND
+        monkeypatch.setattr(procname, "runtime_image", lambda real: moved)
         monkeypatch.setattr(procname, "_plant_runtime", lambda real, root: None)
 
         assert procname.ensure_branded_interpreter() == branded
 
         assert branded.is_symlink(), "a healthy runtime link must survive rung 2"
         assert os.readlink(branded) == str(image)
+
+    def test_a_truncated_clone_is_repaired_rather_than_handed_out(self, tmp_path):
+        """M2: ``X_OK`` plus a resolvable stdlib passed a 12-byte image.
+
+        A truncated clone is executable and its stdlib still resolves, so the
+        old health question answered yes and the kernel answered ``[Errno 8]
+        Exec format error``. One image is shared by every venv of the build, so
+        that state disables the brand for all of them until someone deletes the
+        directory by hand; the key already encodes the source's size, and the
+        repair republishes it under the same key.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        link = tmp_path / "venv" / "bin" / procname.BRAND
+        link.parent.mkdir(parents=True)
+        os.symlink(image, link)
+
+        with open(image, "r+b") as handle:
+            handle.truncate(12)
+
+        assert not procname._healthy_image(image, real)
+        assert procname._needs_replant(link, real, image), "a truncated image is stale"
+        assert procname._executable_image(link, real) is None, "never hand out a dead image"
+
+        repaired = procname._plant_runtime(real, root)
+
+        assert repaired == image, "repaired in place, under the same key"
+        assert image.stat().st_size == real.stat().st_size
+        assert procname._healthy_image(image, real)
+        assert procname._executable_image(link, real) == link
+
+    def test_a_failed_build_never_publishes_a_half_built_directory(self, tmp_path, monkeypatch):
+        """m1: the ``except OSError`` caught a failing clone and renamed the staging tree.
+
+        A build that dies (ENOSPC here) left ``<root>/<key>/bin`` behind: a key a
+        reader can see, and a next planter sent down the corrupt-repair path for
+        a directory that never held an image. A failed build is not a publish.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+
+        def out_of_space(source: Path, target: Path) -> None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"half a clone")
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(procname, "_clone_or_copy", out_of_space)
+
+        assert procname._plant_runtime(real, root) is None
+        assert not [
+            entry for entry in root.iterdir() if entry.is_dir()
+        ], "a failed build published a directory"
+        assert not list(root.glob("*.tmp.*")), "the staging tree was left behind"
+
+    def test_a_venv_built_on_an_image_maps_back_to_the_source(self, tmp_path, monkeypatch):
+        """m2: ``<venv>/bin/Local Operator -m venv X`` makes the CLONE the base.
+
+        That venv's ``pyvenv.cfg`` names the image directory, so resolving it
+        answered the clone and the next plant published a clone OF a clone under
+        a second key — a second macOS privacy row for one Python build. The
+        ``source`` marker written at publish is what maps it back.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        marker = image.parent.parent / procname._SOURCE_MARKER
+        assert marker.read_text(encoding="utf-8").strip() == os.path.realpath(real)
+
+        rebuilt = tmp_path / "rebuilt"
+        (rebuilt / "bin").mkdir(parents=True)
+        (rebuilt / "pyvenv.cfg").write_text(
+            f"home = {image.parent}\nexecutable = {image}\n", encoding="utf-8"
+        )
+        (rebuilt / "bin" / "python").symlink_to(image)
+        monkeypatch.setattr(sys, "prefix", str(rebuilt))
+        monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+        monkeypatch.setattr(sys, "executable", str(rebuilt / "bin" / "python"))
+
+        resolved = procname.real_interpreter()
+
+        assert resolved is not None
+        assert resolved == Path(
+            os.path.realpath(real)
+        ), "a venv built on an image must answer the build it was cloned from"
+        assert procname.runtime_image(resolved) == image, "no clone of a clone"
+
+    def test_a_venv_resident_symlink_asks_the_stdlib_question(self, tmp_path):
+        """Q2: the stdlib gate was skipped for exactly the shape that needs it.
+
+        ``<venv>/bin/Local Operator`` is a symlink to the runtime image, and the
+        skip was keyed on ``pyvenv.cfg`` sitting beside the LINK — which is true
+        for every venv, so the gate only ever ran for the image path. CPython
+        takes the stdlib from the directory of the image it ends up running, so
+        the question belongs to the SYMLINK. An in-venv HARDLINK stays exempt: it
+        IS the venv's interpreter, and CPython reads that venv's own config.
+        """
+        real = self._copied_tree(tmp_path)
+        image = procname._plant_runtime(real, tmp_path / "runtime")
+        assert image is not None
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {image.parent}\n", encoding="utf-8")
+        link = venv / "bin" / procname.BRAND
+        os.symlink(image, link)
+        (image.parent.parent / "lib").unlink()
+        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+
+        assert (link.parent.parent / "pyvenv.cfg").is_file(), "precondition: this venv shape"
+        assert procname._executable_image(image) is None
+        assert (
+            procname._executable_image(link, real) is None
+        ), "a venv link to an image with no stdlib must not reach execve"
+
+    def test_runtime_root_without_an_absolute_home_answers_none(self, monkeypatch, tmp_path):
+        """m3: ``Path("~/")`` is never expanded, so the plant created ``./~``.
+
+        Reproduced by removing the passwd answer: ``mkdir(parents=True)`` made a
+        literal ``~`` directory in the CURRENT working directory, inside whatever
+        checkout the process happened to run from. With nowhere legitimate to
+        publish, the root says so and the caller takes rung 2.
+        """
+        import pwd as pwd_module
+        from types import SimpleNamespace
+
+        monkeypatch.delenv("LOCAL_OPERATOR_RUNTIME_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        def no_entry(uid: int) -> SimpleNamespace:
+            raise KeyError(uid)
+
+        monkeypatch.setattr(pwd_module, "getpwuid", no_entry)
+        assert procname.runtime_root() is None
+
+        monkeypatch.setattr(
+            pwd_module, "getpwuid", lambda uid: SimpleNamespace(pw_dir="relative/home")
+        )
+        assert procname.runtime_root() is None
+        assert not (tmp_path / "~").exists(), "nothing may be created in the working directory"
+        assert procname._plant_runtime(Path(sys.executable), None) is None
 
     def test_the_runtime_root_does_not_follow_home(self, monkeypatch):
         """SDK children get ``HOME`` rewritten; the privacy client must not move.

@@ -1596,7 +1596,12 @@ if [ -x "$branded" ]; then
             *) target="$(dirname -- "$branded")/$target" ;;
         esac
         found=""
-        for enc in "$(dirname -- "$target")"/lib/python3*/encodings/__init__.py; do
+        # The probe is the IMAGE's directory, not the link's: the plant publishes
+        # ``<key>/lib`` beside ``<key>/bin/...``, so ``dirname`` of the target's
+        # parent is where the stdlib link lives. Probing ``<key>/bin/lib`` (one
+        # dirname short) never matched, so every supervised unit silently took
+        # the fallback interpreter and stayed a separate macOS privacy client.
+        for enc in "$(dirname -- "$(dirname -- "$target")")"/lib/python3*/encodings/__init__.py; do
             if [ -f "$enc" ]; then found=1; break; fi
         done
         if [ -z "$found" ]; then use_branded=""; fi
