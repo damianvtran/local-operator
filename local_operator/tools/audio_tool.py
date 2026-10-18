@@ -572,6 +572,15 @@ async def _execute_audio(
         cost = audio_rungs._cost_from_payload(payload)
         if cost is None:
             return  # retain the accepted figure until an authoritative revision arrives
+        # Terminal observations may repeat money but omit the optional receipt.
+        # Normalize identity before comparing so partial reads neither erase it
+        # nor create a spurious ledger revision; a new receipt still revises.
+        cost["usage_record_id"] = str(
+            cost.get("usage_record_id")
+            or payload.get("usage_record_id")
+            or (recorded_cost or {}).get("usage_record_id")
+            or ""
+        )
         if cost == recorded_cost and (
             not terminal or recorded_rev >= 1 or cost["basis"] != "billed"
         ):
@@ -593,9 +602,7 @@ async def _execute_audio(
             status="failed" if payload.get("error_type") else "ok",
             request_id=str(handle.request_id or ""),
             rev=recorded_rev,
-            usage_record_id=str(
-                cost.get("usage_record_id") or payload.get("usage_record_id") or ""
-            ),
+            usage_record_id=cost["usage_record_id"],
             units=cost.get("units"),
             unit=cost.get("unit"),
             detail="terminal server charge" if terminal else "accepted server quote",

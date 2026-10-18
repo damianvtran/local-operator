@@ -2857,6 +2857,8 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     elapsed_s: float = 0.0
     files: list[dict[str, Any]] = Field(default_factory=list)
     components: list[dict[str, Any]] = Field(default_factory=list)
+    #: Like files, stored turn audio is ready at decided; do not wait for graphics.
+    sounds: list[dict[str, Any]] = Field(default_factory=list)
     model: str = ""
     model_source: str = ""
     attempts: list[str] = Field(default_factory=list)
@@ -2870,7 +2872,7 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     ) -> dict[str, Any]:
         """Old event fixtures remain byte-identical when no new facts were observed."""
         value = handler(self)
-        for key in ("model", "model_source", "attempts", "detail"):
+        for key in ("model", "model_source", "attempts", "detail", "sounds"):
             if not value.get(key):
                 value.pop(key, None)
         return value
