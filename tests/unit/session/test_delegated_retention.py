@@ -95,7 +95,7 @@ def _kept(result: dr.DelegatedResult) -> dict[str, str]:
 def test_only_the_reapable_origins_go_and_every_other_class_survives(root: Path) -> None:
     """Survival, not predicate values: each directory is still on disk.
 
-    The reap set is ``cleanup.DELETABLE_ORIGINS``, an ALLOW-LIST — deliberately
+    The reap set is ``cleanup.deletable_origins()``, an ALLOW-LIST — deliberately
     not the negation of the visibility predicate. That inversion is the defect
     this pins: it made every origin minted by a later code path deletable by
     default, and reaped a hidden-but-operator-owned origin nobody had decided
@@ -122,7 +122,7 @@ def test_an_agent_config_run_is_never_reaped(root: Path) -> None:
     The operator starts configuration runs from the Agents page, so the run is
     the operator's own chore: reaping it is irreversible, keeping it costs a few
     kilobytes. It is hidden (not in ``resume.USER_ORIGINS``, so no listing shows
-    it) AND kept (not in ``DELETABLE_ORIGINS``) — two answers on purpose.
+    it) AND kept (not in ``deletable_origins()``) — two answers on purpose.
     """
     _mk(root, "config", "agent-config", age_h=24 * 400)
     assert _pass(root, dry_run=True).removed == []
