@@ -281,8 +281,13 @@ The probability gate is not optional: the live Hindi probe returned `hin` once
 and `por` twice for the same voice, so a bare label is not trustworthy. On the
 Radient path the response may omit language entirely; slice 3 therefore has the
 phone web client send `navigator.language` as the caller-supplied hint (the daemon
-form field already exists). Without any hint, token rules do nothing; the cue
-lexicon still runs because its labels are provider vocabulary.
+form field already exists). The hint is **normalised at the daemon boundary to the
+primary subtag** (`en-US` -> `en`, `zh-Hans` -> `zh`) before it reaches either the
+rule key or Radient's `language` field, whose documented shape is ISO-639-1. The
+provider's ISO-639-3 labels map to the same keys (`eng` -> `en`, `fra` -> `fr`); an
+unmapped or unknown value is a no-op. The hinted `/api/transcribe` test asserts the
+Radient wire value is `en`, not `en-US`. Without any hint, token rules do nothing;
+the cue lexicon still runs because its labels are provider vocabulary.
 
 Token sets (v1):
 
@@ -398,7 +403,7 @@ Fixtures per language, each with a positive and a negative control:
 | en hyphen | `uh-huh, that works` | byte-identical (hyphen guard) |
 | NFD accent | `uh\u0301` | byte-identical; the combining mark blocks the token boundary (no split) |
 | ZWJ/ZWNJ | `uh\u200d` / `\u200cuh` | byte-identical; joiners preserved |
-| RTL control | `U+200F uh U+200F` (RLM around the token) | token may be removed if standalone; both U+200F controls preserved |
+| RTL control | `U+200F uh U+200F` (RLM around the token) | token removed; both U+200F controls preserved |
 | Arabic diacritic | `أُمّي` (with harakat) | byte-identical; no mark or letter removed |
 | en abbreviations | `UM and UH are universities.` | byte-identical (all-caps guard) |
 | en quote | `He said "uh" and left.` | byte-identical inside quotes |
@@ -464,8 +469,9 @@ Fixtures per language, each with a positive and a negative control:
    controls, idempotency, `off` byte-equality. Wire into `auto`/`client` for **both
    Radient adapters** (`_run_radient_rung` and `_transcribe_radient_sync`) and the
    OpenAI rung; have the phone web client send `navigator.language` as the caller
-   hint; carry `language_probability` so the language gate is real, and no-op when
-   the caller supplied no language and the provider's label is weak. Add a
+   hint; carry `language_probability` so the language gate is real, and no-op the
+   token rules (not cue removal) when the caller supplied no language and the
+   provider's label is weak. Add a
    `POST /api/transcribe` Radient-rung integration test for both the hinted and
    unhinted cases.
 4. **Settings surface.** `speech.transcription.cleanup` in `/settings` (enum,
