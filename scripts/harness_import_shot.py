@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -95,6 +96,39 @@ def seed_large_omp() -> None:
             parent = f"a{index}"
 
 
+def seed_metadata_codex() -> None:
+    """One Codex thread whose rollout body is absent: the index-only journey."""
+    root = Path.home() / ".codex"
+    root.mkdir(parents=True)
+    writer = sqlite3.connect(root / "state_5.sqlite")
+    try:
+        writer.execute(
+            "CREATE TABLE threads (id TEXT, rollout_path TEXT, created_at INTEGER, "
+            "updated_at INTEGER, cwd TEXT, title TEXT, archived INTEGER, "
+            "cli_version TEXT, first_user_message TEXT, model TEXT, model_provider TEXT)"
+        )
+        writer.execute(
+            "INSERT INTO threads VALUES ('index-only', '', 1, 2, '/tmp', "
+            "'Index-only Codex thread', 0, '', '', '', '')"
+        )
+        writer.commit()
+    finally:
+        writer.close()
+
+
+def seed_long_omp() -> None:
+    """The fixture with a title at the service's own TITLE_MAX cap."""
+    source = FIXTURES / "omp" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
+    records[0]["title"] = "A very long synthetic title " * 8
+    records[1]["id"] = "omp-long"
+    root = Path.home() / ".omp" / "agent" / "sessions" / "--long--"
+    root.mkdir(parents=True)
+    with (root / "omp-long.jsonl").open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+
 def seed_many_omp() -> None:
     """Twelve synthetic sessions, for the list's scrollbar/truncation check."""
     source = FIXTURES / "omp" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
@@ -151,6 +185,13 @@ async def capture(pilot, state: str, out: Path) -> None:
         shutil.rmtree(Path.home() / ".claude", ignore_errors=True)
         shutil.rmtree(Path.home() / ".codex", ignore_errors=True)
         view = await open_view(pilot)
+    elif state == "absent":
+        shutil.rmtree(Path.home() / ".omp", ignore_errors=True)
+        shutil.rmtree(Path.home() / ".claude", ignore_errors=True)
+        shutil.rmtree(Path.home() / ".codex", ignore_errors=True)
+        view = await open_view(pilot)
+        await pilot.press("enter")
+        await settle(pilot, lambda: view._state == "empty")
     elif state == "loading":
         original = HarnessImportService.sources
 
@@ -173,12 +214,33 @@ async def capture(pilot, state: str, out: Path) -> None:
             seed_large_omp()
         elif state == "many":
             seed_many_omp()
+        elif state == "long":
+            seed_long_omp()
+        elif state in ("metadata_preview", "metadata_result"):
+            seed_metadata_codex()
         else:
             seed_omp()
         if state == "sources":
             view = await open_view(pilot)
+        elif state in ("metadata_preview", "metadata_result"):
+            view = await open_view(pilot)
+            for _ in range(len(view._sources)):
+                if view._sources[view._source_index].source == "codex":
+                    break
+                await pilot.press("down")
+            await pilot.press("enter")
+            await settle(pilot, lambda: view._state == "sessions")
+            await pilot.press("space")
+            await pilot.press("enter")
+            await settle(pilot, lambda: view._state == "preview")
+            if state == "metadata_result":
+                await pilot.press("enter")
+                await settle(pilot, lambda: view._state in ("progress", "result"))
+                await settle(pilot, lambda: view._state == "result")
         else:
             view = await open_omp(pilot)
+            if state == "checked":
+                await pilot.press("space")
             if state in ("preview", "progress", "cancel", "result"):
                 if state == "progress":
                     original_import = HarnessImportService._import_one
@@ -205,8 +267,12 @@ async def capture(pilot, state: str, out: Path) -> None:
     assert view is not None
     if state == "sessions":
         assert view._state == "sessions"
-    if state == "many":
+    if state in ("many", "long", "checked"):
         assert view._state == "sessions"
+    if state == "metadata_preview":
+        assert view._state == "preview"
+    if state == "metadata_result":
+        assert view._state == "result"
     if state == "sources":
         assert view._state == "sources"
     await pilot.pause()

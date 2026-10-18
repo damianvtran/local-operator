@@ -10,6 +10,34 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def all_none() -> Msg:
+    return Msg("tui.import.all_none", {})
+
+
+def availability_full() -> Msg:
+    return Msg("tui.import.availability_full", {})
+
+
+def availability_metadata_only() -> Msg:
+    return Msg("tui.import.availability_metadata_only", {})
+
+
+def availability_unsupported() -> Msg:
+    return Msg("tui.import.availability_unsupported", {})
+
+
+def empty_header() -> Msg:
+    return Msg("tui.import.empty_header", {})
+
+
+def empty_sessions(*, source: str) -> Msg:
+    return Msg("tui.import.empty_sessions", {"source": source})
+
+
+def empty_store() -> Msg:
+    return Msg("tui.import.empty_store", {})
+
+
 def error_busy() -> Msg:
     return Msg("tui.import.error_busy", {})
 
@@ -46,36 +74,60 @@ def error_unknown_subcommand(*, form: str) -> Msg:
     return Msg("tui.import.error_unknown_subcommand", {"form": form})
 
 
-def hints_error() -> Msg:
-    return Msg("tui.import.hints_error", {})
+def hint_back() -> Msg:
+    return Msg("tui.import.hint_back", {})
 
 
-def hints_preview() -> Msg:
-    return Msg("tui.import.hints_preview", {})
+def hint_cancel() -> Msg:
+    return Msg("tui.import.hint_cancel", {})
 
 
-def hints_progress() -> Msg:
-    return Msg("tui.import.hints_progress", {})
+def hint_import() -> Msg:
+    return Msg("tui.import.hint_import", {})
 
 
-def hints_result() -> Msg:
-    return Msg("tui.import.hints_result", {})
+def hint_list() -> Msg:
+    return Msg("tui.import.hint_list", {})
 
 
-def hints_sessions() -> Msg:
-    return Msg("tui.import.hints_sessions", {})
+def hint_move() -> Msg:
+    return Msg("tui.import.hint_move", {})
 
 
-def hints_sources() -> Msg:
-    return Msg("tui.import.hints_sources", {})
+def hint_open() -> Msg:
+    return Msg("tui.import.hint_open", {})
+
+
+def hint_preview() -> Msg:
+    return Msg("tui.import.hint_preview", {})
+
+
+def hint_reload() -> Msg:
+    return Msg("tui.import.hint_reload", {})
+
+
+def hint_select() -> Msg:
+    return Msg("tui.import.hint_select", {})
 
 
 def job_status(*, job: str, state: str) -> Msg:
     return Msg("tui.import.job_status", {"job": job, "state": state})
 
 
-def loading() -> Msg:
-    return Msg("tui.import.loading", {})
+def loading_preview() -> Msg:
+    return Msg("tui.import.loading_preview", {})
+
+
+def loading_sessions(*, source: str) -> Msg:
+    return Msg("tui.import.loading_sessions", {"source": source})
+
+
+def loading_sources() -> Msg:
+    return Msg("tui.import.loading_sources", {})
+
+
+def metadata_only_explain() -> Msg:
+    return Msg("tui.import.metadata_only_explain", {})
 
 
 def no_sessions(*, source: str) -> Msg:
@@ -86,12 +138,79 @@ def no_sources() -> Msg:
     return Msg("tui.import.no_sources", {})
 
 
+def outcome_cancelled() -> Msg:
+    return Msg("tui.import.outcome_cancelled", {})
+
+
+def outcome_failed() -> Msg:
+    return Msg("tui.import.outcome_failed", {})
+
+
+def outcome_imported() -> Msg:
+    return Msg("tui.import.outcome_imported", {})
+
+
+def outcome_metadata_only() -> Msg:
+    return Msg("tui.import.outcome_metadata_only", {})
+
+
+def outcome_resumed() -> Msg:
+    return Msg("tui.import.outcome_resumed", {})
+
+
+def outcome_skipped_already_imported() -> Msg:
+    return Msg("tui.import.outcome_skipped_already_imported", {})
+
+
+def pending_count(*, count: int | float) -> Msg:
+    return Msg("tui.import.pending_count", {"count": count})
+
+
+def phase_cancelled() -> Msg:
+    return Msg("tui.import.phase_cancelled", {})
+
+
+def phase_done() -> Msg:
+    return Msg("tui.import.phase_done", {})
+
+
+def phase_importing() -> Msg:
+    return Msg("tui.import.phase_importing", {})
+
+
+def phase_memory() -> Msg:
+    return Msg("tui.import.phase_memory", {})
+
+
+def phase_selecting() -> Msg:
+    return Msg("tui.import.phase_selecting", {})
+
+
+def phase_session() -> Msg:
+    return Msg("tui.import.phase_session", {})
+
+
 def preview_confirm() -> Msg:
     return Msg("tui.import.preview_confirm", {})
 
 
+def preview_confirm_short() -> Msg:
+    return Msg("tui.import.preview_confirm_short", {})
+
+
 def preview_header() -> Msg:
     return Msg("tui.import.preview_header", {})
+
+
+def preview_memory(*, records: int | float, tokens: str, global_tokens: str) -> Msg:
+    return Msg(
+        "tui.import.preview_memory",
+        {"records": records, "tokens": tokens, "global_tokens": global_tokens},
+    )
+
+
+def preview_narrow(*, count: int | float) -> Msg:
+    return Msg("tui.import.preview_narrow", {"count": count})
 
 
 def preview_summary(*, s: int | float, m: int | float, c: int | float) -> Msg:
@@ -110,11 +229,8 @@ def progress_header() -> Msg:
     return Msg("tui.import.progress_header", {})
 
 
-def progress_row(*, completed: str, total: str, phase: str, session: str) -> Msg:
-    return Msg(
-        "tui.import.progress_row",
-        {"completed": completed, "total": total, "phase": phase, "session": session},
-    )
+def progress_row(*, completed: str, total: str, phase: str) -> Msg:
+    return Msg("tui.import.progress_row", {"completed": completed, "total": total, "phase": phase})
 
 
 def rerun_hint() -> Msg:
@@ -125,6 +241,13 @@ def result_header() -> Msg:
     return Msg("tui.import.result_header", {})
 
 
+def result_memory(*, imported: str, skipped: str, redactions: str) -> Msg:
+    return Msg(
+        "tui.import.result_memory",
+        {"imported": imported, "skipped": skipped, "redactions": redactions},
+    )
+
+
 def result_row(*, source_id: str, target: str, outcome: str, messages: int | float) -> Msg:
     return Msg(
         "tui.import.result_row",
@@ -132,11 +255,26 @@ def result_row(*, source_id: str, target: str, outcome: str, messages: int | flo
     )
 
 
+def result_row_no_target(*, source_id: str, outcome: str, messages: int | float) -> Msg:
+    return Msg(
+        "tui.import.result_row_no_target",
+        {"source_id": source_id, "outcome": outcome, "messages": messages},
+    )
+
+
+def result_session_warning(*, session: str, message: str) -> Msg:
+    return Msg("tui.import.result_session_warning", {"session": session, "message": message})
+
+
 def result_summary(*, state: str, sessions: int | float, messages: int | float) -> Msg:
     return Msg(
         "tui.import.result_summary",
         {"state": state, "sessions": sessions, "messages": messages},
     )
+
+
+def result_warning_row(*, message: str) -> Msg:
+    return Msg("tui.import.result_warning_row", {"message": message})
 
 
 def result_warnings(*, count: int | float) -> Msg:
@@ -149,6 +287,10 @@ def review_instructions(*, path: str) -> Msg:
 
 def review_memory(*, path: str) -> Msg:
     return Msg("tui.import.review_memory", {"path": path})
+
+
+def select_header() -> Msg:
+    return Msg("tui.import.select_header", {})
 
 
 def selected() -> Msg:
@@ -171,7 +313,7 @@ def session_importing(*, session: str) -> Msg:
     return Msg("tui.import.session_importing", {"session": session})
 
 
-def session_meta(*, messages: str, compactions: str, availability: str) -> Msg:
+def session_meta(*, messages: int | float, compactions: int | float, availability: str) -> Msg:
     return Msg(
         "tui.import.session_meta",
         {"messages": messages, "compactions": compactions, "availability": availability},
@@ -190,6 +332,14 @@ def source_header() -> Msg:
     return Msg("tui.import.source_header", {})
 
 
+def source_no_detail() -> Msg:
+    return Msg("tui.import.source_no_detail", {})
+
+
+def source_not_found() -> Msg:
+    return Msg("tui.import.source_not_found", {})
+
+
 def source_path(*, path: str) -> Msg:
     return Msg("tui.import.source_path", {"path": path})
 
@@ -199,6 +349,26 @@ def source_row(*, label: str, count: int | float, availability: str) -> Msg:
         "tui.import.source_row",
         {"label": label, "count": count, "availability": availability},
     )
+
+
+def state_cancelled() -> Msg:
+    return Msg("tui.import.state_cancelled", {})
+
+
+def state_done() -> Msg:
+    return Msg("tui.import.state_done", {})
+
+
+def state_failed() -> Msg:
+    return Msg("tui.import.state_failed", {})
+
+
+def state_queued() -> Msg:
+    return Msg("tui.import.state_queued", {})
+
+
+def state_running() -> Msg:
+    return Msg("tui.import.state_running", {})
 
 
 def subtitle() -> Msg:

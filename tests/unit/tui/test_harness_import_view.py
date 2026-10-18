@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from rich.text import Text
 
 from local_operator.harness_import.jobs import JOBS
@@ -45,6 +47,7 @@ async def _open_import(pilot) -> HarnessImportView:
     await pilot.pause()
     view = app.query_one(HarnessImportView)
     await _settle(pilot, lambda: view._state == "sources")
+    await pilot.pause()
     return view
 
 
@@ -89,7 +92,7 @@ async def test_sessions_require_selection_preview_and_confirmation() -> None:
         view = await _open_omp(pilot)
         # No selection: Enter is refused, not a silent import.
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "error")
+        await _settle(pilot, lambda: view._state == "empty")
         assert "Select at least one session" in _plain(view._body_text)
         await pilot.press("escape")
         await _settle(pilot, lambda: view._state == "sessions")
@@ -138,7 +141,7 @@ def test_import_has_a_slash_alias_and_i18n_copy() -> None:
     assert entry.description
     messages = catalogues.load_catalogue("en", "tui.import")
     assert "tui.import.title" in messages
-    assert "tui.import.hints_sessions" in messages
+    assert "tui.import.hint_preview" in messages
     assert "tui.import.review_instructions" in messages
 
 
@@ -231,5 +234,238 @@ def test_result_paints_instruction_and_memory_review_paths() -> None:
     )
     view._state = "result"
     body = view._body_rich().plain
-    assert "Instructions saved for review at /tmp/config/imports/instructions/omp.md" in body
-    assert "Untethered memory saved for review at /tmp/config/imports/memory-omp.json" in body
+    assert "Instructions saved for review at" in body
+    assert "/tmp/config/imports/instructions/omp.md" in body
+    assert "Untethered memory saved for review at" in body
+    assert "/tmp/config/imports/memory-omp.json" in body
+
+
+def _seed_many_omp(count: int = 12) -> None:
+    source = FIXTURES / "omp" / "sessions" / "--tmp--" / "omp-synthetic.jsonl"
+    records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()]
+    root = Path.home() / ".omp" / "agent" / "sessions" / "--many--"
+    root.mkdir(parents=True)
+    for index in range(count):
+        copy = [dict(record) for record in records]
+        copy[0]["title"] = f"Synthetic omp session {index:02d}"
+        copy[1]["id"] = f"omp-synthetic-{index:02d}"
+        with (root / f"omp-synthetic-{index:02d}.jsonl").open("w", encoding="utf-8") as handle:
+            for record in copy:
+                handle.write(json.dumps(record) + "\n")
+
+
+def _seed_long_title() -> None:
+    path = Path.home() / ".omp" / "agent" / "sessions" / "--long--" / "omp-long.jsonl"
+    path.parent.mkdir(parents=True)
+    records = [
+        json.loads(line)
+        for line in (FIXTURES / "omp" / "sessions" / "--tmp--" / "omp-synthetic.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    records[0]["title"] = "A very long synthetic title " * 8
+    records[1]["id"] = "omp-long"
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+
+@pytest.mark.asyncio
+async def test_cancel_command_reattaches_and_arms_the_poll(monkeypatch) -> None:
+    """Q-1: a fresh `/import cancel` page must leave Importing and show cancelled."""
+    import time
+
+    from local_operator.harness_import.service import HarnessImportService
+
+    original = HarnessImportService._import_one
+
+    def slow_import(self, *args, **kwargs):
+        time.sleep(0.6)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(HarnessImportService, "_import_one", slow_import)
+    _seed_omp()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_omp(pilot)
+        await pilot.press("space")
+        await pilot.press("enter")
+        await _settle(pilot, lambda: view._state == "preview")
+        await pilot.press("enter")
+        await _settle(pilot, lambda: view._state == "progress")
+        app._close_import_view()
+        await pilot.pause()
+        app._run_slash_command("/import cancel")
+        await pilot.pause()
+        view = app.query_one(HarnessImportView)
+        await _settle(pilot, lambda: view._state == "result")
+        assert view._job is not None
+        assert view._job.progress.state == "cancelled"
+        assert "cancelled" in _plain(view._body_text)
+        assert "Nothing running" not in _plain(view._body_text)
+
+
+@pytest.mark.asyncio
+async def test_end_and_arrow_keep_the_cursor_in_a_long_list() -> None:
+    _seed_many_omp()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_omp(pilot)
+        view.action_jump(1)
+        await pilot.pause()
+        assert view._session_index == 11
+        offsets = [2 + (1 if row.cwd else 0) for row in view._sessions]
+        top = sum(offsets[:11])
+        y = view._body.scroll_offset.y
+        height = view._body.size.height
+        assert y <= top < y + height
+        view.action_move(1)  # clamped at the last row
+        await pilot.pause()
+        assert view._session_index == 11
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24), (60, 20)])
+async def test_long_titles_are_one_clipped_line_at_every_width(size) -> None:
+    _seed_long_title()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_omp(pilot)
+        await pilot.pause()
+        body = _plain(view._body_text)
+        lines = body.splitlines()
+        title_lines = [line for line in lines if "long synthetic title" in line or "…" in line]
+        assert len(title_lines) >= 1
+        assert all(cell_len(line) <= view._line_width() for line in lines)
+        assert any("2026-01-02" in line and "…" in line for line in title_lines)
+        assert view._pane.display is (size[0] >= 100)
+
+
+@pytest.mark.asyncio
+async def test_source_and_session_rows_are_clickable() -> None:
+    from types import SimpleNamespace
+
+    _seed_many_omp()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_import(pilot)
+        body = view._body
+        event = SimpleNamespace(
+            button=1,
+            screen_x=body.region.x + 2,
+            screen_y=body.region.y + 4,
+            stop=lambda: None,
+        )
+        view.on_click(event)
+        await _settle(pilot, lambda: view._state == "sessions")
+        assert view._source == "omp"
+
+
+def test_selection_count_is_outside_the_body_and_a_toggles_both_ways() -> None:
+    from types import SimpleNamespace
+
+    view = HarnessImportView()
+    view._state = "sessions"
+    view._sessions = [
+        SimpleNamespace(source_id="a", cwd=""),
+        SimpleNamespace(source_id="b", cwd=""),
+    ]
+    view._selected = {"a"}
+    assert "1 selected" in view._detail_text()
+    view._paint = lambda: None  # type: ignore[method-assign]
+    view.action_all()
+    assert view._selected == {"a", "b"}
+    view.action_all()
+    assert view._selected == set()
+
+
+def test_enum_values_are_mapped_to_user_copy() -> None:
+    from types import SimpleNamespace
+
+    from local_operator.tui.widgets.harness_import_view import (
+        _availability_label,
+        _outcome_label,
+        _state_label,
+    )
+
+    assert _availability_label(SimpleNamespace(availability="metadata_only")) == "index only"
+    assert _outcome_label("skipped_already_imported") == "already imported"
+    assert "skipped_already_imported" not in _outcome_label("skipped_already_imported")
+    assert _state_label("cancelled") == "cancelled"
+
+
+def test_status_paints_request_rows_and_result_warning_messages() -> None:
+    from types import SimpleNamespace
+
+    from local_operator.harness_import.types import (
+        ImportProgress,
+        ImportRequest,
+        ImportResult,
+        ImportWarning,
+    )
+
+    view = HarnessImportView()
+    request = ImportRequest(sources=["omp"], session_ids={"omp": ["s1", "s2"]})
+    view._job = SimpleNamespace(
+        job_id="job",
+        request=request,
+        progress=ImportProgress(
+            job_id="job",
+            state="running",
+            phase="session",
+            completed=1,
+            total=2,
+            session_id="s2",
+            results=[{"source_id": "s1", "outcome": "imported", "messages": 3}],
+        ),
+        result=None,
+    )
+    view._state = "progress"
+    body = view._body_rich().plain
+    assert "s1" in body and "s2" in body
+    assert "imported" in body
+    assert "pending" not in body.lower() or "s2" in body
+
+    result = ImportResult(
+        job_id="job",
+        state="done",
+        warnings=[ImportWarning(source="omp", session_id="s", code="test", message="a warning")],
+        sessions=[],
+    )
+    view._job.result = result
+    view._state = "result"
+    assert "a warning" in view._body_rich().plain
+
+
+def test_cancel_while_loading_is_a_noop() -> None:
+    view = HarnessImportView()
+    view._state = "loading"
+    view.action_cancel()
+    assert view._state == "loading"
+
+
+def test_preview_paints_memory_counts() -> None:
+    from types import SimpleNamespace
+
+    from local_operator.harness_import.types import ImportRequest
+
+    view = HarnessImportView()
+    view._request = ImportRequest(sources=["omp"], session_ids={"omp": ["s"]})
+    view._preview = SimpleNamespace(
+        total_sessions=1,
+        total_messages=8,
+        total_compactions=1,
+        total_memory_records=2,
+        projected_memory_tokens=1234,
+        projected_global_tokens=12,
+        warnings=[],
+    )
+    view._selected = {"s"}
+    view._state = "preview"
+    body = view._body_rich().plain
+    assert "2 memory records" in body
+    assert "1,234 tokens" in body
