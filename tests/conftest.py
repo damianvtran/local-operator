@@ -135,6 +135,15 @@ _AMBIENT_VARS = (
     # deliberately, per test, which is the visible opt-in). Scrub it for every test
     # at once rather than trusting each cell to remember.
     "LOCAL_OPERATOR_SUBAGENT_LANE_BOUND_S",
+    # The episode boot's secret-resolution bound override
+    # (``evaluation/runner/host_secrets.RESOLUTION_TIMEOUT_ENV``, read by the
+    # evaluation host resolvers). The same ESCAPE-HATCH class as the lane bound
+    # above: ``0`` WAIVES the bound and every other inherited value MOVES it, so
+    # an operator's exported knob would silently change what every cell using
+    # the resolvers exercises -- the budget cells would go green while asserting
+    # a bound nobody runs (CI round 1 on PR #2575, 2026-10-17). Cells that mean
+    # to exercise a bound set it through ``monkeypatch`` explicitly.
+    "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
