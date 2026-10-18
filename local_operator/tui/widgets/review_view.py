@@ -40,7 +40,6 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.code_requests import ledger as code_request_ledger
-from local_operator.code_requests import service as code_request_service
 from local_operator.i18n import keys as i18n_keys
 from local_operator.i18n.text import tr
 from local_operator.paths import config_dir
@@ -281,6 +280,12 @@ class ReviewView(Vertical):
         and paints, preserving the cursor across the repaints a single load
         performs (cached frame, post-scan frame, post-forge frame).
         """
+        # Imported lazily: `code_requests.service` pulls httpx, and this widget
+        # is imported on the TUI startup path. The desktop routes and the tool
+        # pay that cost when they actually fetch; a startup that never opens
+        # /review must not.
+        from local_operator.code_requests import service as code_request_service
+
         views = await asyncio.to_thread(code_request_service.view_rows, self._config_dir, rows)
         self._rows = list(views)
         groups = review_model.group_rows(self._rows)
@@ -369,6 +374,8 @@ class ReviewView(Vertical):
             return
 
         if rows:
+            from local_operator.code_requests import service as code_request_service
+
             try:
                 await code_request_service.refresh_session(
                     self._config_dir, self._session_id, rows, force=force_scan

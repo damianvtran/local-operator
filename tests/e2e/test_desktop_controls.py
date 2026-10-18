@@ -254,6 +254,8 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 "mobile",
                 "network",
                 "notifications",
+                # TUI-only request ledger; no desktop destination ships.
+                "review",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
