@@ -13,9 +13,11 @@ that is what the executor's fail-forward is for.
 
 **Executor** (:func:`run_audio_cascade`) — re-resolves at call time, walks the
 available rungs in order, records one attempt per rung the walk spent (plus
-any the direction filter skipped), and fails FORWARD on every rung failure
-except user cancellation (the kind's ``AudioGenerationCancelled`` /
-``asyncio.CancelledError`` — a STOP, no failover) and local validation errors
+any the direction filter skipped), and fails FORWARD only before admission.
+An accepted Radient job's API failure is terminal: buying another generation
+could double-charge, even if the original artifact never arrived. User cancellation
+(the kind's ``AudioGenerationCancelled`` / ``asyncio.CancelledError`` — a STOP,
+no failover) and local validation errors
 (raised before dispatch by the tool). When every rung fails,
 :class:`AudioGenerationUnavailable` carries the full resolution and the
 attempt list; the tool renders it as the error note.
@@ -37,7 +39,6 @@ keeps intercepting.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -267,10 +268,10 @@ async def run_audio_cascade(
     if not capable:
         raise AudioGenerationUnavailable(resolution.reason, resolution=resolution)
     radient_base = resolve_radient_api_base_url(base_url)
-    handle = handle if handle is not None else CancelHandle()
+    handle = handle if handle is not None else audio_rungs.CancelHandle()
     pause = artifacts_walk.make_pause(signal, AudioGenerationCancelled)
 
-    def _dispatch(route_str: str) -> Awaitable[audio_rungs.RungResult]:
+    async def _dispatch(route_str: str) -> audio_rungs.RungResult:
         """One rung, through the module-global ``_run_route`` AT CALL TIME.
 
         The module-global read is load-bearing: ``test_cascade`` monkeypatches
@@ -279,16 +280,26 @@ async def run_audio_cascade(
         to the ``AudioRoute`` member before calling the seam, because the
         lane's fakes and executors compare against the members.
         """
-        return _run_route(
-            AudioRoute(route_str),
-            spec=spec,
-            config_dir=config_dir,
-            radient_base=radient_base,
-            handle=handle,
-            emit=emit,
-            pause=pause,
-            client=client,
-        )
+        try:
+            return await _run_route(
+                AudioRoute(route_str),
+                spec=spec,
+                config_dir=config_dir,
+                radient_base=radient_base,
+                handle=handle,
+                emit=emit,
+                pause=pause,
+                client=client,
+            )
+        except APIError as exc:
+            if route_str == AudioRoute.RADIENT and handle.request_id:
+                raise audio_rungs.AdmittedAudioError(
+                    str(exc),
+                    status_code=exc.status_code,
+                    code=exc.code,
+                    details=exc.details,
+                ) from exc
+            raise
 
     def _on_exhausted(
         message: str, attempts: tuple[AudioAttempt, ...]
@@ -320,4 +331,5 @@ async def run_audio_cascade(
         on_exhausted=_on_exhausted,
         pre_attempts=pre_attempts,
         action="generation",
+        terminal_exceptions=(audio_rungs.AdmittedAudioError,),
     )

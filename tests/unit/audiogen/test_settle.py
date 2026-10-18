@@ -303,3 +303,27 @@ def test_the_observation_uses_the_rungs_settlement_read():
     """The wire code lives in ONE module (rungs); settle only observes it."""
     assert audio_settle.fetch_radient_settlement is audio_rungs.fetch_radient_settlement
     assert audio_rungs.SETTLEMENT_WATCH_NOTE == "Checking for settlement."
+
+
+@pytest.mark.asyncio
+async def test_result_charge_survives_bad_sha_when_status_has_no_cost(monkeypatch):
+    """A read-only 409/running settlement preserves money before byte verification."""
+    from local_operator.clients._http import APIError
+
+    transport, _ = _transport([{"status": "COMPLETED"}])
+
+    async def reject_bytes(*args, **kwargs):
+        raise APIError("sha256 mismatch", status_code=None, code="invalid_response")
+
+    monkeypatch.setattr(audio_rungs, "_download_audio_asset", reject_bytes)
+    async with httpx.AsyncClient(transport=transport) as client:
+        outcome = await audio_settle.observe_audio_settlement(
+            base_url=HUB,
+            credential="synthetic",
+            request_id="synthetic-job",
+            client=client,
+        )
+    assert outcome.terminal and outcome.cost_usd == 0.03
+    assert outcome.billing_basis == "billed" and outcome.usage_record_id == "ur-late"
+    assert outcome.units == 44 and outcome.unit == "chars"
+    assert outcome.asset is None and "sha256" in outcome.asset_error

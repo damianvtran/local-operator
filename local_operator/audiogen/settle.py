@@ -67,6 +67,8 @@ class SettleOutcome:
     cost_usd: float | None = None
     billing_basis: str | None = None
     usage_record_id: str | None = None
+    units: float | None = None
+    unit: str | None = None
     error_type: str = ""
     message: str = ""
     #: Set only when the late artifact was downloaded AND verified.
@@ -149,6 +151,8 @@ def _outcome_from_facts(facts: SettlementFacts) -> SettleOutcome:
         cost_usd=facts.cost_usd,
         billing_basis=facts.billing_basis,
         usage_record_id=facts.usage_record_id,
+        units=facts.units,
+        unit=facts.unit,
         error_type=facts.error_type or "",
         message=facts.message,
         digest=None,
@@ -191,11 +195,6 @@ async def settle_cancelled_audio(
         logger.debug("audio settlement observation failed", exc_info=True)
         return
 
-    # The artifact is a bonus on top of the money: a settled clip registers
-    # only when the observation returned sha256-verified bytes, and the ONE
-    # registration path (``cache_media``) is used either way.
-    digest = _register_asset(outcome)
-
     recorded = False
     if outcome.settled_charge and record_spend is not None:
         try:
@@ -204,9 +203,15 @@ async def settle_cancelled_audio(
         except Exception:  # noqa: BLE001 - the ledger recorder never fails a turn
             logger.debug("audio settlement ledger row failed", exc_info=True)
 
+    # The artifact is a bonus on top of the money: a settled clip registers
+    # only when the observation returned sha256-verified bytes, and the ONE
+    # registration path (``cache_media``) is used either way.
+    digest = _register_asset(outcome)
+
     if journal is not None:
         row = {
             "version": 1,
+            "tool": str(payload.get("tool") or "generate_voiceover"),
             "request_id": request_id,
             "status": outcome.status or SETTLEMENT_NOT_OBSERVED,
             "terminal": outcome.terminal,
@@ -279,14 +284,15 @@ def _settled_record(payload: dict[str, Any], outcome: SettleOutcome) -> Any:
         channel="audio",
         provider=str(payload.get("provider") or ""),
         model=str(payload.get("model") or ""),
-        units=float(payload.get("units") or 0.0),
-        unit=str(payload.get("unit") or ""),
+        units=outcome.units if outcome.units is not None else float(payload.get("units") or 0.0),
+        unit=outcome.unit or str(payload.get("unit") or ""),
         amount_micro=usd_to_micro(outcome.cost_usd) if outcome.cost_usd is not None else None,
         billing_basis=basis,
         cost_source=source,
         price_version=price_version,
         status="ok" if outcome.error_type == "" else "failed",
         request_id=str(payload.get("request_id") or ""),
+        usage_record_id=outcome.usage_record_id or "",
         detail=(
             "settled after a best-effort cancel"
             if outcome.error_type == ""

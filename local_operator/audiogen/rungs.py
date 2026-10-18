@@ -68,7 +68,8 @@ from local_operator.artifacts.progress import ProgressFn, emit_progress
 from local_operator.artifacts.progress import (
     progress_details as _generic_progress_details,
 )
-from local_operator.artifacts.rung import CancelHandle, RungResult
+from local_operator.artifacts.rung import CancelHandle as SharedCancelHandle
+from local_operator.artifacts.rung import RungResult
 from local_operator.artifacts.walk import PauseFn
 from local_operator.audiogen import AudioRoute
 from local_operator.audiogen.models import (
@@ -96,6 +97,40 @@ __all__ = [
     "run_openai",
     "run_radient",
 ]
+
+
+@dataclass
+class CancelHandle(SharedCancelHandle):
+    """Audio keeps financial identity after completion, independently of bytes.
+
+    A terminal job cannot be cancelled, but clearing its request id would lose
+    the accepted charge when the CDN or local artifact store subsequently fails.
+    The observer is a synchronous ledger enqueue, never a provider request.
+    """
+
+    terminal: bool = False
+    cost: dict[str, Any] | None = None
+    cost_rev: int = 0
+    observe_cost: Callable[[dict[str, Any], bool], None] | None = None
+
+    def clear(self) -> None:
+        self.terminal = True
+
+
+class AdmittedAudioError(APIError):
+    """An accepted job failed; trying another vendor risks a second charge."""
+
+
+def _observe_cost(handle: SharedCancelHandle, payload: dict[str, Any], *, terminal: bool) -> None:
+    cost = _cost_from_payload(payload)
+    if isinstance(handle, CancelHandle):
+        if cost is not None:
+            handle.cost = cost
+        if terminal:
+            handle.terminal = True
+        if handle.observe_cost is not None:
+            handle.observe_cost(payload, terminal)
+
 
 logger = logging.getLogger(__name__)
 
@@ -530,7 +565,7 @@ async def run_radient(
     *,
     base_url: str,
     credential: str,
-    handle: CancelHandle,
+    handle: SharedCancelHandle,
     emit: ProgressFn | None,
     pause: PauseFn | None,
     client: httpx.AsyncClient | None = None,
@@ -572,6 +607,7 @@ async def run_radient(
         handle.model = model_id or None
         handle.base_url = base
         handle.credential = SecretStr(credential)
+        _observe_cost(handle, submit, terminal=False)
         cost = _cost_from_payload(submit)
         cost_path = submit_path
         usage_record_id: str | None = (cost or {}).get("usage_record_id")
@@ -603,6 +639,8 @@ async def run_radient(
         # the server answers straight from cache); every terminal read goes
         # through the same classifier as the polls below so the branches
         # cannot drift between submit, status and result.
+        if status not in RADIENT_OPEN_STATUSES:
+            _observe_cost(handle, last_payload, terminal=True)
         _raise_if_terminal_error(last_payload, status=status)
         while status in RADIENT_OPEN_STATUSES:
             _emit_stage(
@@ -626,6 +664,7 @@ async def run_radient(
             last_payload = status_payload
             status = (status_payload.get("status") or "").upper()
             model_id = _as_str(status_payload.get("model")) or model_id
+            _observe_cost(handle, status_payload, terminal=status not in RADIENT_OPEN_STATUSES)
             _raise_if_terminal_error(status_payload, status=status)
             settled = _cost_from_payload(status_payload)
             if settled is not None:
@@ -642,10 +681,10 @@ async def run_radient(
                 else voicing
             )
 
-        # Terminal: nothing left for a cancel to do. Cleared BEFORE the result
-        # read and the downloads so a stop mid-download reads "none" rather
-        # than firing an ALREADY_COMPLETED round-trip (the image lane's rule).
-        handle.clear()
+        # Retain financial identity through result/CDN/store failures. The
+        # audio handle's terminal bit suppresses cancel writes, not bookkeeping.
+        if isinstance(handle, CancelHandle):
+            handle.terminal = True
 
         result_payload = await _request_json(
             http,
@@ -659,6 +698,7 @@ async def run_radient(
             headers=_bearer_headers(credential),
             params={"request_id": request_id},
         )
+        _observe_cost(handle, result_payload, terminal=True)
         failure = _audio_failure(result_payload)
         if failure is not None:
             raise failure
@@ -675,9 +715,18 @@ async def run_radient(
         if isinstance(result_voicing, dict):
             voicing = result_voicing
 
-        audio_asset = await _download_audio_asset(
-            result_payload.get("audio"), http=http, voicing_notes=voicing
-        )
+        try:
+            audio_asset = await _download_audio_asset(
+                result_payload.get("audio"), http=http, voicing_notes=voicing
+            )
+        except Exception as exc:
+            if (cost or {}).get("basis") == "billed":
+                raise AdmittedAudioError(
+                    "The generation was billed but the artifact could not be stored: " + str(exc),
+                    status_code=None,
+                    code="invalid_response",
+                ) from exc
+            raise
         return RungResult(
             assets=[audio_asset],
             model=model_id or "radient",
@@ -714,20 +763,29 @@ async def _download_audio_asset(
             status_code=None,
             code="invalid_response",
         )
+    expected_sha = _as_str(audio.get("sha256"))
+    if (
+        expected_sha is None
+        or len(expected_sha) != 64
+        or any(char not in "0123456789abcdefABCDEF" for char in expected_sha)
+    ):
+        raise APIError(
+            "Radient's audio block carried no valid sha256; the audio was discarded.",
+            status_code=None,
+            code="invalid_response",
+        )
     downloaded = await download_asset(
         url,
         client=http,
         fallback_content_type=_as_str(audio.get("content_type")),
     )
-    expected_sha = _as_str(audio.get("sha256"))
-    if expected_sha:
-        digest = hashlib.sha256(downloaded.data).hexdigest()
-        if digest.lower() != expected_sha.lower():
-            raise APIError(
-                "The downloaded audio failed its sha256 verification and was discarded.",
-                status_code=None,
-                code="invalid_response",
-            )
+    digest = hashlib.sha256(downloaded.data).hexdigest()
+    if digest.lower() != expected_sha.lower():
+        raise APIError(
+            "The downloaded audio failed its sha256 verification and was discarded.",
+            status_code=None,
+            code="invalid_response",
+        )
     return AudioAsset(
         data=downloaded.data,
         content_type=downloaded.content_type,
@@ -760,6 +818,8 @@ class SettlementFacts:
     cost_usd: float | None = None
     billing_basis: str | None = None
     usage_record_id: str | None = None
+    units: float | None = None
+    unit: str | None = None
     error_type: str | None = None
     message: str = ""
     asset: AudioAsset | None = None
@@ -804,6 +864,8 @@ async def fetch_radient_settlement(
         billing_basis=(cost or {}).get("basis"),
         usage_record_id=_as_str(status_payload.get("usage_record_id"))
         or (cost or {}).get("usage_record_id"),
+        units=(cost or {}).get("units"),
+        unit=(cost or {}).get("unit"),
         error_type=failure.code if failure is not None else None,
         message=str(failure) if failure is not None else "",
     )
@@ -821,14 +883,21 @@ async def fetch_radient_settlement(
             headers=_bearer_headers(credential),
             params={"request_id": request_id},
         )
+        result_cost = _cost_from_payload(result_payload)
+        if result_cost is not None:
+            # Money belongs to the terminal response, not to a successful CDN
+            # read. Preserve it even if verification below rejects the bytes.
+            facts = replace(
+                facts,
+                cost_usd=result_cost["amount_usd"],
+                billing_basis=result_cost["basis"],
+                usage_record_id=result_cost.get("usage_record_id") or facts.usage_record_id,
+                units=result_cost.get("units"),
+                unit=result_cost.get("unit"),
+            )
         result_failure = _audio_failure(result_payload)
         if result_failure is not None:
-            return replace(
-                facts,
-                error_type=result_failure.code,
-                message=str(result_failure),
-            )
-        result_cost = _cost_from_payload(result_payload)
+            return replace(facts, error_type=result_failure.code, message=str(result_failure))
         voicing = (
             result_payload.get("voicing")
             if isinstance(result_payload.get("voicing"), dict)
@@ -913,7 +982,7 @@ async def run_elevenlabs(
     spec: AudioJobSpec,
     *,
     api_key: str,
-    handle: CancelHandle,
+    handle: SharedCancelHandle,
     emit: ProgressFn | None,
     pause: PauseFn | None,
     client: httpx.AsyncClient | None = None,
@@ -1035,7 +1104,7 @@ async def run_openai(
     spec: AudioJobSpec,
     *,
     api_key: str,
-    handle: CancelHandle,
+    handle: SharedCancelHandle,
     emit: ProgressFn | None,
     pause: PauseFn | None,
     client: httpx.AsyncClient | None = None,
@@ -1297,7 +1366,7 @@ def _parse_cancel_body(response: httpx.Response) -> tuple[str, bool | None, str]
     return (response.text or "").upper(), vendor_stopped, reason
 
 
-async def best_effort_cancel(handle: CancelHandle | None) -> AudioCancelReceipt:
+async def best_effort_cancel(handle: SharedCancelHandle | None) -> AudioCancelReceipt:
     """Ask the server to cancel the in-flight Radient job; NEVER raises.
 
     Returns an :class:`AudioCancelReceipt` whose ``outcome`` is one of
@@ -1312,6 +1381,8 @@ async def best_effort_cancel(handle: CancelHandle | None) -> AudioCancelReceipt:
     """
     if handle is None or handle.provider is None or handle.request_id is None:
         return AudioCancelReceipt(outcome="none")
+    if isinstance(handle, CancelHandle) and handle.terminal:
+        return AudioCancelReceipt(outcome="already_completed")
     provider = handle.provider
     credential = handle.credential
 

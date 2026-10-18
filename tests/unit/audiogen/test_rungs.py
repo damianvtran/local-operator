@@ -18,10 +18,10 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from local_operator.artifacts.rung import CancelHandle
 from local_operator.audiogen import AudioRoute
 from local_operator.audiogen import rungs as audio_rungs
 from local_operator.audiogen.models import AudioAsset, AudioJobSpec
+from local_operator.audiogen.rungs import CancelHandle
 from local_operator.clients._http import APIError
 
 HUB = "https://hub.example/v1"
@@ -136,7 +136,7 @@ def _radient_transport(
 
 
 @pytest.mark.asyncio
-async def test_radient_voiceover_walk_settles_cost_and_clears_the_handle():
+async def test_radient_voiceover_walk_settles_cost_and_retains_financial_identity():
     calls: list[httpx.Request] = []
     transport = _radient_transport(
         statuses=[{"status": "IN_QUEUE"}, {"status": "IN_PROGRESS"}, {"status": "COMPLETED"}],
@@ -155,8 +155,9 @@ async def test_radient_voiceover_walk_settles_cost_and_clears_the_handle():
             client=client,
         )
 
-    # The terminal state cleared the handle: nothing left for a cancel.
-    assert handle.provider is None and handle.request_id is None
+    # Terminal suppresses cancel writes, but never erases financial correlation.
+    assert handle.terminal is True
+    assert handle.provider == AudioRoute.RADIENT and handle.request_id == "req-1"
     assert outcome.model == "radient/voiceover"
     assert outcome.generation_id == "req-1"
     assert outcome.cost_usd == 0.042, "the SETTLED figure wins over the quote"
@@ -663,3 +664,20 @@ def test_the_byok_cancel_sentence_never_promises_a_stop():
     )
     assert "may still bill" in text
     assert "no cancel API" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sha", [None, "", "bad", "g" * 64, "0" * 64, AUDIO_SHA])
+async def test_radient_sha_is_required_well_formed_and_matching(sha):
+    audio = _audio_block()
+    if sha is None:
+        audio.pop("sha256", None)
+    else:
+        audio["sha256"] = sha
+    async with httpx.AsyncClient(transport=_radient_transport()) as client:
+        if sha == AUDIO_SHA:
+            asset = await audio_rungs._download_audio_asset(audio, http=client)
+            assert asset.data == AUDIO_BYTES
+        else:
+            with pytest.raises(APIError, match="sha256"):
+                await audio_rungs._download_audio_asset(audio, http=client)

@@ -530,6 +530,8 @@ class ChannelSpendRecord:
     #: shows what was originally claimed (design §3.1).
     quote_micro: int | None = None
     request_id: str = ""
+    #: Server receipt correlation survives artifact/storage failures in journal revisions.
+    usage_record_id: str = ""
     #: Free text, used by ``channel="other"`` and by rows whose knowledge
     #: presumption needs a word (a failed-unbilled job, a cancel awaiting
     #: settlement).
@@ -606,6 +608,8 @@ class ChannelSpendRecord:
             details["quote_micro"] = self.quote_micro
         if self.request_id:
             details["request_id"] = self.request_id
+        if self.usage_record_id:
+            details["usage_record_id"] = self.usage_record_id
         if self.detail:
             details["detail"] = self.detail
         return details
@@ -690,6 +694,7 @@ class ChannelSpendRecord:
             status=status,
             quote_micro=quote,
             request_id=str(details.get("request_id", "") or ""),
+            usage_record_id=str(details.get("usage_record_id", "") or ""),
             detail=str(details.get("detail", "") or ""),
         )
 
