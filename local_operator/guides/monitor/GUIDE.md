@@ -58,6 +58,10 @@ monitor that auto-disabled itself; two rows polling one source are refused
 
 ## What you can watch — read-only only
 
+A cached watched call (for example, `web_fetch` within its TTL) can compare
+snapshots that are not fresh. For freshness-sensitive watches, pass
+`refresh: true` so each tick makes a network call.
+
 Monitors re-run **unattended**, so the harness refuses any call whose
 effective approval tier is not `read`, at arm time and again before every
 run. `bash` commands must be provably read-only: a single line, every stage

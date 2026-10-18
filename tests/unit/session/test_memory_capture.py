@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 import threading
+from itertools import count
 
 import pytest
 
@@ -537,7 +538,7 @@ def test_suggestion_slot_is_one_per_fact_and_budget_is_the_rendered_line(store):
 
 
 @pytest.mark.asyncio
-async def test_long_titles_admit_only_the_block_the_tail_renders(tmp_path):
+async def test_long_titles_admit_only_the_block_the_tail_renders(tmp_path, monkeypatch):
     """The suggestion budget is the emitted BLOCK; the wrapper is not free.
 
     The admission ruler and the renderer's ruler sat 19 tokens apart (header 14
@@ -561,6 +562,14 @@ async def test_long_titles_admit_only_the_block_the_tail_renders(tmp_path):
     )
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
+
+    # UUIDv7 randomness changes the tokenizer's hex segmentation, moving this
+    # boundary fixture across its ruler even when rendered content is unchanged.
+    ids = count(1)
+    monkeypatch.setattr(
+        "local_operator.memory._id",
+        lambda: f"019f4a82-fc3b-7dab-9aaf-{next(ids):012x}",
+    )
 
     titles = [
         "Mercury deployment proof runbook for the platform team covering rollback, canary "
