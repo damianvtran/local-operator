@@ -116,13 +116,31 @@ class ReviewView(Vertical):
         self._body_text = Static()
         self._body = ScrollableContainer(self._body_text, classes="settings-view-body")
         self._body.can_focus = False
-        self._pane = Static(classes="settings-view-pane")
+        # The detail pane is FOCUSABLE and scrolls: a selected request can carry
+        # more lines than the pane is tall (four lanes, meta, tags, notice, url),
+        # and a Static truncated the remainder with no in-page way to read it.
+        # Tab reaches it; its own up/down/page bindings scroll it while focused;
+        # a focused container's keys are handled by it and unhandled ones (`r`,
+        # escape, enter) still bubble to the page.
+        self._pane_body = Static(classes="review-view-pane-text")
+        self._pane = ScrollableContainer(
+            self._pane_body, classes="settings-view-pane review-view-pane"
+        )
+        self._pane.can_focus = True
         self._columns = Horizontal(self._body, self._pane, classes="settings-view-columns")
         self._detail = Static(classes="settings-view-detail")
-        self._hint_move = HintButton("↑↓", lambda: self.action_move(1))
-        self._hint_enter = HintButton("enter", self.action_activate)
-        self._hint_refresh = HintButton("r", self.action_reload)
-        self._hint_esc = HintButton("esc", self.action_leave)
+        # One ink pair for every hint: the shipped `dim`/`faint` resting ink is
+        # 1.97:1 on this page's surface, which reads as disabled chrome rather
+        # than as the four keys that operate the page (design round 1, D1).
+        # `muted` is the page's ordinary readable ink; hover lifts to `fg`.
+        hint_ink: dict[str, tuple[str, str]] = {
+            "ink": ("muted", "muted"),
+            "lifted_ink": ("fg", "fg"),
+        }
+        self._hint_move = HintButton("↑↓", lambda: self.action_move(1), **hint_ink)
+        self._hint_enter = HintButton("enter", self.action_activate, **hint_ink)
+        self._hint_refresh = HintButton("r", self.action_reload, **hint_ink)
+        self._hint_esc = HintButton("esc", self.action_leave, **hint_ink)
         self._hint_order = (
             self._hint_move,
             self._hint_enter,
@@ -179,6 +197,10 @@ class ReviewView(Vertical):
         """Hide the pane where it would squeeze the list below readability."""
         self._narrow = 0 < self.size.width < 90
         self._pane.display = not self._narrow
+        # Narrow mode reserves a second detail line: the selected title is
+        # commonly wider than the page at 60 columns, and one truncated line
+        # left the reader no in-page way to read the rest (design D2).
+        self._detail.set_class(self._narrow, "review-detail-narrow")
 
     # -- data ---------------------------------------------------------------
     def _start(self, *, force_scan: bool) -> None:
@@ -252,62 +274,14 @@ class ReviewView(Vertical):
             raise ReviewIndexReadError(f"malformed index: {path}")
         return [row for row in rows if isinstance(row, Mapping)]
 
-    async def _load(self, *, force_scan: bool) -> None:
-        cold = self._state != "ready"
-        if cold:
-            self._state = "loading"
-        self._refreshing = not cold
-        self._scan_failed = False
-        self._paint()
-        try:
-            rows = await asyncio.to_thread(self._read_rows)
-        except Exception as exc:  # noqa: BLE001 — the page reports, never crashes
-            self._fail(exc)
-            self._paint()
-            return
-        scan_error: Exception | None = None
-        try:
-            await self._scan(force=force_scan)
-        except Exception as exc:  # noqa: BLE001
-            # The scan is best-effort against the CACHED ledger: a torn or
-            # unreadable transcript must not throw away rows this machine has
-            # already recorded. With no recorded rows it IS the answer, and the
-            # error state below says so instead of claiming the session is empty.
-            logger.debug("code-request scan failed for %s", self._session_id, exc_info=True)
-            scan_error = exc
-            self._scan_failed = True
-        try:
-            rows = await asyncio.to_thread(self._read_rows)
-        except Exception as exc:  # noqa: BLE001
-            self._fail(exc)
-            self._paint()
-            return
-        if rows:
-            try:
-                await code_request_service.refresh_session(self._config_dir, self._session_id, rows)
-            except Exception:  # noqa: BLE001
-                # A failed fetch pass keeps the last known data standing, and
-                # each row's own ``refresh_error`` is the sentence that says so.
-                # There is nothing useful for the page to add above it.
-                logger.debug("code-request refresh failed for %s", self._session_id, exc_info=True)
-            try:
-                rows = await asyncio.to_thread(self._read_rows)
-            except Exception as exc:  # noqa: BLE001
-                self._fail(exc)
-                self._paint()
-                return
-        try:
-            views = await asyncio.to_thread(code_request_service.view_rows, self._config_dir, rows)
-        except Exception as exc:  # noqa: BLE001
-            self._fail(exc)
-            self._paint()
-            return
-        if scan_error is not None and not views:
-            # Nothing was recorded and the conversation could not be read: the
-            # empty state would be a claim this page cannot make.
-            self._fail(scan_error)
-            self._paint()
-            return
+    async def _publish(self, rows: list[Mapping[str, Any]]) -> None:
+        """Turn index rows into the page's rows and paint them.
+
+        The caller decides WHEN a frame may be published; this only derives
+        and paints, preserving the cursor across the repaints a single load
+        performs (cached frame, post-scan frame, post-forge frame).
+        """
+        views = await asyncio.to_thread(code_request_service.view_rows, self._config_dir, rows)
         self._rows = list(views)
         groups = review_model.group_rows(self._rows)
         self._opened, self._mentioned = groups.opened, groups.mentioned
@@ -317,11 +291,117 @@ class ReviewView(Vertical):
         else:
             self._index = 0
         self._state = "ready"
+        self._paint()
+
+    async def _load(self, *, force_scan: bool) -> None:
+        """Read, scan, read, fetch, read — publishing each frame as it lands.
+
+        THREE STAGES, and the order is the contract:
+
+        1. **The cached frame first.** The index and the stored entries already
+           hold displayable rows; withholding them until an unrelated network
+           pass settles made a slow forge hide known requests behind a loading
+           screen (agent review F3 / UX U1). An EMPTY cached frame is not
+           published: "No code reviews yet" is a claim, and on a cold machine
+           the scan one step later may disprove it — so an empty read keeps the
+           loading frame until the scan settles.
+        2. **The transcript scan**, which is also the repair path for a torn or
+           stale-schema index. A first-read failure is NOT terminal: the scan's
+           ``write_index`` rewrites exactly the file the read could not parse
+           (QA Q1). Only a scan that also failed, with a read that still fails,
+           is the error state.
+        3. **The forge pass**, forced only when the reader asked. `r` is an
+           explicit "check now", so its intent reaches ``service.refresh_session``
+           as ``force=True`` and defeats a fresh TTL — cooling and per-key
+           backoff are the service's and stay intact (agent review F2). A cold
+           open leaves ``force`` False and respects the cache.
+
+        Nothing here blocks the event loop: every disk/network call runs in a
+        worker thread, and the page is interactive from the first painted frame
+        (selection and Enter keep working while the pass is held).
+        """
+        cold = self._state != "ready"
+        if cold:
+            self._state = "loading"
+        self._refreshing = not cold
+        self._scan_failed = False
+        self._paint()
+
+        first_error: Exception | None = None
+        rows: list[Mapping[str, Any]] = []
+        try:
+            rows = await asyncio.to_thread(self._read_rows)
+        except Exception as exc:  # noqa: BLE001
+            first_error = exc
+            # Show the error frame, but do NOT stop: the scan below is the
+            # repair path the retry hint promises.
+            self._fail(exc)
+            self._paint()
+        if rows:
+            self._refreshing = True
+            try:
+                await self._publish(rows)
+            except Exception as exc:  # noqa: BLE001
+                self._fail(exc)
+                self._paint()
+                return
+
+        scan_error: Exception | None = None
+        try:
+            await self._scan(force=force_scan)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("code-request scan failed for %s", self._session_id, exc_info=True)
+            scan_error = exc
+            self._scan_failed = True
+
+        try:
+            rows = await asyncio.to_thread(self._read_rows)
+        except Exception as exc:  # noqa: BLE001
+            if first_error is not None or not self._visible_rows:
+                self._fail(scan_error or exc)
+                self._paint()
+                return
+            # Cached rows were already painted. Keep them rather than blanking
+            # the page over a re-read that failed after they were shown.
+            logger.debug("code-request re-read failed for %s", self._session_id, exc_info=True)
+            self._refreshing = False
+            self._paint()
+            return
+
+        if rows:
+            try:
+                await code_request_service.refresh_session(
+                    self._config_dir, self._session_id, rows, force=force_scan
+                )
+            except Exception:  # noqa: BLE001
+                # A failed fetch pass keeps the last known data standing, and
+                # each row's own ``refresh_error`` is the sentence that says so.
+                logger.debug("code-request refresh failed for %s", self._session_id, exc_info=True)
+            try:
+                rows = await asyncio.to_thread(self._read_rows)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "code-request post-refresh read failed for %s", self._session_id, exc_info=True
+                )
+
+        try:
+            await self._publish(rows)
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+            self._paint()
+            return
+        if scan_error is not None and not self._visible_rows:
+            # Nothing was recorded and the conversation could not be read: the
+            # empty state would be a claim this page cannot make.
+            self._fail(scan_error)
+            self._paint()
+            return
         self._refreshing = False
-        # "Checked just now" is a receipt for the READER's press; a cold open's
-        # automatic pass already has its loading frame, and claiming a check
-        # nobody asked for would put a claim on the empty state.
-        self._checked = force_scan and not cold
+        # "Checked just now" is a receipt for the READER's press, and `force`
+        # arrives only from one: a cold open's automatic pass leaves it False,
+        # so it never claims a check nobody asked for. This includes a retry
+        # from the error state, which really is an explicit check.
+        self._checked = force_scan
         self._paint()
 
     def _fail(self, exc: BaseException) -> None:
@@ -374,14 +454,32 @@ class ReviewView(Vertical):
         self.post_message(ReviewViewDismissed())
 
     # -- painting -----------------------------------------------------------
+    def _detail_line(self, width: int) -> str:
+        """The selected request's title, wrapped in narrow mode.
+
+        Wide mode has a pane that repeats the clause, so one clipped line is a
+        caption for it. Narrow mode hides the pane, and a title wider than 60
+        cells then had nowhere to be read: two reserved lines carry the whole
+        value, with an ellipsis only when it is still too long.
+        """
+        content = self._detail_text()
+        if not self._narrow or not content:
+            return truncate_cells(content, width)
+        lines = _wrap(content, width)
+        if len(lines) <= 2:
+            return "\n".join(lines)
+        head = lines[:2]
+        head[-1] = truncate_cells(head[-1] + " …", width)
+        return "\n".join(head)
+
     def _paint(self) -> None:
         self._apply_layout()
         self._now_ms = time.time() * 1000.0
         self._title.update(Text(_t(_kt.title()), style="bold"))
         self._rule.update(Text(_RULE_GLYPH * 200, style="dim"))
-        self._pane.update(self._pane_text())
+        self._pane_body.update(self._pane_text())
         width = max(10, self._detail.size.width or self.size.width or 80)
-        self._detail.update(Text(truncate_cells(self._detail_text(), width), style="dim"))
+        self._detail.update(Text(self._detail_line(width), style="dim"))
         self._paint_hints()
         self._body_text.update(self._body_rich())
         self._scroll_to_cursor()
@@ -491,7 +589,6 @@ class ReviewView(Vertical):
             color=theme_mod.semantic_color("muted") if selected else None,
             bgcolor=background,
         )
-        dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
         text.append(f"{_CURSOR} " if selected else "  ", style=cursor)
 
         # Line A: identity, the disambiguating tags, and the state pill pushed
@@ -519,10 +616,17 @@ class ReviewView(Vertical):
             _styled_line("  " + truncate_cells(review_model.row_title(row), width - 2), base)
         )
 
-        # Line C: one line per lane while the request is not link-only.
+        # Line C: the lane state. Wide mode gives each lane its own line; a
+        # narrow page (four-line body at 60x20) gives the whole request one
+        # dense summary instead, so its identity and meta stay in the viewport
+        # (UX U2). The detail pane keeps the full clause where there is room.
         if not row.get("link_only"):
-            for line in review_model.lane_lines(row):
-                self._append_lane_line(text, line, width=width, background=background)
+            lanes = review_model.lane_lines(row)
+            if self._narrow and lanes:
+                self._append_lane_summary(text, lanes, width=width, background=background)
+            else:
+                for line in lanes:
+                    self._append_lane_line(text, line, width=width, background=background)
 
         # Line D: the meta figures, `·`-seamed.
         meta = self._meta_spans(row, width=width, background=background)
@@ -537,12 +641,16 @@ class ReviewView(Vertical):
             else review_model.row_notice(row)
         )
         if notice:
-            text.append_text(_styled_line("  " + truncate_cells(notice, width - 2), dim))
+            notice_style = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
+            text.append_text(_styled_line("  " + truncate_cells(notice, width - 2), notice_style))
         else:
             text.append("\n", style=base)
-        # A blank row between requests: a review row is up to eight lines, and
-        # without the gap two rows read as one block.
-        text.append("\n", style=base)
+        # A blank row between requests keeps two wide rows from reading as one
+        # block. Narrow rows are already a compact four lines, so the gap is
+        # what pushes the next identity out of a four-line viewport; drop it
+        # there and let the notice slot separate them.
+        if not self._narrow:
+            text.append("\n", style=base)
 
     def _append_lane_line(
         self, text: Text, line: review_model.LaneLine, *, width: int, background: Any
@@ -550,17 +658,46 @@ class ReviewView(Vertical):
         dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
         muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
         text.append("  ", style=dim)
-        text.append(review_model.lane_name_cell(line.name) + " ", style=dim)
+        # The NAME is content the reader compares across rows, so it takes the
+        # readable `muted` ink rather than the decorative `dim` (design D1).
+        text.append(review_model.lane_name_cell(line.name) + " ", style=muted)
+        if line.segments_truncated:
+            # The true round stays in the clause; the strip says it is a head,
+            # not the whole history (agent review F1).
+            text.append("…", style=dim)
         for tone in line.segments:
             text.append(
                 _SEGMENT_GLYPH[tone],
                 style=Style(color=_lane_tone_color(tone), bgcolor=background),
             )
-        strip_width = len(line.segments)
+        strip_width = len(line.segments) + (1 if line.segments_truncated else 0)
         gap = 1 if strip_width else 0
         room = max(6, width - 2 - review_model.LANE_NAME_CELLS - 1 - strip_width - gap)
         text.append(" " * gap, style=dim)
         text.append(truncate_cells(line.clause, room), style=muted)
+        text.append("\n")
+
+    def _append_lane_summary(
+        self,
+        text: Text,
+        lines: tuple[review_model.LaneLine, ...],
+        *,
+        width: int,
+        background: Any,
+    ) -> None:
+        """One dense line: lane name and round, `Code 2 · Design 1 · QA 1`.
+
+        The round is what distinguishes a clean lane from one that was reviewed
+        and remediated, so it stays; the prose state and freshness are the
+        detail pane's and wide mode's job.
+        """
+        muted = Style(color=theme_mod.semantic_color("muted"), bgcolor=background)
+        dim = Style(color=theme_mod.semantic_color("dim"), bgcolor=background)
+        parts = [
+            f"{line.name} {line.round}" if line.round is not None else line.name for line in lines
+        ]
+        text.append("  ", style=dim)
+        text.append(truncate_cells(" · ".join(parts), max(6, width - 2)), style=muted)
         text.append("\n")
 
     def _meta_spans(self, row: Mapping[str, Any], *, width: int, background: Any) -> Text | None:
@@ -597,6 +734,10 @@ class ReviewView(Vertical):
             text.append(truncate_cells(part, remaining), style=style)
         if text.plain.strip() == "":
             return None
+        # Every painted line ends with exactly one newline. Without this the
+        # notice appended on the same line as the meta (and `_row_offsets`
+        # undercounted the row's visual height).
+        text.append("\n")
         return text
 
     def _pane_text(self) -> Text:
@@ -634,7 +775,7 @@ class ReviewView(Vertical):
         if head:
             text.append("\n")
             for line in _wrap(" · ".join(head), width):
-                text.append(line + "\n", style=dim)
+                text.append(line + "\n", style=muted)
         if not row.get("link_only"):
             lanes = review_model.lane_lines(row)
             if lanes:
@@ -644,7 +785,7 @@ class ReviewView(Vertical):
                     first = review_model.lane_name_cell(line.name) + " "
                     clause_lines = _wrap(line.clause, max(6, width - cells))
                     for position, clause in enumerate(clause_lines):
-                        text.append(first if position == 0 else " " * cells, style=dim)
+                        text.append(first if position == 0 else " " * cells, style=muted)
                         text.append(clause + "\n", style=muted)
         tags = [tag for tag in (review_model.relation_tag(row), review_model.acted_tag(row)) if tag]
         if tags:
@@ -655,12 +796,12 @@ class ReviewView(Vertical):
         if notice:
             text.append("\n")
             for line in _wrap(notice, width):
-                text.append(line + "\n", style=dim)
+                text.append(line + "\n", style=muted)
         url = str(row.get("url") or "")
         if url:
             text.append("\n")
             for line in _wrap(url, width):
-                text.append(line + "\n", style=dim)
+                text.append(line + "\n", style=muted)
         return text
 
     def _pane_line_width(self) -> int:
@@ -675,7 +816,13 @@ class ReviewView(Vertical):
         start, height = self._row_offsets[min(self._index, len(self._row_offsets) - 1)]
         viewport = max(1, self._body.size.height or 1)
         y = self._body.scroll_offset.y
-        if start < y:
+        if height >= viewport:
+            # A row taller than the viewport (narrow mode: a four-line identity
+            # block against a four-line body) is anchored at its TOP. Bottom
+            # alignment would scroll its identity off the screen to show the
+            # reserved notice line, which is the U2 report exactly.
+            target = start
+        elif start < y:
             target = start
         elif start + height > y + viewport:
             target = start + height - viewport

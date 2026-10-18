@@ -47,6 +47,12 @@ LANE_ORDER = ("agent", "design", "qa", "ux")
 #: the clause's start column identical everywhere.
 LANE_NAME_CELLS = 8
 
+#: Most round marks one lane paints. The round number comes from a remote
+#: convention comment, so it is unbounded input: a comment saying "round 100000"
+#: must not allocate 100000 segments or spans on the UI thread. The clause still
+#: states the true round; the strip shows this many plus an omission marker.
+MAX_ROUND_SEGMENTS = 12
+
 FETCH_STATES = (
     "pending",
     "ready",
@@ -87,6 +93,12 @@ class LaneLine:
     clause: str
     segments: tuple[LaneTone, ...]
     tone: LaneTone
+    #: The parsed round, or ``None`` when the wire carried none. The narrow
+    #: summary line needs the figure without parsing it back out of the clause.
+    round: int | None = None
+    #: True when the round exceeds :data:`MAX_ROUND_SEGMENTS`; the view paints
+    #: a dim ellipsis so the truncated strip never reads as the whole history.
+    segments_truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,23 +348,32 @@ def lane_segment_tone(state: str) -> LaneTone:
     return "outline"
 
 
+def _round_count(lane: Mapping[str, Any]) -> int | None:
+    """The lane's parsed round as a positive int, or ``None`` when it has none."""
+    value = _finite(lane.get("round"))
+    if value is None or value < 1:
+        return None
+    return int(value)
+
+
 def round_segments(lane: Mapping[str, Any]) -> tuple[LaneTone, ...]:
-    """One segment per KNOWN round, chronological.
+    """At most :data:`MAX_ROUND_SEGMENTS` marks, chronological.
 
     THE WIRE PARSES ONE STATE PER LANE — the latest convention comment's — so
     the latest segment carries the state's tone and earlier ones are NEUTRAL,
     never the latest tone repeated. A stale ``clean`` is painted ``muted``: a
     stale clean is not clean now. No round number, no segments: a segment count
-    is a claim about how many rounds ran.
+    is a claim about how many rounds ran — which is also why an oversized count
+    is capped rather than trusted: the number is remote comment text.
     """
-    round_no = _finite(lane.get("round"))
-    if round_no is None or round_no < 1:
+    count = _round_count(lane)
+    if count is None:
         return ()
-    count = int(round_no)
+    shown = min(count, MAX_ROUND_SEGMENTS)
     latest = lane_segment_tone(_text(lane.get("state")))
     if lane.get("freshness") == "stale" and latest == "success":
         latest = "muted"
-    segments: list[LaneTone] = ["muted"] * (count - 1)
+    segments: list[LaneTone] = ["muted"] * (shown - 1)
     segments.append(latest)
     return tuple(segments)
 
@@ -396,6 +417,7 @@ def lane_lines(row: Mapping[str, Any]) -> tuple[LaneLine, ...]:
             for part in (lane_state_clause(lane), lane_freshness_clause(lane, head_sha))
             if part
         )
+        round_no = _round_count(lane)
         out.append(
             LaneLine(
                 key=f"{_text(lane.get('lane'))}-{index}",
@@ -403,6 +425,8 @@ def lane_lines(row: Mapping[str, Any]) -> tuple[LaneLine, ...]:
                 clause=clause,
                 segments=round_segments(lane),
                 tone=lane_segment_tone(_text(lane.get("state"))),
+                round=round_no,
+                segments_truncated=round_no is not None and round_no > MAX_ROUND_SEGMENTS,
             )
         )
     return tuple(out)

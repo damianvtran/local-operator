@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.code_requests import rounds
 from local_operator.tui import review
 
 
@@ -249,6 +250,38 @@ def test_round_segments_mark_only_the_latest_round_with_the_state_tone() -> None
     assert stale == ("muted", "muted")
     assert review.round_segments(_lane("agent", round=0, state="clean")) == ()
     assert review.round_segments(_lane("agent", round=None, state="awaiting_review")) == ()
+
+
+def test_an_oversized_round_is_capped_and_flagged() -> None:
+    """The round is remote comment text: it must not size an allocation.
+
+    `### Agent review — round 100000` parses to that number, and the strip is
+    painted per mark. The clause keeps the true round; the strip is bounded
+    and says so (agent review round 1, F1).
+    """
+    # Through the REAL parser: the number comes from remote comment text.
+    parsed = rounds.parse(
+        [rounds.Comment(id="c1", body="### Agent review — round 100000\n\nNo findings.")],
+        head_sha="9d29452c1100",
+        is_open=True,
+    )
+    lane = next(
+        item.to_payload()
+        for item in parsed.states("9d29452c1100", is_open=True)
+        if item.lane == "agent"
+    )
+    assert lane["round"] == 100000
+    assert len(review.round_segments(lane)) == review.MAX_ROUND_SEGMENTS
+
+    line = review.lane_lines(_row(lanes=[lane], summary=_summary(state="open")))[0]
+    assert line.round == 100000
+    assert line.segments_truncated is True
+    assert len(line.segments) == review.MAX_ROUND_SEGMENTS
+    assert "Round 100000" in line.clause
+
+    small = review.lane_lines(_row(lanes=[_lane("agent", round=2)]))[0]
+    assert small.segments_truncated is False
+    assert small.round == 2
 
 
 def test_lane_tone_by_state() -> None:

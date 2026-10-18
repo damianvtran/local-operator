@@ -1975,7 +1975,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "one MINOR (activity_merge/activity_push: merge and push kept English per glossary §Wave-2) fixed by the implementer after audit; no re-audit required. Independent audit: 73 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+      "note": "one MINOR (activity_merge/activity_push: merge and push kept English per glossary §Wave-2) fixed by the implementer after audit; no re-audit required. Independent audit: 73 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit. Post-audit QA disposition: lane_round copy corrected from English \"Round {round} · {state}\" to the French review-round term \"Tour {round} · {state}\"."
     },
     {
       "locale": "hi",

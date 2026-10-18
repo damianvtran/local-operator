@@ -37,7 +37,7 @@
   "tui.review.lane_design": "Design",
   "tui.review.lane_no_review": "Pas encore de revue d’agent",
   "tui.review.lane_qa": "QA",
-  "tui.review.lane_round": "Round {round} · {state}",
+  "tui.review.lane_round": "Tour {round} · {state}",
   "tui.review.lane_stale": "périmé",
   "tui.review.lane_stale_head": "périmé — relu {reviewed}, head {head}",
   "tui.review.lane_stale_reviewed": "périmé — relu {reviewed}",
