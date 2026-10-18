@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 
 from local_operator.clients._http import APIError
 from local_operator.stt import clients
+from local_operator.stt.cleanup import RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM
 
 
 def _multipart(request: httpx.Request) -> bytes:
@@ -74,6 +77,83 @@ async def test_elevenlabs_refusal_is_an_apierror_with_the_key_scrubbed() -> None
 
 
 @pytest.mark.asyncio
+async def test_elevenlabs_cleanup_fields_and_provenance() -> None:
+    """``auto``/``provider`` are two explicit wire fields, not a prompt hint."""
+    seen: dict[str, bytes] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = _multipart(request)
+        return httpx.Response(
+            200, json={"text": "So I think we should ship.", "language_code": "eng"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = clients.ElevenLabsSttClient("k", client=http)
+        result = await client.transcribe(
+            b"x", mime="audio/wav", no_verbatim=True, tag_audio_events=False
+        )
+
+    body = seen["body"]
+    assert b'name="no_verbatim"' in body and b"\r\n\r\ntrue\r\n" in body
+    assert b'name="tag_audio_events"' in body and b"\r\n\r\nfalse\r\n" in body
+    assert result.cleanup == "elevenlabs.no_verbatim"
+    assert result.raw_text is None
+    assert result.raw_unavailable == RAW_UNAVAILABLE_PROVIDER_NO_VERBATIM
+    assert result.language == "eng"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_verbatim_sends_no_cleanup_fields_and_preserves_raw() -> None:
+    """``cleanup=off`` must be byte-identical to the pre-cleanup request.
+
+    The fields are optional in the API; the verbatim path proves we do not send
+    them at all rather than sending ``false`` (which would still be a wire
+    change and could inherit a provider-side default later).
+    """
+    seen: dict[str, bytes] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = _multipart(request)
+        return httpx.Response(200, json={"text": "Um, so I think.", "language_code": "eng"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = clients.ElevenLabsSttClient("k", client=http)
+        result = await client.transcribe(b"x", mime="audio/wav", language="en")
+
+    body = seen["body"]
+    assert b"no_verbatim" not in body
+    assert b"tag_audio_events" not in body
+    # The complete field set is the pre-cleanup one: model, optional language,
+    # file. No cleanup field, not even a ``false``.
+    names = sorted(match.decode() for match in re.findall(rb';\s*name="([^"]+)"', body))
+    assert names == ["file", "language_code", "model_id"]
+    assert result.text == "Um, so I think."
+    assert result.raw_text == "Um, so I think."
+    assert result.raw_unavailable == ""
+    assert result.cleanup == "none"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_no_verbatim_is_not_sent_for_a_pinned_older_model() -> None:
+    """The provider documents no-verbatim on scribe_v2 only; do not 422 a pin."""
+    seen: dict[str, bytes] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = _multipart(request)
+        return httpx.Response(200, json={"text": "raw text"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = clients.ElevenLabsSttClient("k", client=http)
+        result = await client.transcribe(
+            b"x", mime="audio/wav", model="scribe_v1", no_verbatim=True
+        )
+
+    assert b"no_verbatim" not in seen["body"]
+    assert result.raw_text == "raw text"
+    assert result.cleanup == "none"
+
+
+@pytest.mark.asyncio
 async def test_openai_success_shape() -> None:
     seen: dict[str, object] = {}
 
@@ -90,6 +170,8 @@ async def test_openai_success_shape() -> None:
     assert result.text == "openai text"
     assert result.model == clients.OPENAI_STT_MODEL
     assert result.provider == "openai"
+    assert result.raw_text == "openai text"
+    assert result.cleanup == "none"
     assert str(seen["url"]).endswith("/v1/audio/transcriptions")
     assert seen["authorization"] == "Bearer oai-secret"
     body = seen["body"]

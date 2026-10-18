@@ -73,7 +73,16 @@ class FakeWireClient:
         self.calls: list[dict[str, Any]] = []
 
     async def transcribe(
-        self, audio, *, mime, model=None, language=None, prompt=None, timeout_s=60.0
+        self,
+        audio,
+        *,
+        mime,
+        model=None,
+        language=None,
+        prompt=None,
+        no_verbatim=None,
+        tag_audio_events=None,
+        timeout_s=60.0,
     ):
         self.calls.append(
             {
@@ -82,6 +91,8 @@ class FakeWireClient:
                 "model": model,
                 "language": language,
                 "prompt": prompt,
+                "no_verbatim": no_verbatim,
+                "tag_audio_events": tag_audio_events,
                 "timeout_s": timeout_s,
             }
         )
@@ -91,13 +102,18 @@ class FakeWireClient:
         error = self.behavior.get("error")
         if error is not None:
             raise error
+        text = self.behavior.get("text", f"{self.kind} text")
         return type(
             "Result",
             (),
             {
-                "text": self.behavior.get("text", f"{self.kind} text"),
+                "text": text,
                 "model": model or "some-model",
                 "provider": self.kind,
+                "raw_text": None if no_verbatim else text,
+                "raw_unavailable": "provider_no_verbatim" if no_verbatim else "",
+                "language": "eng" if self.kind == "elevenlabs" else None,
+                "cleanup": "elevenlabs.no_verbatim" if no_verbatim else "none",
             },
         )()
 
@@ -301,6 +317,80 @@ async def test_language_and_prompt_reach_the_byo_clients(rig) -> None:
 
 
 @pytest.mark.asyncio
+async def test_elevenlabs_auto_sends_native_cleanup_and_carries_provenance(rig) -> None:
+    """The default mode uses the provider switch and says so on the outcome."""
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"})
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.text == "elevenlabs text"
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+    assert outcome.language == "eng"
+    assert outcome.removed == ()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_off_sends_no_provider_fields_and_returns_raw(rig) -> None:
+    """``off`` is the verbatim escape hatch: no switch, raw equals text."""
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"}, cleanup="off")
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is None
+    assert call["tag_audio_events"] is None
+    assert outcome.text == "elevenlabs text"
+    assert outcome.raw_text == "elevenlabs text"
+    assert outcome.raw_unavailable == ""
+    assert outcome.cleanup == "none"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_cleanup_mode_is_refused_before_any_call(rig) -> None:
+    with pytest.raises(ValueError, match="Unknown transcription cleanup mode"):
+        await rig.run({"elevenlabs": "el-key"}, cleanup="bogus")
+
+    assert rig.clients == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_client_is_refused_until_its_slice(rig) -> None:
+    """Recognized vocabulary, not-yet-implemented behaviour: refuse, never fall back."""
+    with pytest.raises(ValueError, match="not available yet"):
+        await rig.run({"elevenlabs": "el-key"}, cleanup="client")
+
+    assert rig.clients == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_provider_sends_native_fields_without_client_rules(rig) -> None:
+    rig.behaviors["radient"]["error"] = APIError("up", status_code=500)
+
+    outcome = await rig.run({"elevenlabs": "el-key"}, cleanup="provider")
+
+    call = rig.client("elevenlabs").calls[0]
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_edit_is_refused_until_its_slice(rig) -> None:
+    """The +30% experimental mode is not silently mapped to provider or off."""
+    with pytest.raises(ValueError, match="not available yet"):
+        await rig.run({"elevenlabs": "el-key"}, cleanup="edit")
+
+    assert rig.clients == []
+
+
+@pytest.mark.asyncio
 async def test_the_sniffed_container_beats_the_suffix(rig) -> None:
     """Content over extension: the header is the stronger evidence."""
     mangled = rig.audio_path.with_suffix(".mp3")
@@ -364,6 +454,11 @@ async def test_the_token_executor_runs_only_the_named_rung(rig) -> None:
     assert call["mime"] == "audio/wav"
     assert call["language"] == "en"
     assert call["prompt"] == "hint"
+    assert call["no_verbatim"] is True
+    assert call["tag_audio_events"] is False
+    assert outcome.cleanup == "elevenlabs.no_verbatim"
+    assert outcome.raw_text is None
+    assert outcome.raw_unavailable == "provider_no_verbatim"
     assert not any(getattr(client, "kind", "") == "openai" for client in rig.clients)
 
 
