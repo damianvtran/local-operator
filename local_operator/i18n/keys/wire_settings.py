@@ -2276,6 +2276,46 @@ def speech_title() -> Msg:
     return Msg("wire.settings.speech.title", {})
 
 
+def speech_transcription_cleanup_choice_auto_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.auto.description", {})
+
+
+def speech_transcription_cleanup_choice_auto_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.auto.label", {})
+
+
+def speech_transcription_cleanup_choice_client_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.client.description", {})
+
+
+def speech_transcription_cleanup_choice_client_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.client.label", {})
+
+
+def speech_transcription_cleanup_choice_off_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.off.description", {})
+
+
+def speech_transcription_cleanup_choice_off_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.off.label", {})
+
+
+def speech_transcription_cleanup_choice_provider_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.provider.description", {})
+
+
+def speech_transcription_cleanup_choice_provider_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.provider.label", {})
+
+
+def speech_transcription_cleanup_help() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.help", {})
+
+
+def speech_transcription_cleanup_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.label", {})
+
+
 def speech_voice_accent_help() -> Msg:
     return Msg("wire.settings.speech_voice_accent.help", {})
 

@@ -7117,12 +7117,25 @@ def build_app(daemon: MobileDaemon):
 
         from local_operator.clients._http import APIError
         from local_operator.clients.stt import SttBackendUnavailable
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.stt.cleanup import configured_cleanup
         from local_operator.mobile.stt import (
             describe_stt_failure,
             path_provider_label,
             stt_availability,
             transcribe_audio,
         )
+
+        # The /settings key supplies the mode when the request names none; the
+        # request field wins. The YAML read runs off the loop.
+        def _default_cleanup() -> str:
+            try:
+                return configured_cleanup(ConfigManager(config_dir()))
+            except Exception:  # noqa: BLE001 — an unreadable config must not disable dictation
+                return "auto"
+
+        default_cleanup = await asyncio.to_thread(_default_cleanup)
 
         # Read availability HERE and hand it to the dispatch, so the answer the
         # provider label and the dispatch both use is the SAME read (the module
@@ -7135,7 +7148,7 @@ def build_app(daemon: MobileDaemon):
                 language=_optional_field("language"),
                 prompt=_optional_field("prompt"),
                 model=_optional_field("model"),
-                cleanup=_optional_field("cleanup"),
+                cleanup=_optional_field("cleanup") or default_cleanup,
                 availability=answer,
             )
         except SttBackendUnavailable:

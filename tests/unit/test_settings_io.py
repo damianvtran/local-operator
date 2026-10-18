@@ -465,6 +465,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["speech.voice.language"] = voicing_descriptor.DEFAULT_LANGUAGE
     consumers["speech.voice.accent"] = voicing_descriptor.DEFAULT_ACCENT
     consumers["speech.voice.instructions"] = voicing_descriptor.DEFAULT_SPEECH_INSTRUCTIONS
+
+    # The cleanup policy's own default, asked of the module the routes read.
+    from local_operator.stt import cleanup as cleanup_policy
+
+    consumers["speech.transcription.cleanup"] = cleanup_policy.DEFAULT_CLEANUP
     return consumers
 
 
@@ -3172,3 +3177,27 @@ class TestTheLapsedAskWindowRow:
     def test_the_help_fits_with_the_default_clause(self) -> None:
         setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
         assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+
+def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
+    manager: ConfigManager,
+) -> None:
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+
+    assert setting.kind is Kind.ENUM
+    assert setting.default == "auto"
+    assert {choice.value for choice in setting.resolved_choices} == {
+        "auto",
+        "provider",
+        "client",
+        "off",
+    }
+    assert settings_io.read_setting(manager, setting) == "auto"
+
+    settings_io.write_setting(manager, setting, "off")
+    assert settings_io.read_setting(manager, setting) == "off"
+
+    with pytest.raises(ValueError):
+        settings_io.write_setting(manager, setting, "bogus")
+    # The rejected write did not land.
+    assert settings_io.read_setting(manager, setting) == "off"
