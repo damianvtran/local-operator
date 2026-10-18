@@ -1,0 +1,47 @@
+{
+  "cli.services_help.services": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Top-level summary distinguishes non-runtime services from ongoing conversations: moving services must not stop a conversation."
+  },
+  "cli.services_help.services_description": {
+    "role": "lop CLI help-page description",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Group-page definition of services: lop serve and supervised LaunchAgents, not conversation runtimes. Preserve restart keeping the serve daemon pid and socket. Command/product identifiers remain literal."
+  },
+  "cli.services_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "status reports both the install build and the build each non-runtime service is serving."
+  },
+  "cli.services_help.status_description": {
+    "role": "lop CLI help-page description",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "status is read-only. Same-version rebuild drift must remain distinguishable; report both installed and actively served builds, not just version strings."
+  },
+  "cli.services_help.restart": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "restart moves services to the current build and never stops a conversation runtime."
+  },
+  "cli.services_help.wait": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--wait is a positive per-daemon wait. {wait_seconds} is the preformatted g-style numeric DEFAULT_SERVICES_WAIT_S constant, not translatable prose; the catalogue owns the seconds suffix and default explanation. Preserve timeout behavior: report, keep old build serving, retry next restart."
+  },
+  "cli.services_help.reclaim": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "reclaim ends only a recorded lop serve daemon proven not to be serving its recorded address; never a serving daemon. Preserve the safety restriction."
+  },
+  "cli.services_help.reclaim_description": {
+    "role": "lop CLI help-page description",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Recovery caveat: reclaim targets exactly one proven daemon pid, escalating SIGTERM to SIGKILL at a bound. It is never automatic because successor readiness cannot be proved from the record. Preserve commands, signal names and this restriction."
+  },
+  "cli.services_help.pid": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "reclaim positional pid must match the value printed by lop services status. Preserve pid and the command token."
+  }
+}

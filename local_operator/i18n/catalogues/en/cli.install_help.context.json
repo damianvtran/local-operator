@@ -1,0 +1,27 @@
+{
+  "cli.install_help.install": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Top-level summary: manage local installation generations for the stable lop runtime, not install a new package."
+  },
+  "cli.install_help.prune": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "prune deletes only generations with nothing running from them. Preserve this safety restriction."
+  },
+  "cli.install_help.keep": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--keep is a non-negative count of unreferenced generations. Preserve %(default)s verbatim: argparse expands it using the declared default. A live/saved-session generation or the current target is never removed; current is a literal pointer name."
+  },
+  "cli.install_help.migrate": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "migrate copies this install into the generation layout and repoints the literal current pointer."
+  },
+  "cli.install_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "status describes pointer, generations, and the build a newly launched lop would load; lop is an executable token."
+  }
+}

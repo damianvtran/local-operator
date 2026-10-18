@@ -1,0 +1,32 @@
+{
+  "cli.update_help.update": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "Top-level summary distinguishes PyPI upgrades from the local checkout rebuilding lop-update script; preserve the script name and PyPI brand."
+  },
+  "cli.update_help.check": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--check compares the installed build with PyPI without installing anything. Preserve the flag token and PyPI brand."
+  },
+  "cli.update_help.from_snapshot": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--from-snapshot accepts a source directory or current-repository git ref. Preserve the macOS published-release wheel exception and its key-agent constraint; other refs build from source."
+  },
+  "cli.update_help.allow_downgrade": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--allow-downgrade permits a deliberate rollback only with --from-snapshot, recorded in the marker. Preserve newer-only PyPI behavior and refresh-flag precedence."
+  },
+  "cli.update_help.no_services": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--no-services skips bringing lop serve daemons onto the build, but supervised daemons are still repaired. Preserve this distinction and the lop serve command."
+  },
+  "cli.update_help.no_roll": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, preserves safety and command distinctions",
+    "note": "--no-roll suppresses the automatic mesh rollout regardless of network.rollout_on_update; lop network update remains available manually. Preserve config/command tokens."
+  }
+}

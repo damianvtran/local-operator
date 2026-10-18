@@ -1,0 +1,11 @@
+{
+  "cli.services_help.services": "Bring this machine's non-runtime services (serve daemons and the supervised daemons) onto the current build, without stopping any running conversation",
+  "cli.services_help.services_description": "Everything local_operator runs for this machine that is not a conversation. A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the mobile relay, the browser bridge, the tunnel and the wakes agent. Runtimes — the processes holding your conversations — are never stopped: 'restart' reloads a serve daemon in place, keeping its pid and socket.",
+  "cli.services_help.status": "Report each non-runtime service, the build it is serving, and the build the install is on",
+  "cli.services_help.status_description": "Read-only. Names the build the install is on and, for each `lop serve` daemon, the build it is SERVING — both sides of every comparison, because the ordinary drift on this machine is a same-version rebuild where the version alone cannot show that a daemon is behind.",
+  "cli.services_help.restart": "Move every service onto the current build (never stops a runtime)",
+  "cli.services_help.wait": "How long to wait for an asked daemon to come back on the new build (default: {wait_seconds}s; must be positive). A daemon that does not make it is reported, left serving the build it loaded, and retried by the next `lop services restart`.",
+  "cli.services_help.reclaim": "End a `lop serve` daemon that is recorded but not serving its address (never one that is serving)",
+  "cli.services_help.reclaim_description": "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to SIGKILL at a bound, after proving the process is this product's serve daemon and that it is not the one serving the address its record names. `lop services status` lists the daemons this is for. It is never automatic: the daemon may be supervising session runtimes, and no reader of a record can prove a successor is ready to take its place.",
+  "cli.services_help.pid": "The daemon's pid, exactly as `lop services status` prints it"
+}
