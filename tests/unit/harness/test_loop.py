@@ -227,6 +227,89 @@ async def test_output_envelope_closes_transport_and_retires_pending_calls() -> N
 
 
 @pytest.mark.asyncio
+async def test_leaked_tool_markup_never_reaches_transcript_render_or_replay() -> None:
+    """radient/auto leaks DeepSeek tool-call markup into ``delta.content`` beside a
+    correct structured call. Through the real client and loop, neither the live
+    deltas, the persisted assistant text, nor the next request's native replay
+    may carry it; a turn that was ONLY markup persists as a tool-only turn."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    dsml = "\uff5cDSML\uff5c"
+
+    def chunk(delta: dict[str, Any], finish: str | None = None) -> str:
+        payload = {"id": "gen-1", "choices": [{"delta": delta, "finish_reason": finish}]}
+        return "data: " + json.dumps(payload) + "\n\n"
+
+    def call(call_id: str, text: str) -> dict[str, Any]:
+        arguments = json.dumps({"text": text})
+        function = {"name": "echo", "arguments": arguments}
+        return {"tool_calls": [{"index": 0, "id": call_id, "function": function}]}
+
+    turns = [
+        # Prose, then DSML residue split mid-token across chunks.
+        [
+            chunk({"reasoning_content": "Look it up."}),
+            chunk({"content": "Checking the record."}),
+            chunk({"content": "\n\n\uff5cDS"}),
+            chunk({"content": 'ML\uff5c parameter name="text" str'}),
+            chunk({"content": 'ing="true">alpha'}),
+            chunk(call("call_1", "alpha"), "tool_calls"),
+        ],
+        # Nothing but a bare parameter tail: no DSML token at all.
+        [
+            chunk({"reasoning_content": "Again."}),
+            chunk({"content": 'parameter name="text" string="true">beta'}),
+            chunk(call("call_2", "beta"), "tool_calls"),
+        ],
+        [chunk({"content": "All done."}), chunk({}, "stop")],
+    ]
+    bodies: list[dict[str, Any]] = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        body = "".join(turns[len(bodies) - 1]) + "data: [DONE]\n\n"
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    executed: list[str] = []
+    spec = ModelSpec(provider="radient", model_id="auto", max_output_tokens=1024)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server)) as http:
+        client = OpenAICompatClient("https://test.invalid/v1", http_client=http)
+
+        def stream(request: ChatRequest, signal: AbortSignal | None):
+            return client.stream(request, "test-token")
+
+        events = [
+            event
+            async for event in AgentLoop().run(
+                [Message.user("look it up")],
+                LoopContext(system_blocks=[], messages=[], tools=[echo_tool(executed)]),
+                make_config(stream, model=spec),
+                None,
+            )
+        ]
+
+    assert executed == ["echo", "echo"]
+    rendered = "".join(e.delta for e in events if isinstance(e, MessageUpdateEvent) and e.delta)
+    assert rendered == "Checking the record.All done."
+    end = next(event for event in events if isinstance(event, AgentEndEvent))
+    assistants = [m for m in end.messages if isinstance(m, Message) and m.role == "assistant"]
+    assert [m.content for m in assistants[:2]] == [
+        [TextContent(text="Checking the record.")],
+        [],
+    ]
+    assert [m.tool_calls[0].arguments for m in assistants[:2]] == [
+        {"text": "alpha"},
+        {"text": "beta"},
+    ]
+    # The replayed history is clean, AND the native reasoning still rides along:
+    # its fingerprint matched the persisted text, so it was not discarded.
+    replayed = [m for m in bodies[2]["messages"] if m["role"] == "assistant"]
+    assert [m.get("content") for m in replayed] == ["Checking the record.", None]
+    assert [m.get("reasoning_content") for m in replayed] == ["Look it up.", "Again."]
+    assert dsml not in json.dumps(bodies) and "parameter name" not in json.dumps(bodies)
+
+
+@pytest.mark.asyncio
 async def test_full_turn_text_tool_text():
     """Stream emits text, then a tool call (deltas split), then more text;
     after execution the model stops. Assert event order and final messages."""

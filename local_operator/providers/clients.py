@@ -77,6 +77,7 @@ from local_operator.providers.replay import (
     reasoning_echo_placeholder_tokens,
     replay_items,
 )
+from local_operator.providers.tool_markup import ToolMarkupFilter
 from local_operator.stt import audio as stt_audio
 
 if TYPE_CHECKING:
@@ -3392,6 +3393,13 @@ class OpenAICompatClient:
         served_provider: str | None = None
         direct_deepseek = request.model.provider == "deepseek"
         done_received = False
+        # DeepSeek-family models behind a gateway leak residue of their native
+        # tool-call markup into ``delta.content`` beside the parsed
+        # ``tool_calls`` (seen live on radient/auto). Filtering the deltas here
+        # keeps the live render, the persisted text and ``replay_text`` (whose
+        # fingerprint must match the persisted text) one string; see
+        # ``providers/tool_markup.py`` for what is stripped and what is held.
+        markup_filter = ToolMarkupFilter()
 
         headers = self._headers(api_key, oauth_access)
         headers.update(self._grok_conv_headers(request, url))
@@ -3535,10 +3543,14 @@ class OpenAICompatClient:
                         yield StreamReasoningDelta(delta=fragment)
                 text = delta.get("content")
                 if text:
+                    # The envelope bounds what the WIRE sent, so it is charged
+                    # the raw delta, markup included.
                     envelope.charge(text)
-                    replay_text.append(text)
-                    streamed_text = True
-                    yield StreamTextDelta(delta=text)
+                    visible = markup_filter.feed(text)
+                    if visible:
+                        replay_text.append(visible)
+                        streamed_text = True
+                        yield StreamTextDelta(delta=visible)
                 refusal = delta.get("refusal")
                 if refusal:
                     envelope.charge(str(refusal))
@@ -3587,6 +3599,17 @@ class OpenAICompatClient:
                 candidate = _served_provider_name(chunk.get("provider"))
                 if candidate:
                     served_provider = candidate
+
+        # Only now is it known whether the turn carried structured calls, which
+        # decides whether a held bare-parameter tail is residue or prose. A
+        # nameless call is dropped by the loop, so it is not evidence.
+        held = markup_filter.finish(
+            has_tool_calls=any(saved["name"] for saved in replay_calls.values())
+        )
+        if held:
+            replay_text.append(held)
+            streamed_text = True
+            yield StreamTextDelta(delta=held)
 
         # DeepSeek's protocol ends with [DONE] AND a recognized finish reason.
         # Natural EOF is a truncated response, not a successful answer. Raising
