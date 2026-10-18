@@ -2460,7 +2460,8 @@ Screen.settings #input-dock #prompt-chevron {
  * slabs on light, stub ticks on dark, and the form measured 58 rows with 9
  * visible at 80x24 (design review round 1, D3). Height 1, no border, the panel
  * fill, and the app's "this is the one you are on" fill under the cursor. */
-.projects-form-fields Input {
+.projects-form-fields Input,
+.projects-milestone-prompt Input {
     border: none;
     height: 1;
     padding: 0 1;
@@ -2468,7 +2469,8 @@ Screen.settings #input-dock #prompt-chevron {
     color: $lo-fg;
 }
 
-.projects-form-fields Input:focus {
+.projects-form-fields Input:focus,
+.projects-milestone-prompt Input:focus {
     background: $lo-tint-select;
 }
 
@@ -2555,9 +2557,22 @@ Screen.settings #input-dock #prompt-chevron {
 /* The discard confirm: one line that OWNS the keyboard while it is up (the
  * page hands it focus), so it reads as a question rather than as another
  * field. No box — the transcript's own inline-confirm grammar. */
-.projects-form-confirm {
+.projects-form-confirm,
+.projects-detail-confirm {
     width: 1fr;
     height: 1;
+}
+
+/* The add-milestone prompt (LOH-19 P2): two of the form's field blocks,
+ * pinned under the detail page so the plan being added to stays visible. It
+ * is a flow child of the view (height auto), not a scroll container: two
+ * fields never overflow, and making it one would put a second scrollbar
+ * beside the page it is editing. The inputs take the form's own treatment
+ * through the grouped selectors above — same controls, same mode. */
+.projects-milestone-prompt {
+    width: 1fr;
+    height: auto;
+    padding: 0;
 }
 
 /* The pinned footer: the highlighted project's detail in the list view, the

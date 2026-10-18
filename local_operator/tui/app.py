@@ -131,6 +131,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
+from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.text import tr
 from local_operator.logger import current_log_file
 
@@ -450,8 +451,11 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsViewAttachmentPreviewRequested,
     ProjectsViewComposeChanged,
     ProjectsViewDismissed,
+    ProjectsViewEditSubmitted,
     ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
+    ProjectsViewMilestoneAddedRequested,
+    ProjectsViewMilestoneRemoved,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
     ProjectsViewSendRequested,
@@ -559,6 +563,10 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The projects edit slice's copy (LOH-19 P2). The app composes exactly two of
+#: its sentences — the "project vanished mid-write" refusals that only the
+#: write's own KeyError can produce; every other sentence belongs to the page.
+_te_projects_edit = tr("tui.projects_edit")
 if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from pathlib import Path
 
@@ -37917,6 +37925,119 @@ class OperatorApp(App[None]):
             own_session=self._own_session_id(),
         )
         view.form_created(project.id, project.title or project.name)
+
+    def on_projects_view_edit_submitted(self, message: ProjectsViewEditSubmitted) -> None:
+        """`ctrl+s` on the EDIT form: write ONLY the changed fields, then re-show.
+
+        The form's builder already diffed the values against the state it
+        opened on, and the store applies ``model_fields_set`` per field — so a
+        concurrent session's change to an untouched field survives this write
+        (the per-field last-writer-wins contract). A refusal stays IN the form,
+        under the field the store's exception names, with the draft intact.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        import time as _time
+
+        from local_operator.projects import store_error_text
+        from local_operator.tui.projects_edit import refusal_field
+
+        try:
+            result = registry.update_project(message.project_id, message.edit)
+        except KeyError:
+            name = message.project_name or "that project"
+            view.show_form_refusal(
+                _te_projects_edit(_pe.refusal_project_gone_edit(name=name)), field="key"
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_form_refusal(store_error_text(exc), field=refusal_field(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+        view.form_edited(changed=result.changed)
+
+    def on_projects_view_milestone_added_requested(
+        self, message: ProjectsViewMilestoneAddedRequested
+    ) -> None:
+        """`a` submitted: add-or-update the milestone through the store core.
+
+        The store's ``set_milestone`` is the SAME core the tool and the routes
+        use, and it is add-or-update BY NAME: the returned action is the
+        receipt (added/updated/unchanged), never an assumption. A refusal lands
+        on the page's notice line with the prompt still up, so the reader can
+        correct the name and press enter again.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        import time as _time
+
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            _project, action = registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, target_date=message.target_date or None),
+            )
+        except KeyError:
+            # The store's add path raises KeyError only for a vanished project;
+            # the message names the PROJECT, not the raw uuid.
+            name = message.project_name or "that project"
+            view.show_notice(_te_projects_edit(_pe.refusal_project_gone_milestone(name=name)))
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_notice(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+        view.milestone_added(message.name, action)
+
+    def on_projects_view_milestone_removed(self, message: ProjectsViewMilestoneRemoved) -> None:
+        """The y/n confirm answered yes: remove through the store, then re-show.
+
+        The confirm is gone by the time this runs (the page disarmed it on the
+        answer), so a refusal has only the page's notice line to land on —
+        which is where the reader is looking.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        import time as _time
+
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, remove=True),
+            )
+        except KeyError:
+            name = message.project_name or "that project"
+            view.show_notice(_te_projects_edit(_pe.refusal_project_gone_milestone(name=name)))
+            return
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_notice(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+        view.milestone_removed(message.name)
 
     def _own_session_id(self) -> str | None:
         """THIS process's session id, or ``None`` — the detail page's anchor.

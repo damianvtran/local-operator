@@ -1821,6 +1821,11 @@ def test_the_row_scoped_keys_displace_no_shipped_hint() -> None:
         def selected_preview_open(self) -> bool:
             return False
 
+        def selected_milestone(self) -> dict[str, Any] | None:
+            # The LOH-19 P2 `x remove` rung is armed only on a milestone row;
+            # this sweep models the widest case (every optional key present).
+            return {"name": "groundwork"}
+
     view = ProjectsView()
     view._detail_page = _Selection()  # type: ignore[assignment]
     rungs = view._detail_hint_rungs()
@@ -2281,6 +2286,9 @@ def test_the_painted_order_keeps_the_specs_pair_adjacent() -> None:
         def selected_preview_open(self) -> bool:
             return False
 
+        def selected_milestone(self) -> dict[str, Any] | None:
+            return {"name": "groundwork"}
+
     view = ProjectsView()
     view._detail_page = _Selection()  # type: ignore[assignment]
     rungs = view._detail_hint_rungs()
@@ -2296,7 +2304,15 @@ def test_the_painted_order_keeps_the_specs_pair_adjacent() -> None:
     assert names.index("copy") + 1 == names.index("preview")
     assert names[names.index("open") + 1] == "copy"
     # The narrow sibling keeps the pair's first half and sheds the preview.
-    second = [hint for hint, _label, _lead in rungs[1][0]]
+    # Located rather than indexed: LOH-19 P2 added a WIDER rung at the top
+    # (the shipped widest plus `e`/`a`/`x`), so the sibling is no longer
+    # rungs[1] — the ladder's own order is what this test is about.
+    second = next(
+        [hint for hint, _label, _lead in plan]
+        for plan, _esc in rungs
+        if any(hint is view._copy_hint for hint, _l, _c in plan)
+        and not any(hint is view._preview_hint for hint, _l, _c in plan)
+    )
     assert view._copy_hint in second
     assert view._preview_hint not in second
 
