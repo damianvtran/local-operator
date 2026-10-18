@@ -3619,6 +3619,30 @@ async def child_attachment(
 
 
 @router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}/waveform",
+)
+async def child_attachment_waveform(
+    session_id: str, child_id: str, digest: AttachmentDigest, request: Request
+):
+    """Waveform peaks of an attachment referenced by a CHILD transcript's rows.
+
+    The child twin of :func:`attachment_waveform`, sharing its payload, gates
+    and headers; the containment proof (``_contained_child_dir``) runs before
+    the store is touched, so this is the same membership gate the child byte
+    route is rather than a partition. A child's audio artifacts register in
+    the same content-addressed store as the parent's, so a surface that
+    renders a subagent's generated audio reaches it exactly as it reaches
+    the parent's.
+    """
+    async with errors(request):
+        payload = await host(request).child_attachment_waveform(session_id, child_id, digest)
+    return JSONResponse(
+        payload,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+    )
+
+
+@router.get(
     "/v1/desktop/sessions/{session_id}/attachments/{digest}",
     # The image's own mime type is the response type, so the published contract
     # must not claim the CRUD JSON envelope its neighbours return. Declaring the
@@ -3698,6 +3722,41 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
         # re-deciding that for itself. `tunnels/gateway.py` sets the same
         # header on this repo's other byte-serving surface.
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/v1/desktop/sessions/{session_id}/attachments/{digest}/waveform")
+async def attachment_waveform(session_id: str, digest: AttachmentDigest, request: Request):
+    """Precomputed waveform peaks for one attachment: ``{version, bars, peaks}``.
+
+    The audio surfaces' waveform source. Peaks are computed ONCE at artifact
+    creation (``session.attachments.cache_media`` -> ``audiogen.peaks``: 240
+    max-abs bars at 8 kHz mono, 0..1) and stored as the ``<digest>.peaks.json``
+    sidecar beside the bytes; this route only READS them, so a render loop
+    never pays a decode — the frozen rule that keeps a heavy codec off every
+    repaint. The server contract's v1 result carries no ``waveform`` field, so
+    the sidecar is the default source and remains the source when a future
+    server lane ships its own peaks.
+
+    Shape and gates mirror the byte route beside it: the digest is the
+    traversal gate (declared in the path — FastAPI refuses a non-matching
+    shape before the handler runs, and trailing ``/waveform`` makes the two
+    routes unambiguously distinct), the session id is the same existence
+    check, and a digest held by another device answers the same 409
+    ``attachment_on_peer`` the byte route does. A digest with no sidecar is an
+    ordinary 404 — a pre-peaks artifact or a host without the optional
+    decoder at creation time — and the surface paints its no-waveform state,
+    exactly as a missing image degrades to a placeholder.
+
+    ``no-store`` rides along with ``nosniff`` for the family's reason:
+    everything under ``/v1/desktop/`` is bearer-gated session data, and a
+    shared cache must not retain one user's media metadata.
+    """
+    async with errors(request):
+        payload = await host(request).attachment_waveform(session_id, digest)
+    return JSONResponse(
+        payload,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
 
 

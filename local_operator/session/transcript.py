@@ -224,6 +224,13 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
         # ``stt.sidecar`` drift rule: this module does not import the writer).
         "video_job_v1",
+        # The audio lane's post-cancel settlement record (``local_operator.
+        # audiogen.settle``): a job that refused a mid-flight cancel finishes
+        # minutes later, so the row lands while the user is away. Bookkeeping
+        # by the same rule as the video record above; the writer passes
+        # ``preserve_mtime=True`` and the literal is pinned against
+        # ``audiogen.settle.AUDIO_SETTLE_CUSTOM_TYPE`` by a unit test.
+        "audio_settle_v1",
         # A busy-turn handoff checkpoint is a record ABOUT the session (see
         # ``CHECKPOINT_CUSTOM_TYPE``): its write must not read as operator
         # activity, or a mid-turn rollover would keep the session ranked fresh.

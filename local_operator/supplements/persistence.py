@@ -27,7 +27,7 @@ denylist because only candidates that survived the pre-filter can reach this mod
 
 import time
 import uuid
-from typing import Any, Final, Mapping
+from typing import Any, Final, Mapping, Sequence
 
 from local_operator.supplements.candidates import Candidate
 from local_operator.supplements.contract import (
@@ -37,6 +37,7 @@ from local_operator.supplements.contract import (
     SupplementDecision,
     SupplementDetails,
     SupplementFile,
+    SupplementSound,
 )
 from local_operator.supplements.decision import Decision
 
@@ -83,6 +84,7 @@ def build_details(
     decision: Decision,
     error: str = "",
     at: float | None = None,
+    sounds: Sequence[SupplementSound] = (),
 ) -> SupplementDetails:
     """One row's ``details``: the files half of the decision, ``components`` empty.
 
@@ -101,6 +103,8 @@ def build_details(
         "decision": decision_record(decision),
         "at": time.time() if at is None else at,
     }
+    if sounds:
+        details["sounds"] = [dict(sound) for sound in sounds[:3]]
     if decision.more:
         details["files_more"] = len(decision.more)
         details["more"] = [c.path for c in decision.more[:MORE_MAX]]

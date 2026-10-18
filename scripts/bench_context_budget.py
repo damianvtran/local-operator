@@ -1540,7 +1540,23 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # The tool is a setup-time capability, not an every-session one, but it is in
 # the default surface today; the raise is the explicit decision the guard exists
 # to force, not an unrelated budget increase.
-BUDGET_BILLED_TOKENS = 30_000
+# RAISED 30,000 -> 31,000 for the sound-generation wave's audio pair
+# (``generate_voiceover`` + ``generate_sound_effect``, 2026-10-17). Both tools'
+# schemas were trimmed as far as the frozen contract allows (terse per-field
+# descriptions, one-sentence wire descriptions) and the remainder is the
+# published field list itself, which cannot shrink without removing a field the
+# contract fixes. Attribution measured on THIS head with this script:
+#   without the pair  29,707 billed  (293 tokens under the old 30,000)
+#   with the pair     30,616 billed  (+909: +2,482 tool_schemas chars = ~893
+#                                     billed, plus the two inventory lines)
+#   child arm         27,688 billed  (+588 over the old 27,100)
+# Deferring the pair instead was refused on the image lane's measured
+# adoption regression for a brand-new capability (``image_tool``'s D3 note:
+# deferring a new tool whose description carries its "when to use it" text
+# regressed adoption on #2066). The raise is stated here AND in the PR thread
+# for a reviewer to verify before it settles — it is the explicit decision this
+# guard exists to force, not an unrelated budget increase.
+BUDGET_BILLED_TOKENS = 31_000
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1641,7 +1657,11 @@ BUDGET_BILLED_TOKENS = 30_000
 #:   delta                             +249 chars = ~+90
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 27_100
+# RAISED 27,100 -> 28,100 with ``BUDGET_BILLED_TOKENS`` above, for the same
+# audio pair and on the same measurement pass (child arm measured 27,688 billed
+# on this head). The two ceilings move together because the pair is in every
+# session's surface, child included; the difference between them is unchanged.
+BUDGET_CHILD_BILLED_TOKENS = 28_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

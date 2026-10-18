@@ -146,6 +146,11 @@ CHANNELS = frozenset(
     {
         CHANNEL_INFERENCE,
         "image",
+        # Generated audio (voiceover / sound effects): the tool-side family
+        # whose rows ride both funding classes — a Radient figure is the
+        # platform's own, a BYOK figure is an estimate from the one central
+        # audio rate table and keeps its ``estimated`` label.
+        "audio",
         "tts",
         "stt",
         "search",
@@ -164,6 +169,7 @@ CHANNELS = frozenset(
 CHANNEL_LABELS: Mapping[str, str] = {
     CHANNEL_INFERENCE: "Inference",
     "image": "Image",
+    "audio": "Generated audio",
     "tts": "TTS",
     "stt": "STT",
     "search": "Search",
@@ -347,6 +353,52 @@ def map_image_cost_labels(
     return basis, source, price_version
 
 
+def map_audio_cost_labels(
+    route: str,
+    cost_source: Any,
+    billing_basis: Any,
+    price_version: Any,
+    *,
+    has_amount: bool,
+) -> tuple[str, str, str]:
+    """``(billing_basis, cost_source, price_version)`` for one audio result.
+
+    The audio twin of :func:`map_image_cost_labels`, and the same discipline:
+    ONE mapping from the audio lane's labels (``audiogen``'s outcome
+    ``cost_source``/``billing_basis``/``cost_provenance``) to the ledger's
+    vocabulary, so the live emission and the transcript backfill cannot
+    disagree about what a row means.
+
+    The label sets differ from the image lane's on purpose (the frozen audio
+    contract's own words):
+
+    - Radient states the figure itself — only ``cost.amount_usd`` is
+      authoritative, and the server's labels travel as
+      ``server_reported`` with the basis the contract named (``quote`` reads
+      ``estimated``, ``billed`` reads ``billed``).
+    - A BYOK estimate is ``rate_table`` at ``catalogue`` source and ALWAYS
+      ``estimated``; it is never written as a charge.
+    - No amount at all => ``not_tracked`` — never a fabricated zero.
+    """
+    source_label = str(cost_source).strip() if isinstance(cost_source, str) else ""
+    basis = normalise_basis(billing_basis)
+    if basis is None:
+        # The audio lane labels every figure it emits; the fallback is the
+        # safety net the image twin states — a rate-table label is an
+        # estimate, nothing with an amount is ever read as a charge here.
+        basis = BASIS_NOT_TRACKED if not has_amount else BASIS_ESTIMATED
+    if route == "radient":
+        source = COST_SOURCE_SERVER
+    elif source_label == "rate_table":
+        source = COST_SOURCE_CATALOGUE
+    elif source_label == "reported":
+        source = COST_SOURCE_PROVIDER
+    else:
+        source = COST_SOURCE_NONE
+    price = str(price_version).strip() if isinstance(price_version, str) else ""
+    return basis, source, price
+
+
 def new_record_id(channel: str, correlation: str = "") -> str:
     """``"<channel>:<correlation-or-uuid4>"`` — the ledger's idempotency key.
 
@@ -478,6 +530,8 @@ class ChannelSpendRecord:
     #: shows what was originally claimed (design §3.1).
     quote_micro: int | None = None
     request_id: str = ""
+    #: Server receipt correlation survives artifact/storage failures in journal revisions.
+    usage_record_id: str = ""
     #: Free text, used by ``channel="other"`` and by rows whose knowledge
     #: presumption needs a word (a failed-unbilled job, a cancel awaiting
     #: settlement).
@@ -554,6 +608,8 @@ class ChannelSpendRecord:
             details["quote_micro"] = self.quote_micro
         if self.request_id:
             details["request_id"] = self.request_id
+        if self.usage_record_id:
+            details["usage_record_id"] = self.usage_record_id
         if self.detail:
             details["detail"] = self.detail
         return details
@@ -638,6 +694,7 @@ class ChannelSpendRecord:
             status=status,
             quote_micro=quote,
             request_id=str(details.get("request_id", "") or ""),
+            usage_record_id=str(details.get("usage_record_id", "") or ""),
             detail=str(details.get("detail", "") or ""),
         )
 
@@ -840,12 +897,15 @@ def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
 
 
 #: Display order of channels: the hierarchy the design note states
-#: (inference → image → tts → stt → search → read → classification → other).
-#: The panel sorts wire rows by this; keeping it here means every surface
-#: that groups by channel ages its rows the same way (design round 1, D9).
+#: (inference → image → audio → tts → stt → search → read → classification →
+#: other). The panel sorts wire rows by this; keeping it here means every
+#: surface that groups by channel ages its rows the same way (design round 1,
+#: D9). ``audio`` was inserted before ``other`` in the change that registered
+#: the channel, so the pre-existing ids keep their relative order.
 CHANNEL_ORDER = (
     CHANNEL_INFERENCE,
     "image",
+    "audio",
     "tts",
     "stt",
     "search",
