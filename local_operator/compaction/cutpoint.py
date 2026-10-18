@@ -383,13 +383,14 @@ def _snap_to_valid_cut(
     # summarized; they cannot make a prefix count as progress.
     counts = [0]
     prefix_tokens = [0]
-    suffix_tokens = [0] * (total + 1)
     for message in messages:
         real = not _is_compaction_marker(message) and not _is_preserved_user_turn(message)
         counts.append(counts[-1] + int(real))
         prefix_tokens.append(prefix_tokens[-1] + (_message_tokens(message) if real else 0))
-    for position in range(total - 1, -1, -1):
-        suffix_tokens[position] = suffix_tokens[position + 1] + _message_tokens(messages[position])
+    # Replayed marker/preserved rows survive the rewrite regardless of the
+    # boundary. They cannot be shed by advancing, so do not let their size
+    # spuriously veto retention of the actual tool interval.
+    suffix_tokens = [prefix_tokens[-1] - tokens for tokens in prefix_tokens]
 
     def makes_progress(boundary: int) -> bool:
         return boundary > 1 and (
@@ -422,9 +423,13 @@ def _snap_to_valid_cut(
     for forward in range(candidate + 1, total):
         if makes_progress(forward) and _is_valid_cut(messages, forward, result_at, safe_cuts):
             return forward
-    # If no useful forward cut exists, retaining the safe pair is preferable
-    # to inventing an invalid boundary; the existing trivial-prefix rule may
-    # still refuse this genuinely uncompactable history.
+    # A mid-run tool interval may reach the very end: there is then NO forward
+    # escape. The bound is a preference between useful cuts, never a veto on
+    # the only useful cut. Summarizing the older prefix still buys headroom
+    # even if the indivisible tail exceeds the requested retention budget.
+    for backward in range(candidate, -1, -1):
+        if makes_progress(backward) and _is_valid_cut(messages, backward, result_at, safe_cuts):
+            return backward
     return candidate if candidate in safe_cuts else None
 
 

@@ -742,3 +742,50 @@ async def test_large_interleaved_pair_compacts_again_after_rebuild(preserved_pre
     assert second.ran, second.reason
     assert second.tokens_before - second.tokens_after > 25000
     assert len(summarize.prompts) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep", [5000, 20000])
+@pytest.mark.parametrize("pending_tail", [False, True])
+async def test_oversized_interleaved_tail_must_compact_when_safe_cut_exists(keep, pending_tail):
+    from local_operator.compaction.cutpoint import find_cut_point
+
+    # No terminal assistant/user escape: the tools are still running. A bound
+    # may prefer a forward cut, but must never veto the only useful legal cut.
+    history = []
+    for _ in range(20):
+        history.extend([Message.user("older " * 3000), Message.assistant("answer " * 3000)])
+    call = Message.assistant("parallel reads")
+    call.tool_calls = [ToolCall(id=cid, name="read", arguments={}) for cid in ("a", "b", "c")]
+    history.append(call)
+    for cid in ("a", "b", "c"):
+        history.append(
+            Message(
+                role="tool",
+                content=[TextContent(text="result " * (keep * 3 // 4))],
+                tool_call_id=cid,
+                tool_name="read",
+            )
+        )
+        if cid != "c":
+            history.append(Message.user("interleaved delivery"))
+    if pending_tail:
+        pending = Message.assistant("next read")
+        pending.tool_calls = [ToolCall(id="pending", name="read", arguments={})]
+        history.append(pending)
+    # Every budget below stops inside this indivisible tail. Cut 40 is legal
+    # throughout, so no one of these requests may silently decline to compact.
+    for budget in range(keep // 4, 2 * keep, keep // 4):
+        assert find_cut_point(history, budget) == 40
+    result = await run_compaction_pass(
+        history,
+        model=_model(window=128000),
+        settings=CompactionSettings(keep_recent_tokens=keep),
+        summarize=_Summarizer("Older work summarized."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert result.ran, result.reason
+    assert result.tokens_before - result.tokens_after > 100000
+    assert result.tokens_after < 115200
+    assert call in result.messages

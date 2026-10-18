@@ -857,3 +857,23 @@ def test_oversized_backward_repair_is_bounded_even_with_useful_prefix():
     assert cut == 6
     assert sum(estimate_tokens(m) for m in messages[:cut]) > 15000
     assert_partition_pair_integrity(*prepare_partitions(messages, cut))
+
+
+def test_replayed_tail_does_not_spuriously_veto_backward_retention():
+    from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+
+    call = _assistant_with_call("a")
+    call.tool_calls.append(ToolCall(id="b", name="bash", arguments={}))
+    preserved = _big_user(10000)
+    preserved.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+    messages = [
+        _big_user(),
+        _big_user(),
+        call,
+        _tool_result("a", 10),
+        preserved,
+        _tool_result("b", 200),
+        Message.assistant("done"),
+    ]
+    assert find_cut_point(messages, 300) == 2
+    assert_partition_pair_integrity(*prepare_partitions(messages, 2))
