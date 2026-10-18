@@ -136,6 +136,47 @@ async def _frames_until(lines, predicate, timeout: float = 5.0):
     return collected
 
 
+async def _await_frames(
+    streamed: list[dict[str, Any]],
+    frame_type: str,
+    *,
+    since: int,
+    what: str,
+    guard: float = 5.0,
+) -> list[dict[str, Any]]:
+    """Wait until at least one ``frame_type`` frame lands after ``since``.
+
+    WHY A WAIT AND NOT A WINDOW (flake sweep, 2026-10-17). The doorbell cells
+    used to sample ``len(streamed)`` AFTER the write's acknowledgement, sleep a
+    fixed window, and require the frame to fall inside it. Nothing enforces
+    that ordering: the feed's probe publishes the frame the instant the write
+    is visible on disk, on its own 1 s clock (``CATALOGUE_PROBE_INTERVAL_S``),
+    so a delivery that beats the post-ack sample sits in ``streamed[:since]``
+    and the window reads ``[]``. That is exactly how
+    ``test_an_authored_profile_and_team_ring_the_authoring_doorbell`` failed
+    twice in one evening (runs 39062450274 / 39075893260 — ``AssertionError:
+    []`` at the team leg, green on re-execution). Locally instrumented, delivery
+    follows a write by 0.0-0.4 s (the probe's 1 s clock sets the phase), so the
+    ack path and the delivery chain are the same order of magnitude — the
+    ordering is a genuine race, not a theoretical one. Callers therefore take
+    ``since`` BEFORE the write and wait on the fact their assertion reads; the
+    guard (5 s, five probe intervals) is a hang backstop, never evidence — a
+    silent bell still fails loudly here, naming what it waited for and the
+    frames it did see.
+    """
+    deadline = time.monotonic() + guard
+    while True:
+        frames = [frame for frame in streamed[since:] if frame["type"] == frame_type]
+        if frames:
+            return frames
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{what}: no {frame_type!r} frame within {guard:g}s "
+                f"(the guard fired); frames since the baseline: {streamed[since:]!r}"
+            )
+        await asyncio.sleep(0.05)
+
+
 @pytest_asyncio.fixture
 async def desktop_server(headless_tui_env: Path, monkeypatch):
     """A real backend on a real loopback port, with the desktop plane armed."""
@@ -1269,8 +1310,9 @@ async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
 
     Four claims, each needing the HTTP layer:
 
-    1. authoring a profile publishes exactly one ``authoring`` frame, within the
-       probe interval;
+    1. authoring a profile publishes exactly one ``authoring`` frame (awaited as
+       a fact — see ``_await_frames`` for why a post-ack window cannot
+       attribute it, and why the guard is a backstop rather than a bound);
     2. a team created over the route publishes exactly one more, with the counter
        advanced by one;
     3. a QUIET window after each publishes none — otherwise the feed would refetch
@@ -1303,16 +1345,24 @@ async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
             return [frame for frame in streamed[since:] if frame["type"] == "authoring"]
 
         try:
-            # The feed's own first probe establishes the token, so it is DRAINED
-            # rather than asserted away: the windows below have to be attributable
-            # to the writes.
+            # The CONNECTION BOUNDARY establishes the authoring token
+            # (``_take_baseline`` primes it), and priming publishes NOTHING — the
+            # feed announces changes after connect, not state. A healthy run sees
+            # an empty stream here until the first write (instrumented
+            # 2026-10-17: no frame at all in the first five seconds); the sleep
+            # stays as slack so the windows below are attributable to the writes
+            # alone.
             await asyncio.sleep(2.5)
 
             quiet_from = len(streamed)
             await asyncio.sleep(2.5)
             assert authoring(quiet_from) == [], streamed[quiet_from:]
 
-            # (1) A role authored the way the `agent` tool authors one.
+            # (1) A role authored the way the `agent` tool authors one. The
+            # baseline is taken BEFORE the write: the frame is owed the moment
+            # the write lands, and `_await_frames` carries why a post-ack sample
+            # cannot attribute it.
+            wrote_from = len(streamed)
             registry = AgentRegistry(root)
             name, kind, _action_class = await asyncio.to_thread(
                 write_profile,
@@ -1327,9 +1377,9 @@ async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
             assert (name, kind) == ("e2e-doorbell-role", "role"), (name, kind)
             assert (root / "agents").is_dir(), "the write did not create a profile row"
 
-            wrote_from = len(streamed)
-            await asyncio.sleep(2.5)
-            profiles = authoring(wrote_from)
+            profiles = await _await_frames(
+                streamed, "authoring", since=wrote_from, what="the profile write"
+            )
             assert len(profiles) == 1, streamed[wrote_from:]
             revisions = [frame["payload"]["revision"] for frame in profiles]
 
@@ -1340,16 +1390,18 @@ async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
             await asyncio.sleep(2.5)
             assert authoring(after_from) == [], streamed[after_from:]
 
-            # (2) A team created over the route the app uses.
+            # (2) A team created over the route the app uses. Baseline before
+            # the write, for the profile leg's reason.
+            team_from = len(streamed)
             created = await client.post(
                 "/v1/desktop/teams",
                 json={"request_id": str(uuid.uuid4()), "name": "e2e-doorbell-team"},
             )
             assert created.status_code == 200, created.text
 
-            team_from = len(streamed)
-            await asyncio.sleep(2.5)
-            teams = authoring(team_from)
+            teams = await _await_frames(
+                streamed, "authoring", since=team_from, what="the team write"
+            )
             assert len(teams) == 1, streamed[team_from:]
             revisions.append(teams[0]["payload"]["revision"])
             # The feed is not a session, and a fabricated id would make the
