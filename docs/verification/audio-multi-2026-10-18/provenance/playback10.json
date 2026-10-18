@@ -1,0 +1,102 @@
+[
+  {
+    "item": 1,
+    "ownerId": "sound:7545179bc64d4e4b647b6bb81801d4ea:batch:tool:multi10-call:0:[\"aud_6ad4e8850d2c53091b89ce07\",\"thunder rumble\",1]",
+    "time": 0.153203,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.011128384154770011,
+    "rms": 0
+  },
+  {
+    "item": 2,
+    "ownerId": "sound:700bbf39ecfc2be8926e320167e20a62:batch:tool:multi10-call:1:[\"aud_6ad4e885e0050304150a7577\",\"door creak\",1]",
+    "time": 0.116516,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.10547656296490554,
+    "rms": 0
+  },
+  {
+    "item": 3,
+    "ownerId": "sound:b74486a5e7084d4bf7d959f1e0dea4d1:batch:tool:multi10-call:2:[\"aud_6ad4e888e73ab027182a5c00\",\"glass shatter\",1]",
+    "time": 0.113197,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.08990753052396466,
+    "rms": 0
+  },
+  {
+    "item": 4,
+    "ownerId": "sound:706c96fcec1d2478687f273644f8bc6d:batch:tool:multi10-call:3:[\"aud_6ad4e888e0050304150a7580\",\"ui blip\",1]",
+    "time": 0.128181,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.16392011593525294,
+    "rms": 0
+  },
+  {
+    "item": 5,
+    "ownerId": "sound:a23c0a92d0e658c3e39a7a3a7df6e209:batch:tool:multi10-call:4:[\"aud_6ad4e88ae0050304150a7587\",\"rain window\",1]",
+    "time": 0.119682,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.027628451641220228,
+    "rms": 0
+  },
+  {
+    "item": 6,
+    "ownerId": "sound:53350eb9a61d52001fc0363302622f0d:batch:tool:multi10-call:5:[\"aud_6ad4e88ae0050304150a758c\",\"coin drop\",1]",
+    "time": 0.1161,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.09065739077601348,
+    "rms": 0
+  },
+  {
+    "item": 7,
+    "ownerId": "sound:7ea8e3949705b87427b8eff5792f2849:batch:tool:multi10-call:6:[\"aud_6ad4e88ce73ab027182a5c09\",\"sword unsheathe\",1]",
+    "time": 0.119058,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.05789648051675511,
+    "rms": 0
+  },
+  {
+    "item": 8,
+    "ownerId": "sound:87e5cdcc9a28fef900b11c7893efc009:batch:tool:multi10-call:7:[\"aud_6ad4e88c0d2c53091b89ce16\",\"camera shutter\",1]",
+    "time": 0.1161,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.060202762165560586,
+    "rms": 0
+  },
+  {
+    "item": 9,
+    "ownerId": "sound:1f206c22205d7058d1d18cf29a067994:batch:tool:multi10-call:8:[\"aud_6ad4e88fe73ab027182a5c13\",\"water drop\",1]",
+    "time": 0.1161,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.001992301553598025,
+    "rms": 0
+  },
+  {
+    "item": 10,
+    "ownerId": "sound:0783b8592c2af5740c0855153284c0a4:batch:tool:multi10-call:9:[\"aud_6ad4e88fe0050304150a759a\",\"crowd gasp\",1]",
+    "time": 0.119002,
+    "duration": 0.48,
+    "paused": false,
+    "gain": 0,
+    "inputRms": 0.18283561799262124,
+    "rms": 0
+  }
+]

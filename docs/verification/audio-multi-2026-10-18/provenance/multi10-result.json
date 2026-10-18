@@ -1,0 +1,726 @@
+{
+  "tool_call_id": "multi10-call",
+  "tool_name": "generate_sound_effect",
+  "content": [
+    {
+      "type": "text",
+      "text": "Sound effects: 10 completed, 0 failed, 0 cancelled/stopped. Known total $0.02 (billed); unknown or late charges are not included. \n1/10 thunder rumble: completed\n2/10 door creak: completed\n3/10 glass shatter: completed\n4/10 ui blip: completed\n5/10 rain window: completed\n6/10 coin drop: completed\n7/10 sword unsheathe: completed\n8/10 camera shutter: completed\n9/10 water drop: completed\n10/10 crowd gasp: completed"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "7545179bc64d4e4b647b6bb81801d4ea",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "thunder rumble"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "700bbf39ecfc2be8926e320167e20a62",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "door creak"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "b74486a5e7084d4bf7d959f1e0dea4d1",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "glass shatter"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "706c96fcec1d2478687f273644f8bc6d",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "ui blip"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "a23c0a92d0e658c3e39a7a3a7df6e209",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "rain window"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "53350eb9a61d52001fc0363302622f0d",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "coin drop"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "7ea8e3949705b87427b8eff5792f2849",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "sword unsheathe"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "87e5cdcc9a28fef900b11c7893efc009",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "camera shutter"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "1f206c22205d7058d1d18cf29a067994",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "water drop"
+    },
+    {
+      "type": "attachment",
+      "kind": "audio",
+      "content_type": "audio/mpeg",
+      "attachment": "0783b8592c2af5740c0855153284c0a4",
+      "size_bytes": 8820,
+      "width": null,
+      "height": null,
+      "duration_s": 0.5224489795918368,
+      "name": "crowd gasp"
+    }
+  ],
+  "details": {
+    "artifacts": [
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "low distant thunder rolling, close perspective",
+        "request_id": "aud_6ad4e8850d2c53091b89ce07",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e8850d2c53091b89ce07",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "7545179bc64d4e4b647b6bb81801d4ea4e920be7b2b27187dfec9da1eb14bfdd",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:40:55Z"
+        },
+        "usage_record_id": "6ad4e8850d2c53091b89ce09",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e8850d2c53091b89ce09",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "7545179bc64d4e4b647b6bb81801d4ea",
+        "kind": "audio",
+        "name": "thunder rumble",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "old wooden door creaking open slowly",
+        "request_id": "aud_6ad4e885e0050304150a7577",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e885e0050304150a7577",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "700bbf39ecfc2be8926e320167e20a62e00a36af8e63d0cbe2c70c15a333f414",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:40:55Z"
+        },
+        "usage_record_id": "6ad4e885e0050304150a7579",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e885e0050304150a7579",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "700bbf39ecfc2be8926e320167e20a62",
+        "kind": "audio",
+        "name": "door creak",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "small glass pane shattering on a hard floor",
+        "request_id": "aud_6ad4e888e73ab027182a5c00",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e888e73ab027182a5c00",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "b74486a5e7084d4bf7d959f1e0dea4d1e4680fb3e029388f31cfbe057aa6f3b0",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:40:58Z"
+        },
+        "usage_record_id": "6ad4e888e73ab027182a5c02",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e888e73ab027182a5c02",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "b74486a5e7084d4bf7d959f1e0dea4d1",
+        "kind": "audio",
+        "name": "glass shatter",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "short soft digital confirmation blip",
+        "request_id": "aud_6ad4e888e0050304150a7580",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e888e0050304150a7580",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "706c96fcec1d2478687f273644f8bc6d5d392e81f9e359bfc83bbad2fff8b0f8",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:40:58Z"
+        },
+        "usage_record_id": "6ad4e888e0050304150a7582",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e888e0050304150a7582",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "706c96fcec1d2478687f273644f8bc6d",
+        "kind": "audio",
+        "name": "ui blip",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "steady rain tapping a window",
+        "request_id": "aud_6ad4e88ae0050304150a7587",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e88ae0050304150a7587",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "a23c0a92d0e658c3e39a7a3a7df6e209e4ec65d6b8edf7da80b77a55f59de4b9",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:41:00Z"
+        },
+        "usage_record_id": "6ad4e88ae0050304150a7589",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e88ae0050304150a7589",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "a23c0a92d0e658c3e39a7a3a7df6e209",
+        "kind": "audio",
+        "name": "rain window",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "a coin dropping and spinning on a table",
+        "request_id": "aud_6ad4e88ae0050304150a758c",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e88ae0050304150a758c",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "53350eb9a61d52001fc0363302622f0d82bdf1dfaaed4e9ccd67e5151a536b87",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:41:00Z"
+        },
+        "usage_record_id": "6ad4e88ae0050304150a758e",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e88ae0050304150a758e",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "53350eb9a61d52001fc0363302622f0d",
+        "kind": "audio",
+        "name": "coin drop",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "metal sword sliding out of a scabbard",
+        "request_id": "aud_6ad4e88ce73ab027182a5c09",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e88ce73ab027182a5c09",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "7ea8e3949705b87427b8eff5792f284955d39400dddbf8e8af6cee98ceb5fc0e",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:41:02Z"
+        },
+        "usage_record_id": "6ad4e88ce73ab027182a5c0b",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e88ce73ab027182a5c0b",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "7ea8e3949705b87427b8eff5792f2849",
+        "kind": "audio",
+        "name": "sword unsheathe",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "a DSLR camera shutter click",
+        "request_id": "aud_6ad4e88c0d2c53091b89ce16",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e88c0d2c53091b89ce16",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "87e5cdcc9a28fef900b11c7893efc00986e265632c4840db8ba708b6d6c487d4",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:41:02Z"
+        },
+        "usage_record_id": "6ad4e88c0d2c53091b89ce18",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e88c0d2c53091b89ce18",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "87e5cdcc9a28fef900b11c7893efc009",
+        "kind": "audio",
+        "name": "camera shutter",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "a single water drop into a still pool",
+        "request_id": "aud_6ad4e88fe73ab027182a5c13",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e88fe73ab027182a5c13",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "1f206c22205d7058d1d18cf29a06799425e0764c5acb8da7d583f200dad6df83",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:41:05Z"
+        },
+        "usage_record_id": "6ad4e88fe73ab027182a5c15",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e88fe73ab027182a5c15",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "1f206c22205d7058d1d18cf29a067994",
+        "kind": "audio",
+        "name": "water drop",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      },
+      {
+        "provider": "radient",
+        "model": "radient/sound-effects",
+        "prompt": "a small crowd gasping in surprise",
+        "request_id": "aud_6ad4e88fe0050304150a759a",
+        "cancel_handle": {
+          "provider": "radient",
+          "request_id": "aud_6ad4e88fe0050304150a759a",
+          "model": "radient/sound-effects"
+        },
+        "cost_usd": 0.002,
+        "cost_source": "reported",
+        "billing_basis": "billed",
+        "cost_provenance": "Radient /tools/audio/result cost.amount_usd (basis: billed, price_version: audio-rates@2026-10-17)",
+        "attempts": [
+          {
+            "route": "radient",
+            "outcome": "ok",
+            "reason_class": "",
+            "message": ""
+          }
+        ],
+        "audio": {
+          "format": "mp3",
+          "sample_rate_hz": 44100,
+          "channels": 2,
+          "bitrate_kbps": 128,
+          "size_bytes": 8820,
+          "duration_s": 0.5224489795918368,
+          "sha256": "0783b8592c2af5740c0855153284c0a4ac95badf14fe44f164e307c99944aa7d",
+          "provider_model_id": "eleven_text_to_sound_v2",
+          "expires_at": "2026-10-19T15:41:05Z"
+        },
+        "usage_record_id": "6ad4e88fe0050304150a759c",
+        "cost": {
+          "amount_usd": 0.002,
+          "basis": "billed",
+          "raw_basis": "billed",
+          "usage_record_id": "6ad4e88fe0050304150a759c",
+          "price_version": "audio-rates@2026-10-17",
+          "unit": "second",
+          "units": 1.0,
+          "tool_type": "sound_effect_generation"
+        },
+        "digest": "0783b8592c2af5740c0855153284c0a4",
+        "kind": "audio",
+        "name": "crowd gasp",
+        "content_type": "audio/mpeg",
+        "size_bytes": 8820,
+        "width": null,
+        "height": null,
+        "duration_s": 0.5224489795918368,
+        "status": "completed",
+        "started": true,
+        "format": "mp3",
+        "units": 1.0,
+        "unit": "second",
+        "error": null
+      }
+    ],
+    "cost_usd": 0.02,
+    "cost_complete": true,
+    "cost": {
+      "amount_usd": 0.02,
+      "basis": "billed"
+    },
+    "completed": 10,
+    "failed": 0,
+    "cancelled": 0
+  },
+  "duration_s": null,
+  "is_error": false,
+  "useless": false
+}

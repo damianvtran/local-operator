@@ -1,0 +1,10 @@
+{
+  "status": 400,
+  "body": {
+    "code": "audio_rejected",
+    "details": {
+      "reason": "duration_seconds must be between 0.5 and 30 seconds, got 31"
+    },
+    "error": "This audio request could not be accepted."
+  }
+}
