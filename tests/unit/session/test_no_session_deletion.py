@@ -2263,6 +2263,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual ReviewView.remove unmounts the page; no filesystem path",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_schedule_view",
+        "<path>.remove",
+        "Textual ScheduleView.remove unmounts the page; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_settings_view",
         "<path>.remove",
         "widget.remove()",
