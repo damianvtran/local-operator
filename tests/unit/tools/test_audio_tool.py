@@ -16,8 +16,9 @@ import pytest
 from pydantic import SecretStr
 
 from local_operator.artifacts import ArtifactKind, JobAttempt, JobOutcome
-from local_operator.audiogen import AudioRoute, pricing
+from local_operator.audiogen import AudioRoute
 from local_operator.audiogen import availability as audio_availability
+from local_operator.audiogen import pricing
 from local_operator.audiogen import rungs as audio_rungs
 from local_operator.audiogen.cascade import (
     AudioGenerationCancelled,
@@ -544,9 +545,7 @@ async def test_a_cancel_result_forwards_the_servers_pending_settlement_fields(
 
 
 @pytest.mark.asyncio
-async def test_a_cancel_body_without_a_quote_fabricates_no_settlement_fields(
-    monkeypatch, tmp_path
-):
+async def test_a_cancel_body_without_a_quote_fabricates_no_settlement_fields(monkeypatch, tmp_path):
     """No cost object (BYOK / a bare body) adds no settled or cost keys.
 
     Forwarding is verbatim plus the contract's pending nulls; anything else is
