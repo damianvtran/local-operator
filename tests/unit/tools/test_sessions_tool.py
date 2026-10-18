@@ -1082,7 +1082,9 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     from local_operator.tools.builtin import _SESSIONS_TOOL_DESCRIPTION
 
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
-    assert count_text_tokens(params) <= 1213
+    # LOH-11 adds one optional existing-category name list: 1267 measured
+    # (54 tokens above 1213), with the same one-token headroom. No new tool.
+    assert count_text_tokens(params) <= 1268
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -2771,3 +2773,177 @@ async def test_a_full_id_target_names_the_peer_on_every_addressed_op(
     result = await execute_sessions("t", args, None, None, _context(root))
     assert result.is_error
     assert result.text == "`ffff12345678` is held by cloud-node-1 — pass `peer=cloud-node-1`"
+
+
+@pytest.mark.asyncio
+async def test_spawn_unknown_tags_refuses_before_any_session(root: Path, monkeypatch) -> None:
+    from local_operator.session.session_tags import write_categories
+
+    write_categories(root, [(None, "Review")])
+    before = set((root / "sessions").glob("*"))
+
+    async def never_launch(*args):
+        pytest.fail("unknown tags must be refused before launch")
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", never_launch)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "tags": ["Reviev"]}, None, None, _context(root)
+    )
+    assert result.is_error and "Known categories: Review" in result.text
+    assert set((root / "sessions").glob("*")) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["resume", "list"])
+async def test_tags_only_allowed_on_spawn(root: Path, op: str) -> None:
+    args = {"op": op, "tags": ["Review"]}
+    if op == "resume":
+        args.update(prompt="go", session="abcdef123456")
+    result = await execute_sessions("t", args, None, None, _context(root))
+    assert result.is_error and "tags" in result.text
+
+
+@pytest.mark.asyncio
+async def test_mesh_tags_are_explicitly_local_only(root: Path) -> None:
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "peer": "another-device", "prompt": "go", "tags": ["Review"]},
+        None,
+        None,
+        _context(root),
+    )
+    assert result.is_error and "local sessions only" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visibility", ["workstream", "ephemeral"])
+async def test_spawn_known_tags_written_after_publication(
+    root: Path, monkeypatch, visibility: str
+) -> None:
+    """Real tool/store; only the costly nested CLI+ledger boundary is doubled."""
+    from local_operator.session.session_tags import read_entity_tags, write_categories
+
+    a, b = write_categories(root, [(None, "Review"), (None, "Fix")])
+    sid = "abcdef123456"
+    store = root / "tags" / "session" / f"{sid}.json"
+
+    async def launch(argv, env, cwd):
+        assert not store.exists()
+        _session(root, sid, "tagged")
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    def status(job_id, *, reconcile=True):
+        assert not store.exists()
+        return {"status": "running", "session_id": sid}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", status)
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "go", "tags": [" review ", "FIX"], "visibility": visibility},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    assert read_entity_tags(root, "session", sid) == {
+        "tags": [a["id"], b["id"]],
+        "primary": a["id"],
+    }
+    assert (result.details or {})["tags_applied"] is True
+    assert (result.details or {})["tags"] == ["Review", "Fix"]
+    assert "tags: Review, Fix" in result.text
+    extras = _sessions_marker_extras(sid)
+    assert extras["tags"] == ["Review", "Fix"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_tag_write_failure_reports_admitted_session(root: Path, monkeypatch) -> None:
+    from local_operator.session.session_tags import write_categories
+
+    write_categories(root, [(None, "Review")])
+    sid = "abcdef123456"
+
+    async def launch(argv, env, cwd):
+        _session(root, sid, "tagged")
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    def status(job_id, *, reconcile=True):
+        return {"status": "running", "session_id": sid}
+
+    def fail(*args):
+        raise OSError("synthetic write refusal")
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", status)
+    monkeypatch.setattr("local_operator.session.session_tags.set_entity_tags", fail)
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go", "tags": ["Review"]}, None, None, _context(root)
+    )
+    assert result.is_error and "synthetic write refusal" in result.text
+    assert (result.details or {})["session_id"] == sid
+    assert (result.details or {})["tags_applied"] is False
+
+
+@pytest.mark.asyncio
+async def test_real_spawn_applies_existing_tags(root: Path) -> None:
+    """Actual nested CLI and publication ledger, using the local test provider."""
+    from local_operator.session.session_tags import read_entity_tags, write_categories
+
+    _write_config(root)
+    _requester(root)
+    category = write_categories(root, [(None, "Review")])[0]
+    result = await execute_sessions(
+        "t",
+        {"op": "spawn", "prompt": "say hello", "tags": ["review"]},
+        None,
+        None,
+        _context(root),
+    )
+    sid = str((result.details or {}).get("session_id") or "")
+    try:
+        assert not result.is_error, result.text
+        assert sid and (root / "sessions" / sid).is_dir()
+        assert read_entity_tags(root, "session", sid) == {
+            "tags": [category["id"]],
+            "primary": category["id"],
+        }
+        assert (result.details or {})["tags_applied"] is True
+        assert "tags: Review" in result.text
+        info = await execute_sessions(
+            "t", {"op": "info", "session": sid}, None, None, _context(root)
+        )
+        assert not info.is_error, info.text
+        assert (info.details or {})["tags"] == ["Review"]
+        assert "tags: Review" in info.text
+    finally:
+        await _reap_worker(root, sid)
+
+
+@pytest.mark.asyncio
+async def test_omitting_tags_leaves_spawn_receipt_unchanged(root: Path, monkeypatch) -> None:
+    sid = "abcdef123456"
+
+    async def launch(argv, env, cwd):
+        _session(root, sid, "untagged")
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", launch)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.job_status",
+        lambda *args, **kwargs: {"status": "running", "session_id": sid},
+    )
+    params = SessionsParams(op="spawn", prompt="go")
+    result = await execute_sessions(
+        "t", {"op": "spawn", "prompt": "go"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "tags" not in (result.details or {}) and "tags_applied" not in (result.details or {})
+    assert not (root / "tags").exists()
+    assert result.text == _sessions_open_body(params, result.details or {})
+    assert (
+        result.text
+        == 'opened "untagged" as a listed workstream (session abcdef123456, job cafebabe0001)'
+        " — visible in the operator's sidebar, /resume and the phone list."
+        " origin: agent-workstream."
+    )

@@ -7316,6 +7316,50 @@ class DesktopSessions:
 
         return await asyncio.to_thread(acknowledge)
 
+    async def tags(self) -> dict[str, Any]:
+        """Counts describe distinct assignments, never conversation deletion."""
+        from local_operator.session.session_tags import read_categories, usage_counts
+
+        def read() -> dict[str, Any]:
+            counts = usage_counts(self.root)
+            return {
+                "tags": [
+                    {**tag, "order": order, "conversations": counts.get(tag["id"], 0)}
+                    for order, tag in enumerate(read_categories(self.root))
+                ]
+            }
+
+        return await asyncio.to_thread(read)
+
+    async def replace_tags(self, desired: list[tuple[str | None, str]]) -> dict[str, Any]:
+        from local_operator.session.session_tags import write_categories
+
+        await asyncio.to_thread(write_categories, self.root, desired)
+        return await self.tags()
+
+    async def set_tags(
+        self, session_id: str, tag_ids: list[str], primary: str | None
+    ) -> dict[str, Any]:
+        from local_operator.session.session_tags import read_categories, set_entity_tags
+
+        def apply() -> dict[str, Any]:
+            # Like pins, delegated runs are taggable: directory admission is
+            # intentional, not the user-conversation visibility predicate.
+            if (
+                not SESSION_ID.fullmatch(session_id)
+                or not (self.root / "sessions" / session_id).is_dir()
+            ):
+                raise KeyError("Unknown session")
+            state = set_entity_tags(self.root, "session", session_id, tag_ids, primary)
+            lookup = {tag["id"]: tag for tag in read_categories(self.root)}
+            return {
+                "session_id": session_id,
+                "primary": state["primary"],
+                "tags": [lookup[key] for key in state["tags"] if key in lookup],
+            }
+
+        return await asyncio.to_thread(apply)
+
     async def set_pin(self, session_id: str, pinned: bool) -> dict[str, Any]:
         """Put a session's pin into the state the caller asked for.
 
@@ -8439,6 +8483,27 @@ class DesktopSessions:
             # row of one answer describes the same pin set, which two reads a
             # millisecond apart would not guarantee.
             pins = set(read_pins(self.root))
+            from local_operator.session.session_tags import (
+                read_categories,
+                read_entity_tags,
+            )
+
+            categories = read_categories(self.root)
+            tag_lookup = {tag["id"]: tag for tag in categories}
+
+            def tags_for(session_id: str) -> dict[str, Any]:
+                try:
+                    state = read_entity_tags(
+                        self.root, "session", session_id, categories=categories
+                    )
+                except ValueError:
+                    # Imported legacy directory names remain listable, not taggable.
+                    state = {"tags": [], "primary": None}
+                return {
+                    "tags": [tag_lookup[key] for key in state["tags"]],
+                    "primary": state["primary"],
+                }
+
             # THE CATALOGUE, SCOPED AND PAGED — one call, and the same one the
             # head page makes: `catalogue_page` with no scope, no cursor and no
             # counts IS `load_catalog` plus the truncation verdict this method
@@ -8567,6 +8632,8 @@ class DesktopSessions:
                         # so a `false` here is load-bearing and omitting it would
                         # let a stale optimistic pin outlive a successful unpin.
                         "pinned": entry.id in pins,
+                        # Always settle optimistic client state, even empty/null.
+                        **tags_for(entry.id),
                         # Same rule, second axis: `archived` is always present and
                         # carries the scan's own answer rather than a re-read, so
                         # a row cannot be filtered out of the catalogue and still
