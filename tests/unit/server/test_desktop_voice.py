@@ -401,11 +401,12 @@ async def test_text_reads_the_agents_message_through_speakable(rig: Any) -> None
     response = await _text(rig, SESSION_A, {"kind": "message", "message_id": ASSISTANT_ID})
     assert response.status_code == 200, response.text
     result = response.json()["result"]
-    assert set(result) == {"text", "spoken_chars"}
+    assert set(result) == {"text", "spoken_chars", "truncated"}
     expected = speakable.speakable("Here are the files. ```\nls\n``` Done.").text
     assert result["text"] == expected
     assert "ls" not in result["text"].split() and "```" not in result["text"]
     assert result["spoken_chars"] == len(result["text"])
+    assert result["truncated"] is False
 
 
 @pytest.mark.asyncio
@@ -434,6 +435,7 @@ async def test_text_honours_the_configured_cap_read_from_disk(rig: Any) -> None:
     ]
     assert len(result["text"]) <= 100
     assert result["text"].endswith(speakable.TRUNCATION_TAIL)
+    assert result["truncated"] is True
     assert result["text"] == speakable.speakable(long_reply, max_chars=100).text
 
 

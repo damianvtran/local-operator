@@ -92,8 +92,11 @@ class VoiceText(BaseModel):
     """``POST /v1/desktop/voice/text`` 200: the words to speak, after ``speakable``.
 
     ``spoken_chars`` is ``len(text)``, carried so a client can log what was capped
-    without recounting.
+    without recounting. ``truncated`` says whether the cap actually cut this
+    reply, so a client can show the cut (a speaker cannot see it) without
+    comparing lengths against a cap the backend may have clamped.
     """
 
     text: str
     spoken_chars: int
+    truncated: bool

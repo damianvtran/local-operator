@@ -56,6 +56,23 @@ def test_the_cap_cuts_on_a_sentence_and_never_exceeds_the_limit() -> None:
     assert body.endswith("is here.")
 
 
+def test_the_tail_is_spoken_in_the_first_person_and_rides_inside_the_cap() -> None:
+    """The listener cannot see the screen, so the cut is said, not implied.
+
+    The tail counts against the cap like any other spoken word: at the
+    registry's floor the budget left for the answer is still positive, which
+    is the arithmetic that forbids a longer tail.
+    """
+    assert sp.TRUNCATION_TAIL == "That's where I'll stop — the rest is on screen."
+    text = " ".join(f"Sentence number {index} is here." for index in range(100))
+    result = sp.speakable(text, max_chars=sp.MIN_MAX_SPOKEN_CHARS)
+    assert result.truncated
+    assert result.text.endswith(sp.TRUNCATION_TAIL)
+    assert len(result.text) <= sp.MIN_MAX_SPOKEN_CHARS
+    body = result.text[: -len(sp.TRUNCATION_TAIL)].rstrip()
+    assert len(body) >= 20
+
+
 def test_the_cap_falls_back_to_a_word_boundary() -> None:
     text = "word " * 400
     result = sp.speakable(text, max_chars=150)
