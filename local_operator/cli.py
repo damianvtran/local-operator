@@ -60,11 +60,21 @@ from local_operator.agent_shell import exec_session_refusal, interactive_session
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
 from local_operator.i18n.keys import cli_agents_help as _ag
+from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
+from local_operator.i18n.keys import cli_config_help as _cf
+from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_login_help as _li
+from local_operator.i18n.keys import cli_login_status_help as _ls
+from local_operator.i18n.keys import cli_logout_help as _lo
 from local_operator.i18n.keys import cli_mcp_help as _mh
+from local_operator.i18n.keys import cli_memory_help as _me
 from local_operator.i18n.keys import cli_mobile_help as _mb
+from local_operator.i18n.keys import cli_qwencloud_help as _qc
+from local_operator.i18n.keys import cli_resume_click_help as _rc
+from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_wake_help as _wh
@@ -303,21 +313,23 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Human inspection shares the TUI runner, not the model tool schema.
     from local_operator.memory_cli import configure_parser as configure_memory_parser
 
-    memory_parser = subparsers.add_parser("memory", help="Inspect and correct scoped memory")
+    memory_parser = subparsers.add_parser(
+        "memory", help=_me.memory().envelope(locale=help_locale)["text"]
+    )
     configure_memory_parser(memory_parser)
     # Credential command
     credential_parser = subparsers.add_parser(
         "credential",
-        help="Manage API keys and credentials for different hosting platforms",
+        help=_cr.credential().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     credential_subparsers = credential_parser.add_subparsers(dest="credential_command")
     credential_update_parser = credential_subparsers.add_parser(
-        "update", help="Update a credential", parents=[parent_parser]
+        "update", help=_cr.update().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
     credential_delete_parser = credential_subparsers.add_parser(
-        "delete", help="Delete a credential", parents=[parent_parser]
+        "delete", help=_cr.delete().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
     # The F1 credential shim (github adapter): run BY GIT from a child whose env
@@ -327,62 +339,53 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # than hiding it, so `lop credential --help` still shows the full verb set.
     git_helper_parser = credential_subparsers.add_parser(
         "git-helper",
-        help=(
-            "Serve the git credential protocol from the brokered environment "
-            "(invoked by git; not for direct use)"
-        ),
+        help=(_cr.git_helper().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     git_helper_parser.add_argument("operation", nargs="?", default="get")
 
-    credential_key_help = (
-        "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
-        "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
-        "MISTRAL_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY)"
-    )
+    credential_key_help = _cr.key().envelope(locale=help_locale)["text"]
 
     credential_update_parser.add_argument("key", type=str, help=credential_key_help)
     credential_delete_parser.add_argument("key", type=str, help=credential_key_help)
 
     # Config command
     config_parser = subparsers.add_parser(
-        "config", help="Manage configuration settings", parents=[parent_parser]
+        "config", help=_cf.config().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     config_subparsers = config_parser.add_subparsers(dest="config_command")
     # Open command
     config_subparsers.add_parser(
         "open",
-        help="Open the configuration file in the default editor",
+        help=_cf.open().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # Edit command
     config_edit_parser = config_subparsers.add_parser(
         "edit",
-        help="Edit a specific configuration value in the config file",
+        help=_cf.edit().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     config_edit_parser.add_argument(
         "key",
         type=str,
-        help="Configuration key to update (e.g., hosting, model_name, conversation_length, "
-        "detail_length, max_learnings_history, auto_save_conversation)",
+        help=_cf.edit_key().envelope(locale=help_locale)["text"],
     )
     config_edit_parser.add_argument(
         "value",
         type=str,
-        help="New value for the configuration key (type is automatically converted "
-        "based on the key)",
+        help=_cf.edit_value().envelope(locale=help_locale)["text"],
     )
 
     # List command
     config_subparsers.add_parser(
         "list",
-        help="List available configuration options and their descriptions",
+        help=_cf.list().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
     config_subparsers.add_parser(
-        "create", help="Create a new configuration file", parents=[parent_parser]
+        "create", help=_cf.create().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
     # Instructions command. Takes ``--agent`` from ``parent_parser``, which is
@@ -390,15 +393,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # actually assemble rather than only the two global sources.
     config_subparsers.add_parser(
         "instructions",
-        help="Show which custom-instruction files a session assembles, in order "
-        "(paths and sizes only, never their contents)",
+        help=_cf.instructions().envelope(locale=help_locale)["text"],
         # ``description=`` as well as ``help=``: the latter renders only on the
         # PARENT ``config --help`` page, so without this the command's own
         # ``--help`` is blank above the options list.
-        description="Show which custom-instruction files a session assembles, in "
-        "order, with the size each contributed and whether it was collapsed as a "
-        "duplicate, truncated, or overlaps an earlier source. Paths and sizes "
-        "only, never the contents.",
+        description=_cf.instructions_description().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
@@ -407,17 +406,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # `aida/profile.py` resolves the file itself; see that module for why.
     aida_parser = subparsers.add_parser(
         "aida",
-        help="Aida's profile notes: record what she should remember",
+        help=_ad.aida().envelope(locale=help_locale)["text"],
     )
     aida_subparsers = aida_parser.add_subparsers(dest="aida_command")
     aida_note_parser = aida_subparsers.add_parser(
         "note",
-        help="Append a note under 'About the operator' in system_prompt.md",
-        description="Record a note into <config root>/system_prompt.md, inside the "
-        "marked 'About the operator' section, so every future session and "
-        "subagent sees it. The file is resolved from the config root and is never "
-        "an argument; the note must not contain the section markers. Omit TEXT to "
-        "read the note from STDIN (multi-line notes need no quoting).",
+        help=_ad.note().envelope(locale=help_locale)["text"],
+        description=_ad.note_description().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     aida_note_parser.add_argument(
@@ -425,7 +420,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="?",
         type=str,
         default=None,
-        help="The note to record; omit to read it from STDIN",
+        help=_ad.note_text().envelope(locale=help_locale)["text"],
     )
 
     # Agents command
@@ -773,40 +768,30 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
-        "serve", help="Start the FastAPI server", parents=[parent_parser]
+        "serve", help=_sv.serve().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     serve_parser.add_argument(
         "--host",
         type=str,
         default="127.0.0.1",
-        help=(
-            "Host address (default: 127.0.0.1). Loopback-only by policy: every "
-            "non-loopback bind is refused. File serving is unclamped on loopback "
-            "connections; reach this API remotely through an explicit tunnel or an "
-            "SSH port-forward."
-        ),
+        help=(_sv.host().envelope(locale=help_locale)["text"]),
     )
     serve_parser.add_argument(
         "--port",
         type=int,
         default=1111,
-        help="Port for the server (default: 1111)",
+        help=_sv.port().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--reload",
         action="store_true",
-        help="Enable hot reload for the server",
+        help=_sv.reload().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--listener-fd",
         type=int,
         default=None,
-        help=(
-            "Adopt an already-bound listening socket instead of binding one. "
-            "Set by a daemon replacing its own process image onto a new build "
-            "(`server/reload`), so the port never has a moment with nothing "
-            "behind it. Not a user-facing flag."
-        ),
+        help=(_sv.listener_fd().envelope(locale=help_locale)["text"]),
     )
 
     # Mobile command: the phone-facing control plane (daemon + supervision).
@@ -929,19 +914,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # cannot be refreshed headlessly). stdlib-only registration, same rule.
     qwencloud_parser = subparsers.add_parser(
         "qwencloud-ticket",
-        help="Store the QwenCloud console session cookie that /usage reads",
+        help=_qc.qwencloud_ticket().envelope(locale=help_locale)["text"],
     )
     qwencloud_actions = qwencloud_parser.add_subparsers(dest="qwencloud_command")
-    qwencloud_actions.add_parser(
-        "set", help="Store the cookie; the value is read from STDIN, never argv"
-    )
-    qwencloud_actions.add_parser(
-        "status", help="Whether a cookie is stored and how old it is; never the value"
-    )
-    qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
-    qwencloud_actions.add_parser(
-        "migrate", help="Move a plaintext ticket into the encrypted secret store"
-    )
+    qwencloud_actions.add_parser("set", help=_qc.set().envelope(locale=help_locale)["text"])
+    qwencloud_actions.add_parser("status", help=_qc.status().envelope(locale=help_locale)["text"])
+    qwencloud_actions.add_parser("rm", help=_qc.rm().envelope(locale=help_locale)["text"])
+    qwencloud_actions.add_parser("migrate", help=_qc.migrate().envelope(locale=help_locale)["text"])
 
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
@@ -1464,7 +1443,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # (round 3, B5). Omitting the kwarg is what keeps it off the list.
         parents=[parent_parser],
     )
-    resume_click_parser.add_argument("session", help="session id to reopen")
+    resume_click_parser.add_argument(
+        "session", help=_rc.session().envelope(locale=help_locale)["text"]
+    )
 
     stop_parser = subparsers.add_parser(
         "stop",
@@ -2078,7 +2059,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
         "login",
-        help="Log in to a provider (OAuth or API key)",
+        help=_li.login().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     login_parser.add_argument(
@@ -2086,28 +2067,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="?",
         default=None,
-        help="Provider to log in to (e.g., openai, anthropic, kimi, xai). "
-        "Omit to list login-capable providers.",
+        help=_li.provider().envelope(locale=help_locale)["text"],
     )
     logout_parser = subparsers.add_parser(
         "logout",
-        help="Log out of a provider (removes stored credentials)",
+        help=_lo.logout().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     logout_parser.add_argument(
         "provider",
         type=str,
-        help="Provider to log out of",
+        help=_lo.provider().envelope(locale=help_locale)["text"],
     )
     subparsers.add_parser(
         "login-status",
-        help="List stored provider credentials and their status",
+        help=_ls.login_status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # Alias matching the docs/REWRITE.md section B spelling (`status`).
     subparsers.add_parser(
         "status",
-        help="Alias for login-status: list stored provider credentials",
+        help=_ls.status_alias().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
