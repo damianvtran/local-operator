@@ -3067,11 +3067,17 @@ def _failure_detail(
         f"method: {detail.method}",
     ]
     if detail.operation_id is not None:
-        lines.append(f"operation_id: {detail.operation_id}")
+        lines.append(
+            f"operation_id: {detail.operation_id}"
+        )  # i18n: ignore failure-artifact diagnostic
     for index, cause in enumerate(detail.causes, start=1):
-        lines.append(f"cause[{index}]: {cause.exception_type}: {cause.message}")
+        lines.append(
+            f"cause[{index}]: {cause.exception_type}: {cause.message}"
+        )  # i18n: ignore failure-artifact diagnostic
     for frame in detail.frames:
-        lines.append(f"  at {frame.file}:{frame.line} in {frame.function}")
+        lines.append(
+            f"  at {frame.file}:{frame.line} in {frame.function}"
+        )  # i18n: ignore failure-artifact diagnostic
     # ``section`` carries its own leading blank line, so the artifact ends on
     # the tail when there is one and is unchanged when there is not.
     return "\n".join(lines) + section
@@ -3172,7 +3178,9 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
     sections = [rejected.diagnostic]
     class_key = getattr(rejected, "class_key", None)
     if isinstance(class_key, str) and class_key:
-        sections.append(f"class: {_header_value(class_key)}")
+        sections.append(
+            f"class: {_header_value(class_key)}"
+        )  # i18n: ignore failure-artifact diagnostic
     shape = getattr(rejected, "stream_shape", None)
     if shape is not None:
         channel = "read" if getattr(rejected, "channel_read", False) else "prose"
@@ -3194,6 +3202,7 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
         # evidence that anything was removed, which is the "quietly mangling a
         # reply" failure the tally exists to prevent.
         sections.append(
+            # i18n: ignore failure-artifact diagnostic
             "stream: "
             f"content_deltas={shape.content_deltas} "
             f"reasoning_deltas={shape.reasoning_deltas} "
@@ -3541,8 +3550,11 @@ def _failure_diagnostic_text(
     cause = _first_os_error(error)
     if cause is not None:
         symbol = errno.errorcode.get(cause.errno) if cause.errno is not None else None
-        lines.append(f"errno: {_diagnostic_value(symbol or 'unknown', redactions, limit=32)}")
         lines.append(
+            f"errno: {_diagnostic_value(symbol or 'unknown', redactions, limit=32)}"
+        )  # i18n: ignore failure-artifact diagnostic
+        lines.append(
+            # i18n: ignore failure-artifact diagnostic
             # ``or ""``, never ``str(cause)``: ``OSError(EIO, None, "<path>")``
             # renders the full path, re-leaking what ``path:`` reduced to a
             # basename one line above.
@@ -3550,7 +3562,9 @@ def _failure_diagnostic_text(
         )
         if cause.filename is not None:
             element = os.path.basename(str(cause.filename)) or "?"
-            lines.append(f"path: {_diagnostic_value(element, redactions, limit=256)}")
+            lines.append(
+                f"path: {_diagnostic_value(element, redactions, limit=256)}"
+            )  # i18n: ignore failure-artifact diagnostic
     return "\n".join(lines) + "\n"
 
 

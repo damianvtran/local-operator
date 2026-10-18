@@ -184,9 +184,9 @@ def _override_lines(team: Any) -> list[str]:
             continue
         parts = []
         if member.tier:
-            parts.append(f"tier {member.tier}")
+            parts.append(f"tier {member.tier}")  # i18n: ignore model-facing tool output
         if member.effort:
-            parts.append(f"effort {member.effort}")
+            parts.append(f"effort {member.effort}")  # i18n: ignore model-facing tool output
         rows.append(f"- {_slot_token(member)}: {', '.join(parts)}")
     if not rows:
         return []
@@ -343,8 +343,10 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     if team.aliases:
         # D5: an alias resolves to this team, and the model has no other way
         # to learn one exists.
-        header.append(f"aliases: {', '.join(team.aliases)}")
-    header.append("roster:")
+        header.append(
+            f"aliases: {', '.join(team.aliases)}"
+        )  # i18n: ignore model-facing tool output
+    header.append("roster:")  # i18n: ignore model-facing tool output
     header.extend(team.roster_lines())
     header.extend(_override_lines(team))
     body = "\n".join(header)
