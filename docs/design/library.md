@@ -351,6 +351,13 @@ The Librarian is Aida's twin, not a new scheduler.
 
 - New `/library` route and a left-sidebar destination (Library icon), gated on
   capability `features.library`.
+- Sidebar information architecture: the primary column is Aida, Library,
+  Projects, Agents, Schedules, Browser. Agent Hub and Mesh move into one
+  collapsed overflow group at the bottom, opened by an ellipsis / `More` row
+  that reveals the rows inline (ChatGPT-style), with `aria-expanded`, keyboard
+  order and a persisted expanded state. Low-frequency destinations added later
+  join that group rather than lengthening the primary column. New chat and
+  Search stay at the top.
 - Page layout: filter rail (kinds, origin groups, tags, organized state) +
   search/sort header + asset grid/list + preview dock. Narrow widths collapse
   the rail into a sheet and the preview into the selected route.
