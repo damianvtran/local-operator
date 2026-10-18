@@ -70,10 +70,14 @@ and returns text.
 - **Q6 Approvals.** Gates are announced from `/voice/text {kind: gate}`. A
   spoken "yes" gets 409 `approval_pending` (V13), and the rig says the
   "on screen first" phrase. Voice never answers a gate (V7).
-- **Q7 Filler is a closed set of phrases in the launcher:** `sent`,
+- **Q7 Filler is a closed set of phrases in the launcher:**
   `on_screen_first`, `voice_off`, `switched`, `failed` (and an optional
   `still_working`, slice 3). No model-written filler exists anywhere, and lop
-  carries no phrase catalogue.
+  carries no phrase catalogue. A successful take speaks nothing: `sent`
+  ("Sent.") was removed on 2026-10-18 at the operator's request, because it
+  was spoken on every turn and a lone spoken "sent" had to be dropped as echo.
+  The UI header's "Working" phase is the acknowledgement; an optional earcon
+  is a follow-up.
 - **Q8 Hands-free full duplex**, as the rig already does it, with an echo guard
   in slice 2.
 - **Q9 Where the operator talks.** Slice 2: the Gateway WebUI opened by the
