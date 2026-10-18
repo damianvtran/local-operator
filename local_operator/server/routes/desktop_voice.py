@@ -12,7 +12,8 @@ The frozen contract, which both repositories build against:
         422 invalid_voice_request | empty_transcript
     POST /v1/desktop/voice/text        body {session_id, source}
         source {kind: message, message_id} | {kind: gate, request_id}
-        200 {text, spoken_chars}; 409 voice_not_enabled; 404 unknown_source
+        200 {text, spoken_chars, truncated}; 409 voice_not_enabled;
+        404 unknown_source
 
 and the ``type: "voice"`` frame on ``GET /v1/desktop/events`` (published by
 ``server/utils/desktop_feed.py``), ``{active}``, on every slot change.
@@ -462,6 +463,10 @@ async def voice_text(
     Never free text: the body names a message or a pending gate, and the text
     comes from the session's own journal or card. The result is ``speakable``'s
     output, so the rig speaks exactly what this returns and nothing else.
+
+    ``truncated`` is ``speakable``'s own report, forwarded rather than recomputed:
+    only it knows whether the cap actually cut this reply at this request's
+    ``voice.max_spoken_chars``.
     """
     require_slot(_config_dir(request), body.session_id)
     source = body.source
@@ -474,4 +479,10 @@ async def voice_text(
     spoken = voice_speakable.speakable(raw, max_chars=_max_spoken_chars(config_manager))
     if not spoken.text:
         raise _refuse(404, "unknown_source", _wv.unknown_source())
-    return reply(VoiceText(text=spoken.text, spoken_chars=len(spoken.text)))
+    return reply(
+        VoiceText(
+            text=spoken.text,
+            spoken_chars=len(spoken.text),
+            truncated=spoken.truncated,
+        )
+    )

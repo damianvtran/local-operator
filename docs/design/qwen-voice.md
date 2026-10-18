@@ -101,7 +101,7 @@ machine `code` in `detail.code` and a sentence in `detail.text`.
 | `GET /v1/desktop/voice` | — | `{active: {session_id, enabled_at} \| null, settings: {max_spoken_chars}}` | — |
 | `POST /v1/desktop/voice` | JSON `{op: enable \| disable, session_id}` | `{active, replaced}` | 404 `unknown_session`; 409 `voice_store_busy` |
 | `POST /v1/desktop/voice/utterance` | form `session_id`, `request_id` (dashed UUID), `text` (required), `text_origin?` ∈ {`qwen_s2s`} | `{text, path, admission}` | 409 `voice_not_enabled` \| `approval_pending`; 422 `invalid_voice_request` \| `empty_transcript` |
-| `POST /v1/desktop/voice/text` | JSON `{session_id, source}`; `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars}` | 409 `voice_not_enabled`; 404 `unknown_source` |
+| `POST /v1/desktop/voice/text` | JSON `{session_id, source}`; `source` is `{kind: "message", message_id}` or `{kind: "gate", request_id}` | `{text, spoken_chars, truncated}` | 409 `voice_not_enabled`; 404 `unknown_source` |
 
 - `/voice/text` accepts no free text: an unknown `kind` or an extra field is a
   422. A message source resolves only an ASSISTANT message; a user row, a tool
@@ -109,6 +109,12 @@ machine `code` in `detail.code` and a sentence in `detail.text`.
   resolves only the session's pending APPROVAL with that `request_id`. The text
   is then passed through `voice/speakable.py` (no code blocks, no URLs, capped at
   `voice.max_spoken_chars` on a sentence boundary).
+- `truncated` on the answer is `speakable`'s own report: true only when the cap
+  actually cut the reply. It is forwarded, never recomputed, because the backend
+  may have clamped a hand-edited `voice.max_spoken_chars`. A cut reply ends with
+  the spoken sentence "That's where I'll stop — the rest is on screen."; the
+  sentence is SPOKEN, so it counts against the cap and the spoken total never
+  exceeds it.
 - `path` in the utterance result is the `text_origin`, or `null`.
 - The `type: "voice"` frame on `GET /v1/desktop/events` carries `{active}` on
   every slot change.
@@ -201,4 +207,5 @@ except where noted.
 ## Settings
 
 `voice.max_spoken_chars` (section `voice`, LIVE): the cap `/voice/text` applies,
-default 800, 100–4000. Read from disk per request.
+default 800, 100–4000. Read from disk per request. The cap covers the closing
+sentence too, so a cut reply's `spoken_chars` is still at most the cap.
