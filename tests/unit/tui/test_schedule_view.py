@@ -396,9 +396,9 @@ async def test_a_narrow_page_hides_the_detail_pane() -> None:
 
 @pytest.mark.asyncio
 async def test_the_narrowest_page_shows_the_cursor_rows_head_and_every_hint() -> None:
-    """60x24 is the narrow floor: the dock band leaves the list a two-line
-    viewport, and the page must still show the selected row's HEAD (not scroll
-    to its meta line) and advertise every key without clipping one."""
+    """60x24 is the narrow floor: the page owns the dock band's rows, and it
+    must show the selected row's HEAD (not scroll to its meta line) and
+    advertise every key without clipping one."""
     app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
     async with app.run_test(size=(60, 24)) as pilot:
         await _boot(pilot, app)
@@ -532,3 +532,248 @@ def test_detail_labels_leave_a_two_cell_gap_in_every_shipped_locale(locale: str)
         assert len(set(starts)) == 1, (locale, starts)
     finally:
         i18n_text.set_active_locale(previous)
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation regressions
+# ---------------------------------------------------------------------------
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    """WCAG 2.x relative-luminance ratio for two ``#rrggbb`` colours."""
+
+    def channel(value: int) -> float:
+        scaled = value / 255.0
+        return scaled / 12.92 if scaled <= 0.04045 else ((scaled + 0.055) / 1.055) ** 2.4
+
+    def luminance(hex_color: str) -> float:
+        raw = hex_color.lstrip("#")
+        red, green, blue = (int(raw[index : index + 2], 16) for index in (0, 2, 4))
+        return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+    high, low = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_selected_meta_ink_clears_aa_in_the_three_rendered_palettes() -> None:
+    """Round-1 design D3: selected metadata used muted-on-tint-select.
+
+    Everforest's pair measured 3.58:1 — inherited palette debt, but this page is
+    where it became the metadata a selection exists to expose. The scoped fix is
+    one rung brighter (``fg``); the three palettes the designer rendered must
+    clear AA, and unselected rows keep the quiet ``muted``.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    assert schedule_view_mod._meta_ink(False) == "muted"
+    assert schedule_view_mod._meta_ink(True) == "fg"
+    for theme in ("dark", "light", "everforest"):
+        ink = theme_mod.semantic_color(schedule_view_mod._meta_ink(True), theme)
+        ground = theme_mod.semantic_color("tint-select", theme)
+        ratio = _contrast_ratio(ink, ground)
+        assert ratio >= 4.5, (theme, ink, ground, round(ratio, 2))
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_moves_back_a_field_and_leaves_the_effort_alone() -> None:
+    """Round-1 UX U1: the app-wide priority shift+tab cycled reasoning effort.
+
+    The chord must mean "previous field" while this form owns input, and the
+    session's REAL ModelSpec must come back untouched — the failing observation
+    was high -> xhigh, a billable change from a navigation key.
+    """
+    from tests.unit.tui.test_effort import EffortSession
+
+    session = EffortSession()
+    setattr(session, "wake_scheduler", SimpleNamespace(schedules=[_schedule("w1")]))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.press("e")
+        await pilot.pause()
+        assert view.view_mode == "form"
+        before = getattr(session.model, "reasoning_effort", None)
+        assert before is not None
+
+        fields = view.form.fields()
+        fields[1].focus()
+        await pilot.pause()
+        assert app.focused is fields[1]
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert app.focused is fields[0]
+        assert getattr(session.model, "reasoning_effort", None) == before
+
+
+@pytest.mark.asyncio
+async def test_the_shared_teardown_closes_the_schedule_page() -> None:
+    """Round-1 review F2: schedule was absent from ``_close_settings_view``.
+
+    That method is the documented common teardown for ctrl+C, approvals, asks,
+    session swaps and /clear; leaving this page out left the transcript hidden
+    behind a full-page mode on every one of those paths.
+    """
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app)
+        app._close_settings_view()
+        await pilot.pause()
+        assert len(app.query(ScheduleView)) == 0
+        assert app._transcript_view().display
+        assert not app.screen.has_class("settings")
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_leaves_the_schedule_page_before_warning_about_exit() -> None:
+    """F2 through the real key: the exit hint is a transcript block, so a page
+    that stayed mounted would draw the warning where it cannot be read."""
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert len(app.query(ScheduleView)) == 0
+        assert app._transcript_view().display
+        assert app._exit_hint is not None
+
+
+@pytest.mark.asyncio
+async def test_an_approval_closes_the_schedule_page() -> None:
+    """F2 through the approval path: the question must not mount behind a page."""
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
+    app._set_approve_all(False)
+    app._approvals_default_auto = False
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app)
+        task = asyncio.create_task(app.request_tool_approval("bash", "rm -rf"))
+        await _settle(pilot, lambda: bool(app.screen.query(ApprovalPrompt)))
+        assert len(app.query(ScheduleView)) == 0
+        assert app._transcript_view().display
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_a_session_change_closes_the_schedule_page() -> None:
+    """F2 through the session-swap path: the page must not hold a disposed
+    session's scheduler while its rows are repainted underneath it."""
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app)
+        await app._reload_session()
+        await pilot.pause()
+        assert len(app.query(ScheduleView)) == 0
+        assert app._transcript_view().display
+
+
+@pytest.mark.asyncio
+async def test_the_page_gets_the_dock_band_rows_back_at_60x24() -> None:
+    """Round-1 design D1 / UX U2: the dock's duplicate wake band hid the page.
+
+    The settled 60x24 list was 56x1 — only a heading, never its metadata — and
+    the band's late arrival shrank an already-readable page. While /schedule
+    owns the screen the band is suppressed; on exit it comes back.
+    """
+    rows = [
+        _schedule("w1", message="check the deploy", every_ms=DAY, limit=3, fired_count=1),
+        _schedule("w2", message="water the plants", notify=True),
+        _schedule("w3", message="pay the invoice", next_due_at=NOW - 3 * 60 * MINUTE),
+    ]
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession(rows)))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        panel = app._wake_panel
+        assert panel is not None
+        await _settle(pilot, lambda: panel.display is True)
+        view = await _open(pilot, app)
+        await _settle(pilot, lambda: panel.display is False)
+        assert view._body.size.height >= 5, view._body.size
+        painted = _plain(view._body_text).splitlines()
+        assert "w1" in painted[0], painted[:3]
+        assert "overdue" in painted[1] or "every 1d" in painted[1], painted[:3]
+        # The form keeps the same deal: the band never competes with the page.
+        await pilot.press("n")
+        await pilot.pause()
+        assert panel.display is False
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.query(ScheduleView)) == 0
+        assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_edit_names_the_instant_a_blank_when_will_keep() -> None:
+    """Round-1 UX U3: the edit form replaced the detail pane and said only
+    "blank keeps the time", making the preserved instant uninspectable. The
+    field's placeholder now names it; a create keeps the instructional one."""
+    from local_operator.wakes.display import format_wake_time
+
+    row = _schedule("w1", every_ms=DAY, limit=3)
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([row])))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.press("n")
+        await pilot.pause()
+        create_placeholder = view.form.fields()[1].placeholder
+        assert "in 30m" in str(create_placeholder)
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        assert view.form.fields()[1].placeholder == format_wake_time(row.next_due_at)
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        assert view.form.fields()[1].placeholder == create_placeholder
+
+
+@pytest.mark.asyncio
+async def test_the_form_keeps_its_save_legend_on_screen_at_open() -> None:
+    """Round-1 design D2: the only save instruction sat below the scroll fold."""
+    app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.press("n")
+        await pilot.pause()
+        legend = view.form._keys_hint
+        assert legend.parent is view.form  # pinned, not inside the scroll
+        assert legend.display
+        region = legend.region
+        assert region.height >= 1
+        assert region.y + region.height <= app.screen.size.height
+
+
+@pytest.mark.asyncio
+async def test_switching_ends_in_the_form_replaces_the_stored_bound() -> None:
+    """Round-1 review F1 through the shipped page: limit -> until must write a
+    row whose limit is gone — not one carrying both bounds."""
+    from datetime import datetime
+
+    until_at = NOW + 2 * DAY
+    until_text = datetime.fromtimestamp(until_at / 1000.0).astimezone().isoformat()
+    session = ScheduleFakeSession([_schedule("w1", every_ms=DAY, limit=3, fired_count=1)])
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.press("e")
+        await pilot.pause()
+        view.form.fields()[3].value = f"until {until_text}"
+        await pilot.press("ctrl+s")
+        await _settle(pilot, lambda: bool(session.wake_writes))
+        [written] = [row for row in session.wake_writes[-1] if row.id == "w1"]
+        assert written.until_at == until_at
+        assert written.limit is None

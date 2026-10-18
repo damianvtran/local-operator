@@ -36569,6 +36569,14 @@ class OperatorApp(App[None]):
         view = ScheduleView(session, session_id=getattr(session, "session_id", ""))
         self._schedule_view = view
         self._transcript_view().display = False
+        # The dock's wake band lists the SAME rows this page manages; at 60x24
+        # it left the list a one-row viewport and its late (1 Hz) arrival shrank
+        # an already-readable page (round-1 design D1 / UX U2). Suppressed for
+        # the page's lifetime, then re-settled so the reclaimed rows go to the
+        # page and the band comes back on exit.
+        if self._wake_panel is not None:
+            self._wake_panel.set_suppressed(True)
+        self._refresh_band()
         self.screen.mount(view, before=self.query_one("#input-dock"))
         # The schedule page shares the settings page's region contract, so it
         # reuses that layout class (the same greyed dock, the same transcript
@@ -36589,6 +36597,12 @@ class OperatorApp(App[None]):
         self._transcript_view().display = True
         self._sync_boot_layout_class()
         self._sync_boot_layout()
+        # Restore the band BEFORE the composer comes back: `_refresh_band` is
+        # what re-decides `#band.has-slot` and the todo budget, so waiting for
+        # the next 1 Hz poll would leave the dock visibly short for a beat.
+        if self._wake_panel is not None:
+            self._wake_panel.set_suppressed(False)
+        self._refresh_band()
         self._set_composer_read_only(False)
         restore = self._schedule_focus_restore
         self._schedule_focus_restore = None
@@ -36823,11 +36837,12 @@ class OperatorApp(App[None]):
         comes back with its blocks, scroll position, and any half-typed prompt
         exactly as they were left.
 
-        The import and review pages share this region, so they are torn down
-        here too: every session-swap, /clear, approval and ctrl+C path already
-        calls this method, and a second copy of those nine call sites would
-        drift.
+        The import, review and schedule pages share this region, so they are
+        torn down here too: every session-swap, /clear, approval and ctrl+C path
+        already calls this method, and a second copy of those nine call sites
+        would drift.
         """
+        self._close_schedule_view()
         self._close_review_view()
         self._close_import_view()
         view = self._settings_view
@@ -43757,6 +43772,14 @@ class OperatorApp(App[None]):
         page = self._projects_view
         if page is not None and getattr(page, "wants_field_tab", False):
             page.form_focus_previous()
+            return
+        # The schedule form is the second page that owns a shift+tab meaning.
+        # Without this delegation the app-wide priority handler ran BEFORE the
+        # focused field and changed the conversation's reasoning effort (and its
+        # billable setting) while navigating the form (round-1 UX U1).
+        schedule = self._schedule_view
+        if schedule is not None and getattr(schedule, "wants_field_tab", False):
+            schedule.form_focus_previous()
             return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming

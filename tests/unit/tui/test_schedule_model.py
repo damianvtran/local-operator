@@ -7,6 +7,8 @@ refusals is the defect this file exists to prevent.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from local_operator.harness.wake import format_duration
@@ -104,13 +106,16 @@ def test_repeat_request_accepts_the_word_and_the_bare_duration(text, expected) -
     "text,expected",
     [
         ("", {"limit": None, "until": None}),
-        ("limit 3", {"limit": 3}),
-        ("3", {"limit": 3}),
-        ("until 2026-10-20 09:00", {"until": "2026-10-20 09:00"}),
-        ("2026-10-20T09:00:00+11:00", {"until": "2026-10-20T09:00:00+11:00"}),
+        # BOTH keys on every branch: the opposite side is a deliberate CLEAR,
+        # not an omission, so switching the bound type cannot retain the old
+        # one hidden beside it (round-1 review F1).
+        ("limit 3", {"limit": 3, "until": None}),
+        ("3", {"limit": 3, "until": None}),
+        ("until 2026-10-20 09:00", {"limit": None, "until": "2026-10-20 09:00"}),
+        ("2026-10-20T09:00:00+11:00", {"limit": None, "until": "2026-10-20T09:00:00+11:00"}),
         # Not a number: the builder's own "invalid 'limit'" sentence is the
         # refusal, so the page invents nothing.
-        ("limit soon", {"limit": "soon"}),
+        ("limit soon", {"limit": "soon", "until": None}),
     ],
 )
 def test_ends_request_routes_a_limit_or_an_until(text, expected) -> None:
@@ -245,6 +250,78 @@ def test_edit_clears_the_repeat_and_the_bound_when_their_fields_are_blank() -> N
     assert result.schedule.every_ms is None
     assert result.schedule.limit is None
     assert result.schedule.until_at is None
+
+
+def test_switching_the_ends_type_replaces_the_bound_instead_of_stacking_it() -> None:
+    """Round-1 review F1: a limit becoming an until must not keep the limit.
+
+    ``build_wake_edit`` treats an absent bound key as "leave that bound alone",
+    so the old one survived hidden beside the visible one: the repeat still
+    retired after three fires while the form showed only the new deadline.
+    """
+    until_at = NOW + 2 * DAY
+    until_text = datetime.fromtimestamp(until_at / 1000.0).astimezone().isoformat()
+    row = _schedule("w5", every_ms=DAY, limit=3, fired_count=1)
+    switched = schedule.edit(
+        schedule.FormValues(
+            message=row.message,
+            when="",
+            repeat=schedule.prefilled(row).repeat,
+            ends=f"until {until_text}",
+        ),
+        [row],
+        "w5",
+        NOW,
+    )
+    assert switched.ok and switched.schedule is not None
+    assert switched.schedule.until_at == until_at
+    assert switched.schedule.limit is None
+    assert switched.schedule.every_ms == DAY
+    # Reopening shows the bound that is actually armed, not the stale limit.
+    assert schedule.prefilled(switched.schedule).ends == f"until {until_text}"
+
+    bounded = _schedule("w6", every_ms=DAY, until_at=until_at)
+    reverse = schedule.edit(
+        schedule.FormValues(
+            message=bounded.message,
+            when="",
+            repeat=schedule.prefilled(bounded).repeat,
+            ends="limit 2",
+        ),
+        [bounded],
+        "w6",
+        NOW,
+    )
+    assert reverse.ok and reverse.schedule is not None
+    assert reverse.schedule.limit == 2
+    assert reverse.schedule.until_at is None
+
+
+def test_an_untouched_ends_preserves_both_bounds_a_legacy_row_carries() -> None:
+    """A row with BOTH bounds can only show one in the single Ends field.
+
+    The form prefills ``limit``; leaving it untouched must therefore OMIT the
+    bound request rather than clear the until the user never saw.
+    """
+    until_at = NOW + 4 * DAY
+    row = _schedule("w7", every_ms=DAY, limit=2, until_at=until_at, fired_count=1)
+    values = schedule.prefilled(row)
+    assert values.ends == "limit 2"
+    result = schedule.edit(
+        schedule.FormValues(
+            message="reworded",
+            when=values.when,
+            repeat=values.repeat,
+            ends=values.ends,
+            notify=values.notify,
+        ),
+        [row],
+        "w7",
+        NOW,
+    )
+    assert result.ok and result.schedule is not None
+    assert result.schedule.limit == 2
+    assert result.schedule.until_at == until_at
 
 
 def test_edit_prefill_round_trips_the_row_into_the_form() -> None:

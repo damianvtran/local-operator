@@ -143,11 +143,17 @@ def repeat_request(text: str) -> dict[str, Any]:
 def ends_request(text: str) -> dict[str, Any]:
     """``{"limit": n-or-None, "until": text-or-None}`` — blank is no bound.
 
-    Both keys are PRESENT for the same reason ``every`` is in
-    :func:`repeat_request`: a blank Ends field CLEARS a bound, and the edit
-    builder reads a present ``None`` as exactly that. Non-numeric, non-positive
-    and unparseable values ride through untouched so the builder's own
-    sentences are the refusals.
+    BOTH keys are always present, and that is the point of this function rather
+    than a dict literal per branch: the edit builder treats an ABSENT key as
+    "leave that bound alone", so a request carrying only the selected bound
+    would switch the type and keep the old one hidden beside it — ``limit 3``
+    becoming ``until +1d`` stored BOTH, the repeat still retiring after three
+    fires while the form showed only the new deadline (round-1 review F1). A
+    present ``None`` is the builder's deliberate CLEAR, so switching types
+    replaces the bound instead of stacking a second one.
+
+    Non-numeric, non-positive and unparseable values ride through untouched so
+    the builder's own sentences are the refusals.
     """
     stripped = text.strip()
     if not stripped:
@@ -156,15 +162,15 @@ def ends_request(text: str) -> dict[str, Any]:
     if lowered == "limit" or lowered.startswith("limit "):
         value = stripped[5:].strip()
         try:
-            return {"limit": int(value)}
+            return {"limit": int(value), "until": None}
         except ValueError:
-            return {"limit": value}
+            return {"limit": value, "until": None}
     if lowered == "until" or lowered.startswith("until "):
-        return {"until": stripped[5:].strip()}
+        return {"limit": None, "until": stripped[5:].strip()}
     try:
-        return {"limit": int(stripped)}
+        return {"limit": int(stripped), "until": None}
     except ValueError:
-        return {"until": stripped}
+        return {"limit": None, "until": stripped}
 
 
 def _request(values: FormValues) -> dict[str, Any]:
@@ -199,8 +205,22 @@ def edit(
     A blank When is therefore a real instruction — "leave the time alone" — and
     cannot be expressed by omitting the key here, because a create would then
     have no time at all and the two forms share one request shape.
+
+    ENDS IS THE ONE FIELD THAT IS COMPARED, not merely merged. When the text
+    still reads exactly what :func:`prefilled` put there, the user did not touch
+    the bound, so the bound keys are OMITTED and the builder preserves the row's
+    stored bounds — including a legacy row that carries BOTH a ``limit`` and an
+    ``until``, where the form can only show one of them and a message-only edit
+    must not silently drop the other. Any other text is a deliberate choice, and
+    :func:`ends_request` then supplies both keys so switching type CLEARS the
+    previous bound instead of retaining it hidden (round-1 review F1).
     """
-    outcome = build_wake_edit(_request(values), list(existing), wake_id, now_ms)
+    request = _request(values)
+    target = next((row for row in existing if row.id == wake_id), None)
+    if target is not None and values.ends.strip() == ends_prefill(target).strip():
+        request.pop("limit", None)
+        request.pop("until", None)
+    outcome = build_wake_edit(request, list(existing), wake_id, now_ms)
     if "error" in outcome:
         return SaveResult(error=outcome["error"], sentence=outcome["error"])
     schedule = outcome["schedule"]
@@ -208,6 +228,23 @@ def edit(
         schedule=schedule,
         sentence=notice_edited(schedule.id, schedule.next_due_at),
     )
+
+
+def ends_prefill(schedule: WakeSchedule) -> str:
+    """The Ends text :func:`prefilled` shows for ``schedule``.
+
+    ``limit`` wins when a row somehow carries BOTH bounds: it is the one the
+    scheduler reports as remaining, and it round-trips as a short number. The
+    until is not lost by showing this — :func:`edit` omits the bound keys while
+    the field still reads this text, so an untouched Ends preserves whatever the
+    row actually stores.
+    """
+    if schedule.limit is not None:
+        return f"limit {schedule.limit}"
+    if schedule.until_at is not None:
+        until = datetime.fromtimestamp(schedule.until_at / 1000.0).astimezone().isoformat()
+        return f"until {until}"
+    return ""
 
 
 def prefilled(schedule: WakeSchedule) -> FormValues:
@@ -219,19 +256,24 @@ def prefilled(schedule: WakeSchedule) -> FormValues:
     same reason — a naive local string would be re-read under whatever offset
     applies on the day, which is not necessarily the one the row was armed in.
     """
-    ends = ""
-    if schedule.limit is not None:
-        ends = f"limit {schedule.limit}"
-    elif schedule.until_at is not None:
-        until = datetime.fromtimestamp(schedule.until_at / 1000.0).astimezone().isoformat()
-        ends = f"until {until}"
     return FormValues(
         message=schedule.message,
         when="",
         repeat=format_duration(schedule.every_ms) if schedule.every_ms is not None else "",
-        ends=ends,
+        ends=ends_prefill(schedule),
         notify=schedule.notify,
     )
+
+
+def kept_time(schedule: WakeSchedule) -> str:
+    """The instant a blank When keeps, named for the EDIT form's placeholder.
+
+    Round-1 UX U3: "blank keeps the time" is an instruction with an unstated
+    value, and the form replaces the detail pane that used to show it. This is
+    DATA, not copy — a formatted timestamp is not translated — so it rides in
+    the field's placeholder rather than adding a catalogue key.
+    """
+    return format_wake_time(schedule.next_due_at)
 
 
 def with_schedule(existing: Sequence[WakeSchedule], schedule: WakeSchedule) -> list[WakeSchedule]:

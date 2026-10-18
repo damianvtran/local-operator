@@ -119,6 +119,19 @@ def _selection_ground() -> Style:
         return Style()
 
 
+def _meta_ink(selected: bool) -> str:
+    """The ink token a row's meta line reads with.
+
+    SELECTED META USES ``fg``, NOT ``muted``. The ``muted``-on-``tint-select``
+    pair inherits palette debt the page does not own (everforest measured
+    3.58:1 in round-1 design D3, below AA for this text), and the meta line is
+    the half of the selected row that carries due, cadence and fired count —
+    the information the selection exists to expose. One rung brighter keeps the
+    hierarchy (the head stays bold) and clears AA in every shipped palette.
+    """
+    return "fg" if selected else "muted"
+
+
 class ScheduleForm(Vertical):
     """Create/edit as a page state: five fields, one refusal line, no second writer.
 
@@ -150,7 +163,10 @@ class ScheduleForm(Vertical):
         self._on_cancel = on_cancel
         self._title = Static(classes="schedule-form-title")
         self._message = TextArea(id="schedule-form-message")
-        self._when = Input(placeholder=_t(_k.form_when_placeholder()), id="schedule-form-when")
+        # Captured once: an EDIT swaps the placeholder for the instant the save
+        # will keep (U3), and reset() has to put the instruction back.
+        self._when_placeholder_default = _t(_k.form_when_placeholder())
+        self._when = Input(placeholder=self._when_placeholder_default, id="schedule-form-when")
         self._repeat = Input(
             placeholder=_t(_k.form_repeat_placeholder()), id="schedule-form-repeat"
         )
@@ -202,7 +218,7 @@ class ScheduleForm(Vertical):
         # ``markup=False``: the builder's sentence is DATA (it quotes the
         # user's own bad value), and Static parses brackets by default.
         self._refusal = Static("", classes="schedule-form-refusal", markup=False)
-        self._keys_hint = Static(_t(_k.form_keys_hint()), classes="schedule-form-keys")
+        self._keys_hint = Static(_t(_k.form_keys_hint()), classes="schedule-form-keys gap-above")
 
     # -- composition --------------------------------------------------------
     def compose(self):  # type: ignore[override]
@@ -210,13 +226,14 @@ class ScheduleForm(Vertical):
         with self._fields_scroll:
             for block in self._blocks:
                 yield block
-            # The key legend travels WITH the fields, not pinned under them.
-            # Pinned, on a viewport that shows only the first two fields (the
-            # 100x30 capture, with the dock band below it), it painted directly
-            # under `when` and read as the form's end — repeat, ends and notify
-            # were undiscoverable behind a scrollbar with no other cue.
-            yield self._keys_hint
-        # A refusal IS pinned: it is the receipt for the save the user just
+        # PINNED, not scrolled (round-1 design D2). The first frame shows the
+        # message box, `when` and only the start of `repeat`; with the legend at
+        # the scroll's end the only save instruction in the form sat below the
+        # fold and a new user had to discover scrolling before learning how to
+        # submit. The `gap-above` row separates it from the clipped field so it
+        # reads as the page's chrome rather than as `repeat`'s hint.
+        yield self._keys_hint
+        # A refusal is pinned too: it is the receipt for the save the user just
         # pressed, and it must be visible wherever the fields are scrolled.
         yield self._refusal
 
@@ -257,8 +274,20 @@ class ScheduleForm(Vertical):
             notify=self._notify.value == self._notify_on,
         )
 
-    def prefill(self, values: schedule_model.FormValues, *, wake_id: str = "") -> None:
-        """Show ``values``; ``wake_id`` also names the row in the title."""
+    def prefill(
+        self,
+        values: schedule_model.FormValues,
+        *,
+        wake_id: str = "",
+        when_placeholder: str = "",
+    ) -> None:
+        """Show ``values``; ``wake_id`` also names the row in the title.
+
+        ``when_placeholder`` is the EDIT case's value-bearing hint (round-1 UX
+        U3): the field stays blank because the stored instant is what a blank
+        save keeps, so the placeholder names that instant — "blank keeps the
+        time" alone made the preservation uninspectable.
+        """
         self._title.update(
             Text(
                 _t(_k.form_title_edit(id=wake_id)) if wake_id else _t(_k.form_title_new()),
@@ -266,6 +295,7 @@ class ScheduleForm(Vertical):
             )
         )
         self._message.text = values.message
+        self._when.placeholder = when_placeholder or self._when_placeholder_default
         self._when.value = values.when
         self._repeat.value = values.repeat
         self._ends.value = values.ends
@@ -293,6 +323,11 @@ class ScheduleForm(Vertical):
         self._focus_step(1)
 
     def action_focus_prev_field(self) -> None:
+        self.focus_prev_field()
+
+    def focus_prev_field(self) -> None:
+        """Move focus back one field. PUBLIC because the app's priority
+        ``shift+tab`` handler delegates here instead of cycling effort (U1)."""
         self._focus_step(-1)
 
     def _focus_step(self, delta: int) -> None:
@@ -476,6 +511,21 @@ class ScheduleView(Vertical):
         return self._form
 
     @property
+    def wants_field_tab(self) -> bool:
+        """True while the form owns the keyboard.
+
+        The app's ``shift+tab`` binding is ``priority=True``, so it fires before
+        the focused field sees the chord. While this page is in form mode the
+        chord is a FIELD-NAVIGATION key, not the effort cycle: the app delegates
+        it to :meth:`form_focus_previous` (round-1 UX U1 — reverse-tab used to
+        change the session's reasoning effort and billable setting).
+        """
+        return self.view_mode == "form"
+
+    def form_focus_previous(self) -> None:
+        self._form.focus_prev_field()
+
+    @property
     def selected(self) -> schedule_model.ScheduleRow | None:
         if 0 <= self._cursor < len(self._rows):
             return self._rows[self._cursor]
@@ -521,7 +571,11 @@ class ScheduleView(Vertical):
             self.action_reload()
             return
         self._editing = row.id
-        self._form.prefill(schedule_model.prefilled(schedule), wake_id=row.id)
+        self._form.prefill(
+            schedule_model.prefilled(schedule),
+            wake_id=row.id,
+            when_placeholder=schedule_model.kept_time(schedule),
+        )
         self._show_form()
 
     def action_cancel_wake(self) -> None:
@@ -744,7 +798,7 @@ class ScheduleView(Vertical):
                 bold=selected,
             )
             meta_style = Style(
-                color=theme_mod.semantic_color("muted"),
+                color=theme_mod.semantic_color(_meta_ink(selected)),
                 bgcolor=ground.bgcolor,
             )
             text.append(f"{marker} ", style=head_style)
