@@ -3102,12 +3102,19 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 
             await pilot.press("home")
             await pilot.pause()
-            # A cushion, not a count: the settings list grows with every section
-            # (26 presses on the fdf52ada4 merge; main alone sits at 25) and
-            # paging clamps, so extra presses are no-ops.
-            for _ in range(40):
+            # Pagedown moves ONE SECTION PER PRESS, so a fixed cushion is a count
+            # in disguise: the list grows with every section (42 headers after the
+            # voice fold; 25 on main before it) and the old 40 stopped two short.
+            # Press until the cursor stops moving instead — a paging bug that
+            # stalls mid-list still fails the assertion below, because the loop
+            # ends wherever the gesture ends.
+            previous = None
+            for _ in range(200):
                 await pilot.press("pagedown")
-            await pilot.pause()
+                await pilot.pause()
+                if view._selected == previous:
+                    break
+                previous = view._selected
 
             last = view._selectable()[-1]
             assert view._selected == last, (
@@ -3118,10 +3125,15 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
                 view._body.scroll_offset.y == view._body.max_scroll_y
             ), "paging reached the last row without reaching the bottom of the view"
 
-            # And back: `pageup` reaches the first row the same way.
-            for _ in range(40):
+            # And back: `pageup` reaches the first row the same way, so it needs
+            # the same convergence rather than a second cushion.
+            previous = None
+            for _ in range(200):
                 await pilot.press("pageup")
-            await pilot.pause()
+                await pilot.pause()
+                if view._selected == previous:
+                    break
+                previous = view._selected
             assert view._selected == view._selectable()[0]
 
 
