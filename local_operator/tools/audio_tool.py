@@ -255,13 +255,16 @@ def _describe_sound_effect_approval(args: dict[str, Any], cwd: str) -> str:
             )
             for item in params.sounds or []
         ]
+        known = [estimate for estimate in estimates if estimate is not None]
         total = (
-            f"estimated total ${sum(e.amount_usd for e in estimates if e):.4f} "
-            f"({pricing.PRICE_VERSION}); per-item server billed figures are authoritative"
-            if all(e is not None for e in estimates)
-            else "estimated total unavailable at published rates; this is a paid batch"
+            f"estimated total ${sum(e.amount_usd for e in known):.4f} "
+            if len(known) == len(estimates)
+            else f"estimated known subtotal ${sum(e.amount_usd for e in known):.4f}; "
+            f"{len(estimates) - len(known)} item(s) unpriced "
         )
-        return f"Generate {len(estimates)} sound effects via {label} — {total}."
+        total += f"({pricing.PRICE_VERSION}); per-item billed figures are authoritative"
+        noun = "sound effect" if len(estimates) == 1 else "sound effects"
+        return f"Generate {len(estimates)} {noun} via {label} — {total}."
     prompt = args.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return "[unresolvable] generate_sound_effect without a prompt"
@@ -900,7 +903,9 @@ def _sound_name(prompt: str, explicit: str | None) -> str:
     # content-addressed storage may dedupe bytes, but never the user's requests.
     value = (explicit if explicit is not None else prompt).strip()
     value = re.sub(r"[^\w .-]+", "-", value, flags=re.UNICODE).strip(" .-")
-    return value[:100] or "sound-effect"
+    if len(value) > 100:
+        value = value[:99].rstrip(" .-") + "…"
+    return value or "sound-effect"
 
 
 async def _execute_sound_batch(
@@ -1070,7 +1075,15 @@ async def _execute_sound_batch(
             or (details.get("cancel_handle") or {}).get("request_id"),
             "digest": attached.get("digest"),
             "duration_s": attached.get("duration_s", item.duration_s),
-            "format": (details.get("audio") or {}).get("format", "mp3" if blocks else None),
+            "format": (details.get("audio") or {}).get("format")
+            or {
+                "audio/mpeg": "mp3",
+                "audio/mp3": "mp3",
+                "audio/wav": "wav",
+                "audio/x-wav": "wav",
+                "audio/ogg": "ogg",
+                "audio/flac": "flac",
+            }.get(str(attached.get("content_type") or "").split(";", 1)[0].strip()),
             "cost_usd": cost.get("amount_usd"),
             "cost": cost,
             "units": cost.get("units") if index in started else 0,
@@ -1084,8 +1097,17 @@ async def _execute_sound_batch(
         )
     known_costs = [row["cost_usd"] for row in artifacts if row["cost_usd"] is not None]
     total = sum(known_costs) if known_costs else None
+    # Completeness and basis answer different questions: an unpriced failure
+    # must not relabel successful, server-billed siblings as estimates.
+    known_rows = [row for row in artifacts if row["cost_usd"] is not None]
     total_basis = (
-        "billed" if all(row["cost"].get("basis") == "billed" for row in artifacts) else "estimated"
+        (
+            "billed"
+            if all(row["cost"].get("basis") == "billed" for row in known_rows)
+            else "estimated"
+        )
+        if known_rows
+        else None
     )
     caption = (
         f"Sound effects: {completed} completed, {failed} failed, {cancelled} cancelled/stopped. "
