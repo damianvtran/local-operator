@@ -5,7 +5,8 @@ loop that decoded the MP3 on every paint would pay a full decode per frame.
 The frozen rule is therefore: peaks are computed ONCE, at artifact creation,
 and stored beside the bytes as a ``<digest>.peaks.json`` sidecar (see
 ``session/attachments.py``); nothing decodes in a render loop, and the
-waveform route reads the sidecar. The server contract v1 does not emit a
+waveform route reads the sidecar (with bounded legacy repair in ``recovery``).
+The server contract v1 does not emit a
 ``waveform`` field, so this module is the DEFAULT source — a later server lane
 can ship its own peaks and the route prefers the sidecar either way.
 
@@ -16,8 +17,8 @@ to 0..1. 8 kHz mono is deliberate: a waveform bar is a loudness summary, so
 the cheapest decode that preserves relative loudness across buckets is the
 right one, and the grid is fixed by the contract (``bars: 240``).
 
-**Optional import, never raises.** ``miniaudio`` is an optional extra —
-a host without it computes no peaks and every consumer degrades (no sidecar →
+**Guarded import, never raises.** ``miniaudio`` is a base runtime dependency,
+but a damaged/older install may lack it. Consumers still degrade (no sidecar →
 the waveform route answers 404 → the surface draws its no-waveform state).
 Import failure, decode failure and empty audio all answer ``None``/silence
 rather than raising: peaks are presentation, and no render surface may take a
@@ -46,9 +47,8 @@ def _load_miniaudio() -> Any | None:
     """The optional engine, or ``None``.
 
     ``importlib`` rather than a top-level ``import miniaudio``: the dependency
-    is an OPTIONAL extra, and a static import would make every environment
-    without it a lint/type error instead of the supported degraded state this
-    module exists to serve.
+    is a native decoder whose import can fail even in a complete install.
+    Keep that failure a supported degraded state, not a failed generation.
     """
     try:
         return importlib.import_module("miniaudio")

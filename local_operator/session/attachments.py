@@ -422,10 +422,11 @@ def cache_media(
     AUDIO also gets its waveform PEAKS here, computed once at creation and
     stored as the ``<digest>.peaks.json`` sidecar (``audiogen.peaks``; the
     server contract emits no waveform, so this is the default source). The
-    decode is optional-capability — a host without the decoder writes no
-    sidecar and the waveform route answers 404 — and it happens ONLY when the
-    digest has none yet, so re-registering identical bytes pays no second
-    decode. Peaks are NOT part of the returned block: they are a rendering
+    decoder ships in the base runtime, with a guarded import so a damaged or
+    older install still preserves audio bytes without a sidecar. The waveform
+    route can repair small legacy artifacts within bounded server-side limits;
+    otherwise it returns 404/no-waveform. Creation decodes ONLY when the digest
+    has none yet, so re-registering identical bytes pays no second decode. Peaks are NOT part of the returned block: they are a rendering
     sidecar fetched by digest, never a field every attachment row carries.
     """
     if not raw:
