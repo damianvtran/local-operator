@@ -58,5 +58,90 @@
     "role": "TUI notice text",
     "tone": "terse, operator-facing status",
     "note": "EN-only context sidecar; the continuation limit stopped the turn and dropped the pending message"
+  },
+  "tui.notices.image_unsupported": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {model} is the selected model label"
+  },
+  "tui.notices.request_too_large_dropped": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; images were dropped and the size limit tightened"
+  },
+  "tui.notices.too_large_run_compact": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; no images remain to drop; names /compact as the exit"
+  },
+  "tui.notices.too_large_images_removed": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; images were removed after the size refusal"
+  },
+  "tui.notices.image_rejected_history": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; the provider rejected one image in history"
+  },
+  "tui.notices.stopped_session_held": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; admission into a stopped session is held"
+  },
+  "tui.notices.auto_continuation_limit": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {limit} is the continuation cap"
+  },
+  "tui.notices.steering_not_saved": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {command_id} and {reason} name the rejected steer"
+  },
+  "tui.notices.unsaved_asides": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; plural summary fragment for unsaved asides"
+  },
+  "tui.notices.unsaved_receipts": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; plural summary fragment for unsaved shell receipts"
+  },
+  "tui.notices.unsaved_records": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {summary} joins the unsaved fragments"
+  },
+  "tui.notices.model_info_incomplete": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {model} is the selected model label"
+  },
+  "tui.notices.model_info_incomplete_headline": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; boot-toast headline"
+  },
+  "tui.notices.model_default_changed": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {model} is the kept model label"
+  },
+  "tui.notices.model_default_changed_headline": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; boot-toast headline"
+  },
+  "tui.notices.effort_default_changed": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; {effort} is the stored default effort"
+  },
+  "tui.notices.effort_default_changed_headline": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status",
+    "note": "EN-only context sidecar; boot-toast headline"
   }
 }
