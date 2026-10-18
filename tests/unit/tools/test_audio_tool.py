@@ -1271,6 +1271,149 @@ async def test_batch_partial_failure_uses_actual_http_rejection(monkeypatch):
     assert _details(result)["artifacts"][0]["units"] == 1
 
 
+def test_hub_reason_error_appends_the_reason_and_keeps_typed_fields() -> None:
+    """The refused-submit upgrade: reason in the sentence, classification intact."""
+    from local_operator.clients._http import APIError
+
+    exc = APIError(
+        "This audio request could not be accepted.",
+        status_code=400,
+        code="audio_rejected",
+        details={"reason": "duration_seconds must be between 0.5 and 30 seconds, got 31"},
+        body='{"code": "audio_rejected"}',
+    )
+    wrapped = audio_rungs._hub_reason_error(exc)
+    assert str(wrapped) == (
+        "This audio request could not be accepted. "
+        "(duration_seconds must be between 0.5 and 30 seconds, got 31)"
+    )
+    assert wrapped.status_code == 400
+    assert wrapped.code == "audio_rejected"
+    assert wrapped.details == exc.details
+    assert wrapped.body == exc.body
+
+
+def test_hub_reason_error_omits_without_a_reason_or_when_already_present() -> None:
+    """Additive only: an older hub or an already-actionable message is unchanged."""
+    from local_operator.clients._http import APIError
+
+    plain = APIError("This audio request could not be accepted.", status_code=400)
+    assert audio_rungs._hub_reason_error(plain) is plain
+    empty = APIError(
+        "This audio request could not be accepted.", status_code=400, details={"reason": "  "}
+    )
+    assert audio_rungs._hub_reason_error(empty) is empty
+    already = APIError(
+        "Refused: duration_seconds must be between 0.5 and 30 seconds, got 31",
+        status_code=400,
+        details={"reason": "duration_seconds must be between 0.5 and 30 seconds, got 31"},
+    )
+    assert audio_rungs._hub_reason_error(already) is already
+
+
+@pytest.mark.asyncio
+async def test_batch_rejected_item_surfaces_the_servers_details_reason(monkeypatch):
+    """A 400 ``audio_rejected`` batch item shows ``details.reason`` verbatim.
+
+    The live hub sends the generic sentence in ``error`` and the actionable
+    parameter explanation in ``details.reason``; the batch row's ``error`` is
+    composed from the attempt message, so the reason must ride that message.
+    Scripted HTTP only — no provider call.
+    """
+    import hashlib
+    import json
+
+    import httpx
+
+    from local_operator.audiogen import cascade, rungs
+
+    monkeypatch.setattr(cascade.audio_availability, "radient_available", lambda cfg=None: True)
+    monkeypatch.setattr(cascade.audio_availability, "elevenlabs_key", lambda cfg=None: None)
+    monkeypatch.setattr(cascade.audio_availability, "openai_audio_key", lambda cfg=None: None)
+    submitted = []
+    audio = b"ID3mock-http-audio"
+    reason = "duration_seconds must be between 0.5 and 30 seconds, got 31"
+
+    def respond(request):
+        if request.method == "POST":
+            body = json.loads(request.content)
+            submitted.append(body)
+            if body["duration_seconds"] == 31:
+                return httpx.Response(
+                    400,
+                    json={
+                        "code": "audio_rejected",
+                        "error": "This audio request could not be accepted.",
+                        "details": {"reason": reason},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": body["prompt"],
+                    "status": "COMPLETED",
+                    "model": "sfx",
+                    "cost": {
+                        "amount_usd": 0.002,
+                        "basis": "billed",
+                        "units": 1,
+                        "unit": "seconds",
+                    },
+                },
+            )
+        if request.url.path.endswith("/result"):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "COMPLETED",
+                    "audio": {
+                        "url": "https://fixture.invalid/media.mp3",
+                        "content_type": "audio/mpeg",
+                        "duration_seconds": 0.5,
+                        "sha256": hashlib.sha256(audio).hexdigest(),
+                    },
+                },
+            )
+        assert request.url.path == "/media.mp3"
+        return httpx.Response(200, content=audio)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        async def route(route, **kwargs):
+            assert route == AudioRoute.RADIENT
+            return await rungs.run_radient(
+                kwargs["spec"],
+                credential="test-credential",
+                base_url="https://fixture.invalid/v1",
+                handle=kwargs["handle"],
+                emit=kwargs["emit"],
+                pause=kwargs["pause"],
+                client=client,
+            )
+
+        monkeypatch.setattr(cascade, "_run_route", route)
+        result = await audio_tool.execute_generate_sound_effect(
+            "partial",
+            {
+                "sounds": [
+                    {"prompt": f"sound-{n}", "duration_s": 31 if n == 2 else 0.5} for n in range(4)
+                ]
+            },
+            None,
+            None,
+            None,
+        )
+    assert not result.is_error
+    assert len(submitted) == 4
+    assert len([b for b in result.content if isinstance(b, AttachmentContent)]) == 3
+    rejected = _details(result)["artifacts"][2]
+    assert rejected["status"] == "failed"
+    assert rejected["error_type"] == "audio_rejected"
+    assert rejected["http_status"] == 400
+    assert reason in rejected["error"]
+    assert "could not be accepted" in rejected["error"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refuse_all", [False, True])
 async def test_batch_cache_refusal_is_isolated_and_all_refused_errors(monkeypatch, refuse_all):
