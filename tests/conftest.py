@@ -47,6 +47,18 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The per-build runtime image root (``procname.runtime_root``) is resolved
+    # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
+    # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
+    # Any test that reaches a spawn path plants one image there — measured, not
+    # hypothetical: individual runs of ``test_daemon_plist_refresh.py``,
+    # ``test_broker_sweep.py`` and ``test_update.py`` each published a directory
+    # into the operator's real runtime root. Inherited from a developer's shell
+    # it steers where a test writes, so it is scrubbed like the rest and then
+    # REPLACED with a per-test scratch root in ``isolate_environment`` (a
+    # subprocess only sees an environment variable, not a monkeypatched
+    # function).
+    "LOCAL_OPERATOR_RUNTIME_ROOT",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
@@ -677,6 +689,11 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))  # Windows equivalent
     for name in _AMBIENT_VARS:
         monkeypatch.delenv(name, raising=False)
+    # ...and give every test a runtime root under its OWN scratch tree. The
+    # scrub above removes an inherited value; this is the positive half, and it
+    # must come after the loop. See the entry's comment in ``_AMBIENT_VARS``
+    # for what went wrong without it.
+    monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(tmp_path_factory.mktemp("runtime")))
     # The suite must never reach the operator's DESKTOP either. A runtime with
     # no attached client announces a parked gate through `detached_notify`,
     # which on darwin spawns a real `osascript display notification` — so six

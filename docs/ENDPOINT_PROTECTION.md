@@ -1031,11 +1031,15 @@ instead of being hardlinked into every venv. It does not stop an EDR flagging
 the name, but it stops whatever an EDR does to that name from reaching the
 interpreter every venv on the machine resolves to (measured, §1: two uv
 interpreters left unreadable on 2026-09-19, every 3.12/3.13 venv on the host
-dead until reinstalled). The cost is a ~50 KB clone (APFS shares the blocks) and
-a content-staleness rule — the build key — where the inode comparison was. The
-copy shape's old failure, `dyld: Library not loaded: @rpath/libpython3.X.dylib`,
-is what the `lib` symlink beside the image fixes, and it is measured: 25/25
-launches through the venv symlink, `sys.prefix` still the venv.
+dead until reinstalled). The cost is no extra blocks on APFS: the image is
+logically the interpreter's whole size (18,041,888 bytes for the uv 3.12.14
+build this was measured on) and shares every block with the source while the
+source exists; a volume without clones pays one copy per Python build, not one
+per venv. What it costs instead is a content-staleness rule — the build key —
+where the inode comparison was. The copy shape's old failure,
+`dyld: Library not loaded: @rpath/libpython3.X.dylib`, is what the `lib` symlink
+beside the image fixes, and it is measured: 20/20 launches through the venv
+symlink, `sys.prefix` still the venv.
 
 ## 6. Where to find this
 
