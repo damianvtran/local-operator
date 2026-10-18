@@ -4681,7 +4681,16 @@ def _print_kept(protected: list[tuple[str, str]]) -> None:
     for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
         print(f"  kept         {name}  ({guard})")
     if len(protected) > _CLEANUP_TEXT_ROWS:
-        print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
+        # The pass caps each kept group at WINDOW_NAMES_CAP while still counting
+        # every member into its total, so ``--json`` carries the same capped
+        # list, not every row. The old text promised the full listing and was
+        # false past the cap; say what the JSON actually holds.
+        from local_operator.session.delegated_retention import WINDOW_NAMES_CAP
+
+        print(
+            f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept "
+            f"(list capped at {WINDOW_NAMES_CAP} per group; --json carries the same capped list)"
+        )
 
 
 def _content_class_counts(rows: list[Any]) -> dict[str, int]:
@@ -4881,6 +4890,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 enabled=policy.delegated_enabled,
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
+                kept_by_origin=getattr(delegated, "kept_by_origin", 0),
+                kept_by_origin_names=getattr(delegated, "kept_by_origin_names", []),
                 remaining=getattr(delegated, "remaining", 0),
                 scratchpad_enabled=policy.delegated_scratchpad_enabled,
                 scratchpad={
@@ -4990,7 +5001,9 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
-                f"newer than {delegated.hours}h (kept); {delegated_verb} {len(delegated.removed)}"
+                f"kept inside {delegated.hours}h or with no usable clock; "
+                f"{delegated.kept_by_origin} kept by origin; "
+                f"{delegated_verb} {len(delegated.removed)}"
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
             _print_kept(delegated.protected)
