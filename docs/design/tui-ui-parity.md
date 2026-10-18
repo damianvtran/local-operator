@@ -31,8 +31,7 @@ evidence for both.
 |---|---|---|---|---|
 | 1.1 | Conversation list with pinned/active/previous sections, pin/unpin, archive/unarchive/delete | ✅ | ✅ | UI `features/chat/components/chat-sidebar.tsx`, `chat-sections.ts`; TUI `widgets/session_sidebar.py`, `/archive`, `/unarchive`, `/delete` |
 | 1.2 | Conversation search over titles **and message bodies** | ✅ | ✅ | UI `shared/api/local-operator/session-search.ts`, `palette-search.ts`; TUI `widgets/session_picker.py` + `session/search_index.py` |
-| 1.3 | Two or more conversations open at once (chat tabs) | ✅ | ✗ | UI `features/chat/components/chat-tabs.tsx`; TUI switches the one attached session (`/resume`, sidebar) |
-| 1.4 | Global command palette / action search (`Cmd+K`, `Ctrl+K`, `Ctrl+P`) | ✅ | ✗ | UI `features/command-palette/*`; TUI has slash autocomplete and `?` legend only (`widgets/command_picker.py`, `widgets/keys_legend.py`) |
+| 1.4 | Global command palette / action search (`Cmd+K`, `Ctrl+K`, `Ctrl+P`) | ✅ | ◐ | UI `features/command-palette/*`; TUI inherits Textual's `ctrl+p` CommandPalette (`app.py:4578-4583`, `docs/design/keymap.md` §E.4) but registers no app-specific providers, so only framework system actions appear |
 | 1.5 | Agents and teams visible in the navigation column | ✅ | ◐ | UI `chat-sidebar.tsx` (Agents + Teams sections); TUI `/agent` and `/team` listings, no tree |
 | 1.6 | Notification / attention routing back to a conversation | ✅ | ◐ | UI attention store and sidebar badges; TUI `/notifications`, notifier app and status marks |
 
@@ -40,7 +39,7 @@ evidence for both.
 
 | # | Capability | UI | TUI | Evidence |
 |---|---|---|---|---|
-| 2.1 | Multiline composer, slash autocomplete, `@path` references | ✅ | ✅ | UI `features/chat/components/message-input.tsx`, `at-mention-overlay.tsx`; TUI `widgets/editor.py`, `autocomplete.py` |
+| 2.1 | Multiline composer, slash autocomplete, `@path` references | ✅ | ✅ | UI `shared/components/composer/message-input.tsx`, `at-mention-overlay.tsx`; TUI `widgets/editor.py`, `autocomplete.py` |
 | 2.2 | Image attachment staging (paste, drop, picker) | ✅ | ✅ | UI `file-attachment.tsx`, `image-attachment.tsx`, attach button; TUI `widgets/editor.py` attachment staging |
 | 2.3 | Rich attachment / artifact preview in the app | ✅ | ◐ | UI canvas viewers for text, code, markdown, HTML, PDF, spreadsheet, image, audio, video; TUI renders images inline (`widgets/image_block.py`) and opens other files externally (`attachments.py`, `supplement_block.py`) |
 | 2.4 | Voice dictation in the composer | ✅ | ✗ | UI `features/chat/components/audio-recording-indicator.tsx`, mic in `message-input.tsx`; no TUI capture surface |
@@ -53,15 +52,15 @@ evidence for both.
 | 2.11 | Plan / todo list | ✅ | ✅ | UI run panel + plan chip; TUI `widgets/todo_panel.py` |
 | 2.12 | Running subagents and background jobs roster | ✅ | ✅ | UI run panel; TUI `widgets/subagent_panel.py`, `widgets/subagent_view.py`, status counters |
 | 2.13 | Armed wakes and monitors, with next-due/health | ✅ | ✅ | UI composer chips + run panel; TUI `widgets/wake_panel.py` |
-| 2.14 | Create, edit and cancel wakes/schedules | ✅ | ✗ | UI `features/schedules/*` (page + form + cancel confirm); TUI has no direct surface — only the agent's `wake` tool |
-| 2.15 | Code-request ledger: PR/MR state, CI, agent/design/QA/UX review rounds, freshness | ✅ | ✗ | UI `features/code-review/*` right pane; TUI has no surface (the `code_requests` tool is agent-facing only) |
+| 2.14 | Create, edit and cancel wakes/schedules | ✅ | ◐ | UI `features/schedules/*` (page + form + cancel confirm); TUI has no direct surface — the agent's `wake` tool can create/list/cancel, and the panel only displays |
+| 2.15 | Code-request ledger: PR/MR state, CI, agent/design/QA/UX review rounds, freshness | ✅ | ◐ | UI `features/code-review/*` right pane; TUI has no surface — the agent-facing `code_requests` tool can list/show rows, but there is no page |
 
 ## 3. Skills, memory and harness import
 
 | # | Capability | UI | TUI | Evidence |
 |---|---|---|---|---|
 | 3.1 | List discoverable skills and read a skill body | ✅ | ✅ | UI `SkillsPicker` in `features/chat/pickers/destination-pickers.tsx`; TUI `/skills` block in `app.py` |
-| 3.2 | Inspect, search, correct and forget scoped memory | ✗ | ✅ | TUI `/memory` (`local_operator/memory_cli.py`, `app.py::_cmd_memory`); no desktop destination in the registry |
+| 3.2 | Inspect, search, correct and forget scoped memory | ✗ | ➕ | TUI `/memory` (`local_operator/memory_cli.py`, `app.py::_cmd_memory`); no desktop destination in the registry |
 | 3.3 | Import conversations and memory from Claude Code / Codex / omp | ✅ | ✅ | UI `features/settings/components/import-settings-view.tsx`; TUI `/import` + `widgets/harness_import_view.py` |
 
 ## 4. Agent hub, agents and teams
@@ -102,8 +101,8 @@ evidence for both.
 | # | Capability | UI | TUI | Evidence |
 |---|---|---|---|---|
 | 6.1 | File callouts from an answer, open in the OS | ✅ | ✅ | UI file rows; TUI `widgets/supplement_block.py`, `attachments.py` |
-| 6.2 | Inline document viewer (text, code, markdown, HTML, PDF, spreadsheet, image, audio, video) | ✅ | ✗ | UI `features/chat/components/canvas/*`; TUI renders images only (`image_block.py`) |
-| 6.3 | Create/edit files with an inline AI editor | ✅ | ✗ | UI `canvas/inline-edit.tsx`, `create-file-dialog.tsx`, WYSIWYG markdown; no TUI equivalent |
+| 6.2 | Inline document viewer (text, code, markdown, HTML, PDF, spreadsheet, image, audio, video) | ✅ | ◐ | UI `features/chat/components/canvas/*`; TUI renders images inline (`image_block.py`) and the agent's `read` can print text, but there is no viewer |
+| 6.3 | Create/edit files with an inline AI editor | ✅ | ◐ | UI `canvas/inline-edit.tsx`, `create-file-dialog.tsx`, WYSIWYG markdown; TUI has no editor surface — the agent's `edit`/`write` tools are the only path |
 | 6.4 | Drag-and-drop arbitrary files into the composer | ✅ | ◐ | UI attach-file button/drop; TUI stages images, other terminal drops arrive as paths/text |
 
 ## 7. Built-in browser
@@ -120,8 +119,8 @@ evidence for both.
 |---|---|---|---|---|
 | 8.1 | Completion notifications and unread marks | ✅ | ✅ | UI native notifications + attention; TUI notifier app, `/notifications`, terminal marks |
 | 8.2 | Armed wake/monitor list with due time and delivery health | ✅ | ✅ | UI composer chips/run panel; TUI `wake_panel.py` |
-| 8.3 | Create/edit/cancel a wake from the app | ✅ | ✗ | UI schedules page/form; TUI direct surface absent (`wake` tool only) |
-| 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ✗ | UI `features/schedules/schedules-page.tsx`; TUI has no page |
+| 8.3 | Create/edit/cancel a wake from the app | ✅ | ◐ | UI schedules page/form; TUI direct surface absent, but the agent's `wake` tool can create/list/cancel |
+| 8.4 | Schedules page grouped by conversation, including legacy agent schedules | ✅ | ✗ | UI `features/schedules/components/schedules-page.tsx`; TUI has no page |
 
 ## 9. Ask flows
 
@@ -136,9 +135,9 @@ evidence for both.
 |---|---|---|---|---|
 | 10.1 | List, board, timeline and detail views | ✅ | ✅ | UI projects page; TUI `widgets/projects_view.py` |
 | 10.2 | Toggle a milestone complete | ✅ | ✅ | UI milestone block; TUI `DetailMilestoneRow` |
-| 10.3 | Add or remove a milestone | ✅ | ✗ | UI `project-milestones.tsx` add/remove; TUI toggles only |
+| 10.3 | Add or remove a milestone | ✅ | ◐ | UI `project-milestones.tsx` add/remove; TUI toggles only, while the `project` tool's `milestone` op can add/remove |
 | 10.4 | Create a project | ✅ | ✅ | UI form dialog; TUI `projects_form.py` |
-| 10.5 | Edit a project's fields | ✅ | ✗ | UI `project-form-dialog.tsx` edit mode; TUI form is create-only |
+| 10.5 | Edit a project's fields | ✅ | ◐ | UI `features/projects/components/project-editors.tsx` (the retired form dialog is create-only); TUI form is create-only, while the `project` tool's `update` op can edit |
 | 10.6 | Links, todos, updates, attachments, quick send, start session | ✅ | ✅ | UI project detail components; TUI `projects_detail.py`, `projects_send.py`, `projects_start.py` |
 
 ## 11. Mesh
@@ -159,38 +158,46 @@ evidence for both.
 
 ## 13. Summary
 
-Counting the 72 rows above:
+Counting the 71 rows above:
 
 - Full parity: 38
-- TUI partial: 9
-- TUI missing: 21
+- TUI partial: 17
+- TUI missing: 12
 - TUI-only: 1
 - Not applicable to a terminal: 3
 
-The missing set clusters into three kinds:
+The missing set is smaller than it first looks because a capability reachable
+only through an agent tool is **partial**, not missing. The remaining missing
+set clusters into three kinds:
 
-1. **Terminal-shaped, bounded, high value** — schedule authoring, code-review
-   ledger, project edit/milestone authoring, agent/team authoring, file
-   previews, command palette.
+1. **Bounded direct surfaces** — the schedules page grouped by conversation
+   (8.4) and the user profile (5.11). The underlying wake and profile data
+   exists; only the page is absent.
 2. **Large desktop surfaces that need a terminal design and a client for a
-   backend API** — agent hub (marketplace, skills, public teams), canvas.
-3. **Genuinely cross-cutting** — built-in browser pane and its consent/approval
-   chrome; voice dictation (audio capture + transcription); multi-session tabs.
+   backend API** — the agent hub marketplace, skills library and public teams
+   (4.5–4.9).
+3. **Genuinely cross-cutting** — the built-in browser pane and its
+   consent/approval chrome (7.1–7.3); voice dictation (2.4); the mesh graph
+   (11.2, deliberately not planned for a terminal).
+
+The larger, more actionable group is the 17 **partial** rows: the capability
+exists only by asking the agent to use a tool, or as a read-only/stripped-down
+surface. The first six slices below target that group.
 
 ## 14. Prioritised slice plan
 
 Order is by user value per unit of delivery risk. The first six are proposed as
-serial TUI slices; the last four are proposals, not implementation work, until
-their design is accepted.
+serial TUI slices; P6–P9 are proposals, not implementation work, until their
+design is accepted.
 
 | Order | Slice | Gap closed | Why this rank | Risk |
 |---|---|---|---|---|
-| P0 | `/review` — code-request ledger page | 2.15 | Whole desktop feature absent; backend ledger and `service.view_rows` already exist; read-only; high value to a developer operator | Low: read-only, no protocol change |
-| P1 | `/schedule` — wake list/create/edit/cancel | 2.14, 8.3 | Whole desktop feature absent; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround | Medium: mutation, form validation, date/duration parsing |
+| P0 | `/review` — code-request ledger page | 2.15 | No direct TUI surface; backend ledger and `service.view_rows` already exist; read-only; high value to a developer operator | Low: read-only, no protocol change |
+| P1 | `/schedule` — wake list/create/edit/cancel | 2.14, 8.3 | No direct TUI surface; `build_wake_schedule`/`build_wake_edit` and the scheduler already exist; direct UI removes the "ask the agent" workaround | Medium: mutation, form validation, date/duration parsing |
 | P2 | Project parity completion: edit project, add/remove milestone | 10.3, 10.5 | Closes the last project gaps; store APIs already exist; TUI already has the page and form patterns | Low–medium |
 | P3 | Agent and team authoring forms | 4.2, 4.4 | Removes the agent-mediated workaround; desktop has the full field set to mirror; TUI already has `/agent` and `/team` surfaces | Medium: forms and validation |
 | P4 | Attachment/file preview | 2.3, 6.2 | TUI currently punts everything but images to the OS; text/code/markdown preview is terminal-shaped and useful | Medium: file-type routing, bounded rendering |
-| P5 | Command palette | 1.4 | One keyboard surface over destinations, settings rows, conversations and agents; TUI already has search primitives | Medium: new interaction, not a new subsystem |
+| P5 | Command palette providers | 1.4 | One keyboard surface over destinations, settings rows, conversations and agents; the inherited Textual palette already opens, but has nothing app-specific to show | Medium: new interaction, not a new subsystem |
 
 ### Proposals (do not build without acceptance)
 
@@ -205,8 +212,13 @@ their design is accepted.
   part that matters for agent safety. Propose.
 - **P9 — Voice dictation** (2.4). Audio capture and transcription are
   cross-cutting and platform-sensitive; propose after the terminal-shaped work.
-- **P10 — Multi-session chat tabs** (1.3). Structural change to the one-session
-  attach model; propose with the session-runtime owners.
+
+### Checked, not a feature
+
+Multi-conversation tabs are **not** a desktop feature to mirror: `ChatTabs` is a
+dev-only Chat/Raw toggle for one conversation, and production renders the chat
+view with no strip. The TUI's `/resume` and sidebar remain the switch. This was
+checked and removed from the matrix and the proposal list.
 
 ### Not planned
 
