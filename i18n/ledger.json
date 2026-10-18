@@ -2033,6 +2033,196 @@
       },
       "status": "passed",
       "note": "clean terminal; no findings. Independent audit: 73 keys; mechanical/ICU/glossary clean. Auditor ran openai/gpt-6.1-sol because anthropic/claude-sonnet-5-5 hit quota before the substantive audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "86fb2dc48425f95faf1d364930d8c737da725bb8cf1ca5880c8f716cad946845",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "LOH-5 slice 4 speech.transcription.cleanup 10-key delta; translator job 99a768096f98 after the round-1 audit findings; independent auditor job c1af9ff290d2 (different agent session) reported 0 BLOCKER/MAJOR/MINOR, 2 non-gating NITs now applied; both runs deepseek/deepseek-flash, same model family (disclosed); source hash pinned to the current en bytes."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "86fb2dc48425f95faf1d364930d8c737da725bb8cf1ca5880c8f716cad946845",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "LOH-5 slice 4 speech.transcription.cleanup 10-key delta; translator job 99a768096f98 after the round-1 audit findings; independent auditor job c1af9ff290d2 (different agent session) reported 0 BLOCKER/MAJOR/MINOR, 2 non-gating NITs now applied; both runs deepseek/deepseek-flash, same model family (disclosed); source hash pinned to the current en bytes."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "86fb2dc48425f95faf1d364930d8c737da725bb8cf1ca5880c8f716cad946845",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "LOH-5 slice 4 speech.transcription.cleanup 10-key delta; translator job 99a768096f98 after the round-1 audit findings; independent auditor job c1af9ff290d2 (different agent session) reported 0 BLOCKER/MAJOR/MINOR, 2 non-gating NITs now applied; both runs deepseek/deepseek-flash, same model family (disclosed); source hash pinned to the current en bytes."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "86fb2dc48425f95faf1d364930d8c737da725bb8cf1ca5880c8f716cad946845",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "LOH-5 slice 4 speech.transcription.cleanup 10-key delta; translator job 99a768096f98 after the round-1 audit findings; independent auditor job c1af9ff290d2 (different agent session) reported 0 BLOCKER/MAJOR/MINOR, 2 non-gating NITs now applied; both runs deepseek/deepseek-flash, same model family (disclosed); source hash pinned to the current en bytes."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "86fb2dc48425f95faf1d364930d8c737da725bb8cf1ca5880c8f716cad946845",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "LOH-5 slice 4 speech.transcription.cleanup 10-key delta; translator job 99a768096f98 after the round-1 audit findings; independent auditor job c1af9ff290d2 (different agent session) reported 0 BLOCKER/MAJOR/MINOR, 2 non-gating NITs now applied; both runs deepseek/deepseek-flash, same model family (disclosed); source hash pinned to the current en bytes."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "41b4002383a65953cc51298d12ac0367600800e1d72696f00ab5b8fd7764d71b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-18",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D1 design remediation: the three long enum hints were shortened to fit the 100x30 split layout; translator job c9923c4fb827 updated the five locales, independent delta auditor job cba64f97f2db reported 0 BLOCKER/MAJOR/MINOR (4 NITs; 3 rejected because their extra words would re-clip, vi off cue term applied); both runs deepseek/deepseek-flash (same family, disclosed); unchanged labels/help/literal cleanup."
     }
   ]
 }

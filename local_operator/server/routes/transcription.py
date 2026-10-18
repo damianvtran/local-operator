@@ -24,6 +24,7 @@ from local_operator.stt.cleanup import (
     InvalidCleanupMode,
     apply_client_rules,
     choose_cleanup_language,
+    configured_cleanup,
     normalize_language_hint,
     resolve_cleanup,
 )
@@ -93,9 +94,9 @@ async def create_transcription_endpoint(
     """
     # A direct call (tests, in-process callers) can pass the FastAPI ``Form``
     # sentinel; only a real string is a mode.
-    raw_cleanup = cleanup if isinstance(cleanup, str) else None
+    raw_cleanup = cleanup if isinstance(cleanup, str) and cleanup.strip() else None
     try:
-        mode = resolve_cleanup(raw_cleanup)
+        mode = resolve_cleanup(raw_cleanup or configured_cleanup(config_manager))
     except InvalidCleanupMode as exc:
         raise HTTPException(status_code=422, detail=_wm.media_refusal(error=str(exc)).envelope())
     if not radient_client.api_key:

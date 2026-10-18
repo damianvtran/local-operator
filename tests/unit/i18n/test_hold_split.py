@@ -22,15 +22,16 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # FIFTEEN: the union of both branches' additions the rebase merged in, plus
-    # the LOH-19 review slice's audited `tui.review` row. Base is twelve (the
-    # Wave-3 ten retain their audited source pins). Main added a wire.settings
-    # row for the hub-setting deletion; this branch added a tui.transcript row
-    # for the independent re-attestation of the carried content against the
-    # current en source, and the review slice added one more. Keep the
+    # SEVENTEEN: the union of both branches' additions the rebase merged in.
+    # Base is twelve (the Wave-3 ten retain their audited source pins). Main
+    # added a wire.settings row for the hub-setting deletion and the LOH-19
+    # review slice added a tui.review row; the earlier branch added a
+    # tui.transcript row for the independent re-attestation of the carried
+    # content; LOH-5 slice 4 adds two wire.settings rows for the
+    # transcription-cleanup setting and its D1 copy remediation. Keep the
     # cardinality pin: adding an audited union must not silently admit an
     # unrelated held namespace or discard the previous audit history.
-    assert len(hindi) == 15
+    assert len(hindi) == 17
     assert all(entry["status"] == "passed" for entry in hindi)
 
 

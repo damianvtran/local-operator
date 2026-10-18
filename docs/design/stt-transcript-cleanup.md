@@ -368,14 +368,17 @@ message and its `input_path`; changing that is a separate data-retention decisio
 
 ### 4.5 Configuration
 
-The full design adds one `/settings` key under the existing `speech` section:
+The key ships in slice 4 under the existing `speech` section:
 
-`speech.transcription.cleanup` — enum `auto` (default), `provider`, `client`, `off`
-through slice 4; `edit` is added to the enum only in slice 5, when the code can
-accept it. Scope LIVE (the route reads it per request); per user/installation via
-`config.yml`. The first implementation slice uses the same vocabulary as a request
-field with a module-level default so the API is usable before the settings surface
-lands. A team-level default is out of scope; a team brief can select the per-user
+`speech.transcription.cleanup` — enum `auto` (default), `provider`, `client`, `off`;
+`edit` is added to the enum only in slice 5, when the code can accept it. Path
+`("speech", "transcription", "cleanup")`; scope LIVE (the routes read it per
+request); per user/installation via `config.yml`. The routes read the key ONLY when
+the request names no `cleanup`; a per-call field always wins, so the agent/API path
+keeps its explicit control. Changing the key never rewrites an existing transcript
+and never changes a stored message; it applies to the next transcription. TUI and
+UI render the row from the registry, so both surfaces read the same key, choices and
+default. A team-level default is out of scope; a team brief can select the per-user
 default later without a new config mechanism.
 
 ## 5. Test matrix

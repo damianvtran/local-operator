@@ -881,6 +881,16 @@ export type MessageParams = {
   "wire.settings.shell_environment_mode.label": undefined;
   "wire.settings.speech.description": undefined;
   "wire.settings.speech.title": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.auto.description": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.auto.label": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.client.description": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.client.label": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.off.description": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.off.label": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.provider.description": undefined;
+  "wire.settings.speech_transcription_cleanup.choice.provider.label": undefined;
+  "wire.settings.speech_transcription_cleanup.help": undefined;
+  "wire.settings.speech_transcription_cleanup.label": undefined;
   "wire.settings.speech_voice_accent.help": undefined;
   "wire.settings.speech_voice_accent.label": undefined;
   "wire.settings.speech_voice_expressiveness.choice.high.description": undefined;
