@@ -45,8 +45,10 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.i18n.keys import tui_projects as copy
+from local_operator.i18n.keys import tui_projects_edit as copy_edit
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.projects_edit import ProjectEditState
 from local_operator.tui.projects_render import (
     PROJECTS_MAX,
     TIMELINE_TIERS,
@@ -73,6 +75,7 @@ from local_operator.tui.projects_render import (
 )
 from local_operator.tui.widgets.projects_detail import ProjectDetailPage
 from local_operator.tui.widgets.projects_form import FORM_FOOTER_HINT, ProjectsFormPage
+from local_operator.tui.widgets.projects_milestone import MilestonePrompt
 from local_operator.tui.widgets.projects_send import (
     SendTarget,
     SendTargetCard,
@@ -92,6 +95,12 @@ from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 VIEWS: tuple[str, ...] = ("list", "board", "timeline")
 
 _t = tr("tui.projects")
+#: The edit form and the milestone prompt's copy (LOH-19 P2) lives in its own
+#: namespace so the new surface's sentences can be translated and audited as
+#: one unit. Shared page vocabulary stays in ``tui.projects`` — e.g. the
+#: read-only notice and the done-gate refusal this slice added — because it is
+#: the page's standing state, not the form's private copy.
+_te = tr("tui.projects_edit")
 # View identifiers drive routing and must stay stable; only their displayed
 # names move with the locale. Weak references never retain dismissed pages.
 _VIEW_LABELS: dict[str, str] = {}
@@ -112,6 +121,15 @@ def _project_bindings() -> list[Binding]:
         # `c` opens the CREATE form (P4) — the spec's own key for it, and one
         # of the letters the canvases left free.
         Binding("c", "create", _t(copy.binding_create()), show=False),
+        # `e` opens the selected project's EDIT form, prefilled (LOH-19 P2)
+        # and limited to the DETAIL page: `check_action` disarms it on the
+        # canvas, so the key is never claimed where it has nothing to edit.
+        Binding("e", "edit", _te(copy_edit.binding_edit()), show=False),
+        # `a` adds a milestone (name + optional target date) and `x` removes
+        # the selected one behind an inline y/n confirm; both are detail-page
+        # keys on the same arming rule (P2, spec §10.3).
+        Binding("a", "add_milestone", _te(copy_edit.binding_add_milestone()), show=False),
+        Binding("x", "remove_milestone", _te(copy_edit.binding_remove_milestone()), show=False),
         # `m` messages a linked session (P5a): on a session row it sends
         # straight to it, anywhere else it opens the target picker (spec
         # §7.5.1). Free in the mode and in the app's focused chain.
@@ -198,6 +216,51 @@ class ProjectsViewFormSubmitted(Message):
     def __init__(self, *, edit: Any) -> None:
         super().__init__()
         self.edit = edit
+
+
+class ProjectsViewEditSubmitted(Message):
+    """`ctrl+s` on the EDIT form: the app writes the changed fields, then re-shows.
+
+    Carries the page's OWN provenance (the project the form was opened on), not
+    the canvas cursor's row: a recomposition while the form is up moves the
+    cursor, and an edit must land on the record the reader saw. The edit itself
+    is the changed-only ``ProjectEdit`` the model built — the app never guesses
+    which fields moved.
+    """
+
+    def __init__(self, *, project_id: str, edit: Any, project_name: str = "") -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.edit = edit
+        self.project_name = project_name
+
+
+class ProjectsViewMilestoneAddedRequested(Message):
+    """`a` submitted the add-milestone prompt: the app writes through the store.
+
+    The store's ``set_milestone`` is add-or-update BY NAME, so the receipt the
+    app reports is the returned action (added/updated/unchanged), never an
+    assumption this surface makes.
+    """
+
+    def __init__(
+        self, *, project_id: str, name: str, target_date: str = "", project_name: str = ""
+    ) -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.name = name
+        self.target_date = target_date
+        self.project_name = project_name
+
+
+class ProjectsViewMilestoneRemoved(Message):
+    """The inline confirm answered yes: remove one milestone through the store."""
+
+    def __init__(self, *, project_id: str, name: str, project_name: str = "") -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.name = name
+        self.project_name = project_name
 
 
 class ProjectsViewSendRequested(Message):
@@ -447,6 +510,12 @@ class ProjectsView(Vertical):
     #: ``open_detail`` is in the set for the same reason (`d` is swallowed by a
     #: field anyway, but a click on the canvas is not the only way in) and
     #: ``esc`` is deliberately NOT — it is the form's own way out.
+    #: The detail page's own keys. Disarmed everywhere else: `e`/`a`/`x` have
+    #: nothing to act on while a canvas or another mode owns the page, and
+    #: claiming them on the canvas would swallow letters a reader expects to
+    #: type into the composer once the mode closes.
+    _DETAIL_ACTIONS = frozenset({"edit", "add_milestone", "remove_milestone"})
+
     _CANVAS_ACTIONS = frozenset(
         {
             "show_list",
@@ -501,9 +570,12 @@ class ProjectsView(Vertical):
         #: timeline tier, and the one-clock "updated at" the title states.
         self._view: str = "list"
         self._cursor: int = 0
-        #: ``canvas`` | ``detail`` — where the page is (spec §10.1's state
-        #: machine). The canvas keeps the shipped mechanics while the detail
-        #: owns its own body; `esc` pops ONE level and only the canvas exits.
+        #: ``canvas`` | ``detail`` | ``form`` | ``milestone`` | the overlay
+        #: states — where the page is (spec §10.1's state machine). The canvas
+        #: keeps the shipped mechanics while the detail owns its own body;
+        #: `esc` pops ONE level and only the canvas exits. ``milestone`` is the
+        #: add-milestone prompt: the detail page stays on screen under it, so
+        #: the reader sees the plan they are adding to.
         self._mode: str = "canvas"
         #: The calling process's own session id, when the host knows it — the
         #: `◆` marker and `own session` label on the detail page. Sticky: a
@@ -512,6 +584,29 @@ class ProjectsView(Vertical):
         #: The project the detail state is showing, by id — the anchor a
         #: recomposition re-finds (a rename can move its index).
         self._detail_project_id: str | None = None
+        #: The project the EDIT form was opened on, by id — the write's
+        #: provenance while the form is up (the canvas cursor may move).
+        self._edit_project_id: str | None = None
+        #: Whether this page may WRITE (QA round 1, Q1). A follower session's
+        #: runtime lives on another device, so the store this page reads is not
+        #: the one that owns the project; the app supplies the state on every
+        #: ``load`` and guards the write handlers as well (the page must never
+        #: be the only lock). A bare terminal with no session stays writable.
+        self._read_only: bool = False
+        #: Provenance of the open add-milestone prompt and the armed remove
+        #: question. Both name a project when they open, and a later page
+        #: change must never redirect their answer: a submission is ignored
+        #: unless the anchor is still the detail page's project (agent review
+        #: round 1, R1).
+        self._milestone_project_id: str | None = None
+        self._milestone_project_name = ""
+        self._confirm_project_id: str | None = None
+        self._confirm_project_name = ""
+        #: True while the pinned notice is the EDIT form's no-change receipt.
+        #: That sentence states a fact about the LAST save, so the next field
+        #: change invalidates it — a dirty form must not keep saying there is
+        #: nothing to save (UX round 1, U2).
+        self._notice_is_no_change_receipt = False
         self._tier: str = "month"
         #: Whether the tier above was chosen by hand (``+``/``-``) and, if so,
         #: the dated span it was chosen for. A manual zoom survives a
@@ -561,6 +656,9 @@ class ProjectsView(Vertical):
             # A toggle changes the selected row's verb, which is the hint row's
             # own input (UX review round 1, U2).
             on_state_change=self._detail_state_changed,
+            # The y/n answer to the remove confirm. The page owns the KEYS;
+            # the row and the write stay with this view/the app (P2).
+            on_confirm=self._detail_remove_confirmed,
         )
         self._detail_page.display = False
         # The FORM state (P4): the create page. `c` opens it, `esc` pops one
@@ -571,9 +669,27 @@ class ProjectsView(Vertical):
             on_submit=self._form_submitted,
             on_cancel=self.close_form,
             on_state_change=self._form_state_changed,
+            # The EDIT mode's two outcomes (LOH-19 P2): a changed-only write,
+            # and a no-op receipt for a save that would have sent nothing.
+            on_edit_submit=self._edit_submitted,
+            on_no_change=self._edit_no_change,
             style_for=_style_resolver(),
         )
         self._form_page.display = False
+        # The add-milestone prompt (P2): pinned under the detail page so the
+        # plan being added to stays visible; a full-page form would hide it.
+        self._milestone_prompt = MilestonePrompt(
+            self._milestone_submitted,
+            self._close_milestone_prompt,
+            on_state_change=self._milestone_state_changed,
+            style_for=_style_resolver(),
+        )
+        self._milestone_prompt.display = False
+        # The remove confirm's question row (P2). One pinned line, the
+        # transcript's inline-confirm grammar; the PAGE swallows the y/n keys,
+        # the row only states what they answer.
+        self._confirm_row = Static("", classes="projects-detail-confirm", markup=False)
+        self._confirm_row.display = False
         # The pinned footer: the highlighted project's detail in the list view,
         # aggregate counts elsewhere. ALWAYS one row (a footer that appeared
         # and disappeared would move the body on every view switch).
@@ -607,6 +723,12 @@ class ProjectsView(Vertical):
         # that list is what the painter hides, and a button absent from it stays
         # visible at its DOM slot, ahead of the rung it belongs to.
         self._start_hint = HintButton("s", lambda: self.action_start())
+        # The detail page's edit/milestone keys (P2). In `_hint_buttons()` so
+        # the painter hides them off the detail page, and in the detail ladder
+        # only on rungs that ADD to a shipped row (see `_detail_hint_rungs`).
+        self._edit_hint = HintButton("e", lambda: self.action_edit())
+        self._add_hint = HintButton("a", lambda: self.action_add_milestone())
+        self._remove_hint = HintButton("x", lambda: self.action_remove_milestone())
         # `y` copy path / `space` preview (P6, spec §7.4). Row-scoped: the rungs
         # carry them only while an attachment row is selected, and they are in
         # `_hint_buttons()` so a state change HIDES them rather than leaving
@@ -617,6 +739,10 @@ class ProjectsView(Vertical):
         self._exit_hint = HintButton("esc", self._leave_or_pop)
         self._tab_hint = HintButton("tab", self._form_focus_next)
         self._save_hint = HintButton("ctrl+s", self._form_save)
+        # The add-milestone prompt's submit key is ENTER, not the form's
+        # ctrl+s: the same button cannot advertise both, and `ctrl+s add` would
+        # be a hinted key that resumes the session instead of adding.
+        self._milestone_add_hint = HintButton("↵", lambda: self._milestone_prompt.action_submit())
         self._state_hint = HintButton(READ_ONLY_NOTE)
         self._hints = Horizontal(classes="projects-view-hints")
 
@@ -630,6 +756,7 @@ class ProjectsView(Vertical):
         view: str | None = None,
         associated: frozenset[str] | None = None,
         own_session: str | None = None,
+        read_only: bool | None = None,
     ) -> None:
         """Point the page at a fresh composition and paint it.
 
@@ -643,11 +770,19 @@ class ProjectsView(Vertical):
         the cursor onto it (an entry), while one that carries none (a refresh)
         never moves the reader. ``own_session`` is THIS process's session id,
         used by the detail page's `◆`/`own session` labels; sticky, so a
-        refresh load may omit it.
+        refresh load may omit it. ``read_only`` states whether writes are
+        available here (a follower session's runtime is elsewhere); ``None``
+        KEEPS the state, so a refresh that omits it cannot silently re-enable
+        writes, and the app passes it on every load it makes.
         """
+        if read_only is not None:
+            self._read_only = bool(read_only)
         # A recompose answers whatever the last notice said; `_resync_detail`
         # below may set its own (the vanished-project pop, UX round 1, U5).
-        self._notice = None
+        # The read-only sentence is the page's STANDING state, so it is
+        # re-stated first and a landed pop notice may still answer it.
+        self._notice = _t(copy.notice_read_only()) if self._read_only else None
+        self._notice_is_no_change_receipt = False
         self._views = list(views)
         if own_session is not None:
             self._own_session = own_session
@@ -656,9 +791,11 @@ class ProjectsView(Vertical):
             # outranks the open form. A plain recomposition (no `view`) leaves
             # the form — and the draft in it — exactly as it is.
             self._exit_form()
-        if view is not None and self._mode == "detail":
+        if view is not None and self._mode in ("detail", "milestone"):
             # An EXPLICIT canvas request outranks the open detail: the reader
-            # asked for the board/timeline, not the page they were on.
+            # asked for the board/timeline, not the page they were on. It also
+            # closes the add-milestone prompt and the remove question, which
+            # name a project this load is leaving (agent review round 1, R1).
             self._exit_detail()
         if associated is not None:
             self._associated = frozenset(str(pid) for pid in associated)
@@ -693,7 +830,7 @@ class ProjectsView(Vertical):
                 # requested `view` (the board/timeline entries) outranks that.
                 self._view = "list"
         self._cursor = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
-        if self._mode == "detail":
+        if self._mode in ("detail", "milestone"):
             # Keep the detail open across a recomposition: re-show the SAME
             # project (by id — the store's order can shift with a rename) and
             # keep the row cursor; a deleted project pops back to the canvas.
@@ -723,7 +860,7 @@ class ProjectsView(Vertical):
                 # A retarget is a fresh intent: whatever the last notice said
                 # belonged to the project being left (UX round 1).
                 self._notice = None
-                if self._mode == "detail":
+                if self._mode in ("detail", "milestone"):
                     # A named show is a CANVAS retarget, obeying the same rule
                     # `load` states for an explicit canvas request: the reader
                     # asked to be shown a project, not the page they were on.
@@ -867,7 +1004,22 @@ class ProjectsView(Vertical):
         back rather than blank the row (caught in the pass-5 frame).
         """
         self._notice = text or None
+        self._notice_is_no_change_receipt = False
         self._paint_chrome()
+
+    def refuse_read_only(self) -> bool:
+        """True when a write must be refused, saying why (QA round 1, Q1).
+
+        The ONE guard both layers call: the page's actions so a keypress or a
+        hint click cannot open a form/prompt/confirm, and the app's message
+        handlers so a message already in flight (or posted by a host that
+        skipped the page) cannot reach the store. It lives on the page because
+        the sentence is the page's own copy and the notice is its own row.
+        """
+        if not self._read_only:
+            return False
+        self.show_notice(_t(copy.notice_read_only()))
+        return True
 
     def _notice_text(self, width: int) -> Text:
         """The footer's notice line: warning ink, fitted to the MEASURED box.
@@ -898,7 +1050,7 @@ class ProjectsView(Vertical):
         )
 
     def _paint_chrome(self) -> None:
-        if self._mode == "detail":
+        if self._mode in ("detail", "milestone"):
             self._paint_detail_chrome()
             return
         if self._mode == "form":
@@ -1000,7 +1152,10 @@ class ProjectsView(Vertical):
         muted = Style(color=theme_mod.semantic_color("muted"))
         title = Text(no_wrap=True, overflow="ellipsis")
         title.append(_t(copy.title()), style=Style(color=theme_mod.semantic_color("fg"), bold=True))
-        title.append(_t(copy.new_project()), style=muted)
+        title.append(
+            _te(copy_edit.form_title()) if self._form_page.edit_mode else _t(copy.new_project()),
+            style=muted,
+        )
         self._title.update(title)
         width = max(self.size.width - 2, 1)
         self._paint_rule(width)
@@ -1053,6 +1208,11 @@ class ProjectsView(Vertical):
             title.append(
                 f" {status_chip_text(status)}", style=_style_resolver()(f"status_{status}")
             )
+            if self._mode == "milestone":
+                # The prompt is a MODE, and the title states where the reader
+                # is: the same identity, plus what they are doing there.
+                title.append(_te(copy_edit.prompt_title()), style=muted)
+                with_updated = False
             if with_updated and self._updated_at is not None:
                 import time as _time
 
@@ -1082,7 +1242,35 @@ class ProjectsView(Vertical):
             self._detail.update(
                 detail_progress_line(view_row, width=footer_width, style_for=_style_resolver())
             )
+        self._paint_confirm_row(footer_width)
         self._paint_hints()
+
+    def _paint_confirm_row(self, width: int) -> None:
+        """Paint the remove-milestone question, or hide it.
+
+        The question is pinned ABOVE the footer (the page is the scroll
+        container, so a row inside it would scroll away from the reader
+        answering it). It WRAPS rather than truncating: a legal milestone name
+        is up to 80 characters, and the old single-cell painter cut the whole
+        sentence — in English and in Spanish alike — so the destructive
+        question lost both `y` and `n` at 60 columns (design round 1, D1). The
+        row may take two or three lines while confirming; the keys stay on
+        screen. ``width`` is accepted for the chrome's one geometry contract
+        but no longer used: the layout owns the wrapping.
+        """
+        name = self._detail_page.confirm_name if self._detail_page.confirming else ""
+        if not name:
+            self._confirm_row.display = False
+            return
+        sentence = _te(copy_edit.confirm_remove(name=name))
+        self._confirm_row.update(
+            Text(
+                sentence,
+                style=Style(color=theme_mod.semantic_color("warning")),
+                no_wrap=False,
+            )
+        )
+        self._confirm_row.display = True
 
     def _paint_rule(self, width: int | None = None) -> None:
         """The rule row: the shipped plain rule, or the section ruler.
@@ -1099,7 +1287,7 @@ class ProjectsView(Vertical):
             # The form has no sections to measure against, so its rule is the
             # shipped plain one — the `ruler is None` branch below.
             ruler = None
-        elif self._mode == "detail":
+        elif self._mode in ("detail", "milestone"):
             ruler = detail_ruler(
                 self._detail_page.section_anchors(),
                 int(self._detail_page.scroll_offset.y),
@@ -1165,7 +1353,9 @@ class ProjectsView(Vertical):
         only way out.
         """
         rungs = self._canvas_hint_rungs()
-        if self._mode == "detail":
+        if self._mode == "milestone":
+            rungs = self._milestone_hint_rungs()
+        elif self._mode == "detail":
             rungs = self._detail_hint_rungs()
         elif self._mode == "form":
             rungs = self._form_hint_rungs()
@@ -1203,6 +1393,8 @@ class ProjectsView(Vertical):
         # deferred pass in `_repaint` re-arms once the layout has settled.
         if self._mode == "detail":
             self._sync_detail_hints()
+        elif self._mode == "milestone":
+            self._sync_milestone_hints()
         elif self._mode == "form":
             self._sync_form_hints()
         else:
@@ -1221,6 +1413,9 @@ class ProjectsView(Vertical):
             self._create_hint,
             self._msg_hint,
             self._start_hint,
+            self._edit_hint,
+            self._add_hint,
+            self._remove_hint,
             self._copy_hint,
             self._preview_hint,
             self._open_hint,
@@ -1229,6 +1424,7 @@ class ProjectsView(Vertical):
             self._zoom_hint,
             self._tab_hint,
             self._save_hint,
+            self._milestone_add_hint,
             self._exit_hint,
             self._state_hint,
         )
@@ -1258,6 +1454,29 @@ class ProjectsView(Vertical):
         tab = (self._tab_hint, " next field", False)
         save = (self._save_hint, " save", True)
         return [rung([tab, save], "cancel")]
+
+    def _milestone_hint_rungs(
+        self,
+    ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The add-milestone prompt's ONE rung: `tab next field · ↵ add · esc cancel`.
+
+        The prompt owns the keyboard while it is up, so the detail rung's keys
+        (`e`, `a`, `x`, `r`, arrows) are not advertised: they type into a field
+        or do nothing. ``enter`` submits from either field (from the name it
+        moves to the date first), and `esc` closes without writing.
+        """
+        add = (self._milestone_add_hint, f" {_te(copy_edit.hint_add())}", True)
+        tab = (self._tab_hint, f" {_te(copy_edit.hint_next_field())}", False)
+        cancel = _te(copy_edit.hint_cancel())
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]], esc_label: str
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            return (row, esc_label)
+
+        return [rung([tab, add], cancel)]
 
     def _compose_hint_rungs(self) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
         """The compose mode's ONE rung: ``esc cancel``, and nothing else (U5).
@@ -1313,6 +1532,11 @@ class ProjectsView(Vertical):
         self._save_hint.set_actionable(not confirming)
         self._tab_hint.set_actionable(not confirming)
 
+    def _sync_milestone_hints(self) -> None:
+        """The prompt has two fields and no confirm: its keys are live."""
+        self._milestone_add_hint.set_actionable(True)
+        self._tab_hint.set_actionable(True)
+
     def _canvas_hint_rungs(
         self,
     ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
@@ -1367,7 +1591,7 @@ class ProjectsView(Vertical):
         list_hint = (self._list_hint, " list", True)
         board_hint = (self._board_hint, " board", True)
         timeline_hint = (self._timeline_hint, " timeline", True)
-        refresh = (self._refresh_hint, " refresh", True)
+        refresh = (self._refresh_hint, "refresh", True)
         create_hint = (self._create_hint, " create", True)
         # `m message`: the one affordance a reader cannot guess. The invariant
         # this ladder enforces is measured, not aspirational (agent review
@@ -1595,14 +1819,21 @@ class ProjectsView(Vertical):
     def _detail_hint_rungs(
         self,
     ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
-        """The detail page's ladder — P2's subset of the spec's §3.3 row.
+        """The detail page's ladder — §3.3's row, shed by measured priority.
 
-        ``↑↓ move · pgup/pgdn page · ↵ <context> · r refresh · esc back``:
-        only what WORKS on this slice (`m`/`s`/`e` land with P4–P6; a hinted
-        key that does nothing is the failure the page's own rules name), and
-        the `↵` label is the selected row's VERB — ``open`` on a session,
-        ``toggle`` on a milestone — inside the shipped slot (spec §3.2/10.3).
-        ``esc`` pops one level here, so its label is ``back`` at every rung.
+        The page's OWN keys lead at the standard sizes: at 100x30 the row is
+        ``↑↓ move · pgup/pgdn page · ↵ <context> · e edit · a add · x remove ·
+        esc back`` (85 cells against the 94 the footer offers), and at 60x24
+        the context sheds its NAME and `esc` its label so the page's newest
+        action survives: ``↑↓ move · ↵ toggle · e edit · a add · x remove ·
+        esc`` = 52 against 54 (design D2 / UX U3 round 1).
+        The canvas-era extras (``m message``, ``s start``, ``r refresh``) then
+        ride only the widths where they still fit: they are additions to the
+        detail page, not its reason. Only keys that WORK are hinted (a hinted
+        key that does nothing is the failure the page's own rules name), the
+        ``↵`` label is the selected row's verb — ``open`` on a session,
+        ``toggle`` on a milestone — and ``esc`` pops one level, so its label is
+        ``back`` wherever the row can hold it.
         """
 
         def rung(
@@ -1614,23 +1845,27 @@ class ProjectsView(Vertical):
 
         context = self._detail_page.selected_action_label()
         verb = self._detail_page.selected_action_verb()
-        move = (self._move_hint, " move", False)
-        page = (self._page_hint, " page", True)
+        # Labels are BARE (no leading space): HintButton._build adds exactly
+        # one space between the key and its label. A label carrying its own
+        # space made every hint two cells wider than it reads, and a row near
+        # its budget then clipped the gap — the frame showed `eedit`, `aadd`.
+        move = (self._move_hint, "move", False)
+        page = (self._page_hint, "page", True)
         # The `↵` hint exists only while the selected row HAS a verb: its old
         # `" open"` fallback was unreachable until design D1 and UX U3 made
         # verb-less rows real (a one-line entry, a missing copy), and a dimmed
         # `↵ open` on a row that cannot act is the same wrong promise in a
         # quieter ink (UX review round 2, U6). No verb, no rung.
         named = context or verb
-        open_hint = (self._open_hint, f" {named}", True)
+        open_hint = (self._open_hint, named or "", True)
         # The bare verb is a LOW rung: a long target name sheds before the key
         # does (UX round 1, U3 — the name informs, the key acts).
-        open_bare = (self._open_hint, f" {verb or context}", True)
-        refresh = (self._refresh_hint, " refresh", True)
+        open_bare = (self._open_hint, (verb or context) or "", True)
+        refresh = (self._refresh_hint, "refresh", True)
         # `m message` (P5a): the detail page is where messaging lives, and it
         # is the first of the new keys to shed (spec §3.3), so it rides only
         # the two widest rungs of each branch.
-        msg = (self._msg_hint, " message", True)
+        msg = (self._msg_hint, "message", True)
         # `s start` (P5b), on the canvas's own rule: the rungs below are the
         # SHIPPED rows and each one that can carry the new key is preceded by a
         # wider variant of itself. The ladder stops at the first rung that fits,
@@ -1640,7 +1875,7 @@ class ProjectsView(Vertical):
         # spliced in it costs 97 against the 94 a 100-column terminal offers, so
         # `s` is advertised from 101 columns up and every shipped row holds.
         # `s` still WORKS wherever it is not advertised.
-        start = (self._start_hint, " start", True)
+        start = (self._start_hint, "start", True)
         # `y copy` / `space preview` (P6, spec §7.4): the two ROW-SCOPED keys,
         # advertised only while an attachment row has the cursor. They follow
         # the `s start` variant rule exactly — each rides a one-extra-wider
@@ -1654,16 +1889,48 @@ class ProjectsView(Vertical):
         # `↵ open · y copy`, stays adjacent at every width that carries both.
         extras: list[tuple[HintButton, str, bool]] = []
         if self._detail_page.selected_can_copy():
-            extras.append((self._copy_hint, " copy", True))
+            extras.append((self._copy_hint, "copy", True))
         if self._detail_page.selected_can_preview():
             extras.append(
                 (
                     self._preview_hint,
-                    " hide" if self._detail_page.selected_preview_open() else " preview",
+                    "hide" if self._detail_page.selected_preview_open() else "preview",
                     True,
                 )
             )
-        head = [move, page] if named is None else [move, page, open_hint]
+        # `e edit` / `a add` / `x remove` (LOH-19 P2) are this page's OWN
+        # keys, so they outrank the canvas-era extras (`m message`, `s start`,
+        # `r refresh`) rather than riding a rung only a ~140-column terminal
+        # reaches. MEASURED, against the footer's own budget (`size.width - 2`;
+        # the page measures 96 at a 100-column terminal and 56 at 60):
+        #   * 100 columns, 94 available: `↑↓ move · pgup/pgdn page ·
+        #     ↵ toggle groundwork · e edit · a add · x remove · esc back` = 85
+        #     cells, so it fits; the same row with `m message` is 97 and must
+        #     shed it, and the long `add milestone` word alone brings it to 95.
+        #     The SHORT `add` word is load-bearing at this width.
+        #   * 60 columns, 54 available: the named context cannot coexist with
+        #     the writes, so it sheds to the bare verb and `esc` to its key.
+        #     Two rungs carry `x remove` there — 63 with the named context
+        #     and a bare `esc`, 52 with the bare verb — and the row reads
+        #     `↑↓ move · ↵ toggle · e edit · a add · x remove · esc` = 52. The
+        #     removal key must not be invisible at a supported size (design
+        #     D2).
+        # `x` is carried only while a milestone row is selected — it removes
+        # what the cursor names; `e`/`a` act on the page itself. The wider
+        # rungs keep the long `add milestone` word so the key's fuller name is
+        # still stated where there is room for it.
+        edit = (self._edit_hint, _te(copy_edit.hint_edit()), True)
+        add = (self._add_hint, _te(copy_edit.hint_add()), True)
+        add_long = (self._add_hint, _te(copy_edit.hint_add_milestone()), True)
+        remove = (self._remove_hint, _te(copy_edit.hint_remove_milestone()), True)
+        actions: list[tuple[HintButton, str, bool]] = [edit, add]
+        wide_actions: list[tuple[HintButton, str, bool]] = [edit, add_long]
+        if self._detail_page.selected_milestone() is not None:
+            actions.append(remove)
+            wide_actions.append(remove)
+        head: list[tuple[HintButton, str, bool]] = (
+            [move, page] if named is None else [move, page, open_hint]
+        )
         # Shedding among the extras goes WIDEST LABEL FIRST, so a narrower
         # terminal keeps the cheaper key: the reader reaches `↵ open · y copy`
         # — the pair spec §3.3 names — before `space preview` (17 cells to
@@ -1672,28 +1939,89 @@ class ProjectsView(Vertical):
         variants: list[list[tuple[HintButton, str, bool]]] = [extras]
         if len(extras) > 1:
             variants.append(extras[:1])
-        if named is None:
-            return [
-                *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
-                rung([move, page, msg, start, refresh], "back"),
-                rung([move, page, msg, refresh], "back"),
-                rung([move, page, msg], "back"),
-                rung([move, page], "back"),
-                rung([move], ""),
-                rung([], ""),
+        # The ladder, widest first. Each rung sheds from the previous along
+        # this priority order — extras, `s start`, `r refresh`, `m message`,
+        # `pgup/pgdn page`, `x remove`, the long `add milestone` word, `a`,
+        # `e`, the context's NAME, the context key, `↑↓ move`, `esc`'s label —
+        # so a key never returns as the terminal narrows and every rung is a
+        # superset of the one after it.
+        # A read-only page advertises no write key: `e`/`a`/`x` would open a
+        # form or a question the app then refuses, and a hint that promises an
+        # action the page cannot perform is the "nothing happens" bug one step
+        # earlier. The keys themselves stay bound, so a press still explains
+        # WHY via the notice (QA round 1, Q1).
+        has_remove = self._detail_page.selected_milestone() is not None and not self._read_only
+        short: list[tuple[HintButton, str, bool]] = [] if self._read_only else [edit, add]
+        wide: list[tuple[HintButton, str, bool]] = [] if self._read_only else [edit, add_long]
+        if has_remove:
+            short.append(remove)
+            wide.append(remove)
+
+        def rungs_for(
+            head_row: list[tuple[HintButton, str, bool]],
+        ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+            rows = [
+                rung([*head_row, *variants[0], *wide, msg, start, refresh], "back"),
+                *(
+                    rung([*head_row, *chosen, *wide, msg, start, refresh], "back")
+                    for chosen in variants[1:]
+                ),
+                rung([*head_row, *wide, msg, start, refresh], "back"),
+                rung([*head_row, *wide, msg, refresh], "back"),
+                rung([*head_row, *short, msg, refresh], "back"),
+                rung([*head_row, *short, msg], "back"),
+                rung([*head_row, *short], "back"),
+                # Keep the CONTEXT key when the page key sheds: `↵` is the
+                # row's own action, and the page's keys shed around it.
+                rung([move, *([open_hint] if named is not None else []), *short], "back"),
             ]
-        return [
-            *(rung([*head, *chosen, msg, start, refresh], "back") for chosen in variants),
-            rung([move, page, open_hint, msg, start, refresh], "back"),
-            rung([move, page, open_hint, msg, refresh], "back"),
-            rung([move, page, open_hint, msg], "back"),
-            rung([move, page, open_hint], "back"),
-            rung([move, open_hint], "back"),
-            rung([move, open_hint], ""),
-            rung([move, open_bare], ""),
-            rung([move], ""),
-            rung([], ""),
-        ]
+            if named is not None:
+                if has_remove:
+                    # The bare verb is what buys the 12 cells `x remove` needs
+                    # at the 60-column floor; below that the page's own keys
+                    # shed newest-last (`a`, then `e`), never the context key
+                    # first.
+                    rows.extend(
+                        [
+                            # 58 cells: the named context and both keys at 60
+                            # columns, where the extra `x remove` still fits
+                            # once `esc` sheds its label (design D2 / UX U3
+                            # round 1: a new primary action must not be
+                            # invisible at a supported size).
+                            rung([move, open_hint, edit, add, remove], ""),
+                            rung([move, open_bare, edit, add, remove], ""),
+                            rung([move, open_bare, edit, add], "back"),
+                            rung([move, open_bare, edit], ""),
+                            rung([move, open_bare], ""),
+                            rung([move], ""),
+                            rung([], ""),
+                        ]
+                    )
+                else:
+                    # A non-milestone verb is short (`open`) and both keys fit
+                    # beside it at the floor, so the name is kept until the row
+                    # can no longer hold `a`.
+                    rows.extend(
+                        [
+                            rung([move, open_hint, edit, add], "back"),
+                            rung([move, open_hint, edit], ""),
+                            rung([move, open_hint], ""),
+                            rung([move], ""),
+                            rung([], ""),
+                        ]
+                    )
+            else:
+                rows.extend(
+                    [
+                        rung([move, edit, add], "back"),
+                        rung([move, edit], ""),
+                        rung([move], ""),
+                        rung([], ""),
+                    ]
+                )
+            return rows
+
+        return rungs_for(head)
 
     def _sync_detail_hints(self) -> None:
         """Arm the detail hints against what they would act on just now.
@@ -1712,6 +2040,11 @@ class ProjectsView(Vertical):
         # `↵ open` was on a verb-less row (UX round 2, U6).
         self._copy_hint.set_actionable(self._detail_page.selected_can_copy())
         self._preview_hint.set_actionable(self._detail_page.selected_can_preview())
+        # The edit and add keys always act on the page; `x` needs a milestone
+        # row under the cursor, because it removes what the cursor names.
+        self._edit_hint.set_actionable(True)
+        self._add_hint.set_actionable(True)
+        self._remove_hint.set_actionable(self._detail_page.selected_milestone() is not None)
 
     def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
         """Cell width of a candidate hint row, measured before it is painted."""
@@ -1728,7 +2061,9 @@ class ProjectsView(Vertical):
         yield self._rule
         yield self._body
         yield self._detail_page
+        yield self._milestone_prompt
         yield self._form_page
+        yield self._confirm_row
         yield self._detail
         with self._hints:
             yield self._scroll_hint
@@ -1741,6 +2076,9 @@ class ProjectsView(Vertical):
             yield self._create_hint
             yield self._msg_hint
             yield self._start_hint
+            yield self._edit_hint
+            yield self._add_hint
+            yield self._remove_hint
             yield self._open_hint
             yield self._copy_hint
             yield self._preview_hint
@@ -1749,6 +2087,7 @@ class ProjectsView(Vertical):
             yield self._zoom_hint
             yield self._tab_hint
             yield self._save_hint
+            yield self._milestone_add_hint
             yield self._exit_hint
             yield self._state_hint
 
@@ -1852,11 +2191,18 @@ class ProjectsView(Vertical):
             rows.extend(self._form_page.readback())
             rows.append(plain(self._detail))
             return rows
-        if self._mode == "detail":
+        if self._mode in ("detail", "milestone"):
             # The detail state swaps the CANVAS rows for the page's own rows;
             # the title, rule and footer are the same boxes either way (S6d
-            # P2), so the reads stay in one place for tests and evidence.
+            # P2), so the reads stay in one place for tests and evidence. The
+            # edit slice's two pinned surfaces join the readback: the confirm
+            # question and the add-milestone prompt are part of what the reader
+            # sees, and a surface a test cannot assert is one nobody can pin.
             rows.extend(self._detail_page.painted_rows())
+            if self._mode == "milestone":
+                rows.extend(self._milestone_prompt.readback())
+            elif self._confirm_row.display:
+                rows.append(plain(self._confirm_row))
             rows.append(plain(self._detail))
             return rows
         if self._last is not None:
@@ -1958,6 +2304,10 @@ class ProjectsView(Vertical):
         shipped ladder; a milestone toggles) — spec §3.2/§10.3."""
         if self._mode == "detail":
             self._detail_page.activate()
+            return
+        if self._mode != "canvas":
+            # The add-milestone prompt owns the keyboard while it is up: an
+            # `enter` that bubbled past a field must not open a conversation.
             return
         if not (0 <= self._cursor < len(self._views)):
             return
@@ -2330,7 +2680,17 @@ class ProjectsView(Vertical):
             # (P5a/P5b): `esc cancel` on the band, `esc close` on either card.
             self.escape_surface()
             return
+        if self._mode == "milestone":
+            # The prompt pops one level: back to the detail page, no write.
+            self._close_milestone_prompt()
+            return
         if self._mode == "detail":
+            # The confirm is a question ON this page: `esc` answers "keep" and
+            # leaves the reader where they are, rather than popping the page
+            # out from under a question they have not answered.
+            if self._detail_page.confirming:
+                self._detail_page.disarm_confirm()
+                return
             # Leaving by hand drops any refusal/pop sentence with the page it
             # belonged to (UX round 1, U1/U5).
             self._notice = None
@@ -2343,7 +2703,13 @@ class ProjectsView(Vertical):
         if self._mode == "form":
             self._form_page.action_cancel_request()
             return
+        if self._mode == "milestone":
+            self._close_milestone_prompt()
+            return
         if self._mode == "detail":
+            if self._detail_page.confirming:
+                self._detail_page.disarm_confirm()
+                return
             # Leaving by hand drops any refusal/pop sentence with the page it
             # belonged to (UX round 1, U1/U5).
             self._notice = None
@@ -2354,6 +2720,8 @@ class ProjectsView(Vertical):
     # -- the form state (S6d parity P4) -------------------------------------
     def action_create(self) -> None:
         """``c``: open the create form (spec §3), from the canvas or the detail."""
+        if self.refuse_read_only():
+            return
         if self._mode in ("canvas", "detail"):
             self._enter_form()
 
@@ -2367,25 +2735,7 @@ class ProjectsView(Vertical):
         closes immediately rather than asking about edits nobody made.
         """
         self._notice = None
-        # The team field's hint says which names exist (spec §7.7): read on
-        # entry from the registry `/team` uses, so it cannot drift from the
-        # vocabulary the reader is actually allowed to write. The lookup lives
-        # on the APP (it owns the team registry); a page mounted by a test host
-        # that is not an ``OperatorApp`` simply has none, and the hint falls back
-        # to its own honest sentence — the settings page's `getattr` rule.
-        lookup = getattr(self.app, "_known_team_names", None)
-        names: list[str] = []
-        if callable(lookup):
-            try:
-                found = lookup()
-                # Narrowed rather than assumed: ``getattr`` hands back an
-                # untyped callable, and the hint must not depend on the host
-                # answering with exactly a list.
-                if isinstance(found, (list, tuple)):
-                    names = [str(name) for name in found]
-            except Exception:  # noqa: BLE001 — a hint must never fail a keypress
-                names = []
-        self._form_page.set_known_teams(names)
+        self._form_page.set_known_teams(self._known_team_names())
         #: Where a CANCEL returns to: a form opened from a project's own page
         #: goes back to that page (spec §1), while a SAVE always lands on a
         #: canvas — "cursor on the new project" only means something there.
@@ -2418,6 +2768,11 @@ class ProjectsView(Vertical):
         canvas and says why.
         """
         destination = back or self._form_from
+        # A save/cancel also ends any detail-page question or prompt: the form
+        # can only have been opened over a detail page, and returning must not
+        # resurrect a question the reader left behind.
+        self._clear_detail_write_state()
+        self._notice_is_no_change_receipt = False
         self._form_page.disarm_confirm()
         self._form_page.display = False
         self._mode = "canvas"
@@ -2441,6 +2796,27 @@ class ProjectsView(Vertical):
         if self._mode == "form":
             self._exit_form()
 
+    def _known_team_names(self) -> list[str]:
+        """The names the team field's hint may name (spec §7.7).
+
+        Read on entry from the registry `/team` uses, so the hint cannot drift
+        from the vocabulary the reader is actually allowed to write. The lookup
+        lives on the APP (it owns the team registry); a page mounted by a test
+        host that is not an ``OperatorApp`` simply has none, and the hint falls
+        back to its own honest sentence — the settings page's `getattr` rule.
+        """
+        lookup = getattr(self.app, "_known_team_names", None)
+        if not callable(lookup):
+            return []
+        try:
+            found = lookup()
+        except Exception:  # noqa: BLE001 — a hint must never fail a keypress
+            return []
+        # Narrowed rather than assumed: ``getattr`` hands back an untyped
+        # callable, and the hint must not depend on the host answering with
+        # exactly a list.
+        return [str(name) for name in found] if isinstance(found, (list, tuple)) else []
+
     def form_created(self, project_id: str, name: str) -> None:
         """A create landed: leave the form, cursor on the new row, say so.
 
@@ -2459,7 +2835,7 @@ class ProjectsView(Vertical):
         self._scroll_cursor_into_view()
         self.show_notice(f"created '{name}'")
 
-    def show_form_refusal(self, text: str) -> None:
+    def show_form_refusal(self, text: str, field: str = "key") -> None:
         """A STORE refusal, painted in the form (spec §7.7) — never a toast.
 
         The page stays open with the reader's values intact: the refusal is
@@ -2467,8 +2843,13 @@ class ProjectsView(Vertical):
         trade. The sentence is the store's own (``store_error_text``'s rule at
         the call site), so the form never invents a second wording for a rule
         the store owns.
+
+        ``field`` is the EDIT form's addition (LOH-19 P2): an update can refuse
+        the status (the done gate), a date, or the handle, and a refusal under
+        the wrong field is a sentence the reader cannot act on. The create
+        path keeps its ``key`` default byte-for-byte.
         """
-        self._form_page.show_refusal(text)
+        self._form_page.show_refusal(text, field=field)
         self.call_after_refresh(self._paint_chrome)
 
     def _form_submitted(self, edit: Any) -> None:
@@ -2476,16 +2857,252 @@ class ProjectsView(Vertical):
         self.post_message(ProjectsViewFormSubmitted(edit=edit))
 
     def _form_state_changed(self) -> None:
-        """The form changed something the chrome states: re-arm it."""
+        """The form changed something the chrome states: re-arm it.
+
+        A field change also invalidates the no-change RECEIPT: that sentence
+        says the last save sent nothing, and leaving it pinned over a draft
+        that is dirty again tells the reader the opposite of the truth
+        (UX round 1, U2).
+        """
+        if self._notice_is_no_change_receipt:
+            self._notice = None
+            self._notice_is_no_change_receipt = False
         self.call_after_refresh(self._paint_chrome)
 
     def _form_focus_next(self) -> None:
-        """The `tab` hint's action: the button must do what the key does."""
+        """The `tab` hint's action: the button must do what the key does.
+
+        The SAME button serves the create/edit form and the add-milestone
+        prompt, so the click routes by mode instead of assuming the form — a
+        hint that moves the wrong page's focus is the "nothing happens" bug
+        one step earlier.
+        """
+        if self._mode == "milestone":
+            self._milestone_prompt.action_focus_next_field()
+            return
         self._form_page.action_focus_next_field()
 
     def _form_save(self) -> None:
         """The `ctrl+s` hint's action."""
         self._form_page.action_save()
+
+    # -- the EDIT form and the milestone prompt (LOH-19 P2) -----------------
+    def action_edit(self) -> None:
+        """``e``: edit the project the DETAIL page is showing, prefilled.
+
+        Anchored on the page's own provenance (the id its rows were built
+        from), not the canvas cursor: a recomposition while the page is open
+        may move the cursor, and an edit must land on what the reader saw.
+        """
+        if self.refuse_read_only():
+            return
+        if self._mode != "detail" or self._detail_page.confirming:
+            # The y/n question owns the page; a hint click must not open a
+            # form over an unanswered question.
+            return
+        row = self._project_row_by_id(self._detail_page.project_id or self._detail_project_id)
+        if row is None:
+            return
+        project_value = row.get("project")
+        project = project_value if isinstance(project_value, dict) else {}
+        self._edit_project_id = str(project.get("id") or "") or None
+        self._notice = None
+        self._enter_edit_form(ProjectEditState.from_project(project))
+
+    def _enter_edit_form(self, state: ProjectEditState) -> None:
+        """Show the form prefilled with one project's current values.
+
+        A CANCEL returns to the detail page the edit was opened from; a SAVE
+        also lands there (``form_edited``), because the page the reader was
+        reading is where the changed row is visible — the create form's
+        land-on-the-canvas rule does not transfer to an edit.
+        """
+        self._form_page.set_known_teams(self._known_team_names())
+        self._form_from = "detail"
+        self._mode = "form"
+        self._form_page.reset()
+        self._form_page.prefill(state)
+        self._form_page.display = True
+        self._body.display = False
+        self._detail_page.display = False
+        # The canvas actions disarm against the new mode; the active binding
+        # map is cached until this recomputes it (the app's recorded lesson).
+        self.refresh_bindings()
+        self._paint_chrome()
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self._form_page.focus_first()
+        except Exception:  # noqa: BLE001 — focus is a nicety
+            pass
+        self.call_after_refresh(self._form_page.arm_current)
+
+    def _edit_submitted(self, edit: Any) -> None:
+        """The edit form's local validation passed — the APP performs the write."""
+        self.post_message(
+            ProjectsViewEditSubmitted(
+                project_id=self._edit_project_id or "",
+                edit=edit,
+                project_name=self._detail_page.project_name,
+            )
+        )
+
+    def _edit_no_change(self) -> None:
+        """A save that would send nothing: a receipt where the reader pressed.
+
+        Deliberately NOT a write: the store would stamp ``updated_at`` for a
+        row whose content did not move, and a no-op that looks like a save is
+        the silent success this page's rules forbid.
+        """
+        self.show_notice(_te(copy_edit.no_changes()))
+        # Only the FORM-side receipt is invalidated by later typing; the same
+        # sentence after a landed write belongs to the detail page.
+        self._notice_is_no_change_receipt = True
+
+    def form_edited(self, *, changed: bool) -> None:
+        """The app's edit write returned: back to the page, with the receipt.
+
+        ``changed=False`` is the store's own truthful answer (the form's diff
+        was a spelling the store normalises away), and it says so rather than
+        reporting a write that did not move the row.
+        """
+        self._exit_form(back="detail")
+        self.show_notice(_te(copy_edit.saved()) if changed else _te(copy_edit.no_changes()))
+
+    def action_add_milestone(self) -> None:
+        """``a``: open the add-milestone prompt over the detail page."""
+        if self.refuse_read_only():
+            return
+        if self._mode != "detail" or self._detail_page.confirming:
+            return
+        project_id = self._detail_page.project_id or ""
+        if not project_id:
+            # No provenance, no prompt: an add that cannot name its project
+            # is the R1 write-to-another-project bug waiting to happen.
+            return
+        self._milestone_project_id = project_id
+        self._milestone_project_name = self._detail_page.project_name
+        self._notice = None
+        self._milestone_prompt.restyle(_style_resolver())
+        self._milestone_prompt.clear()
+        self._milestone_prompt.display = True
+        self._mode = "milestone"
+        self.refresh_bindings()
+        self._paint_chrome()
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self._milestone_prompt.focus_first()
+        except Exception:  # noqa: BLE001 — focus is a nicety
+            pass
+
+    def _close_milestone_prompt(self) -> None:
+        """Leave the prompt for the detail page it was opened over (no write)."""
+        if self._mode != "milestone":
+            return
+        self._milestone_prompt.display = False
+        self._milestone_project_id = None
+        self._milestone_project_name = ""
+        self._mode = "detail"
+        self.refresh_bindings()
+        self._paint_chrome()
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self._detail_page.focus()
+        except Exception:  # noqa: BLE001 — focus is a nicety
+            pass
+
+    def _milestone_submitted(self, name: str, target_date: str) -> None:
+        """The prompt's local validation passed — the APP performs the write.
+
+        Anchored on the project the prompt OPENED on (agent review round 1,
+        R1): the live detail page can be retargeted underneath an orphaned
+        prompt, and a draft typed for A must never persist on B. A submission
+        whose mode or anchor no longer matches is discarded with the prompt,
+        not sent.
+        """
+        anchor = self._milestone_project_id or ""
+        if self._mode != "milestone" or not anchor:
+            self._close_milestone_prompt()
+            return
+        if anchor != (self._detail_page.project_id or ""):
+            self._close_milestone_prompt()
+            return
+        self.post_message(
+            ProjectsViewMilestoneAddedRequested(
+                project_id=anchor,
+                name=name,
+                target_date=target_date,
+                project_name=self._milestone_project_name,
+            )
+        )
+
+    def _milestone_state_changed(self) -> None:
+        self.call_after_refresh(self._paint_chrome)
+
+    def milestone_added(self, name: str, action: str) -> None:
+        """The add write returned: receipt on the page, back to the detail.
+
+        The store's ``set_milestone`` is add-or-UPDATE by name, so the sentence
+        reports the action it actually took — a reader who typed an existing
+        name is told the milestone was updated, never that it was added.
+        """
+        self._close_milestone_prompt()
+        if action == "added":
+            sentence = _te(copy_edit.milestone_added(name=name))
+        elif action == "updated":
+            sentence = _te(copy_edit.milestone_updated(name=name))
+        else:
+            sentence = _te(copy_edit.milestone_unchanged(name=name))
+        self.show_notice(sentence)
+
+    def action_remove_milestone(self) -> None:
+        """``x``: ask the inline y/n question about the SELECTED milestone."""
+        if self.refuse_read_only():
+            return
+        if self._mode != "detail" or self._detail_page.confirming:
+            # An unanswered question owns the page; re-arming it with a
+            # different row's name would move the destructive target under the
+            # reader's hands (UX round 1, U1).
+            return
+        milestone = self._detail_page.selected_milestone()
+        if milestone is None:
+            # The honest outcome: `x` is armed only on a milestone row, and a
+            # press elsewhere says what would make it act instead of nothing.
+            self.show_notice(_te(copy_edit.remove_needs_row()))
+            return
+        name = str(milestone.get("name") or "")
+        anchor = self._detail_page.project_id or ""
+        if not name or not anchor:
+            return
+        self._notice = None
+        # The question is anchored on the project it was armed on: a retarget
+        # must never re-aim a same-named removal (agent review round 1, R1).
+        self._confirm_project_id = anchor
+        self._confirm_project_name = self._detail_page.project_name
+        self._detail_page.arm_confirm(name)
+
+    def _detail_remove_confirmed(self, remove: bool, name: str) -> None:
+        """The page's y/n answer: yes posts the write, no keeps the milestone.
+
+        Anchored on the project the question was ARMED on, never the live page.
+        """
+        anchor = self._confirm_project_id or ""
+        project_name = self._confirm_project_name
+        if not remove:
+            return
+        if not anchor or anchor != (self._detail_page.project_id or ""):
+            self._clear_detail_write_state()
+            return
+        self.post_message(
+            ProjectsViewMilestoneRemoved(
+                project_id=anchor,
+                name=name,
+                project_name=project_name,
+            )
+        )
+
+    def milestone_removed(self, name: str) -> None:
+        """The remove write returned: the page recomposed, say what changed."""
+        self.show_notice(_te(copy_edit.removed(name=name)))
 
     @property
     def wants_field_tab(self) -> bool:
@@ -2508,7 +3125,9 @@ class ProjectsView(Vertical):
         received the bound METHOD — always truthy — so the claim was never the
         one asked about (QA round 1, Q-2).
         """
-        return self._mode == "form"
+        return self._mode in ("form", "milestone") or (
+            self._mode == "detail" and self._detail_page.confirming
+        )
 
     def form_focus_previous(self) -> None:
         """``shift+tab`` — the app's priority binding delegates here.
@@ -2520,8 +3139,53 @@ class ProjectsView(Vertical):
         page first — the one key, delegated — which leaves ctrl+c and the rest
         of the app's bindings exactly where they were.
         """
+        if self._detail_page.confirming:
+            # The remove question owns shift+tab wherever focus went: the app
+            # delegated it here, and there is no field to move to — returning
+            # without the effort cycle is the whole answer (UX round 1, U1).
+            return
+        if self._mode == "milestone":
+            self._milestone_prompt.focus_prev_field()
+            return
         if self._mode == "form" and not self._form_page.confirming:
             self._form_page.focus_prev_field()
+
+    def _answer_confirm(self, remove: bool) -> None:
+        """Answer the armed question once, through the one confirm path."""
+        name = self._detail_page.confirm_name
+        if not name:
+            return
+        self._detail_page.disarm_confirm()
+        self._detail_remove_confirmed(remove, name)
+
+    def on_key(self, event: Any) -> None:
+        """The remove question owns the keyboard wherever focus went.
+
+        The question is painted and armed by the VIEW, but its key discipline
+        lived on the detail page — so Tab (a focus move the page never sees)
+        took the reader off it, and the next Enter ran the view's own jump or
+        toggle binding while the question stayed up. Measured: `x → Tab →
+        Enter` marked a milestone completed with the destructive question
+        still on screen (UX round 1, U1). This handler is found before the
+        view's bindings, so once the question is up it owns y/n/enter/escape
+        and swallows Tab, Shift+Tab and every other printable key — no
+        background action can fire under an unanswered question.
+        """
+        if self._mode != "detail" or not self._detail_page.confirming:
+            return
+        if event.key == "y":
+            event.stop()
+            event.prevent_default()
+            self._answer_confirm(True)
+            return
+        if event.key in ("n", "enter", "escape"):
+            event.stop()
+            event.prevent_default()
+            self._answer_confirm(False)
+            return
+        if event.key in ("tab", "shift+tab") or event.is_printable:
+            event.stop()
+            event.prevent_default()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Disarm the canvas actions while the FORM owns the page.
@@ -2532,7 +3196,15 @@ class ProjectsView(Vertical):
         NOT in the set — it is the form's own way out — and neither is `c`,
         which is inert in form mode by its own guard.
         """
-        if self._mode in ("form", "send", "compose", "start") and action in self._CANVAS_ACTIONS:
+        if (
+            self._mode in ("form", "send", "compose", "start", "milestone")
+            and action in self._CANVAS_ACTIONS
+        ):
+            return False
+        # `e`/`a`/`x` act on the DETAIL page only. Disarmed elsewhere so the
+        # letters bubble to the app exactly as they did before this slice: a
+        # binding that claims a key it cannot act on is a swallowed keystroke.
+        if action in self._DETAIL_ACTIONS and self._mode != "detail":
             return False
         return super().check_action(action, parameters)
 
@@ -3015,7 +3687,28 @@ class ProjectsView(Vertical):
         except Exception:
             pass  # focus is a nicety; the keys bubble to this view either way
 
+    def _clear_detail_write_state(self) -> None:
+        """Drop every page-scoped write draft and question (review round 1, R1).
+
+        ONE teardown for the remove question and the add-milestone prompt. Both
+        name a project, and every way out of the detail — project retarget, an
+        explicit canvas load, the project vanishing, or a plain mode exit —
+        must leave neither behind: a stale question must not be painted on the
+        canvas (or reopen armed on `d`), and an orphaned prompt must never
+        submit a draft into a project it was not opened on.
+        """
+        self._detail_page.disarm_confirm()
+        if self._milestone_prompt.display or self._mode == "milestone":
+            self._milestone_prompt.display = False
+        if self._mode == "milestone":
+            self._mode = "detail"
+        self._milestone_project_id = None
+        self._milestone_project_name = ""
+        self._confirm_project_id = None
+        self._confirm_project_name = ""
+
     def _exit_detail(self) -> None:
+        self._clear_detail_write_state()
         self._mode = "canvas"
         self._detail_page.display = False
         self._body.display = True
@@ -3025,6 +3718,21 @@ class ProjectsView(Vertical):
             self.focus()
         except Exception:
             pass
+
+    def _project_row_by_id(self, project_id: str | None) -> dict[str, Any] | None:
+        """The composed row whose project id matches — the page's own anchor.
+
+        One lookup for the detail grid and the edit form: a retarget mid-read
+        once split the page (chrome on one project, body on another), so both
+        callers anchor on the id they are actually showing.
+        """
+        if not project_id:
+            return None
+        for view_row in self._views:
+            project = view_row.get("project") if isinstance(view_row, dict) else None
+            if isinstance(project, dict) and str(project.get("id") or "") == str(project_id):
+                return view_row
+        return None
 
     def _resync_detail(self) -> None:
         """Keep the detail page open across a recomposition, by project ID.
@@ -3106,6 +3814,8 @@ class ProjectsView(Vertical):
             )
             return
         if kind == "milestone":
+            if self.refuse_read_only():
+                return
             name = str(row.get("name") or "")
             if not name:
                 return
