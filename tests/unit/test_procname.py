@@ -2010,6 +2010,7 @@ class TestStableRuntimeImage:
         """
         real = self._copied_tree(tmp_path)
         root = tmp_path / "runtime"
+        monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
         image = procname._plant_runtime(real, root)
         assert image is not None
         marker = image.parent.parent / procname._SOURCE_MARKER
@@ -2032,6 +2033,66 @@ class TestStableRuntimeImage:
             os.path.realpath(real)
         ), "a venv built on an image must answer the build it was cloned from"
         assert procname.runtime_image(resolved) == image, "no clone of a clone"
+
+    def test_a_marker_naming_a_foreign_binary_is_ignored(self, tmp_path, monkeypatch):
+        """m-b: the marker was read unvalidated, so any binary could be the answer.
+
+        Probe from the review: a marker rewritten to ``/bin/ls`` made
+        ``_source_for_image`` RETURN ``/bin/ls``, and the next plant would have
+        published a clone of it. The marker is a statement about OUR layout, so
+        it is honoured only for a published image, and only when its target is
+        an executable regular file OUTSIDE the publish tree — otherwise the
+        answer is another clone and the loop this exists to stop comes back.
+        """
+        real = self._copied_tree(tmp_path)
+        root = tmp_path / "runtime"
+        monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
+        image = procname._plant_runtime(real, root)
+        assert image is not None
+        marker = image.parent.parent / procname._SOURCE_MARKER
+
+        marker.write_text("/bin/ls\n", encoding="utf-8")
+        assert procname._source_for_image(image) is None, "a foreign binary is not a source"
+
+        marker.write_text(f"{os.path.realpath(image)}\n", encoding="utf-8")
+        assert procname._source_for_image(image) is None, "the target must be outside the tree"
+
+        marker.write_text(f"{os.path.realpath(real)}\n", encoding="utf-8")
+        assert procname._source_for_image(image) == Path(
+            os.path.realpath(real)
+        ), "the same image with its real marker must still map back"
+
+    def test_a_marker_beside_an_unpublished_interpreter_is_ignored(self, tmp_path, monkeypatch):
+        """The marker is read at ``<path>/../../source``, which exists in other trees.
+
+        A pyenv, framework or checkout tree is not a published image, so a file
+        called ``source`` one level up there is not ours to read — a venv built
+        on such a tree used to answer whatever it named. A published image is
+        ``<runtime_root>/<key>/bin/<BRAND>``; the guard is that layout, not the
+        file name, which the second half of the cell proves.
+        """
+        monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(tmp_path / "runtime"))
+        tree = tmp_path / "pyenv" / "3.12"
+        (tree / "bin").mkdir(parents=True)
+        interpreter = tree / "bin" / "python3.12"
+        interpreter.write_bytes(b"#!/bin/sh\nexit 0\n")
+        interpreter.chmod(0o755)
+        (tree / procname._SOURCE_MARKER).write_text(
+            f"{os.path.realpath(interpreter)}\n", encoding="utf-8"
+        )
+
+        assert procname._source_for_image(interpreter) is None
+
+        published_dir = tmp_path / "runtime" / "cpython-3.12-key" / "bin"
+        published_dir.mkdir(parents=True)
+        published = published_dir / procname.BRAND
+        published.write_bytes(b"#!/bin/sh\nexit 0\n")
+        published.chmod(0o755)
+        (published_dir.parent / procname._SOURCE_MARKER).write_text(
+            f"{os.path.realpath(interpreter)}\n", encoding="utf-8"
+        )
+
+        assert procname._source_for_image(published) == Path(os.path.realpath(interpreter))
 
     def test_a_venv_resident_symlink_asks_the_stdlib_question(self, tmp_path):
         """Q2: the stdlib gate was skipped for exactly the shape that needs it.

@@ -563,6 +563,15 @@ def _real_interpreter_for(interpreter: str | os.PathLike[str]) -> Path | None:
 _SOURCE_MARKER = "source"
 
 
+def _under(root: Path, path: Path) -> bool:
+    """True when ``path`` is ``root`` or lies beneath it; both already resolved."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _source_for_image(path: Path) -> Path | None:
     """The interpreter a published runtime image was cloned from, or ``None``.
 
@@ -576,18 +585,48 @@ def _source_for_image(path: Path) -> Path | None:
     through the marker is what keeps :func:`real_interpreter` answering about a
     build.
 
+    THE MARKER IS ONLY TRUSTED ON A PUBLISHED IMAGE, and the target is only
+    trusted when it is an executable Python OUTSIDE the publish tree. Read
+    unconditionally, ``<path>/../../source`` exists in trees nothing here wrote
+    (a pyenv or framework install, a checkout), and a stray file there was taken
+    as the answer — a marker naming ``/bin/ls`` made this function return
+    ``/bin/ls``, and the next plant would have published a clone of it. The
+    marker is a sidecar of THIS layout, so it is honoured only where that layout
+    put it (``<runtime_root>/<key>/bin/<BRAND>``), only when it points back out
+    of the tree (a target inside it is another clone, the loop this exists to
+    stop), and only when the target names a Python build — the family
+    :func:`real_interpreter` draws its answer from, so a target that does not is
+    not something a plant here could have written.
+
     An image published before markers existed, or one whose recorded source has
     since been removed, answers ``None``; the caller then keeps what it
     resolved, exactly as before.
     """
+    root = runtime_root()
+    if root is None:
+        return None
     try:
-        recorded = Path((path.parent.parent / _SOURCE_MARKER).read_text(encoding="utf-8").strip())
+        image = Path(os.path.realpath(path))
+        published = Path(os.path.realpath(root))
+    except OSError:
+        return None
+    if image.name != BRAND or not _under(published, image.parent.parent):
+        return None
+    try:
+        recorded = Path((image.parent.parent / _SOURCE_MARKER).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
     try:
-        return recorded if recorded.is_file() else None
+        if not recorded.is_file() or not os.access(recorded, os.X_OK):
+            return None
+        recorded = Path(os.path.realpath(recorded))
     except OSError:
         return None
+    if _under(published, recorded):
+        return None
+    if not (recorded.name.startswith("python") and len(recorded.name) > len("python")):
+        return None
+    return recorded
 
 
 def _write_source_marker(published: Path, real: Path) -> None:
