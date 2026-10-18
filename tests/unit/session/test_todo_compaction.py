@@ -192,3 +192,27 @@ async def test_the_nudge_still_reaches_the_model_on_a_compacting_session(tmp_pat
     finally:
         await session.dispose()
         builtin.TODO_STORE.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_extra_opening_todo_pass_has_a_useful_real_prefix(tmp_path):
+    from local_operator.compaction.cutpoint import find_cut_point
+    from local_operator.compaction.tokens import estimate_tokens
+
+    session_id = "synthetic-todo-useful-prefix"
+    builtin.TODO_STORE[session_id] = [{"text": "work", "status": "pending"}]
+    session = make_session(tmp_path, ReplyingStream(), session_id)
+    try:
+        await session.prompt("question " + "detail " * 30)
+        history = session._render_for_compaction()
+        cut = find_cut_point(history, KEEP_RECENT)
+        assert cut is not None
+        # Pin WHY the extra opening pass is valid, not just the direction of
+        # the rate inequality: two real rows, enough prefix to buy headroom.
+        assert len(history[:cut]) >= 2
+        assert all(message.role in ("user", "assistant") for message in history[:cut])
+        assert sum(estimate_tokens(message) for message in history[:cut]) >= KEEP_RECENT
+        assert (await session.compact_now()).ran
+    finally:
+        await session.dispose()
+        builtin.TODO_STORE.pop(session_id, None)

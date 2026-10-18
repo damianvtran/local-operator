@@ -906,3 +906,98 @@ async def test_pair_safe_prefix_budget_invariant_compacts_without_growth(keep, s
     )
     assert result.ran, result.reason
     assert result.tokens_after <= result.tokens_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("words", [21000, 810000])
+async def test_primary_tiny_prefix_refuses_nonshrinking_rebuild_without_stranding(words):
+    history = [Message.user("hi"), Message.assistant("hello"), Message.user("paste " * words)]
+    summarizer = _Summarizer("Short summary.")
+    settings = CompactionSettings(keep_recent_tokens=20000, threshold_tokens=800000)
+    for _ in range(2):
+        result = await run_compaction_pass(
+            history,
+            model=_model(window=1000000),
+            settings=settings,
+            summarize=summarizer,
+            now_ms=NOW,
+            last_activity_ms=NOW,
+            respect_threshold=words == 810000,
+        )
+        assert not result.ran
+        assert result.reason == "no-token-reduction"
+        assert result.tokens_after == result.tokens_before
+        assert all(a is b for a, b in zip(result.messages, history))
+        assert len(result.messages) == len(history)
+        history = result.messages
+    assert len(summarizer.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_pair_opening_tiny_prefix_also_refuses_nonshrinking_rebuild():
+    call = Message.assistant("reads")
+    call.tool_calls = [ToolCall(id=cid, name="read", arguments={}) for cid in ("a", "b")]
+    history = [Message.user("hi"), Message.assistant("hello"), call]
+    history.extend(
+        Message(
+            role="tool",
+            content=[TextContent(text="result " * 10000)],
+            tool_call_id=cid,
+            tool_name="read",
+        )
+        for cid in ("a", "b")
+    )
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=CompactionSettings(keep_recent_tokens=20000),
+        summarize=_Summarizer("Short summary."),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert not result.ran and result.reason == "no-token-reduction"
+    assert result.tokens_before == result.tokens_after
+    assert result.messages == history
+
+
+@pytest.mark.asyncio
+async def test_equal_size_rebuild_is_refused_not_reported_as_success():
+    from local_operator.compaction.marker import (
+        build_compaction_marker,
+        render_compaction_marker,
+    )
+
+    history = [
+        Message.user("older " * 100),
+        Message.assistant("prior " * 100),
+        Message.user("tail"),
+    ]
+    before = estimate_messages_tokens(history)
+    # Construct a genuinely equal-token marker using the real renderer/ruler,
+    # not mocked token counts: equality must refuse just like actual growth.
+    summary = next(
+        text
+        for count in range(300)
+        if estimate_messages_tokens(
+            [
+                render_compaction_marker(
+                    build_compaction_marker(text := "summary " * count + "end")
+                ),
+                history[-1],
+            ]
+        )
+        == before
+    )
+    result = await run_compaction_pass(
+        history,
+        model=_model(),
+        settings=CompactionSettings(keep_recent_tokens=10),
+        summarize=_Summarizer(summary),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+    assert not result.ran and result.reason == "no-token-reduction"
+    assert result.tokens_after == result.tokens_before == before
+    assert result.messages == history
