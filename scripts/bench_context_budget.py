@@ -1587,7 +1587,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #     agents recorded progress without the evidence beside it; trimming the
 #     occasion to fit 45 chars of headroom would delete the change. The raise
 #     is stated in the PR thread for a reviewer to verify before it settles.
-BUDGET_BILLED_TOKENS = 31_100
+#
+# AND THEN for the ask RELAY field (#2520): one property on ``AskParams`` plus
+# ONE clause in the queued description. The relay delta is measured against the
+# tree this branch was rebased onto, not carried forward from its old base —
+# re-derive with this script rather than trusting the figure below.
+BUDGET_BILLED_TOKENS = 31_160
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
