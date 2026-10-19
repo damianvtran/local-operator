@@ -2850,6 +2850,7 @@ async def test_spawn_known_tags_written_after_publication(
     assert read_entity_tags(root, "session", sid) == {
         "tags": [a["id"], b["id"]],
         "primary": a["id"],
+        "revision": 1,
     }
     assert (result.details or {})["tags_applied"] is True
     assert (result.details or {})["tags"] == ["Review", "Fix"]
@@ -2912,6 +2913,7 @@ async def test_real_spawn_applies_existing_tags(root: Path) -> None:
         assert read_entity_tags(root, "session", sid) == {
             "tags": [category["id"]],
             "primary": category["id"],
+            "revision": 1,
         }
         assert (result.details or {})["tags_applied"] is True
         assert "tags: Review" in result.text

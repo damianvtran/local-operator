@@ -7338,11 +7338,15 @@ class DesktopSessions:
         return await self.tags()
 
     async def set_tags(
-        self, session_id: str, tag_ids: list[str], primary: str | None
+        self,
+        session_id: str,
+        tag_ids: list[str],
+        primary: str | None,
+        expected_revision: str | int | None = None,
     ) -> dict[str, Any]:
         from local_operator.session.session_tags import (
+            TagRevisionConflict,
             read_categories,
-            read_entity_tags,
             set_entity_tags,
         )
 
@@ -7354,16 +7358,27 @@ class DesktopSessions:
                 or not (self.root / "sessions" / session_id).is_dir()
             ):
                 raise KeyError("Unknown session")
-            set_entity_tags(self.root, "session", session_id, tag_ids, primary)
-            # Resolve IDs and names against one snapshot: a concurrent deletion
-            # may prune a tag, but must not leave primary outside the returned tags.
+            try:
+                state = set_entity_tags(
+                    self.root, "session", session_id, tag_ids, primary, expected_revision
+                )
+            except TagRevisionConflict as exc:
+                exc.current["session_id"] = session_id
+                raise
+            # Keep the returned revision paired with the write's state, rather
+            # than re-reading a possibly newer assignment from another caller.
             categories = read_categories(self.root)
-            state = read_entity_tags(self.root, "session", session_id, categories=categories)
             lookup = {tag["id"]: tag for tag in categories}
+            surviving = [key for key in state["tags"] if key in lookup]
             return {
                 "session_id": session_id,
-                "primary": state["primary"],
-                "tags": [lookup[key] for key in state["tags"] if key in lookup],
+                "primary": (
+                    state["primary"]
+                    if state["primary"] in surviving
+                    else (surviving[0] if surviving else None)
+                ),
+                "tags": [lookup[key] for key in surviving],
+                "tags_revision": str(state["revision"]),
             }
 
         return await asyncio.to_thread(apply)
@@ -8512,10 +8527,11 @@ class DesktopSessions:
                     )
                 except ValueError:
                     # Imported legacy directory names remain listable, not taggable.
-                    state = {"tags": [], "primary": None}
+                    state = {"tags": [], "primary": None, "revision": 0}
                 return {
                     "tags": [tag_lookup[key] for key in state["tags"]],
                     "primary": state["primary"],
+                    "tags_revision": str(state["revision"]),
                 }
 
             # THE CATALOGUE, SCOPED AND PAGED — one call, and the same one the

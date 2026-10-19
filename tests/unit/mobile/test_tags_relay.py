@@ -262,6 +262,7 @@ def test_assignment_round_trip_preserves_order_names_and_clears() -> None:
     assert session_tags.read_entity_tags(config_dir(), "session", SESSION_A) == {
         "tags": [],
         "primary": None,
+        "revision": 3,  # Assignment, primary change, then clear are three edits.
     }
     row = _rows(client)[SESSION_A]
     assert row["tags"] == [] and row["primary"] is None
@@ -502,6 +503,10 @@ def test_an_older_writer_that_does_not_bump_is_still_detected() -> None:
     _seed_session(SESSION_A)
     review = _catalogue("Review")[0]
     assert session_tags.read_tags_revision(config_dir()) is not None
+    # Establish an actual empty assignment file, not an initial-empty no-op:
+    # the store intentionally writes nothing when the desired state is already
+    # empty. This test needs an existing file for the older writer to replace.
+    session_tags.set_entity_tags(config_dir(), "session", SESSION_A, [review["id"]], review["id"])
     session_tags.set_entity_tags(config_dir(), "session", SESSION_A, [], None)
     daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
     assert _warm(daemon)[SESSION_A] == {"tags": [], "primary": None}
