@@ -113,6 +113,7 @@ def test_voice_path_vocabulary_is_closed() -> None:
         "provider_tts_radient",
         "provider_tts_elevenlabs",
         "provider_tts_openai",
+        "provider_tts_groq",
         "none",
     ]
 
@@ -421,3 +422,21 @@ def test_the_cascade_is_not_a_second_source_of_the_rung_order() -> None:
         "provider_tts_elevenlabs",
         "provider_tts_openai",
     ]
+
+
+# -- Groq is opt-in: the generic paths payload is unchanged (session-voice-groq D1) --
+
+
+@pytest.mark.asyncio
+async def test_paths_never_lists_groq_even_with_a_stored_groq_key(
+    test_app_client, store_override
+) -> None:
+    store_override(FakeStore({"groq": "gsk_stored"}))
+    result = (await test_app_client.get("/v1/tts/paths")).json()["result"]
+    assert [rung["path"] for rung in result["rungs"]] == [
+        "provider_tts_radient",
+        "provider_tts_elevenlabs",
+        "provider_tts_openai",
+    ]
+    assert result["path"] == "none"
+    assert result["servable"] is False

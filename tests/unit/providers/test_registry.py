@@ -557,6 +557,7 @@ def test_every_registry_brand_is_pinned() -> None:
         "openrouter": "OpenRouter",
         "elevenlabs": "ElevenLabs",
         "openai-key": "OpenAI",
+        "groq": "Groq",
         "openai-api-key": "OpenAI",
         "anthropic-key": "Anthropic",
         "radient": "Radient",

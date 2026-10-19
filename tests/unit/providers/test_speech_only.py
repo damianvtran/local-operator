@@ -127,7 +127,7 @@ def test_only_the_speech_rows_are_speech_only() -> None:
     """The flag is not a broad brush: every other row stays selectable."""
     flagged = {row.id for row in registry.PROVIDER_REGISTRY if row.speech_only}
 
-    assert flagged == {"elevenlabs", "openai-key"}
+    assert flagged == {"elevenlabs", "openai-key", "groq"}
     assert registry.is_speech_only("elevenlabs") is True
     # Normalisation matches the sibling predicate's contract: case, padding,
     # aliases; None and unknown ids answer False.
