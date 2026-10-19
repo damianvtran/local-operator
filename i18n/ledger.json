@@ -2605,6 +2605,25 @@
       "note": "4-key session.scratchpad.max_bytes delta (section title/description, row label/help) translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
     },
     {
+      "locale": "fr",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "cba53d2393157b88894850c4d6a9666349868844108dd518cebcccd7d0e2cc3e",
+      "translator": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "coder",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-19",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1-key --scratchpads-only help line translated in the feature slice; key + argument parity checked by scripts/i18n/check.py; no independent linguistic audit was run — disclosed on the PR."
+    },
+    {
       "locale": "es",
       "namespace": "tui.team_authoring",
       "source_sha256": "59d834252c06e6c5d63f4dbec0f4388892d2d6edeea28dd0b4d5544f9cb8e8dc",
