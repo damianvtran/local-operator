@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_operator.library import index, service
+from local_operator.library import service
 from local_operator.library.metadata import MetadataStore
 
 from ._fixtures import SESSION, config_root, session, user_row, write_rows
@@ -13,10 +13,8 @@ def listing(root: Path, query: service.Query) -> dict:
     return service.list_assets(root, query, budget_s=None)
 
 
-def build(root: Path, rows_a: list | None = None, rows_b: list | None = None) -> None:
-    session(root, SESSION, rows_a if rows_a is not None else write_rows("w1", 1, root / "cfg" / "a.txt"))
-    if rows_b is not None:
-        session(root, "fedcba654321", rows_b)
+def build(root: Path, rows: list) -> None:
+    session(root, SESSION, rows)
 
 
 def test_row_projection_uses_effective_metadata_and_display_form(tmp_path, monkeypatch) -> None:
@@ -51,7 +49,7 @@ def test_filters_sort_and_session_id_list(tmp_path, monkeypatch) -> None:
     session(root, "fedcba654321", [user_row("u1", 3, f"{first}")])
 
     answer = listing(root, service.Query(kinds=frozenset({"image"})))
-    assert answer["total"] == 1, (answer["counts"], answer["state"], answer["scan"], [r["name"] for r in listing(root, service.Query())["rows"]])
+    assert answer["total"] == 1, answer["counts"]
     # A file both created and mentioned later is CREATED: the strongest origin wins.
     assert listing(root, service.Query(origin_groups=frozenset({"created"})))["total"] == 2
     assert (
