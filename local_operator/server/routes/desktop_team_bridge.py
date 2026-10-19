@@ -80,6 +80,13 @@ router = APIRouter(tags=["Desktop agent messages"], dependencies=[Depends(requir
 #: BEFORE interpolating an id into an upstream path is the pair lane's rule
 #: (review S-RSA-5) and applies unchanged here.
 _CONVERSATION_ID = re.compile(r"^bcv_[0-9a-z]{8,64}$")
+#: The conversation domain's other two interpolated path/query values. Both are
+#: opaque server-minted strings; this route family only has to prove they
+#: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
+#: rule is a conservative charset rather than a re-implementation of the
+#: server's mint.
+_MESSAGE_ID = re.compile(r"^bcmsg_[0-9a-z]{8,64}$")
+_ACCOUNT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class _Strict(BaseModel):
@@ -986,6 +993,20 @@ def _require_conversation_id(conversation_id: str) -> None:
         _raise_read("invalid_request")
 
 
+def _require_message_id(message_id: str) -> None:
+    """Refuse a message id that could reshape the upstream path. See above."""
+
+    if _MESSAGE_ID.fullmatch(message_id) is None:
+        _raise_read("invalid_request")
+
+
+def _require_account_id(account_id: str) -> None:
+    """Refuse an account id carrying URL syntax. See above."""
+
+    if _ACCOUNT_ID.fullmatch(account_id) is None:
+        _raise_read("invalid_request")
+
+
 async def _conversation_reply(awaitable: Any) -> Any:
     """Map the transport's two refusal families, exactly like the pair routes."""
 
@@ -1053,9 +1074,6 @@ async def get_conversation(
 ) -> CRUDResponse[Any]:
     """One conversation: members, read state and latest seq. No body, ever."""
     _require_conversation_id(conversation_id)
-
-    if not _CONVERSATION_ID.fullmatch(conversation_id):
-        _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(client.conversation(conversation_id, tenant_id=tenant_id))
@@ -1076,9 +1094,6 @@ async def conversation_archive(
 ) -> CRUDResponse[Any]:
     """Archive (read-only for every member)."""
     _require_conversation_id(conversation_id)
-
-    if not _CONVERSATION_ID.fullmatch(conversation_id):
-        _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(client.conversation_lifecycle(conversation_id, "archive"))
@@ -1095,9 +1110,6 @@ async def conversation_unarchive(
 ) -> CRUDResponse[Any]:
     """Unarchive (owner only, server-enforced)."""
     _require_conversation_id(conversation_id)
-
-    if not _CONVERSATION_ID.fullmatch(conversation_id):
-        _raise_read("invalid_request")
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(client.conversation_lifecycle(conversation_id, "unarchive"))
@@ -1137,6 +1149,7 @@ async def remove_conversation_member(
 ) -> CRUDResponse[Any]:
     """Remove a human member (owner only; the server owns succession)."""
     _require_conversation_id(conversation_id)
+    _require_account_id(account_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1158,6 +1171,7 @@ async def conversation_consent(
 ) -> CRUDResponse[Any]:
     """Record an agent owner's participation decision (the agent only then becomes active)."""
     _require_conversation_id(conversation_id)
+    _require_account_id(account_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1312,6 +1326,7 @@ async def conversation_message_body(
 ) -> CRUDResponse[Any]:
     """The agent classification fetch: body + binding hash. Not a context path."""
     _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
 
     client = _conversation_client(config_manager)
     return reply(
@@ -1336,6 +1351,7 @@ async def conversation_admit(
 ) -> CRUDResponse[Any]:
     """Record the harness's screening verdict. A reject is terminal on the server."""
     _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
 
     client = _conversation_client(config_manager)
     return reply(

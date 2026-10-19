@@ -449,7 +449,13 @@ class FakeClient:
         }
         return self._answer("conversations")
 
-    async def conversation(self, conversation_id: str, *, tenant_id: str | None = None, access: Any = None):
+    async def conversation(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: Any = None,
+    ):
         FakeClient.behavior["last_conversation_id"] = conversation_id
         return self._answer("conversation")
 
@@ -457,20 +463,40 @@ class FakeClient:
         FakeClient.behavior["last_create_body"] = dict(body)
         return self._answer("create_conversation")
 
-    async def conversation_lifecycle(self, conversation_id: str, action: str, *, access: Any = None):
+    async def conversation_lifecycle(
+        self, conversation_id: str, action: str, *, access: Any = None
+    ):
         FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
         return self._answer("conversation_lifecycle")
 
-    async def conversation_members(self, conversation_id: str, members: Any, *, tenant_id=None, access=None):
+    async def conversation_members(
+        self, conversation_id: str, members: Any, *, tenant_id=None, access=None
+    ):
         FakeClient.behavior["last_members"] = list(members)
         return self._answer("conversation_members")
 
-    async def conversation_remove_member(self, conversation_id: str, account_id: str, *, access=None):
+    async def conversation_remove_member(
+        self, conversation_id: str, account_id: str, *, access=None
+    ):
         FakeClient.behavior["last_removed"] = (conversation_id, account_id)
         return self._answer("conversation_remove_member")
 
-    async def conversation_consent(self, conversation_id: str, account_id: str, *, decision: str, consent_version: str, tenant_id=None, access=None):
-        FakeClient.behavior["last_consent"] = (conversation_id, account_id, decision, consent_version)
+    async def conversation_consent(
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        decision: str,
+        consent_version: str,
+        tenant_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_consent"] = (
+            conversation_id,
+            account_id,
+            decision,
+            consent_version,
+        )
         return self._answer("conversation_consent")
 
     async def conversation_join(self, conversation_id: str, *, access=None):
@@ -481,7 +507,17 @@ class FakeClient:
         FakeClient.behavior["last_leave"] = conversation_id
         return self._answer("conversation_leave")
 
-    async def conversation_messages(self, conversation_id: str, *, tenant_id=None, limit=None, before_seq=None, after_seq=None, endpoint_id=None, access=None):
+    async def conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id=None,
+        limit=None,
+        before_seq=None,
+        after_seq=None,
+        endpoint_id=None,
+        access=None,
+    ):
         FakeClient.behavior["last_history_kwargs"] = {
             "conversation_id": conversation_id,
             "tenant_id": tenant_id,
@@ -492,7 +528,16 @@ class FakeClient:
         }
         return self._answer("conversation_messages")
 
-    async def conversation_send(self, conversation_id: str, *, client_ref: str, text: str, tenant_id=None, agent_label=None, access=None):
+    async def conversation_send(
+        self,
+        conversation_id: str,
+        *,
+        client_ref: str,
+        text: str,
+        tenant_id=None,
+        agent_label=None,
+        access=None,
+    ):
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,
             "client_ref": client_ref,
@@ -502,21 +547,46 @@ class FakeClient:
         }
         return self._answer("conversation_send")
 
-    async def conversation_body(self, conversation_id: str, message_id: str, *, tenant_id=None, endpoint_id=None, access=None):
+    async def conversation_body(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id=None,
+        endpoint_id=None,
+        access=None,
+    ):
         return self._answer("conversation_body")
 
-    async def conversation_admit(self, conversation_id: str, message_id: str, *, verdict: str, body_hash: str, tenant_id=None, endpoint_id=None, access=None):
-        FakeClient.behavior["last_admit"] = (conversation_id, message_id, verdict, body_hash, endpoint_id)
+    async def conversation_admit(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        verdict: str,
+        body_hash: str,
+        tenant_id=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_admit"] = (
+            conversation_id,
+            message_id,
+            verdict,
+            body_hash,
+            endpoint_id,
+        )
         return self._answer("conversation_admit")
 
-    async def conversation_read(self, conversation_id: str, *, seq=None, muted=None, tenant_id=None, access=None):
+    async def conversation_read(
+        self, conversation_id: str, *, seq=None, muted=None, tenant_id=None, access=None
+    ):
         FakeClient.behavior["last_read"] = (conversation_id, seq, muted, tenant_id)
         return self._answer("conversation_read")
 
     async def unread(self, *, tenant_id=None, access=None):
         FakeClient.behavior["last_unread_kwargs"] = {"tenant_id": tenant_id}
         return self._answer("unread")
-
 
 
 class FakeDiscipline:
@@ -2340,14 +2410,46 @@ async def test_conversation_history_refuses_a_non_numeric_cursor(api):
 
 async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
     client, _root, _d = api
-    for method, path, payload in (
+    cases = (
         ("get", "/v1/desktop/team-bridge/conversations/nope", None),
         ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/members", {"members": []}),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/join", {}),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/leave", {}),
         ("post", "/v1/desktop/team-bridge/conversations/nope/read", {"seq": 1}),
-    ):
+        (
+            "post",
+            "/v1/desktop/team-bridge/conversations/nope/messages/bcmsg_abc12345/admit",
+            {"verdict": "allow", "body_hash": "x"},
+        ),
+    )
+    for method, path, payload in cases:
         response = (
             await client.get(path)
             if method == "get"
             else await client.post(path, json=payload)
         )
         assert response.status_code == 422, (path, response.text)
+
+
+async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
+    client, _root, _d = api
+    # `..` collapses the DELETE path; `x?tenant_id=evil` injects a query. Both
+    # must be refused by the local charset guard, never handed to httpx.
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/%2E%2E"
+    )
+    assert response.status_code == 422, response.text
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/x%3Ftenant_id%3Devil"
+    )
+    assert response.status_code == 422, response.text
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abc12345/body"
+        "?endpoint_id=x%3Ftenant_id%3Devil"
+    )
+    # endpoint_id is a query parameter the client forwards as a parameter, not
+    # interpolated into the path; the encoded value is a value, not URL syntax.
+    assert response.status_code in (200, 422), response.text
