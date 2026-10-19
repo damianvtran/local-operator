@@ -89,6 +89,88 @@ SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max
 FALLBACK_EFFORTS = SUPPORTED_EFFORTS | {"auto"}
 
 
+#: The tier NAMES a ``subagents.models`` row may carry, in the order they are
+#: presented. This is the WHOLE set, not merely a presentation order over a free
+#: mapping: :func:`local_operator.harness.subagent.read_effort_tier_selectors`
+#: drops every other key in ``values.subagents.models``, so a hand-added ``xl:``
+#: is inert everywhere (schema, tool-argument validation, launch) rather than
+#: honoured by some consumers and not others.
+#:
+#: Narrowing to the registry set is what keeps ADVERTISED == REBUILDABLE. These
+#: are the only keys ``lop config edit`` and the ``/settings`` page can write
+#: (``settings_io`` accepts registered keys only), and -- the reason this is a
+#: correctness boundary rather than a preference -- the only ones the config
+#: watcher's per-registry-key diff can report. A tier outside the set would be
+#: read and advertised, but editing it produces no ``changed_keys`` entry, so
+#: ``Session._rebuild_effort_tier_tools`` never fires: the schema would promise a
+#: tier whose edits the live re-render could not reach until the next session.
+#: Widening this tuple therefore means registering the key in
+#: ``settings_io.SETTINGS`` in the same change, which is what makes the watcher
+#: see it.
+#:
+#: The order is load-bearing too: the schema rides in the prompt-cache prefix, so
+#: it follows this tuple rather than YAML key order, and a reordering edit to
+#: ``config.yml`` cannot move the enum.
+#:
+#: It lives HERE, in the leaf module, rather than in ``harness.subagent`` where
+#: it was born, because a second subsystem now needs the same vocabulary at zero
+#: import cost: ``teams.TeamMember.tier`` validates against it, and ``teams`` is
+#: a data-layer module that must not pull the harness in. ``harness.subagent``
+#: re-exports the name, so its own callers are unaffected by the move.
+CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
+
+#: The keys a ``subagents.models.<tier>`` MAPPING may carry (#2428). A tier was
+#: only ever a bare ``provider/model`` selector, so a child launched on it ran at
+#: that model's own default reasoning effort and no config could change it. The
+#: mapping form ``{model: provider/model, effort: high}`` mirrors a fallback
+#: chain hop (``providers.failover.FallbackTarget``) — the repo's existing shape
+#: for "a model plus the depth to run it at". Closed on purpose: an unknown key
+#: (``temperature``) is refused by name rather than silently ignored.
+TIER_MAPPING_KEYS = frozenset({"model", "effort"})
+
+#: The words a tier mapping's ``effort`` accepts, in the order the refusal
+#: messages list them. ``auto`` leads because it is the explicit spelling of
+#: "no override" (the model's own default, as if ``effort`` were omitted) —
+#: the word a fallback-chain hop already uses for that (:data:`FALLBACK_EFFORTS`),
+#: so an operator copying a hop into a tier is not refused. Every
+#: :data:`EFFORT_ORDER` rung follows, ``none`` included: the launch clamps it
+#: to the target's ladder like any other rung.
+TIER_EFFORTS: tuple[str, ...] = ("auto", *EFFORT_ORDER)
+
+
+def parse_tier_mapping(value: object) -> tuple[str, str | None] | None:
+    """``(selector, effort)`` for a well-formed tier mapping, else ``None``.
+
+    Lives in this leaf module for the reason :data:`SUPPORTED_EFFORTS` does:
+    ``settings_io`` validates the mapping at config-WRITE time and must not drag
+    the harness onto the TUI's import graph, while the launch path
+    (``harness.subagent.read_effort_tier_targets``) must accept exactly what the
+    write accepted — one parser, so the two cannot disagree.
+
+    ``effort`` is optional and is any word of :data:`TIER_EFFORTS`, matched
+    case- and whitespace-insensitively and returned lowercased. Absent and
+    ``auto`` both mean the model's own default (the bare selector's
+    behaviour) and both return ``None``, so no consumer has to know ``auto``
+    exists; any other word is an :data:`EFFORT_ORDER` rung the launch path
+    clamps to the target's ladder, as a chain hop's effort is. The
+    selector is returned stripped and otherwise unjudged: whether it is a
+    usable ``provider/model`` (or the ``default`` sentinel) is the tier
+    reader's question, answered identically for both forms.
+    """
+    if not isinstance(value, dict) or not value or set(value) - TIER_MAPPING_KEYS:
+        return None
+    model = value.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    effort = value.get("effort")
+    if effort is None:
+        return model.strip(), None
+    if not isinstance(effort, str) or effort.strip().lower() not in TIER_EFFORTS:
+        return None
+    level = effort.strip().lower()
+    return model.strip(), None if level == "auto" else level
+
+
 def is_effort_sentinel(level: str) -> bool:
     """Whether ``level`` is a sentinel rather than a rankable rung.
 

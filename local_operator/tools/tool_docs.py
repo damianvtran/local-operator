@@ -218,7 +218,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="snapshot", blurb="Accessibility tree with click refs."),
             ToolDocOp(op="screenshot", blurb="Capture the page to a file."),
             ToolDocOp(op="click", blurb="Click a selector or snapshot ref."),
-            ToolDocOp(op="type", blurb="Type text into a field."),
+            ToolDocOp(
+                op="type",
+                blurb="Type text, or a stored secret via 'secret_ref', into a field.",
+            ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
             ToolDocOp(
@@ -237,6 +240,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb="The chain from the element up to <html> (depth <= 16, default 12).",
             ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
+            ToolDocOp(
+                op="inspect_ownership",
+                blurb=(
+                    "Read-only extension ownership snapshot; "
+                    "no recovery, allocation or approval changes."
+                ),
+            ),
             ToolDocOp(
                 op="request_access",
                 blurb="Raise the site-approval prompt for a not-yet-allowed origin.",
@@ -528,6 +538,83 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
     # rationale (pydantic copies it into $defs on every request) and several
     # field tails (status enum recital, progress edge cases, description's
     # markdown shape). The enum literals still render from the schema itself.
+    "library": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                "stats",
+                "Catalog totals plus metadata-store counts and building state.",
+            ),
+            ToolDocOp(
+                "list",
+                "Search/filter/sort a page; compact rows with tags and sources.",
+                (
+                    "q",
+                    "category",
+                    "kind",
+                    "origin_group",
+                    "tag",
+                    "session_id",
+                    "limit",
+                    "cursor",
+                ),
+            ),
+            ToolDocOp(
+                "get",
+                "The full row: tags, occurrences, chat, preview, organized state.",
+                ("asset_id",),
+            ),
+            ToolDocOp(
+                "update",
+                "Set name/description/favorite/locked/archived; records provenance "
+                "and an edit row.",
+                (
+                    "asset_id",
+                    "name",
+                    "description",
+                    "favorite",
+                    "locked",
+                    "archived",
+                    "confidence",
+                    "actor",
+                ),
+            ),
+            ToolDocOp(
+                "tags",
+                "List/create/rename/delete/merge the tag registry, or set/clear "
+                "one asset's tags.",
+                (
+                    "action",
+                    "asset_id",
+                    "tags",
+                    "primary",
+                    "tag_id",
+                    "tag_name",
+                    "tag_category",
+                    "into",
+                ),
+            ),
+            ToolDocOp(
+                "conventions",
+                "Read the Librarian's taxonomy; with body, write one convention row.",
+                ("kind_name", "body", "convention_id"),
+            ),
+        ),
+        notes=(
+            "Writes are LOCAL, REVERSIBLE METADATA and never touch a user file, so "
+            "the tool is read-tier.\n"
+            "\n"
+            "- Effective precedence is user > librarian > derived: a derived refresh "
+            "never overwrites a name/description either writer set.\n"
+            "- `locked` protects a row from agent writes; the Librarian skips it.\n"
+            "- An asset may carry at most 12 tags; `primary` must be one of them.\n"
+            "- `actor` defaults to `librarian`; pass `user` only for a user-"
+            "initiated action. `confidence` is recorded on the edit row.\n"
+            "- `update` with a name/description marks the asset organized when "
+            "the actor is the Librarian.\n"
+            "- Content bytes and thumbnails are HTTP surfaces, not tool ops: the "
+            "tool is for finding and naming, not shipping files."
+        ),
+    ),
     "project": ToolDocNotes(
         notes=(
             "Moved off the wire in the slimming wave (audit item 2):\n"
@@ -708,6 +795,66 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "\n\n"
             "Setup for both rungs, the family/duration quirks and the "
             "per-mode examples: `guide://video-generation`."
+        ),
+    ),
+    "generate_voiceover": ToolDocNotes(
+        notes=(
+            "Providers, in fixed priority order: Radient (signed-in account), "
+            "then ElevenLabs (stored key), then OpenAI (stored platform key). "
+            "Failover is automatic — if one refuses, the next runs, and the "
+            "result's `details.attempts` lists what each provider said. "
+            "Setup for every rung: `guide://sound-generation`.\n"
+            "\n"
+            "Cost: a Radient call is quoted by the server when it runs and "
+            "settles at billing; a BYOK (ElevenLabs / OpenAI) call reports no "
+            "per-call figure, so the harness estimates from its central rate "
+            "table and the receipt says so — `details.billing_basis` is "
+            "`estimated` and never a charge. The harness prompts for approval "
+            "(write tier) with a pre-spend estimate where one is knowable.\n"
+            "\n"
+            "The text may be anything from a word to 10,000 characters; "
+            "`voice` takes `female`, `male` or a provider voice id. "
+            "`language` is honoured only on the flash model "
+            "(`radient/voiceover-flash`, `eleven_flash_v2_5`); the "
+            "multilingual default pronounces whatever it is given and the "
+            "receipt's voicing notes say what was ignored. There are no "
+            "pronunciation dictionaries. Output is MP3.\n"
+            "\n"
+            "Cancelling (Esc / steering) stops the wait and best-effort "
+            "cancels the server job: it says what the server said — the "
+            "vendor may not be stoppable once it is running "
+            "(`cancellation.vendor_stopped: false` is a normal answer), and a "
+            "BYOK call may still bill on your provider account. Call again "
+            "for a fresh generation; nothing resumes.\n"
+            "\n"
+            "The generated audio is attached to the session — that IS the "
+            "delivery; do not re-save it to disk unless the user asks for a "
+            "file."
+        ),
+    ),
+    "generate_sound_effect": ToolDocNotes(
+        notes=(
+            "Providers, in fixed priority order: Radient (signed-in account), "
+            "then ElevenLabs (stored key). There is no OpenAI path for sound "
+            "effects. Failover is automatic; `details.attempts` lists what "
+            "each provider said. Setup: `guide://sound-generation`.\n"
+            "\n"
+            "`duration_s` is REQUIRED (0.5–30 seconds; no auto-duration) and "
+            "is the spend knob: an ElevenLabs estimate is priced per second "
+            "of generated audio, and a Radient call is quoted by the server. "
+            "`prompt_influence` (0–1) steers how literally the prompt is "
+            "followed; `loop` asks for a seamless loop. Output is MP3.\n"
+            "\n"
+            "Cost rules and the approval prompt are the same as "
+            "`generate_voiceover`: a BYOK figure is an `estimated` figure "
+            "from the central rate table, never a written charge.\n"
+            "\n"
+            "Cancelling is best-effort exactly as for `generate_voiceover`: "
+            "the receipt says whether the server could stop the vendor, and "
+            "a BYOK call may still bill. Call again for a fresh generation.\n"
+            "\n"
+            "The generated audio is attached to the session; do not re-save "
+            "it to disk unless the user asks for a file."
         ),
     ),
     "video_status": ToolDocNotes(

@@ -878,7 +878,7 @@ def _append_transcript(session_dir: Path, *entries: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_last_user_key_is_on_every_local_row_and_pinned_off_page(tmp_path):
+async def test_the_last_user_key_is_on_every_local_row_and_off_page(tmp_path):
     """The key is ALWAYS PRESENT on every local row — `pinned`'s rule.
 
     Both populations come from ONE projection (see ``list()``'s comment), so the
@@ -901,8 +901,8 @@ async def test_the_last_user_key_is_on_every_local_row_and_pinned_off_page(tmp_p
 
     page = await DesktopSessions(tmp_path).list(2)
 
-    assert [row["id"] for row in page.pinned_off_page] == [pinned_sid]
-    for row in (*page.rows, *page.pinned_off_page):
+    assert [row["id"] for row in page.off_page] == [pinned_sid]
+    for row in (*page.rows, *page.off_page):
         assert "last_user_at" in row
         assert row["last_user_at"] is None, (
             "no live record on any row: the value is not computed, and null is "
@@ -3899,6 +3899,123 @@ async def test_child_attachment_route_is_bearer_gated_and_no_store(tmp_path, mon
     assert refused.status_code == 404
     assert refused.json()["detail"]["code"] == "child_not_found"
     assert bad_digest.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_attachment_waveform_serves_the_payload_with_the_family_headers(
+    tmp_path, monkeypatch
+):
+    """The waveform route: peaks by digest, the same gates, a 404 on a miss.
+
+    The real-HTTP half of the shows-the-payload claim: bearer gating first,
+    then the frozen ``{version, bars, peaks}`` shape, the family's ``nosniff``
+    + ``no-store`` headers, an ordinary 404 for a digest with no sidecar, and
+    the declared digest pattern refusing a traversal-shaped one before the
+    handler runs.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.server.app import app
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put_bytes(b"ID3\x04\x00\x00\x00wire-peaks", "audio/mpeg")
+    assert ref is not None
+    bars = [round((index % 7) / 7.0, 4) for index in range(PEAK_BARS)]
+    assert store.put_peaks(ref.digest, bars)
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    path = f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}/waveform"
+
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+        assert client.get(path).status_code == 401
+        headers = {"Authorization": "Bearer token"}
+        response = client.get(path, headers=headers)
+        missing = client.get(
+            f"/v1/desktop/sessions/0123456789ab/attachments/{'f' * 32}/waveform",
+            headers=headers,
+        )
+        bad_digest = client.get(
+            "/v1/desktop/sessions/0123456789ab/attachments/not-a-digest/waveform",
+            headers=headers,
+        )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload == {"version": 1, "bars": PEAK_BARS, "peaks": bars}
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    # A digest with no sidecar is ordinary: the surface paints its no-waveform
+    # state rather than treating a missing sidecar as a fault.
+    assert missing.status_code == 404
+    assert bad_digest.status_code == 422
+
+    # The route DECLARATION carries the traversal gate (the family's rule).
+    parameters = app.openapi()["paths"][
+        "/v1/desktop/sessions/{session_id}/attachments/{digest}/waveform"
+    ]["get"]["parameters"]
+    digest = next(parameter for parameter in parameters if parameter["name"] == "digest")
+    assert digest["schema"]["pattern"] == "^[a-f0-9]{32}$"
+
+
+@pytest.mark.asyncio
+async def test_child_attachment_waveform_serves_for_a_contained_child(tmp_path):
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    parent_dir, child_dir = subagent_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put_bytes(b"ID3\x04\x00\x00\x00child-peaks", "audio/mpeg")
+    assert ref is not None
+    assert store.put_peaks(ref.digest, [0.25] * PEAK_BARS)
+
+    payload = await DesktopSessions(tmp_path).child_attachment_waveform(
+        PARENT_ID, CHILD_ID, ref.digest
+    )
+    assert payload["bars"] == PEAK_BARS and len(payload["peaks"]) == PEAK_BARS
+    # An unknown digest is the same ordinary miss the byte route reports, and
+    # the containment proof still runs first: a child the parent never named
+    # is refused before the store is touched.
+    with pytest.raises(KeyError):
+        await DesktopSessions(tmp_path).child_attachment_waveform(PARENT_ID, CHILD_ID, "f" * 32)
+    unnamed_dir = tmp_path / "sessions" / UNNAMED_CHILD_ID
+    unnamed_dir.mkdir()
+    mark_session_origin(unnamed_dir, ORIGIN_SUBAGENT, label="reviewer")
+    with pytest.raises(SubagentChildUnavailable):
+        await DesktopSessions(tmp_path).child_attachment_waveform(
+            PARENT_ID, UNNAMED_CHILD_ID, ref.digest
+        )
+
+
+@pytest.mark.asyncio
+async def test_attachment_waveform_host_reads_the_sidecar_or_misses(tmp_path):
+    from local_operator.audiogen.peaks import PEAK_BARS
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put_bytes(b"ID3\x04\x00\x00\x00host-peaks", "audio/mpeg")
+    assert ref is not None
+    assert store.put_peaks(ref.digest, [0.5] * PEAK_BARS)
+
+    pool = DesktopSessions(tmp_path)
+    payload = await pool.attachment_waveform("0123456789ab", ref.digest)
+    assert payload["version"] == 1 and payload["bars"] == PEAK_BARS
+    assert pool.bridges == {}, "a cold read must not start an owner"
+    with pytest.raises(KeyError):
+        await pool.attachment_waveform("0123456789ab", "f" * 32)
+    with pytest.raises(KeyError):
+        await pool.attachment_waveform("ffffffffffff", ref.digest)
 
 
 async def legacy_roster(parent_dir: Path, *session_dirs: Path) -> None:
@@ -8466,6 +8583,11 @@ async def test_an_unknown_scope_name_is_an_empty_page_not_a_404(draft_api) -> No
         ("scope_name=lopdev", "scope_kind_required"),
         ("scope_kind=pod&scope_name=lopdev", "scope_kind_unknown"),
         (f"scope_kind=team&scope_name={'n' * 65}", "scope_name_too_long"),
+        # An unknown ORDER is refused by name too: the framework ignores a
+        # query parameter the handler does not know how to answer, so a
+        # silently-served rank order would be an ordering the client did not
+        # ask for and could not detect.
+        ("sort=sideways", "sort_unknown"),
     ],
 )
 async def test_a_bad_scope_is_refused_by_name(draft_api, query: str, code: str) -> None:
@@ -8489,6 +8611,52 @@ async def test_a_bad_scope_is_refused_by_name(draft_api, query: str, code: str) 
     # Nothing about the store leaked into the refusal, and no scope can be
     # applied to a name the route would not accept.
     assert "sessions" not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_the_activity_sort_carries_the_just_used_conversation(draft_api) -> None:
+    """The regression this parameter exists for, at the route that serves it.
+
+    A store whose cold population is a wake band: without ``sort`` the
+    conversation the reader just used sorts past the page (the rank order puts
+    every wake-bearing row first), and with ``sort=activity`` it leads the
+    head -- which is what keeps it inside the sidebar's first fetch on the
+    operator's own store. The default answer is asserted UNCHANGED in the same
+    test, because the compatibility promise is the other half of the fix.
+    """
+    from local_operator.wakes import store as wakes_store
+
+    client, root = draft_api
+    for index in range(10):
+        row = _bound_session(root, f"sched{index:08d}", created=500.0 + index)
+        # The activity clock is the TRANSCRIPT's mtime, and ``_bound_session``
+        # leaves it at "now" -- which would model a freshly-touched scheduled
+        # conversation, not an old one. Backdate it to the row's own creation,
+        # exactly as the bin-promptness scenes backdate their subjects.
+        os.utime(row / "transcript.jsonl", (500.0 + index, 500.0 + index))
+        wakes_store.write_entry(
+            root,
+            row.name,
+            cwd=str(root),
+            schedules=[
+                {
+                    "kind": "wake",
+                    "id": f"wake-{row.name}",
+                    "next_due_at": 4_000_000_000_000,
+                    "prompt": "Resume.",
+                }
+            ],
+        )
+    subject = _bound_session(root, "subject00001", created=900.0)
+    os.utime(subject / "transcript.jsonl", (1_500.0, 1_500.0))
+
+    rank_answer = await client.get("/v1/desktop/sessions?limit=10")
+    activity_answer = await client.get("/v1/desktop/sessions?limit=10&sort=activity")
+
+    assert rank_answer.status_code == 200, rank_answer.text
+    assert activity_answer.status_code == 200, activity_answer.text
+    assert "subject00001" not in _ids(rank_answer)
+    assert _ids(activity_answer)[0] == "subject00001"
 
 
 @pytest.mark.asyncio
@@ -9750,3 +9918,114 @@ async def test_the_list_route_tolerates_a_malformed_notice_record(draft_api) -> 
     assert answer["delegated_cleanup_notice"] is None
     ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
     assert ack.status_code == 200 and ack.json()["result"] == {"acknowledged": True}
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_asks_route_follows_a_window_written_after_start(
+    tmp_path, monkeypatch
+) -> None:
+    """``asks.lapsed_visible_for`` on ``GET /v1/desktop/asks`` (decisions D8/D9).
+
+    The desktop server starts no config watcher, so the route polls the file on
+    each request; a ``config.yml`` written after the app is up must apply on the
+    very next request, hide only the LAPSED row, and keep the answered one."""
+    from local_operator import settings_io
+    from local_operator.asks import store as ask_store
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+    root = tmp_path / "config"
+    (root / "sessions" / "s-window").mkdir(parents=True)
+    now = int(time.time() * 1000)
+
+    def row(ask_id: str, status: str) -> dict[str, Any]:
+        return {
+            "ask_id": ask_id,
+            "created_at": now - 3 * 3_600_000,
+            "expires_at": now - 2 * 3_600_000,
+            "timeout_s": 3600,
+            "urgent": False,
+            "status": status,
+            "delivered": False,
+            "questions": [],
+        }
+
+    ask_store.write_entry(
+        root, "s-window", cwd="/tmp/w", asks=[row("lapsed", "timed_out"), row("done", "answered")]
+    )
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(root)
+    app.include_router(routes.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer [redacted]"},
+    ) as client:
+        first = await client.get("/v1/desktop/asks")
+        assert first.status_code == 200, first.text
+        assert sorted(r["ask_id"] for r in first.json()["result"]["asks"]) == ["done", "lapsed"]
+        settings_io._store(
+            ConfigManager(root), settings_io.BY_KEY["asks.lapsed_visible_for"].path, "1h"
+        )
+        second = await client.get("/v1/desktop/asks")
+        assert [r["ask_id"] for r in second.json()["result"]["asks"]] == ["done"]
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["new-artifact", "legacy-no-sidecar"])
+def test_real_mp3_waveform_http_writes_and_serves_sidecar(tmp_path, monkeypatch, legacy):
+    """Production MP3 codec, producer, durable sidecar, and authenticated route.
+
+    The legacy case stores only bytes/MIME like an installation without its
+    decoder; no test-manufactured peaks conceal a missing production codec.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.session.attachments import (
+        ATTACHMENTS_DIRNAME,
+        AttachmentStore,
+        cache_media,
+    )
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    raw = (Path(__file__).parents[2] / "fixtures" / "audio" / "tone.mp3").read_bytes()
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    if legacy:
+        ref = store.put_bytes(raw, "audio/mpeg")
+        assert ref is not None
+        digest = ref.digest
+        assert store.get_peaks(digest) is None
+    else:
+        artifact = cache_media(raw, content_type="audio/mpeg")
+        assert artifact is not None
+        digest = artifact.attachment
+        assert digest is not None
+        assert (
+            store.get_peaks(digest) is not None
+        ), "new sound must persist production-decoded peaks"
+
+    monkeypatch.setattr(
+        app.state, "config_manager", SimpleNamespace(config_dir=tmp_path), raising=False
+    )
+    pool = DesktopSessions(tmp_path)
+    monkeypatch.setattr(app.state, "desktop_sessions", pool, raising=False)
+    path = f"/v1/desktop/sessions/0123456789ab/attachments/{digest}/waveform"
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+        assert client.get(path).status_code == 401
+        if legacy:
+            assert store.get_peaks(digest) is None, "unauthorized reads cannot trigger repair"
+        response = client.get(path, headers={"Authorization": "Bearer token"})
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["version"] == 1 and payload["bars"] == 240
+        assert len(payload["peaks"]) == 240 and max(payload["peaks"]) > 0
+        assert store.get_peaks(digest) == payload
+        # A resumed/cold owner and subsequent requests use the persisted repair.
+        monkeypatch.setattr(app.state, "desktop_sessions", DesktopSessions(tmp_path))
+        assert client.get(path, headers={"Authorization": "Bearer token"}).json() == payload
+    assert pool.bridges == {}, "waveform recovery must not start a session owner"

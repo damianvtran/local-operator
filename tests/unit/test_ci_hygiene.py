@@ -2201,11 +2201,11 @@ def test_the_cli_sanity_job_keeps_its_named_script_input() -> None:
 
 
 def test_the_windows_input_set_covers_what_that_job_loads() -> None:
-    """R3. The Windows job loads more than the two test files it names.
+    """R3. The Windows job loads more than the test files it names.
 
     Its pytest run imports the `conftest.py` chain, and the root conftest does
     `from tests import shard_stall_watchdog` at module scope; pytest also imports
-    the `__init__.py` markers for both protected modules. A change to any of
+    the `__init__.py` markers for the selected modules. A change to any of
     them can change that job's behaviour without touching a file it lists, which
     is the "flag narrower than the guard's real input" pattern this classifier
     exists to avoid.
@@ -2223,6 +2223,15 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
         "tests/unit/server/__init__.py",
         "tests/unit/test_agent_import_boundary.py",
         "tests/unit/server/test_edit_workspace_boundary.py",
+        "tests/unit/network/test_credentials_private_paths.py",
+        "tests/unit/conftest.py",
+        "tests/unit/network/conftest.py",
+        "tests/unit/network/test_credential_inherit.py",
+        "tests/unit/network/test_credentials_consent.py",
+        "tests/unit/network/test_approvals_store.py",
+        "tests/unit/network/test_credentials_real_link.py",
+        "tests/unit/network/test_credentials_owner.py",
+        "tests/unit/network/test_relay_e2e.py",
     )
     conftest = (REPO / "conftest.py").read_text()
     assert "from tests import shard_stall_watchdog" in conftest, (
@@ -2238,6 +2247,38 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     # …and a test file with no relationship to that job still skips it: the
     # point is a curated input set, not "anything under tests/".
     assert scope.classify(["tests/unit/test_ci_hygiene.py"])["windows"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "selected"),
+    (
+        ("tests/unit/network/test_credentials_private_paths.py", True),
+        ("tests/unit/conftest.py", True),
+        ("tests/unit/network/conftest.py", True),
+        ("tests/unit/network/test_credential_inherit.py", True),
+        ("tests/unit/network/test_credentials_consent.py", True),
+        ("tests/unit/network/test_approvals_store.py", True),
+        ("tests/unit/network/test_credentials_real_link.py", True),
+        ("tests/unit/network/test_credentials_owner.py", True),
+        ("tests/unit/network/test_relay_e2e.py", True),
+        ("tests/unit/test_ci_hygiene.py", False),
+    ),
+)
+def test_windows_root_input_only_changes_select_the_native_job(path: str, selected: bool) -> None:
+    """A test-only diff must reach its native lane, but not widen all tests/**.
+
+    The helpers are module-level imports of the newly selected module, not
+    optional fixture bodies. Removing one curated input must fail its own row;
+    broadening CAT_TESTS must fail the unrelated-test negative control.
+    """
+    entrypoint = "tests/unit/network/test_credentials_private_paths.py::"
+    assert any(
+        entrypoint in str(step.get("run") or "") for step in _steps("filesystem-boundaries-windows")
+    ), "the ROOT nodes left the Windows command; revisit its curated inputs"
+    scope = _scope()
+    flags = scope.classify([path])
+    assert flags["windows"] is selected
+    assert scope.job_plan(flags)["filesystem-boundaries-windows"] == ("run" if selected else "skip")
 
 
 def test_the_xplat_input_set_covers_what_the_battery_reads() -> None:
@@ -2408,7 +2449,7 @@ def test_an_explicit_root_is_authoritative_for_base_resolution(tmp_path: Path) -
     )
 
 
-_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
 
 
 def test_agents_doc_names_every_job_a_local_run_skips() -> None:

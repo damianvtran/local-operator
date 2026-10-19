@@ -29,7 +29,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +115,11 @@ DEFAULT_TOP_P = 0.9
 DEFAULT_MODEL_NAMES = _DEFAULT_MODEL_NAMES
 
 # Sensible ModelSpec fallbacks when the legacy registry knows nothing.
+# ``UNKNOWN_MAX_OUTPUT`` is NO LONGER a spec default — seeding a no-data route
+# with it is the defect ``build_model_spec`` documents (the 8k stand-in was read
+# as a published cap, and the budget clamped every router route to it); see that
+# function for the value a no-data route carries now. The constant is kept as
+# the documented history its neighbours cite.
 UNKNOWN_CONTEXT_WINDOW = 128_000
 UNKNOWN_MAX_OUTPUT = 8_192
 
@@ -899,7 +904,24 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             info = None
 
     context_window = UNKNOWN_CONTEXT_WINDOW
-    max_output = UNKNOWN_MAX_OUTPUT
+    # 0, not ``UNKNOWN_MAX_OUTPUT``: 8192 is a NUMBER and a no-data route must not
+    # assert one. ``ModelSpec.max_output_tokens`` defaults to 8192, so a spec built
+    # from a placeholder row was indistinguishable from a model that really
+    # publishes an 8k cap -- and ``turn_output_budget`` therefore clamped every
+    # router route (``radient/auto``, ``radient-key/auto``, ``openrouter/auto``) to
+    # 8192, which a reasoning-heavy turn spends entirely on thinking and returns
+    # empty at ``stop_reason='length'``. The registry sentinel
+    # (``aggregator_router_model_info.max_tokens = -1``) says the SELECTED model's
+    # cap is unknown; that fact has to survive into the spec. 0 is already this
+    # codebase's no-data value (``turn_output_budget``, ``_effective_max_tokens``)
+    # and already renders as "output unknown" in the picker.
+    #
+    # ``UNKNOWN_MAX_OUTPUT`` itself is untouched and stays exported: it stops
+    # being a SPEC default only. This was its last code reader, and the seed it
+    # described is the defect, so the constant now survives as the documented
+    # history its neighbours cite (``_fill_from_row`` on where a missing cap used
+    # to fall back to) rather than as a live default anywhere.
+    max_output = 0
     supports_images = True
     # The mirror of ``supports_images`` with the OPPOSITE default, and the
     # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
@@ -2226,9 +2248,17 @@ def _fill_from_row(info: ModelInfo, row: "DiscoveredModel") -> ModelInfo:
         # provider's real limit. The band's `311.0k/—` is the visible half.
         info.context_window = row.context_window
     # Independent of the window: an OpenAI-shaped gateway can quote a context
-    # length and no completion cap, and a missing `max_tokens` falls back to
-    # UNKNOWN_MAX_OUTPUT (8192), which truncates a long answer with no error.
-    # ``None`` and ``-1`` are both "no data" here, same as the window.
+    # length and no completion cap, and the ROW's cap is worth taking where the
+    # direct sources left none -- a stated cap NARROWS the ask, and a model with a
+    # real 8k limit asked for 131,072 is a 400 or a silent cut.
+    #
+    # What this comment used to say is the defect that was fixed here: a missing
+    # ``max_tokens`` fell back to ``UNKNOWN_MAX_OUTPUT`` (8192) in the SPEC builder,
+    # "which truncates a long answer with no error". The fallback is gone -- a
+    # no-data route now carries ``0`` and the budget fills it with the policy
+    # ceiling (see ``build_model_spec``), so the fill below is no longer a guard
+    # against an invented 8k cap; it is how a real, stated cap still reaches the
+    # spec. ``None`` and ``-1`` are both "no data" here, same as the window.
     if not (info.max_tokens and info.max_tokens > 0) and row.max_tokens > 0:
         # Guarded like the other two listing paths: this row is second-hand
         # catalogue data (models.dev, or an aggregator's document), so it can
@@ -3222,6 +3252,49 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
     return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
 
 
+#: Decode rate (output tokens per second of streaming) below which a host that
+#: keeps serving this conversation is retired from its affinity pin; ``0`` turns
+#: the speed check off. Next to the code that reads the key, as the registry
+#: requires (``Adding a configuration key`` in AGENTS.md).
+#:
+#: Why 25: an OpenRouter-routed DeepSeek v4.1 Flash run measured one upstream
+#: host at 20.3 tok/s (fit R2 0.99, 63 consecutive requests, 93% of the run's
+#: request time) beside 130-172 tok/s on the other two hosts the same run saw.
+#: 25 sits just above the slow host and well under the healthy
+#: ones, so ordinary host-to-host variance never reaches it; at 25 tok/s a
+#: 4,000-token reasoning reply already takes 160 s, which is the point where a
+#: cold-prefix move to another host is cheap by comparison. It is a floor on
+#: DECODE only -- queueing and prefill are excluded by the estimator itself (see
+#: ``SessionStreamFn._score_host_decode_rate``).
+# Opt-in until the newly attributable estimator has live evidence across more
+# than one model/run. The measured run above motivates trying 25, not imposing
+# that floor on every cached OpenRouter model (review round 1, C1).
+OPENROUTER_RETIRE_BELOW_TPS = 0.0
+
+
+def _openrouter_retire_below_tps(settings: Mapping[str, Any] | None) -> float:
+    """Resolve ``providers.openrouter.retire_below_tps`` (the decode-rate floor).
+
+    Same shape as ``_anthropic_cache_ttl_1h_min_context_tokens``: a missing
+    ``providers`` block (old config files) or a malformed leaf falls back to the
+    default (off). Only an explicit finite non-negative number opts into this
+    experimental policy; ``0`` also removes learned speed exclusions at the next
+    request boundary, preserving cache-miss retirements.
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    openrouter = providers.get("openrouter") if isinstance(providers, Mapping) else None
+    configured = openrouter.get("retire_below_tps") if isinstance(openrouter, Mapping) else None
+    # ``bool`` is an ``int`` subclass; ``true`` in YAML must not read as 1 tok/s.
+    if (
+        isinstance(configured, (int, float))
+        and not isinstance(configured, bool)
+        and configured >= 0
+        and math.isfinite(configured)
+    ):
+        return float(configured)
+    return OPENROUTER_RETIRE_BELOW_TPS
+
+
 def _openrouter_provider_preferences(settings: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Build the OpenRouter chat-completions ``provider`` routing object.
 
@@ -3476,6 +3549,42 @@ class SessionStreamFn:
     #: must never be able to make a model unreachable. At the cap the harness
     #: stops retiring and keeps serving on whatever remains.
     MAX_RETIRED_PROVIDERS = 3
+
+    # -- decode-throughput retirement ---------------------------------------
+    # Cache strikes (above) catch a host that does not CACHE; these catch one that
+    # caches fine but DECODES slowly, which nothing else in the harness notices.
+    # Measured: an OpenRouter-routed DeepSeek v4.1 Flash run sat 63 consecutive
+    # requests on one upstream host at ~20 tok/s (fit R2 0.99) while the two other
+    # hosts it saw ran 120-170 tok/s; that host held 93% of the run's request time
+    # (110 of 119 min) and every one of its ten slowest requests, because the pin
+    # (``order=[host]``) re-selects the host that just served and a good cache
+    # score never lets go of it. The floor itself is the
+    # ``providers.openrouter.retire_below_tps`` setting (``OPENROUTER_RETIRE_BELOW_TPS``).
+    #:
+    #: Consecutive qualifying slow turns before the host is retired. THREE, not two
+    #: as for the cache: upstream-await rate is a noisier reading than "zero
+    #: cached tokens" (network stalls count and buffering can distort the rate;
+    #: local consumer processing is explicitly excluded), and the replay of the
+    #: measured run shows three still retires the slow host on its 4th request
+    #: (absolute run turn 31) -- the extra strike costs about two requests.
+    HOST_SLOW_STRIKES_TO_RETIRE = 3
+    #: Below this many output tokens a turn carries no decode-rate information and
+    #: neither strikes nor clears. The window already starts at the FIRST output
+    #: delta, so prefill and queueing are excluded by construction; what is left
+    #: to guard against is a short reply whose few deltas arrive in one or two
+    #: network bursts, where tokens/window is quantisation noise. 500 tokens is
+    #: 25 s at the measured slow rate -- long enough that the window is dominated
+    #: by decode -- while still qualifying 53 of that host's 63 requests (the
+    #: reasoning-heavy turns are exactly the long ones). Every fast-host turn of
+    #: that size measured >= 49 tok/s.
+    HOST_SLOW_MIN_OUTPUT_TOKENS = 500
+    #: Slow strikes only pair if each is this close to the previous one. Decode
+    #: speed is a property of host LOAD, which moves over minutes to hours, so
+    #: three slow turns a day apart are three independent readings, not a
+    #: pattern. Generous on purpose (the measured run averaged ~100 s between
+    #: turns on the slow host, tool time included): the bound exists to forgive
+    #: idle gaps, not to demand a tight cadence.
+    HOST_SLOW_STRIKE_MAX_GAP_S = 1800.0
     DEFAULT_USAGE_BLOCK_MS = 5 * 60 * 1000
 
     #: How many blocked accounts the recovery walk may probe at once.
@@ -3643,6 +3752,35 @@ class SessionStreamFn:
         # model_id -> whether the "at the retirement cap" line has been logged
         # already, so it is said once rather than on every later strike.
         self._provider_retire_capped: dict[str, bool] = {}
+        # model_id -> {host: its LATEST qualifying decode rate (tok/s)}. The proof
+        # that a faster route exists, which the speed retirement demands before it
+        # will `ignore` a host: `ignore` is a hard filter, so retiring a host in
+        # favour of nothing known turns a slow conversation into OpenRouter's
+        # "all providers have been ignored" 404 (single-endpoint model) or a cold
+        # prefix for no gain (every host slow -- a slow MODEL, not a slow host).
+        # Not cleared by a compaction: speed is not a fact about the prefix.
+        self._provider_host_rate: dict[str, dict[str, float]] = {}
+        # model_id -> {host: consecutive qualifying turns decoding under the floor}
+        # and the monotonic time of the latest one. Separate from the cache
+        # strikes because the two evidence streams must not pair: a cache miss
+        # and a slow turn are not two readings of the same fact.
+        self._provider_slow_strikes: dict[str, dict[str, int]] = {}
+        self._provider_slow_strike_at: dict[str, dict[str, float]] = {}
+        # model_id -> the subset of ``_provider_retired`` that was retired for
+        # SLOWNESS. Kept apart because a compaction wipes cache-based retirements
+        # (they were learned against the old prefix) but must not wipe these: how
+        # fast a host decodes does not depend on the prefix, and forgetting it
+        # would send the conversation back to the slow host for three more turns
+        # after every compaction.
+        self._provider_retired_slow: dict[str, set[str]] = {}
+        # model_id -> hosts whose PIN was released for slowness while no other
+        # host had been seen. Releasing is the reversible half of a speed
+        # retirement: it stops naming the host (so OpenRouter's own routing is
+        # free to land elsewhere and thereby reveal that an alternative exists)
+        # without adding it to the hard ``ignore`` filter. It is promoted to a
+        # real retirement the first time another host serves this model, and
+        # dropped if the host itself later decodes at or above the floor.
+        self._provider_slow_released: dict[str, set[str]] = {}
         self._message_boundary_pending = True
         # Frozen for one user-message tool loop: choosing a new effort between
         # tool calls would bust the provider cache and make one task reason at
@@ -3813,18 +3951,30 @@ class SessionStreamFn:
         than not clearing at all — which is the failure that made the clear
         necessary.
         """
-        if not (self._provider_strikes or self._provider_retired):
+        # Retirements for SLOWNESS are not cache evidence and survive this clear:
+        # how fast a host decodes does not depend on the prefix being voided (see
+        # ``_provider_retired_slow``). So "is there anything to clear" counts only
+        # the cache-derived part, or a conversation holding one slow retirement
+        # would log and rebuild this state on every compaction for nothing.
+        cache_retired = sum(
+            len(hosts - self._provider_retired_slow.get(model_id, set()))
+            for model_id, hosts in self._provider_retired.items()
+        )
+        if not (self._provider_strikes or cache_retired):
             return
         logger.debug(
-            "cache affinity: clearing %d strike record(s) and %d retirement set(s) — %s",
+            "cache affinity: clearing %d strike record(s) and %d retired host(s) — %s",
             len(self._provider_strikes),
-            len(self._provider_retired),
+            cache_retired,
             reason,
         )
         self._provider_strikes.clear()
         self._provider_strike_at.clear()
         self._provider_retired.clear()
         self._provider_retire_capped.clear()
+        for model_id, hosts in self._provider_retired_slow.items():
+            if hosts:
+                self._provider_retired[model_id] = set(hosts)
 
     def _apply_cache_affinity(self, request: ChatRequest) -> ChatRequest:
         """Stamp this conversation's host pin and retirements onto a request.
@@ -3840,6 +3990,17 @@ class SessionStreamFn:
         pin from the model it left. The gate refuses isolated requests in BOTH
         directions — see ``_affinity_enabled``.
         """
+        if _openrouter_retire_below_tps(self._settings) <= 0:
+            # A LIVE off-switch must undo its routing effects, not just stop new
+            # scoring (review C2). Speed-only state is independent of cache
+            # evidence: keep cache retirements and the current healthy pin.
+            for model_id, hosts in self._provider_retired_slow.items():
+                self._provider_retired.get(model_id, set()).difference_update(hosts)
+            self._provider_retired_slow.clear()
+            self._provider_slow_strikes.clear()
+            self._provider_slow_strike_at.clear()
+            self._provider_slow_released.clear()
+            self._provider_host_rate.clear()
         if request.purpose == "compaction":
             # A compaction REPLACES this conversation's prefix, which voids
             # every strike and retirement recorded against the old one (review
@@ -3972,6 +4133,222 @@ class SessionStreamFn:
             count,
         )
 
+    def _score_host_decode_rate(
+        self,
+        request: ChatRequest,
+        served: str,
+        usage: "Usage | None",
+        *,
+        decode_us: int,
+        output_deltas: int,
+        now: float,
+        model_id: str | None = None,
+    ) -> list[str]:
+        """Retire a host that keeps decoding below the configured floor.
+
+        The cache strikes in :meth:`_score_cache_affinity` judge whether a held
+        host CACHES; this judges whether it is FAST, and the two are independent
+        (the measured slow host cached well, which is exactly why the pin never
+        let go of it). Returns the user-facing notice lines for whatever this call
+        changed (usually none) -- the caller owns the (async) emission.
+
+        The reading is output tokens divided by accumulated upstream-await time
+        BETWEEN the first and last output deltas. Queue/prefill before the first
+        delta, trailers after the last, and time this async generator spends
+        suspended at ``yield`` (consumer processing) are excluded. The existing
+        analytics/band rate intentionally keeps its client-observed wall window;
+        displaying that interval and changing routing on it have different risk.
+        Await time still includes network stalls and upstream iterator work;
+        buffering can overstate speed. This is an opt-in heuristic, not a pure
+        GPU decode-rate or live endpoint-availability guarantee.
+
+        What can strike, and what is deliberately refused:
+
+        * Only a real conversation turn (``purpose == "turn"``), for the reason
+          the cache scoring states: helper calls differ in size and shape.
+        * A turn under :data:`HOST_SLOW_MIN_OUTPUT_TOKENS` is no evidence either
+          way -- it neither strikes nor clears, so a short tool-call turn between
+          two slow reasoning turns does not forgive the host.
+        * A qualifying turn at or above the floor clears the host's strikes:
+          this is CONSECUTIVE slowness, and one slow turn in a fast stretch is a
+          stall, not a host.
+
+        What retirement needs, and why it is not just "N slow turns":
+
+        * **Proof of a faster route.** The host is added to the hard ``ignore``
+          filter only while some OTHER, un-retired host has a measured rate at
+          or above the floor. With no measured alternative this will not ignore
+          the only host seen, or churn through an all-hosts-slow conversation.
+          A historical fast reading can be stale: it does NOT prove that host is
+          still eligible/up, so it cannot guarantee avoidance of every all-ignored
+          response when upstream availability changes.
+        * Absent that proof the host's PIN is merely **released** -- it stops
+          being named, so OpenRouter's own routing is free to land elsewhere (and
+          is never worse than affinity off) -- and the release is promoted to a
+          retirement the first time another host is measured fast. A release adds
+          nothing to ``ignore``, so it cannot cause the 404.
+        * The cap is the shared :data:`MAX_RETIRED_PROVIDERS`.
+
+        Thrash: each retirement costs one cold prefix on the next host. It needs
+        three slow qualifying turns plus a measured-fast alternative, is bounded
+        by the cap, and a host retired here stays retired across a compaction
+        (see ``_provider_retired_slow``) so the cost is paid once per host.
+        """
+        model_id = model_id or request.model.model_id
+        notices: list[str] = []
+        floor = _openrouter_retire_below_tps(self._settings)
+        if floor <= 0 or request.purpose != "turn":
+            return notices
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        measured_us, measured_tokens, _ = _decode_measure(
+            decode_us=decode_us, output_deltas=output_deltas, output_tokens=output_tokens
+        )
+        if measured_us and measured_tokens >= self.HOST_SLOW_MIN_OUTPUT_TOKENS:
+            rate = measured_tokens / (measured_us / 1_000_000.0)
+            self._provider_host_rate.setdefault(model_id, {})[served] = rate
+            notice = self._strike_slow_host(model_id, served, rate, measured_tokens, floor, now)
+            if notice:
+                notices.append(notice)
+        # Promotion runs on EVERY scored turn, not just the slow host's: the proof
+        # a release waits for is a measured-fast reading on some other host, which
+        # arrives on that host's turn.
+        notices.extend(self._promote_released_hosts(model_id, floor))
+        return notices
+
+    def _strike_slow_host(
+        self, model_id: str, served: str, rate: float, tokens: int, floor: float, now: float
+    ) -> str | None:
+        """Fold one qualifying reading for ``served``; retire or release on the Nth.
+
+        Split from :meth:`_score_host_decode_rate` only to keep that method the
+        policy statement; the notice text it returns is the user-visible record of
+        a retirement or release.
+        """
+        strikes = self._provider_slow_strikes.setdefault(model_id, {})
+        strike_at = self._provider_slow_strike_at.setdefault(model_id, {})
+        if rate >= floor:
+            strikes.pop(served, None)
+            strike_at.pop(served, None)
+            # Healthy again: an unpromoted release is lifted and the pin may be
+            # re-acquired from this very turn.
+            self._provider_slow_released.get(model_id, set()).discard(served)
+            return None
+        count = strikes.get(served, 0) + 1
+        previous_strike_at = strike_at.get(served)
+        if (
+            previous_strike_at is not None
+            and (now - previous_strike_at) > self.HOST_SLOW_STRIKE_MAX_GAP_S
+        ):
+            # Stale evidence: a first reading, not the next of a run.
+            count = 1
+        strikes[served] = count
+        strike_at[served] = now
+        if count < self.HOST_SLOW_STRIKES_TO_RETIRE:
+            return None
+        retired = self._provider_retired.setdefault(model_id, set())
+        released = self._provider_slow_released.setdefault(model_id, set())
+        if served in retired or served in released:
+            return None
+        strikes.pop(served, None)
+        strike_at.pop(served, None)
+        if self._provider_affinity.get(model_id) == served:
+            del self._provider_affinity[model_id]
+        faster = self._known_faster_hosts(model_id, served, floor)
+        if faster and len(retired) < self.MAX_RETIRED_PROVIDERS:
+            retired.add(served)
+            self._provider_retired_slow.setdefault(model_id, set()).add(served)
+            logger.debug(
+                "host speed: retiring %s for %s -- %d consecutive turns decoding under "
+                "%.1f tok/s (latest %.1f over %d tokens); %s measured at or above it",
+                served,
+                model_id,
+                count,
+                floor,
+                rate,
+                tokens,
+                ", ".join(faster),
+            )
+            return (
+                f"routing away from {served}: it decoded at {rate:.0f} tok/s for "
+                f"{count} turns in a row (floor {floor:g}); the next request may "
+                "start on a cold prompt cache"
+            )
+        if faster:
+            # A faster host exists but the cap is spent. Logged once per model --
+            # at the cap this branch is reached on every later slow run.
+            if not self._provider_retire_capped.get(model_id):
+                self._provider_retire_capped[model_id] = True
+                logger.debug(
+                    "host speed: not retiring %s for %s (%.1f tok/s) -- already at the "
+                    "%d-host cap; `ignore` is a hard filter and an unbounded set "
+                    "risks leaving no eligible endpoint",
+                    served,
+                    model_id,
+                    rate,
+                    self.MAX_RETIRED_PROVIDERS,
+                )
+            return None
+        # No measured-fast alternative: release the pin, never `ignore`. See the
+        # "proof of a faster route" paragraph of the caller's docstring.
+        released.add(served)
+        logger.debug(
+            "host speed: releasing the pin on %s for %s -- %d consecutive turns "
+            "decoding under %.1f tok/s (latest %.1f over %d tokens) and no other "
+            "host has been measured at or above the floor, so it is not ignored",
+            served,
+            model_id,
+            count,
+            floor,
+            rate,
+            tokens,
+        )
+        return (
+            f"{served} decoded at {rate:.0f} tok/s for {count} turns in a row "
+            f"(floor {floor:g}); no longer pinning it"
+        )
+
+    def _known_faster_hosts(self, model_id: str, host: str, floor: float) -> list[str]:
+        """Un-retired hosts other than ``host`` last measured at or above ``floor``."""
+        retired = self._provider_retired.get(model_id, set())
+        rates = self._provider_host_rate.get(model_id, {})
+        return sorted(h for h, r in rates.items() if h != host and h not in retired and r >= floor)
+
+    def _promote_released_hosts(self, model_id: str, floor: float) -> list[str]:
+        """Turn each released host into a retirement once a faster host is known.
+
+        The release is the reversible half of a speed retirement (see
+        :meth:`_score_host_decode_rate`); this is where it earns the hard
+        ``ignore``. Bounded by the shared cap, and a host that is no longer slow
+        had its release lifted when it was measured, so only hosts still under
+        suspicion get here.
+        """
+        released = self._provider_slow_released.get(model_id)
+        if not released:
+            return []
+        notices: list[str] = []
+        retired = self._provider_retired.setdefault(model_id, set())
+        for host in sorted(released):
+            faster = self._known_faster_hosts(model_id, host, floor)
+            if not faster or len(retired) >= self.MAX_RETIRED_PROVIDERS:
+                continue
+            released.discard(host)
+            retired.add(host)
+            self._provider_retired_slow.setdefault(model_id, set()).add(host)
+            logger.debug(
+                "host speed: retiring %s for %s -- released earlier, and %s is now "
+                "measured at or above %.1f tok/s",
+                host,
+                model_id,
+                ", ".join(faster),
+                floor,
+            )
+            notices.append(
+                f"routing away from {host}: it was slow and {faster[0]} has since "
+                f"decoded at or above {floor:g} tok/s; the next request may start on "
+                "a cold prompt cache"
+            )
+        return notices
+
     def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
         """Create a conversation owner sharing transport and parent activity count.
 
@@ -4023,6 +4400,19 @@ class SessionStreamFn:
             # expensive way.
             child._provider_retired = {
                 model: set(hosts) for model, hosts in self._provider_retired.items()
+            }
+            # The speed retirements are a subset of the set above, so the child
+            # needs the marker with it or its first compaction would forget them;
+            # and the measured rates travel so the child's "a faster host exists"
+            # guard reads the same facts the parent's does.
+            child._provider_retired_slow = {
+                model: set(hosts) for model, hosts in self._provider_retired_slow.items()
+            }
+            child._provider_host_rate = {
+                model: dict(rates) for model, rates in self._provider_host_rate.items()
+            }
+            child._provider_slow_released = {
+                model: set(hosts) for model, hosts in self._provider_slow_released.items()
             }
         return child
 
@@ -4153,28 +4543,33 @@ class SessionStreamFn:
         return self._settings if isinstance(self._settings, Mapping) else {}
 
     def _push_usage_aware_pick(self, settings: Mapping[str, Any] | None) -> None:
-        """Push ``retry.usageAwareAccountPick`` into the auth store.
+        """Push the centrally resolved account policy at construction and hot apply.
 
-        The operator's opt-out for the cascade's usage-ranked first pick
-        travels through here because this is the one place a session parses
-        ``retry.*``; the store itself defaults to ON and knows nothing about
-        config. Duck-typed (``getattr``) because the test doubles handed in as
-        ``auth_store`` implement only the failover protocol.
+        The auth store copies this preference rather than reading session config
+        per call. Rebinding the mapping alone can therefore report an applied
+        value while selection still uses the old policy. Constructor and hot
+        apply MUST share this helper; the resolver owns canonical precedence,
+        the reset-soonest default and strict legacy-boolean compatibility.
 
-        Factored out of ``__init__`` so :meth:`apply_settings` can re-push it
-        (review round 2, B1). This is the ONE ``retry.*`` key that is not read
-        back off the mapping per call — the store copies it into its own state
-        (``AuthStore._usage_aware_pick``) — so a rebind alone moves what
-        ``RetrySettings`` reports while leaving what the cascade actually does
-        unchanged. That gap is what made a live ``— applied`` notice untrue for
-        this key. Constructor and re-push share this method precisely so the
-        two cannot drift apart again.
+        Duck typing retains the older failover-store protocol: stores with the
+        enum setter receive all three policies, while older hosts receive only
+        the headroom compatibility flag. Neither path clears a valid affinity
+        lease or unrelated provider/model/effort route state.
         """
-        configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
-        if callable(configure_pick):
-            from local_operator.providers.failover import RetrySettings
+        from local_operator.providers.account_policy import (
+            effective_account_selection_policy,
+        )
 
-            configure_pick(RetrySettings.from_settings(settings).usage_aware_account_pick)
+        policy = effective_account_selection_policy(settings)
+        configure_policy = getattr(self._auth_store, "configure_account_selection_policy", None)
+        if callable(configure_policy):
+            # Rebind the preference without clearing a still-useful success
+            # lease or unrelated provider/model/effort route pins.
+            configure_policy(policy)
+        else:
+            configure_pick = getattr(self._auth_store, "configure_usage_aware_pick", None)
+            if callable(configure_pick):
+                configure_pick(policy == "headroom")
 
     def apply_settings(self, values: Mapping[str, Any] | None) -> None:
         """Rebind the settings mapping every routing decision reads.
@@ -6102,6 +6497,32 @@ class SessionStreamFn:
     async def __call__(
         self, request: ChatRequest, signal: AbortSignal | None
     ) -> AsyncIterator[StreamEvent]:
+        # A quota/preflight pick must stay coherent until THIS request finishes,
+        # without granting an unsuccessful pick a durable cache lease. Store-
+        # owned identity cleanup also works when an old generator is closed
+        # after a newer boundary replaced it; no ContextVar spans a yield.
+        begin = getattr(self._auth_store, "begin_account_request", None)
+        end = getattr(self._auth_store, "end_account_request", None)
+        boundary = (
+            begin(self._session_id, request) if callable(begin) and not request.isolated else None
+        )
+        stream = self._stream_account_request(request, signal, boundary)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            try:
+                await stream.aclose()
+            finally:
+                if boundary is not None and callable(end):
+                    end(self._session_id, boundary)
+
+    async def _stream_account_request(
+        self,
+        request: ChatRequest,
+        signal: AbortSignal | None,
+        boundary: object | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         # A session's old hint describes its preceding request, not this one.
         # Only the counted boundary held by this conversation can reconcile it
         # with appended assistant/tool/user content. Cold tokenization stays off
@@ -6266,6 +6687,20 @@ class SessionStreamFn:
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
         request = self._apply_cache_affinity(request)
+        update_boundary = getattr(self._auth_store, "update_account_request", None)
+        if boundary is not None and callable(update_boundary):
+            from local_operator.providers.account_affinity import endpoint_mode_resolver
+
+            # Snapshot the SAME fitted client factory's actual API decision for
+            # preflight. This constructs no request/refresh; a capability flag
+            # cannot tell an explicitly selected Chat route from Responses.
+            mode_client = self._client_for(request.model)
+            update_boundary(
+                self._session_id,
+                boundary,
+                request,
+                endpoint_mode=endpoint_mode_resolver(mode_client, request),
+            )
 
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message
@@ -6393,8 +6828,36 @@ class SessionStreamFn:
             # child wrapper's finally also runs on early close, failure, and
             # cancellation, keeping concurrent/nested requests balanced.
             self._descendant_request_counter.begin()
+        # Routing needs an attributable interval, unlike analytics' existing
+        # client-drained first-to-last window. Time ONLY each upstream __anext__:
+        # a yield suspends this generator while subscribers/renderers process it,
+        # and charging that consumer time to the host can retire fast hosts (C1).
+        # Keep the off path untimed; the opt-in path adds two monotonic reads per
+        # upstream event and scalar accumulation, no per-event wrapper/container.
+        # Measured at this real funnel (30 interleaved CPU-time slope waves,
+        # 100 vs 3000 prebuilt output events): opt-in adds 166.8 ns/output delta
+        # against the old estimator (~0.83 ms/5000 deltas); off adds 51.9 ns.
+        # A counting clock confirms 1 -> 3 reads/output delta only when enabled.
+        # These are local microbenchmark conditions, not a zero-work claim.
+        measure_host_speed = _openrouter_retire_below_tps(
+            getattr(self, "_settings", None)
+        ) > 0 and self._affinity_enabled(request)
+        provider_wait_s = 0.0
+        provider_decode_s = 0.0
+        provider_output_started = False
         try:
-            async for event in stream:
+            # Iterator acquisition is injectable and can itself raise (C3).
+            # Protect it too, so child-work accounting and final bookkeeping
+            # unwind before the exception propagates, just as for anext failures.
+            upstream = stream.__aiter__()
+            while True:
+                wait_started = time.monotonic() if measure_host_speed else 0.0
+                try:
+                    event = await anext(upstream)
+                except StopAsyncIteration:
+                    break
+                if measure_host_speed:
+                    provider_wait_s += max(0.0, time.monotonic() - wait_started)
                 # ONE ``getattr`` for the event type, and it is an ADDITION to
                 # this loop rather than a saving — measured, not assumed
                 # (``scripts/bench_tps_overhead.py``, interleaved A/B below).
@@ -6411,6 +6874,14 @@ class SessionStreamFn:
                 # 5 000-delta turn against a generation measured in seconds. No
                 # allocation, no lock, no I/O in the delta branch.
                 event_type = getattr(event, "type", "")
+                if measure_host_speed and event_type in _OUTPUT_DELTA_TYPES:
+                    # Exclude queue/prefill before the FIRST output, and waits
+                    # after the LAST output (usage/end trailers). Non-output
+                    # events BETWEEN output deltas still belong to the interval.
+                    if provider_output_started:
+                        provider_decode_s += provider_wait_s
+                    provider_output_started = True
+                    provider_wait_s = 0.0
                 if event_type == "reasoning_delta":
                     # Matched on the event's own type string, exactly as
                     # ``ttft_ms`` matches its two below: this wrapper is written
@@ -6506,8 +6977,30 @@ class SessionStreamFn:
                                 now=time.monotonic(),
                                 model_id=served_model_id,
                             )
-                            if str(served) not in self._provider_retired.get(served_model_id, ()):
+                            # Speed is judged on every served turn, not only the
+                            # one we pinned: a host's decode rate is the same
+                            # whether or not we asked for it by name. Routing
+                            # uses upstream-await time only; analytics above keeps
+                            # its existing client-observed wall interval (C1).
+                            slow_notices = []
+                            if measure_host_speed:
+                                slow_notices = self._score_host_decode_rate(
+                                    request,
+                                    str(served),
+                                    event_usage,
+                                    decode_us=max(0, int(provider_decode_s * 1_000_000)),
+                                    output_deltas=output_deltas,
+                                    now=time.monotonic(),
+                                    model_id=served_model_id,
+                                )
+                            if str(served) not in self._provider_retired.get(
+                                served_model_id, ()
+                            ) and str(served) not in self._provider_slow_released.get(
+                                served_model_id, ()
+                            ):
                                 self._provider_affinity[served_model_id] = str(served)
+                            for text in slow_notices:
+                                await self._notice(text, "info")
                     except Exception:  # noqa: BLE001 — routing hints never break a turn
                         pass
                 yield event

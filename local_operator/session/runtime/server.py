@@ -1696,6 +1696,7 @@ class _ClientConn:
     #: frame; see ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY`` for what emitting it
     #: to a viewer that did not negotiate would do.
     entry_times: bool = False
+    peer_cycle_records: bool = False
     journal_order: bool = False
     #: Whether this viewer negotiated the input-metadata carriage
     #: (``input-mode-v1``). While False, every message-bearing frame this
@@ -1893,7 +1894,8 @@ class SessionHandle(Protocol):
     # ask_decline(ask_id, by="") -> str: the explicit "no answer, decide
     #   yourself" (today's Esc). Optional, same shape.
     # ask_dismiss(ask_id, by="") -> str: view-only removal of a TIMED-OUT ask;
-    #   injects nothing. Optional, same shape.
+    #   asks the model nothing (it can still deliver the deadline notice that ask
+    #   never got — design §14). Optional, same shape.
     # receive_peer_message(text, *, mode="mailbox", wake=False, sender=None)
     #   -> str: deliver a message from another local lop session (`lop send`).
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
@@ -2238,6 +2240,11 @@ class RuntimeServer:
                 # validation outright. See
                 # ``DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY``.
                 + (["display-history-entry-times-v1"] if hasattr(handle, "history_page") else [])
+                + (
+                    ["display-history-peer-cycle-records-v1"]
+                    if hasattr(handle, "history_page")
+                    else []
+                )
                 # TURN SUPPLEMENTS ("Highlights"): advertised only by a handle that
                 # implements the lazy read op, for the reason every entry here is
                 # gated on what the handle can honour. The attach gate is TWO halves --
@@ -3866,6 +3873,7 @@ class RuntimeServer:
                 strip_audit_fields,
                 strip_entry_time_fields,
                 strip_input_metadata,
+                strip_peer_cycle_fields,
                 wire_payload,
             )
 
@@ -3883,6 +3891,9 @@ class RuntimeServer:
             # field its page model would reject.
             conn.entry_times = bool(frame.get("display_history_entry_times")) and (
                 "display-history-entry-times-v1" in self._record.capabilities
+            )
+            conn.peer_cycle_records = bool(frame.get("display_history_peer_cycle_records")) and (
+                "display-history-peer-cycle-records-v1" in self._record.capabilities
             )
             conn.journal_order = bool(frame.get("journal_order")) and (
                 JOURNAL_ORDER_CAPABILITY in self._record.capabilities
@@ -4052,6 +4063,9 @@ class RuntimeServer:
                 strip_entry_time_fields(
                     sync_payload["display_history"], entry_times_capable=conn.entry_times
                 )
+                strip_peer_cycle_fields(
+                    sync_payload["display_history"], peer_cycle_capable=conn.peer_cycle_records
+                )
             # The message-level twin of the strip above, and it must walk both
             # carriers this payload has: the display page's messages AND the
             # snapshot's in-flight ``live_events`` seed, whose events serialize
@@ -4087,10 +4101,14 @@ class RuntimeServer:
                         # that are gone — a page whose map claims instants for
                         # rows nobody received. Blank it with the rows it maps.
                         "entry_times": {},
+                        "peer_cycle_display_records": {"records": [], "status": "metadata_budget"},
                     }
                 )
                 sync_payload["display_history"] = wire_payload(
-                    fallback, audit_capable=conn.audit_history, entry_times_capable=conn.entry_times
+                    fallback,
+                    audit_capable=conn.audit_history,
+                    entry_times_capable=conn.entry_times,
+                    peer_cycle_capable=conn.peer_cycle_records,
                 )
                 oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
             if oversize is not None:
@@ -6398,6 +6416,7 @@ class RuntimeServer:
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
                     entry_times_capable=conn.entry_times,
+                    peer_cycle_capable=conn.peer_cycle_records,
                     input_capable=conn.input_metadata,
                     capabilities=conn.capabilities,
                     # Whether THIS connection PROVED it may loosen the gate,
@@ -6515,6 +6534,7 @@ class RuntimeServer:
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
+                AsideAdoptRefused,
                 AsideUnanswered,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
@@ -6528,6 +6548,7 @@ class RuntimeServer:
             if isinstance(
                 exc,
                 (
+                    AsideAdoptRefused,
                     AsideUnanswered,
                     AttachmentUnavailable,
                     AudioInputUnsupported,
@@ -6571,6 +6592,9 @@ class RuntimeServer:
                 # so the only thing that may ride along is a value the class
                 # enumerates. Absent, the far side composes the generic sentence,
                 # which is what an older peer's frame reads as anyway.
+                frame["error_reason"] = exc.reason
+            if isinstance(exc, AsideAdoptRefused) and exc.reason:
+                # The same closed-set token carriage as ``ForkRefused`` above.
                 frame["error_reason"] = exc.reason
             if isinstance(exc, AudioInputUnsupported):
                 # THE REFUSAL'S FACTS, AS THEIR OWN FIELDS rather than prose
@@ -7766,6 +7790,7 @@ class RuntimeServer:
         input_capable: bool = False,
         capabilities: frozenset[str] = frozenset(),
         may_loosen: bool | None = None,
+        peer_cycle_capable: bool = False,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -8041,6 +8066,7 @@ class RuntimeServer:
                 strip_audit_fields,
                 strip_entry_time_fields,
                 strip_input_metadata,
+                strip_peer_cycle_fields,
             )
 
             capture = getattr(h, "subscribe_frontend", None)
@@ -8065,6 +8091,9 @@ class RuntimeServer:
                     strip_audit_fields(payload["display_history"], audit_capable=audit_capable)
                     strip_entry_time_fields(
                         payload["display_history"], entry_times_capable=entry_times_capable
+                    )
+                    strip_peer_cycle_fields(
+                        payload["display_history"], peer_cycle_capable=peer_cycle_capable
                     )
                 # Both message carriers of a sync payload, same as the pushed
                 # frame above: the page's messages and the live_events seed.
@@ -8091,6 +8120,10 @@ class RuntimeServer:
                                     # join over blanked rows is cleared with
                                     # them, never left describing absent ids.
                                     "entry_times": {},
+                                    "peer_cycle_display_records": {
+                                        "records": [],
+                                        "status": "metadata_budget",
+                                    },
                                 }
                             ).model_dump(mode="json"),
                             audit_capable=audit_capable,
@@ -8103,6 +8136,9 @@ class RuntimeServer:
                         strip_entry_time_fields(
                             payload["display_history"],
                             entry_times_capable=entry_times_capable,
+                        )
+                        strip_peer_cycle_fields(
+                            payload["display_history"], peer_cycle_capable=peer_cycle_capable
                         )
                     if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
                         raise ValueError("canonical refresh exceeds the transport frame limit")
@@ -8127,10 +8163,12 @@ class RuntimeServer:
                     strip_audit_fields,
                     strip_entry_time_fields,
                     strip_input_metadata,
+                    strip_peer_cycle_fields,
                 )
 
                 strip_audit_fields(payload, audit_capable=audit_capable)
                 strip_entry_time_fields(payload, entry_times_capable=entry_times_capable)
+                strip_peer_cycle_fields(payload, peer_cycle_capable=peer_cycle_capable)
                 strip_input_metadata(payload, input_capable=input_capable)
             return payload
         if op == "job_trajectory":

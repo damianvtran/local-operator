@@ -10,6 +10,270 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def active_view(*, view: str) -> Msg:
+    return Msg("tui.projects.active_view", {"view": view})
+
+
+def binding_copy_attachment() -> Msg:
+    return Msg("tui.projects.binding_copy_attachment", {})
+
+
+def binding_create() -> Msg:
+    return Msg("tui.projects.binding_create", {})
+
+
+def binding_cycle_view() -> Msg:
+    return Msg("tui.projects.binding_cycle_view", {})
+
+
+def binding_down() -> Msg:
+    return Msg("tui.projects.binding_down", {})
+
+
+def binding_jump() -> Msg:
+    return Msg("tui.projects.binding_jump", {})
+
+
+def binding_leave() -> Msg:
+    return Msg("tui.projects.binding_leave", {})
+
+
+def binding_message() -> Msg:
+    return Msg("tui.projects.binding_message", {})
+
+
+def binding_next_section() -> Msg:
+    return Msg("tui.projects.binding_next_section", {})
+
+
+def binding_open_detail() -> Msg:
+    return Msg("tui.projects.binding_open_detail", {})
+
+
+def binding_page_down() -> Msg:
+    return Msg("tui.projects.binding_page_down", {})
+
+
+def binding_page_left() -> Msg:
+    return Msg("tui.projects.binding_page_left", {})
+
+
+def binding_page_right() -> Msg:
+    return Msg("tui.projects.binding_page_right", {})
+
+
+def binding_page_up() -> Msg:
+    return Msg("tui.projects.binding_page_up", {})
+
+
+def binding_prev_section() -> Msg:
+    return Msg("tui.projects.binding_prev_section", {})
+
+
+def binding_preview_attachment() -> Msg:
+    return Msg("tui.projects.binding_preview_attachment", {})
+
+
+def binding_refresh() -> Msg:
+    return Msg("tui.projects.binding_refresh", {})
+
+
+def binding_scroll_end() -> Msg:
+    return Msg("tui.projects.binding_scroll_end", {})
+
+
+def binding_scroll_home() -> Msg:
+    return Msg("tui.projects.binding_scroll_home", {})
+
+
+def binding_scroll_left() -> Msg:
+    return Msg("tui.projects.binding_scroll_left", {})
+
+
+def binding_scroll_right() -> Msg:
+    return Msg("tui.projects.binding_scroll_right", {})
+
+
+def binding_show_board() -> Msg:
+    return Msg("tui.projects.binding_show_board", {})
+
+
+def binding_show_list() -> Msg:
+    return Msg("tui.projects.binding_show_list", {})
+
+
+def binding_show_timeline() -> Msg:
+    return Msg("tui.projects.binding_show_timeline", {})
+
+
+def binding_start() -> Msg:
+    return Msg("tui.projects.binding_start", {})
+
+
+def binding_up() -> Msg:
+    return Msg("tui.projects.binding_up", {})
+
+
+def binding_zoom_in() -> Msg:
+    return Msg("tui.projects.binding_zoom_in", {})
+
+
+def binding_zoom_out() -> Msg:
+    return Msg("tui.projects.binding_zoom_out", {})
+
+
+def detail_no_description() -> Msg:
+    return Msg("tui.projects.detail.no_description", {})
+
+
+def detail_no_text() -> Msg:
+    return Msg("tui.projects.detail.no_text", {})
+
+
+def form_date_placeholder() -> Msg:
+    return Msg("tui.projects.form.date_placeholder", {})
+
+
+def form_estimate_placeholder() -> Msg:
+    return Msg("tui.projects.form.estimate_placeholder", {})
+
+
+def form_key_placeholder() -> Msg:
+    return Msg("tui.projects.form.key_placeholder", {})
+
+
+def form_owner_placeholder() -> Msg:
+    return Msg("tui.projects.form.owner_placeholder", {})
+
+
+def form_readback_error(*, label: str, error: str) -> Msg:
+    return Msg("tui.projects.form.readback_error", {"label": label, "error": error})
+
+
+def form_readback_hint(*, label: str, hint: str) -> Msg:
+    return Msg("tui.projects.form.readback_hint", {"label": label, "hint": hint})
+
+
+def form_tags_placeholder() -> Msg:
+    return Msg("tui.projects.form.tags_placeholder", {})
+
+
+def form_team_placeholder() -> Msg:
+    return Msg("tui.projects.form.team_placeholder", {})
+
+
+def form_title_placeholder() -> Msg:
+    return Msg("tui.projects.form.title_placeholder", {})
+
+
+def new_project() -> Msg:
+    return Msg("tui.projects.new_project", {})
+
+
+def notice_read_only() -> Msg:
+    return Msg("tui.projects.notice_read_only", {})
+
+
+def refusal_done_gate(*, names: str) -> Msg:
+    return Msg("tui.projects.refusal_done_gate", {"names": names})
+
+
+def render_filed_by(*, ids: str, more: str) -> Msg:
+    return Msg("tui.projects.render.filed_by", {"ids": ids, "more": more})
+
+
+def render_live_count(*, count: str) -> Msg:
+    return Msg("tui.projects.render.live_count", {"count": count})
+
+
+def render_more_lines_hint(*, count: str, noun: str, verb: str) -> Msg:
+    return Msg("tui.projects.render.more_lines_hint", {"count": count, "noun": noun, "verb": verb})
+
+
+def render_more_not_shown(*, count: str) -> Msg:
+    return Msg("tui.projects.render.more_not_shown", {"count": count})
+
+
+def render_more_not_shown_indent(*, count: str) -> Msg:
+    return Msg("tui.projects.render.more_not_shown_indent", {"count": count})
+
+
+def render_more_working(*, count: str) -> Msg:
+    return Msg("tui.projects.render.more_working", {"count": count})
+
+
+def render_next_clause(*, joined: str) -> Msg:
+    return Msg("tui.projects.render.next_clause", {"joined": joined})
+
+
+def render_no_dates_count(*, count: str) -> Msg:
+    return Msg("tui.projects.render.no_dates_count", {"count": count})
+
+
+def render_no_dates_label(*, label: str, count: str) -> Msg:
+    return Msg("tui.projects.render.no_dates_label", {"label": label, "count": count})
+
+
+def render_no_estimate_or_dates() -> Msg:
+    return Msg("tui.projects.render.no_estimate_or_dates", {})
+
+
+def render_no_linked_sessions() -> Msg:
+    return Msg("tui.projects.render.no_linked_sessions", {})
+
+
+def render_no_progress() -> Msg:
+    return Msg("tui.projects.render.no_progress", {})
+
+
+def render_no_progress_recorded() -> Msg:
+    return Msg("tui.projects.render.no_progress_recorded", {})
+
+
+def render_older_updates(*, count: str) -> Msg:
+    return Msg("tui.projects.render.older_updates", {"count": count})
+
+
+def render_open_over_total(*, open: str, total: str) -> Msg:
+    return Msg("tui.projects.render.open_over_total", {"open": open, "total": total})
+
+
+def render_own_session() -> Msg:
+    return Msg("tui.projects.render.own_session", {})
+
+
+def render_progress_none() -> Msg:
+    return Msg("tui.projects.render.progress_none", {})
+
+
+def render_progress_reported(*, age: str, suffix: str) -> Msg:
+    return Msg("tui.projects.render.progress_reported", {"age": age, "suffix": suffix})
+
+
+def render_reported_ago(*, age: str, suffix: str) -> Msg:
+    return Msg("tui.projects.render.reported_ago", {"age": age, "suffix": suffix})
+
+
+def render_running_settled(*, running: str, settled: str) -> Msg:
+    return Msg("tui.projects.render.running_settled", {"running": running, "settled": settled})
+
+
+def render_session_missing(*, session: str) -> Msg:
+    return Msg("tui.projects.render.session_missing", {"session": session})
+
+
+def render_todo_snapshots_none() -> Msg:
+    return Msg("tui.projects.render.todo_snapshots_none", {})
+
+
+def render_todos_counts(*, open: str, total: str) -> Msg:
+    return Msg("tui.projects.render.todos_counts", {"open": open, "total": total})
+
+
+def render_working_prefix() -> Msg:
+    return Msg("tui.projects.render.working_prefix", {})
+
+
 def send_binding_choose() -> Msg:
     return Msg("tui.projects.send.binding_choose", {})
 
@@ -80,3 +344,55 @@ def send_title() -> Msg:
 
 def send_wake_unconfirmed() -> Msg:
     return Msg("tui.projects.send.wake_unconfirmed", {})
+
+
+def start_filter_placeholder() -> Msg:
+    return Msg("tui.projects.start.filter_placeholder", {})
+
+
+def start_legend() -> Msg:
+    return Msg("tui.projects.start.legend", {})
+
+
+def start_more(*, count: str) -> Msg:
+    return Msg("tui.projects.start.more", {"count": count})
+
+
+def start_title() -> Msg:
+    return Msg("tui.projects.start.title", {})
+
+
+def this_session(*, count: str) -> Msg:
+    return Msg("tui.projects.this_session", {"count": count})
+
+
+def title() -> Msg:
+    return Msg("tui.projects.title", {})
+
+
+def tracked(*, count: str) -> Msg:
+    return Msg("tui.projects.tracked", {"count": count})
+
+
+def unnamed() -> Msg:
+    return Msg("tui.projects.unnamed", {})
+
+
+def updated(*, stamp: str) -> Msg:
+    return Msg("tui.projects.updated", {"stamp": stamp})
+
+
+def view_board() -> Msg:
+    return Msg("tui.projects.view_board", {})
+
+
+def view_list() -> Msg:
+    return Msg("tui.projects.view_list", {})
+
+
+def view_timeline() -> Msg:
+    return Msg("tui.projects.view_timeline", {})
+
+
+def zoom(*, tier: str) -> Msg:
+    return Msg("tui.projects.zoom", {"tier": tier})

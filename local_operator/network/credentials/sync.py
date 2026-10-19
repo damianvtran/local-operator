@@ -473,7 +473,7 @@ def sync_path(network_id: str, root: Path | None = None) -> Path:
 
 
 @contextmanager
-def _sync_lock(target: Path) -> Iterator[None]:
+def _sync_lock(target: Path, *, root: Path) -> Iterator[None]:
     """The placement document's two-level lock, for the sync document.
 
     In-process RLock first, then the cross-process flock beside the file, because
@@ -487,7 +487,7 @@ def _sync_lock(target: Path) -> Iterator[None]:
     from local_operator.network.credentials import placement as placement_mod
 
     with network_store._write_lock(target):
-        with placement_mod._cross_process_lock(target.parent / SYNC_LOCK_FILENAME):
+        with placement_mod._cross_process_lock(target.parent / SYNC_LOCK_FILENAME, root=root):
             yield
 
 
@@ -506,8 +506,12 @@ class SyncState:
     """
 
     def __init__(self, network_id: str, *, root: Path | None = None) -> None:
+        # Keep the placement dependency local, as in sync_path/save: importing
+        # it elsewhere does not bind this constructor's function namespace.
+        from local_operator.network.credentials import placement as placement_mod
+
         self.network_id = network_id
-        self.root = root
+        self.root = placement_mod._config_root(root)
         #: ``{key: {"gen": int, "digest": str, "updated_at": int}}`` — owner side.
         self.generations: dict[str, dict[str, Any]] = {}
         #: ``{device_id: {key: {"gen", "digest", "at"[, "wiped": True]}}}``.
@@ -564,7 +568,7 @@ class SyncState:
 
         if not self._dirty:
             return self.path
-        placement_mod._ensure_private_dir(self.path.parent)
+        placement_mod._ensure_private_dir(self.path.parent, root=self.root)
         return network_store._write_private_json(self.path, self.to_json())
 
     @classmethod
@@ -780,8 +784,11 @@ def mutate(network_id: str, root: Path | None = None) -> Iterator[SyncState]:
     lock, saves, and dials after — the non-stall property (§5.4) would not
     survive a peer's link deadline being held across this document's lock.
     """
+    from local_operator.network.credentials import placement as placement_mod
+
+    root = placement_mod._config_root(root)
     path = sync_path(network_id, root)
-    with _sync_lock(path):
+    with _sync_lock(path, root=root):
         state = SyncState.load(network_id, root=root)
         yield state
         state.save()

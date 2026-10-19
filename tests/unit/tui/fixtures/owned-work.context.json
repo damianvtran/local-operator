@@ -1,0 +1,102 @@
+{
+  "description": "NEW owned-work local-input corpus. Details retain real producer spellings; not a replacement for raw reducer/replay adapter tests or the pinned quiet corpus. Completion is a typed event projection, not a generic INFO inference. No added wire/model payload.",
+  "records": [
+    {
+      "id": "user-a",
+      "kind": "user"
+    },
+    {
+      "id": "tool:launch",
+      "kind": "tool",
+      "toolName": "task",
+      "launchedJobId": "job-a"
+    },
+    {
+      "id": "job-result-a",
+      "kind": "custom",
+      "customType": "job_result",
+      "attribution": "user",
+      "details": {
+        "job_id": "job-a",
+        "text": "Sanitised report; legacy status absent."
+      }
+    },
+    {
+      "id": "hub-a",
+      "kind": "custom",
+      "customType": "hub_message",
+      "attribution": "user",
+      "details": {
+        "direction": "to_parent",
+        "job_id": "job-a",
+        "expects_reply": false,
+        "steer": false,
+        "body": "Sanitised peer response."
+      }
+    },
+    {
+      "id": "tool:wait",
+      "kind": "tool",
+      "toolName": "wait"
+    },
+    {
+      "id": "compaction-a",
+      "kind": "compaction"
+    },
+    {
+      "id": "subagent:job-a",
+      "kind": "notice",
+      "level": "info",
+      "producer": "subagent_completion",
+      "jobId": "job-a",
+      "status": "completed"
+    },
+    {
+      "id": "tool:send",
+      "kind": "tool",
+      "toolName": "send"
+    },
+    {
+      "id": "tool:shell",
+      "kind": "tool",
+      "toolName": "bash"
+    },
+    {
+      "id": "answer-a",
+      "kind": "assistant",
+      "final": true,
+      "text": "The genuine final remains visible."
+    },
+    {
+      "id": "standalone-job",
+      "kind": "custom",
+      "customType": "job_result",
+      "attribution": "user",
+      "details": {
+        "job_id": "job-a",
+        "text": "Outside the completed user scope."
+      }
+    }
+  ],
+  "roles": [
+    "boundary",
+    "action",
+    "receipt",
+    "receipt",
+    "action",
+    "bridge",
+    "bridge",
+    "action",
+    "action",
+    "boundary",
+    "boundary"
+  ],
+  "counts": [
+    "1 subagent launch",
+    "1 job result",
+    "1 incoming message",
+    "1 wait action",
+    "1 message sent",
+    "1 shell action"
+  ]
+}

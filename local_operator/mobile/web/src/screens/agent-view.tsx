@@ -840,6 +840,7 @@ export function AgentConversation({
 				pid={sessionId}
 				jobId={jobId}
 				entries={entries}
+				peerCycles={projection?.peer_cycles === 1}
 				tailContent={
 					<>
 						{/* The notice belongs to the rows it explains, so it sits after them

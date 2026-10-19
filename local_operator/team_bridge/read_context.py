@@ -12,12 +12,19 @@ return metadata — and to do it without any of those writes.
 
 WHAT IT IS NOT. No decision, no signing, no capability bump of ``team_bridge``,
 no wake, no screening call, no ack intent, no claim, no checkpoint, no
-``merge_page``/``merge_refs``, and no message text. This slice returns
-METADATA ONLY: ids, states, hashes and coarse screening codes. Returning a body
-needs the shared content-admission predicate (owner standing ∧ validated envelope
-∧ native receipt bound to the fetched bytes ∧ currency rules ∧ a confirmed read
-intent); that predicate is not implemented yet, so no surface here may return one
-— a route that did would serve an unreviewed body, which is the defect the
+``merge_page``/``merge_refs``. Metadata is the DEFAULT answer: ids, states,
+hashes and coarse screening codes.
+
+MESSAGE TEXT IS ADMITTED, NEVER IMPLIED. The ONE way a body or an excerpt leaves
+this module is :func:`admit_read_content` (RFC §4, review S-RSA-3): the fetched
+item's envelope must validate against this owner and carry the hash the server
+served, a native receipt must re-derive to the SAME bytes and envelope digest
+under the still-published policy and this owner's generation, and a CONFIRMED
+read intent must carry that exact tuple. A raw ``screening_receipts`` row is NOT
+proof, and neither is a delivery state: those are the RECORD that screening
+happened, and the predicate is what turns it into an admission. Anything short of
+it leaves the message metadata-only (``content: null``) — a route that returned
+bytes without it would serve an unreviewed body, which is the defect the
 screening pipeline exists to prevent.
 
 TWO STANDING CONTEXTS, and the difference is a real one, not a label:
@@ -60,15 +67,23 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from local_operator.harness.message_types import DISPLAY_CONTEXT_BOUNDS
 from local_operator.team_bridge import pull
 from local_operator.team_bridge.pull import PullRefused
-from local_operator.team_bridge.screening import HOLD_CODES
-from local_operator.team_bridge.store import Store, StoreRefused
+from local_operator.team_bridge.screening import HOLD_CODES, Envelope, validate_envelope
+from local_operator.team_bridge.store import (
+    RECEIPT_CORRUPT,
+    Store,
+    StoreRefused,
+    receipt_authority,
+)
 from local_operator.team_bridge.types import (
     InboxPage,
+    MessageRef,
     OwnerSnapshot,
     TeamBridgeTypeError,
     project_inbox_page,
+    project_message_ref,
 )
 
 #: The read surface's version, reported as a receipt (``read_capability``) so a
@@ -78,13 +93,15 @@ READ_CAPABILITY = 1
 
 #: The slice's availability receipt (spec M-11 / §7): which read-family operations
 #: EXIST on this build, stated so a renderer decides what to draw instead of
-#: probing operations that are not there. M0 ships the metadata inbox only; the
-#: other flags turn true only when their operations exist and pass their own
-#: gates. It rides the team-bridge STATUS answer next to ``capability``, so one
-#: response can drive the whole surface decision.
+#: probing operations that are not there. M1a ships the detail read and the list
+#: excerpts, both only through the shared admission predicate, so
+#: ``screened_detail`` is true; ``read_ack`` turns true only when the ACK gate and
+#: its POST exist (M1b), and ``local_events`` is deliberately outside this family.
+#: It rides the team-bridge STATUS answer next to ``capability``, so one response
+#: can drive the whole surface decision.
 READ_AVAILABILITY: Mapping[str, bool] = {
     "metadata_inbox": True,
-    "screened_detail": False,
+    "screened_detail": True,
     "read_ack": False,
     "local_events": False,
 }
@@ -115,6 +132,26 @@ HISTORY_REASONS = ("bridge_off",)
 #: produces it, and a bare receipt ``reject`` is not the authoritative record
 #: that would.
 SCREENING_STATES = ("unreviewed", "held", "blocked")
+
+#: The upstream delivery states in which CONTENT may be admitted (S-RSA-3, §4.6).
+#: Closed, and deliberately not ``unread``: an item nobody has taken up yet has no
+#: read standing to show its bytes, and ``blocked`` is a native refusal no local
+#: proof may overrule. Read from the AUTHENTICATED upstream answer, never inferred
+#: from a local receipt.
+ADMITTABLE_DELIVERY_STATES = ("read", "working", "done")
+
+#: How admitted text is labelled on the wire (§4). Both are constants because a
+#: renderer keys on them: bridge text is INERT third-party data written by another
+#: organization's member's agent, never instructions and never markup to unfurl.
+CONTENT_TRUST = "untrusted_external"
+CONTENT_FORMAT = "plain_text"
+
+#: The list excerpt's bound: the SAME window the wake payload already ships
+#: (§11.4's shared display bound). Imported from the constant's own module rather
+#: than from the connector, because this module rides the route's import path and
+#: the connector does not. A longer preview would be a second, unreviewed window
+#: on the same bytes.
+EXCERPT_MAX_CHARS = DISPLAY_CONTEXT_BOUNDS["excerpt"]
 
 #: What a hold code outside :data:`~local_operator.team_bridge.screening.HOLD_CODES`
 #: is reported as. Connector-written hold rows carry free-form values
@@ -185,6 +222,163 @@ class HistoryReadContext(ReadContext):
     reason: str = HISTORY_REASONS[0]
     mode: str = READ_MODE_HISTORY
     read_only: bool = True
+
+
+@dataclass(frozen=True)
+class ContentAdmission:
+    """The verdict of the shared content predicate, and the text it admitted.
+
+    ``reason`` is a CLOSED code from this module — never provider prose, never
+    ``str(exception)``, and never rendered as an error: it is why a surface with
+    no text is not a broken payload. The body rides ``text`` only when
+    ``admitted``; the private carrier the envelope keeps off ``repr`` is read
+    exactly once, there.
+    """
+
+    admitted: bool
+    reason: str | None = None
+    envelope: Envelope | None = None
+    text: str | None = None
+
+
+def admit_read_content(
+    context: ReadContext, item: Mapping[str, Any], proof: Mapping[str, Any] | None
+) -> ContentAdmission:
+    """THE shared content-admission predicate (S-RSA-3) — PURE: no I/O, no await.
+
+    Every term is required, and the ORDER is part of the contract: the envelope is
+    authenticated against the FETCHED bytes first, so no stored row can be used to
+    justify serving bytes that do not hash to what the server said it sent.
+
+    1. ``validate_envelope`` on the exact fetched item: closed message type, the
+       body's utf8 hash equal to the served ``body_hash``, the per-type size cap,
+       and the thread/recipient bindings against THIS owner.
+    2. The AUTHENTICATED delivery state must be read/working/done. ``unread``
+       means no uptake happened and ``blocked`` is a native refusal; neither is
+       inferred away from a local proof row.
+    3. No native hold/bounce row: a hold is this machine's record that the item
+       never reached the session, so it outranks any receipt.
+    4. Policy, receipt and read intent must all be present.
+    5. The receipt's own authority (:func:`receipt_authority`): published policy,
+       admission revision, epoch and creator_generation, with decoded closed
+       categories and a closed verdict.
+    6. Verdict ``allow``, and its ``body_sha256`` AND ``envelope_digest`` equal to
+       the recomputed ones. The digest covers sender/type/request as well as the
+       body, so a changed sender under an old body hash denies — which is exactly
+       why a raw receipt row can never be the proof.
+    7. A CONFIRMED ``target=read`` intent whose whole immutable tuple (verdict,
+       model, prompt version, template, body hash, categories) equals the receipt.
+       Pending, conflicting or absent: metadata only, even beside an allow
+       receipt, because the read is not recorded as taken up.
+
+    ``proof`` is ONE entry of the snapshot
+    :meth:`~local_operator.team_bridge.store.Store.content_proof_readonly`
+    returned, so the decision reads one linearized moment.
+    """
+
+    envelope, code = validate_envelope(context.owner, item)
+    if envelope is None:
+        return ContentAdmission(False, code or "envelope_refused")
+    if envelope.delivery_state not in ADMITTABLE_DELIVERY_STATES:
+        return ContentAdmission(False, "delivery_not_admitted")
+    proof = proof or {}
+    if proof.get("hold") is not None:
+        return ContentAdmission(False, "held")
+    policy = proof.get("policy")
+    receipt = proof.get("receipt")
+    intent = proof.get("intent")
+    if not isinstance(policy, Mapping) or not isinstance(receipt, Mapping):
+        return ContentAdmission(False, "proof_missing")
+    authority, damage, _note = receipt_authority(context.owner, policy, receipt)
+    if authority is None:
+        # ``_note`` is the write-side diagnostic (R-8) and is deliberately not
+        # this side's business: nothing here renders a reason for a human, so the
+        # closed code is the whole of what the admission carries.
+        return ContentAdmission(False, damage or RECEIPT_CORRUPT)
+    if authority["verdict"] != "allow":
+        return ContentAdmission(False, "not_allowed")
+    if str(authority["body_sha256"] or "") != str(envelope.body_sha256):
+        return ContentAdmission(False, "body_mismatch")
+    if str(authority["envelope_digest"] or "") != str(envelope.envelope_digest):
+        return ContentAdmission(False, "envelope_mismatch")
+    if not isinstance(intent, Mapping):
+        return ContentAdmission(False, "read_intent_missing")
+    if not _intent_matches(authority, intent):
+        return ContentAdmission(False, "read_intent_mismatch")
+    return ContentAdmission(True, None, envelope=envelope, text=envelope.private_body())
+
+
+def _intent_matches(authority: Mapping[str, Any], intent: Mapping[str, Any]) -> bool:
+    """Does this read intent carry the receipt's whole immutable tuple?
+
+    Only ``confirmed`` counts (S-RSA-3's term 5): a pending intent says the ACK
+    was started, not that this participant took the message up, and a conflicting
+    one says two writers disagree about which tuple it was. Both are metadata-only
+    answers, and neither may be repaired here.
+    """
+
+    if str(intent.get("state") or "") != "confirmed":
+        return False
+    for term in ("verdict", "model", "prompt_version", "template_sha256", "body_sha256"):
+        if str(authority.get(term) or "") != str(intent.get(term) or ""):
+            return False
+    categories = intent.get("categories")
+    if not isinstance(categories, list):
+        # The snapshot decodes that column and answers ``None`` for text that is
+        # not the array it claims to be: unreadable proof cannot admit.
+        return False
+    return list(authority["categories"]) == list(categories)
+
+
+def _content_object(admission: ContentAdmission, *, excerpt: bool) -> Mapping[str, Any] | None:
+    """Admitted text as the object a renderer draws, or ``None`` for no content.
+
+    The list form carries a bounded EXCERPT and the detail form the full body
+    (M1a): one predicate, two windows, and the excerpt is the same cut the wake
+    payload already ships. ``truncated`` is stated rather than inferred from the
+    length, and the body hash rides along so a caller that later fetches the
+    detail can tell whether these are the same bytes.
+    """
+
+    if not admission.admitted or admission.text is None:
+        return None
+    text = admission.text
+    digest = str(admission.envelope.body_sha256) if admission.envelope is not None else ""
+    if excerpt:
+        cut = text[:EXCERPT_MAX_CHARS]
+        return {
+            "excerpt": cut,
+            "excerpt_chars": len(cut),
+            "truncated": len(cut) < len(text),
+            "content_trust": CONTENT_TRUST,
+            "content_format": CONTENT_FORMAT,
+            "content_sha256": digest,
+        }
+    return {
+        "text": text,
+        "content_chars": len(text),
+        "truncated": False,
+        "content_trust": CONTENT_TRUST,
+        "content_format": CONTENT_FORMAT,
+        "content_sha256": digest,
+    }
+
+
+@dataclass(frozen=True)
+class ReadDetail:
+    """ONE message as the detail read answers it: metadata plus, maybe, its body.
+
+    ``admission`` is carried rather than flattened so the caller can report
+    WHETHER a body was admitted without reading the text: the view's flags are
+    about the payload, never about the message.
+    """
+
+    context: ReadContext
+    item: MessageRef
+    #: The same allowlisted row shape a list row has, with the BODY in place of
+    #: the excerpt. Built once by :func:`read_message_detail`, so the view layer
+    #: has no second chance to decide what "content" means.
+    row: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -387,22 +581,31 @@ async def read_inbox_page(
         page: InboxPage = project_inbox_page(result)
     except TeamBridgeTypeError as failure:
         raise ReadRefused("malformed_page") from failure
+    # The RAW items ride along with the projected ones: the content predicate has
+    # to see the exact mapping the server sent (its body bytes, its sender block,
+    # its request block), while the projection is what binds the row to this
+    # owner. ``project_inbox_page`` has already refused a non-list ``items``.
+    raw_items = tuple(result.get("items") or ())
     for item in page.items:
-        if item.tenant_id != context.owner.tenant_id:
-            raise ReadRefused("wrong_tenant")
-        # The SAME binding invariant the connector enforces before it persists a
-        # page (``Store._check_binding``): the recipient endpoint is MANDATORY and
-        # exact, the account is compared when the server serves one. An item
-        # addressed elsewhere — or nowhere — refuses the whole page here exactly
-        # as ``pull.inbox`` refuses it, or this surface would render a row the
-        # connector drops.
-        if item.recipient_endpoint_id != context.owner.endpoint_id:
-            raise ReadRefused("wrong_recipient")
-        recipient = item.recipient_account_id
-        if recipient is not None and recipient != context.owner.account_id:
-            raise ReadRefused("wrong_recipient")
+        _bind_ref(context, item)
+    # ONE proof snapshot for the WHOLE page (S-RSA-3), read after the wire call
+    # and before the post-await fence: every row about to be serialized comes from
+    # one consistent database image, and a fence that trips here denies the whole
+    # answer rather than half of it.
+    proofs = _read_state(
+        lambda: store.content_proof_readonly(
+            context.owner, [item.message_id for item in page.items]
+        )
+    )
+    # No await between this snapshot, the admission and the serialization: the
+    # invalidation checks for the context about to be answered run HERE, so a
+    # re-enrollment during the wire call denies content instead of being answered
+    # under the old owner's standing.
     _recheck(context, store)
-    rows = tuple(_row(store, context.owner, item) for item in page.items)
+    rows = tuple(
+        _row(context, item, raw, proofs.get(item.message_id))
+        for item, raw in zip(page.items, raw_items)
+    )
     return ReadInbox(
         context=context,
         items=rows,
@@ -411,11 +614,11 @@ async def read_inbox_page(
     )
 
 
-def _screening_state(store: Store, owner: OwnerSnapshot, message_id: str) -> Mapping[str, Any]:
+def _screening_state(hold: Mapping[str, Any] | None) -> Mapping[str, Any]:
     """This machine's screening state for ONE message — code only, never prose.
 
-    A RECEIPT IS NOT CONSULTED AT ALL (review R-3 / M-12a). Its verdict would
-    have to be read as an admission (``allow``) or a block (``reject``), and a raw
+    A RECEIPT IS NOT CONSULTED AT ALL (review R-3 / M-12a). Its verdict would have
+    to be read as an admission (``allow``) or a block (``reject``), and a raw
     ``screening_receipts`` row is bound to neither the fetched bytes nor the
     envelope nor a currency check — so a surface that rendered it would be
     asserting content standing this slice cannot back. Whatever the receipt says,
@@ -424,10 +627,25 @@ def _screening_state(store: Store, owner: OwnerSnapshot, message_id: str) -> Map
     when it is one of :data:`~local_operator.team_bridge.screening.HOLD_CODES`;
     connector-written rows carry free-form values that can quote provider text, so
     anything else is reported as ``unknown_hold``. The screener's private reason
-    is never read. The whole read is READ-ONLY (review R-1).
+    is never read.
+
+    The hold row arrives from the CALLER's one proof snapshot (S-RSA-3) rather
+    than from a reader of its own: a page must not open a connection per row, and
+    the state a row reports has to be the state its admission was decided on.
+
+    AN ADMITTED ROW STILL READS ``unreviewed``, and that is the contract rather
+    than a bug (review R-4): this field is THIS MACHINE's own recorded hold
+    state, never a verdict about the sender's screening. A row can therefore
+    carry admitted content beside ``unreviewed`` because what admitted the
+    content is the read slice's tuple (policy + receipt + confirmed intent),
+    which is a different question from "did this machine hold the message". A
+    renderer must read it that way — "this machine recorded no hold" — and
+    MUST NOT draw it as "nobody reviewed this": a state derived from a receipt
+    (``reviewed``, or M0's removed ``allowed``) is exactly what M-12a forbids,
+    and adding one is a change to the surface contract's closed vocabulary
+    rather than something this layer may introduce on its own.
     """
 
-    hold = _read_state(lambda: store.screening_hold_readonly(owner, message_id))
     if hold is not None:
         code = str(hold.get("hold_code") or "")
         retry = hold.get("retry_at")
@@ -439,9 +657,24 @@ def _screening_state(store: Store, owner: OwnerSnapshot, message_id: str) -> Map
     return {"state": "unreviewed", "hold_code": None, "retry_at": None}
 
 
-def _row(store: Store, owner: OwnerSnapshot, item: Any) -> Mapping[str, Any]:
-    """One allowlisted metadata row: ids, states, coarse codes. Never text."""
+def _row(
+    context: ReadContext,
+    item: MessageRef,
+    raw: Mapping[str, Any],
+    proof: Mapping[str, Any] | None,
+    *,
+    excerpt: bool = True,
+) -> Mapping[str, Any]:
+    """One allowlisted row: ids, states, coarse codes, and admitted content.
 
+    ``content`` is the ONLY field that can carry third-party text, and it is built
+    from the shared predicate's verdict (S-RSA-3): a row whose proof does not
+    admit answers ``content: null`` while still reporting its metadata, so a
+    renderer draws "there is a message here, this build will not show you its
+    text" instead of an empty payload.
+    """
+
+    admission = admit_read_content(context, raw, proof)
     return {
         "message_id": item.message_id,
         "thread_id": item.thread_id,
@@ -462,8 +695,28 @@ def _row(store: Store, owner: OwnerSnapshot, item: Any) -> Mapping[str, Any]:
             "expires_at": item.request_expires_at,
             "ref": item.request_ref,
         },
-        "screening": _screening_state(store, owner, item.message_id),
+        "screening": _screening_state((proof or {}).get("hold")),
+        "content": _content_object(admission, excerpt=excerpt),
     }
+
+
+def _bind_ref(context: ReadContext, item: MessageRef) -> None:
+    """The binding invariant ONE item must satisfy to be THIS owner's (§6.2).
+
+    The SAME rule the connector enforces before it persists a page
+    (``Store._check_binding``): the recipient endpoint is MANDATORY and exact, the
+    account is compared when the server serves one. An item addressed elsewhere —
+    or nowhere — refuses the whole answer here exactly as ``pull.inbox`` refuses
+    it, or this surface would render a row the connector drops.
+    """
+
+    if item.tenant_id != context.owner.tenant_id:
+        raise ReadRefused("wrong_tenant")
+    if item.recipient_endpoint_id != context.owner.endpoint_id:
+        raise ReadRefused("wrong_recipient")
+    recipient = item.recipient_account_id
+    if recipient is not None and recipient != context.owner.account_id:
+        raise ReadRefused("wrong_recipient")
 
 
 def _counts(rows: tuple[Mapping[str, Any], ...]) -> Mapping[str, int]:
@@ -483,18 +736,90 @@ def _counts(rows: tuple[Mapping[str, Any], ...]) -> Mapping[str, int]:
     }
 
 
-def inbox_view(result: ReadInbox) -> Mapping[str, Any]:
-    """The serialisable answer: what a UI may render, and what it must not expect.
+async def read_message_detail(
+    context: ReadContext,
+    *,
+    config_dir: Path,
+    message_id: str,
+    tenant_id: str,
+    wire: Any = None,
+) -> ReadDetail:
+    """ONE message, with its body ONLY through the shared predicate (M1a).
 
-    ``body_included``/``screening_detail_included`` are stated rather than
-    implied: a renderer must not read a metadata row's absence of text as a
-    broken payload, and the two flags are the honest boundary of this slice.
-    ``mode``/``read_only``/``history_reason`` are the standing receipt: an answer
-    read under retained history says so, so a surface cannot present a read-only
-    answer as a live inbox session.
+    Same transport ``pull`` uses for a single message, and the same binding rule
+    as a page, with the two things this surface must NOT do stated as structure:
+    no ``merge_refs``/checkpoint write, and no value returned from the store that
+    a reader can mistake for the body. A message whose proof does not admit
+    answers its metadata and ``content: null`` — held, blocked, unreviewed and
+    not-yet-read all land there, with this machine's coarse screening state and
+    never the screener's reason.
+    """
+
+    store = Store(config_dir)
+    client = wire if wire is not None else wire_for(config_dir)
+    try:
+        # The CONCRETE destination must still be the committed hub, checked before
+        # any request: a client pointed at another origin is a different trust
+        # boundary, not a read.
+        pull._guard_destination(context.owner, client)  # noqa: SLF001 — the shared guard
+    except PullRefused as failure:
+        raise ReadRefused(failure.code) from failure
+    result = await client.message(
+        message_id,
+        tenant_id=tenant_id,
+        access=context.access,
+    )
+    raw: Mapping[str, Any] = result if isinstance(result, Mapping) else {}
+    try:
+        item: MessageRef = project_message_ref(raw)
+    except TeamBridgeTypeError as failure:
+        raise ReadRefused("malformed_page") from failure
+    if item.message_id != message_id:
+        # The id rides the PATH, so an answer for another message is not this
+        # read at all: the same bind-the-answer-to-the-request rule a page gets,
+        # one level below the grammar that already refused a rewritable id.
+        raise ReadRefused("malformed_page")
+    _bind_ref(context, item)
+    proofs = _read_state(lambda: store.content_proof_readonly(context.owner, [item.message_id]))
+    # No await between the snapshot, the admission and the serialization (§4):
+    # the standing checks for the context about to be answered run HERE.
+    _recheck(context, store)
+    return ReadDetail(
+        context=context,
+        item=item,
+        row=_row(context, item, raw, proofs.get(item.message_id), excerpt=False),
+    )
+
+
+def _owner_receipt(context: ReadContext) -> Mapping[str, Any]:
+    """The owner half of every read answer: who this read was made under (§3).
+
+    One function for both surfaces, because a renderer that saw a different
+    receipt on a detail than on the page it came from could not tell a switch of
+    account from a bug. ``hub_origin`` is the ORIGIN, never the canonical URL: the
+    receipt says which hub, not which path a caller may build.
+    """
+
+    return {
+        "endpoint_id": context.owner.endpoint_id,
+        "hub_origin": _origin(context.owner.canonical_base_url),
+        "enrollment_generation": int(context.owner.enrollment_generation),
+    }
+
+
+def detail_view(result: ReadDetail) -> Mapping[str, Any]:
+    """The single-message answer: metadata always, content only when admitted.
+
+    ``body_included``/``screening_detail_included`` say whether THIS payload
+    carries text, so a renderer can tell "this build will not show you the bytes"
+    from "there is nothing here". ``content`` repeats the row's own object rather
+    than inventing a second shape for the same bytes: a list excerpt and a detail
+    body differ only in which window they were cut to, and the field names say
+    which one a caller is holding.
     """
 
     context = result.context
+    content = result.row.get("content")
     return {
         "mode": context.mode,
         "read_only": context.read_only,
@@ -502,16 +827,45 @@ def inbox_view(result: ReadInbox) -> Mapping[str, Any]:
         "read_capability": READ_CAPABILITY,
         "account_id": context.owner.account_id,
         "tenant_id": context.owner.tenant_id,
-        "owner": {
-            "endpoint_id": context.owner.endpoint_id,
-            "hub_origin": _origin(context.owner.canonical_base_url),
-            "enrollment_generation": int(context.owner.enrollment_generation),
-        },
+        "owner": _owner_receipt(context),
+        "item": dict(result.row),
+        "content": dict(content) if isinstance(content, Mapping) else None,
+        "body_included": isinstance(content, Mapping),
+        "screening_detail_included": isinstance(content, Mapping),
+        # §7: local invalidation events are NOT part of this slice, and a surface
+        # told "maybe later" would poll. Said once, as a fact.
+        "local_events": False,
+    }
+
+
+def inbox_view(result: ReadInbox) -> Mapping[str, Any]:
+    """The serialisable answer: what a UI may render, and what it must not expect.
+
+    ``body_included``/``screening_detail_included`` are stated rather than
+    implied: a renderer must not read a metadata row's absence of text as a
+    broken payload, and the two flags are the honest boundary of this slice — with
+    the excerpt predicate in place they say whether ANY row on this page carried
+    content, which is a fact about the page and not about the messages in it.
+    ``mode``/``read_only``/``history_reason`` are the standing receipt: an answer
+    read under retained history says so, so a surface cannot present a read-only
+    answer as a live inbox session.
+    """
+
+    context = result.context
+    has_content = any(row.get("content") for row in result.items)
+    return {
+        "mode": context.mode,
+        "read_only": context.read_only,
+        "history_reason": getattr(context, "reason", None),
+        "read_capability": READ_CAPABILITY,
+        "account_id": context.owner.account_id,
+        "tenant_id": context.owner.tenant_id,
+        "owner": _owner_receipt(context),
         "items": [dict(row) for row in result.items],
         "next_cursor": result.next_cursor,
         "counts": dict(result.counts),
-        "body_included": False,
-        "screening_detail_included": False,
+        "body_included": has_content,
+        "screening_detail_included": has_content,
         # §7: local invalidation events are NOT part of this slice, and a surface
         # told "maybe later" would poll. Said once, as a fact.
         "local_events": False,
@@ -531,7 +885,13 @@ __all__ = [
     "READ_CAPABILITY",
     "READ_MODE_HISTORY",
     "READ_MODE_RECEIVE",
+    "ADMITTABLE_DELIVERY_STATES",
+    "CONTENT_FORMAT",
+    "CONTENT_TRUST",
+    "ContentAdmission",
+    "EXCERPT_MAX_CHARS",
     "ReadContext",
+    "ReadDetail",
     "ReadInbox",
     "ReadRefused",
     "ReceiveReadContext",
@@ -539,8 +899,11 @@ __all__ = [
     "TENANT_ID_PATTERN",
     "THREAD_ID_PATTERN",
     "UNKNOWN_HOLD_CODE",
+    "admit_read_content",
+    "detail_view",
     "inbox_view",
     "read_inbox_page",
+    "read_message_detail",
     "resolve_read_context",
     "wire_for",
 ]

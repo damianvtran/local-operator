@@ -321,6 +321,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
     "local_operator/logger.py": (1, "the process log at the store root"),
+    "local_operator/tools/harness_import_tool.py": (
+        1,
+        "``TOOL_NAME`` (``harness_import``) is the model-facing registry key, "
+        "not a path or an entry of a session directory; the tool reads foreign "
+        "stores through the import adapters and writes transcripts through the "
+        "session store, so it owns no copy-set filename.",
+    ),
+    "local_operator/harness_import/manifest.py": (
+        1,
+        "``INDEX_NAME`` ('index.json') is the O(1) already-imported cache under "
+        "``<config>/imports/``, a machine-local build aid beside the source "
+        "manifests — never an entry of a session directory. ``MANIFEST_NAME`` "
+        "itself is classified in ``COPY_SET_NAMES``.",
+    ),
     "local_operator/agent_profiles.py": (
         3,
         "``SEED_NOTICES_NAME`` (``.seed-notices.json``) and ``SEED_SYNC_LOCK_NAME`` "
@@ -414,6 +428,50 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
         "agent registry), not a file in a session directory",
+    ),
+    # The Librarian is Aida's twin: her store lives at the CONFIG root
+    # (``<config>/librarian/``), beside ``sessions/`` rather than inside one.
+    # Her state, extras ledger and ensure lock are this INSTALL's records, and a
+    # session directory travelling between devices carries none of them.
+    "local_operator/librarian/state.py": (
+        4,
+        "``LIBRARIAN_DIRNAME``/``STATE_NAME``/``EXTRAS_NAME``/``LOCK_NAME``: her "
+        "store under the config root, never an entry of a session",
+    ),
+    "local_operator/librarian/bootstrap.py": (
+        1,
+        "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
+        "agent registry), not a file in a session directory — the Aida precedent",
+    ),
+    "local_operator/librarian/proactive.py": (
+        2,
+        "``ROW_PREFIX``/``EXTRA_ID_PREFIX``: prefixes of AGENT-ROW ids in the "
+        "proactive ledger, never filenames or entries of a session directory",
+    ),
+    "local_operator/tui/librarian_control.py": (
+        1,
+        "``MODULE_NAME`` (``local_operator.librarian``): a dotted MODULE name the "
+        "control plane imports lazily, not a path or a session entry",
+    ),
+    # The Library's derived catalog and authoritative metadata live under the
+    # CONFIG root too: the index is a discardable cache under
+    # ``<config>/cache/library/`` and the metadata database is
+    # ``<config>/library/library.sqlite3``. Neither is an entry a session
+    # directory holds, and a moved session rebuilds its rows from its journal.
+    "local_operator/library/index.py": (
+        2,
+        "``INDEX_DIRNAME``/``INDEX_FILENAME``: the derived catalog cache at "
+        "``<config>/cache/library/index.json``, never an entry of a session",
+    ),
+    "local_operator/library/metadata.py": (
+        2,
+        "``DB_DIRNAME``/``DB_FILENAME``: the cross-session metadata database at "
+        "``<config>/library/library.sqlite3``, never an entry of a session",
+    ),
+    "local_operator/library/identity.py": (
+        1,
+        "``ASSET_ID_PREFIX`` (``la_``): the Library asset id's prefix, an identifier "
+        "fragment rather than a path — no file carries this name",
     ),
     "local_operator/aida/naming.py": (
         1,
@@ -758,7 +816,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
         "invalidate one conversation's rows (review round 1, Q3)",
     ),
-    "local_operator/tui/sidebar_pins.py": (1, "the sidebar's pinned-session list"),
+    "local_operator/tui/sidebar_pins.py": (
+        3,
+        "``PINS_FILE``/``UNPINNED_FILE``/``LOCK_NAME``: the sidebar's pinned-session "
+        "index, its deliberate-unpin ledger and their write lock, all at the config "
+        "root — install-level state, never an entry of a session directory",
+    ),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
     "local_operator/tui/resume_click.py": (1, "the desktop app's bundle/binary name"),
     "local_operator/tui/input_decode.py": (

@@ -119,6 +119,15 @@ function isAnswerableStatus(status: string | undefined): boolean {
 	return value === "open" || value === "timed_out";
 }
 
+/** An ask whose deadline has passed: the agent goes ahead without it.
+ *
+ *  The same rule as ``lib/asks.ts`` ``isLapsed`` — the status alone, judged on the
+ *  runtime's host, never the phone's clock — restated for the same reason as
+ *  above. */
+function isLapsedRow(row: PolicyAskRow): boolean {
+	return (row.status ?? "open") === "timed_out";
+}
+
 /**
  * Classify one projection frame's ask fields.
  *
@@ -136,6 +145,17 @@ function isAnswerableStatus(status: string | undefined): boolean {
  * positive tally: the outstanding asks are the ones the bound dropped, and
  * calling that "settled" would spend the view's one decision on a claim the frame
  * contradicts.
+ *
+ * A LAPSED ASK IS NOT PENDING for this decision. Its card offers no answer (the
+ * phone shows it read-only), and a stopped conversation's screen now carries its
+ * asks from the index — Ben's 2026-10-15 specimens are exactly that: past their
+ * deadline, the agent long since moved on. Opening the modal sheet over the
+ * conversation for them would spend the view's one open on a queue with nothing
+ * to answer, so a frame of only lapsed rows reads like settled ones (clause 3).
+ * A runtime from before #2388 still counts them in the tally, so the
+ * dropped-rows guard compares the tally with the answerable rows NAMED, lapsed
+ * or not: a larger tally still means a row the frame does not carry, against
+ * either runtime (a current one counts open asks only).
  */
 export function readQueue(
 	rows: readonly PolicyAskRow[] | undefined | null,
@@ -143,12 +163,13 @@ export function readQueue(
 ): QueueReading {
 	const published = Array.isArray(rows) ? rows : [];
 	if (published.length > 0) {
-		if (published.some((row) => isAnswerableStatus(row?.status))) return "pending";
-		// Rows, and none of them outstanding. That is "everything addressed" only if
-		// the tally agrees: ``asks_open`` counts outstanding asks BEFORE the wire's
+		const outstanding = published.filter((row) => isAnswerableStatus(row?.status));
+		if (outstanding.some((row) => !isLapsedRow(row))) return "pending";
+		// Rows, and none of them answerable now. That is "everything addressed" only
+		// if the tally agrees: ``asks_open`` counts outstanding asks BEFORE the wire's
 		// text bound drops rows, and the drop order keeps newer settled rows over an
 		// older timed-out one.
-		if (typeof tally === "number" && tally > 0) return "unresolved";
+		if (typeof tally === "number" && tally > outstanding.length) return "unresolved";
 		return "settled";
 	}
 	if (tally === 0) return "empty";
@@ -170,9 +191,12 @@ export function readQueue(
  * under-open, never override a refusal.
  *
  * ONE RESIDUAL LIMIT, not closable on the client: the runtime projects at most 20
- * rows before it computes the tally, so an outstanding timed-out ask that sorts
- * behind 20 newer rows is on neither field and no client can name it. The residue
- * is at most one extra auto-open, which is the surface the feature exists to show.
+ * rows before it computes the tally, so an outstanding ask that sorts behind 20
+ * newer rows is on neither field and no client can name it. A current runtime
+ * cannot reach that (open asks are capped at 8 and a timed-out one is not in the
+ * tally); a runtime from before #2388 could, by timed-out asks piling up. The
+ * residue is at most one extra auto-open, which is the surface the feature exists
+ * to show.
  */
 export function namesEveryOutstanding(
 	tally: number | undefined | null,

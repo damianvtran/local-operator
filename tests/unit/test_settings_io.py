@@ -77,6 +77,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
+        OPENROUTER_RETIRE_BELOW_TPS,
     )
 
     # The mesh audit log's three bounds, taken from the module that READS them:
@@ -117,6 +118,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_PINNED_FALLBACK,
         RetrySettings,
     )
+    from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
         DEFAULT_DELEGATED_MAX_AGE_HOURS,
@@ -200,6 +202,7 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageAwareFallback": retry.usage_aware_fallback,
         "retry.usageReservePercent": retry.usage_reserve_percent,
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
+        "retry.accountSelectionPolicy": retry.account_selection_policy,
         "retry.fallbackChains": dict(retry.fallback_chains),
         "retry.pinnedFallback": DEFAULT_PINNED_FALLBACK,
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
@@ -251,6 +254,11 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
         "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
+        # The pad cap's reader falls back to this module constant when the key is
+        # absent (``scratchpad.scratchpad_budget_bytes``); the registry row
+        # carries a literal because settings_io stays off the write path's
+        # import graph, so this pin is what makes a drift red.
+        "session.scratchpad.max_bytes": SCRATCHPAD_TOTAL_BUDGET_BYTES,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         # Read at every child build by ``subagent.read_slim_child_knowledge``;
         # the constant sits beside that reader, not here, so the registry
@@ -338,6 +346,11 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.openrouter.preferred_max_latency": (
             DEFAULT_CONFIG.values["providers"]["openrouter"]["preferred_max_latency"]
         ),
+        # Three restatements of one number (registry literal, DEFAULT_CONFIG, the
+        # consumer constant): the registry default is checked against the
+        # constant here, and DEFAULT_CONFIG against it in
+        # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
+        "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -380,6 +393,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers.update(_monitor_consumer_defaults())
     consumers.update(_supplements_consumer_defaults())
     consumers.update(_team_bridge_consumer_defaults())
+    # ``asks.lapsed_visible_for``'s reader table lives beside its consumer in
+    # the stdlib-only store; the registry row carries a literal (D7).
+    from local_operator.asks.store import DEFAULT_LAPSED_VISIBLE_FOR
+
+    consumers["asks.lapsed_visible_for"] = DEFAULT_LAPSED_VISIBLE_FOR
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -402,6 +420,17 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
     consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
+    # The Librarian keys, asked of the package that reads them — the same split
+    # and the same reason as the Aida block above.
+    from local_operator.librarian import bootstrap as librarian_bootstrap
+    from local_operator.librarian import proactive as librarian_proactive
+
+    consumers["librarian.enabled"] = librarian_proactive.DEFAULT_ENABLED
+    consumers["librarian.name"] = librarian_bootstrap.SESSION_TITLE
+    consumers["librarian.cadence.at"] = librarian_proactive.DEFAULT_CADENCE_AT
+    consumers["librarian.cadence.paused"] = librarian_proactive.DEFAULT_PAUSED
+    consumers["librarian.cadence.max_extra_per_day"] = librarian_proactive.DEFAULT_MAX_EXTRA_PER_DAY
+    consumers["librarian.cadence.min_gap_minutes"] = librarian_proactive.DEFAULT_MIN_GAP_MINUTES
 
     # The wake-trigger keys, asked of the layer that reads them
     # (``local_operator/wakes/triggers/``). The registry rows carry literals
@@ -453,6 +482,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["speech.voice.language"] = voicing_descriptor.DEFAULT_LANGUAGE
     consumers["speech.voice.accent"] = voicing_descriptor.DEFAULT_ACCENT
     consumers["speech.voice.instructions"] = voicing_descriptor.DEFAULT_SPEECH_INSTRUCTIONS
+
+    # The cleanup policy's own default, asked of the module the routes read.
+    from local_operator.stt import cleanup as cleanup_policy
+
+    consumers["speech.transcription.cleanup"] = cleanup_policy.DEFAULT_CLEANUP
     return consumers
 
 
@@ -611,7 +645,6 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.rate": "tui/settings.py derives its defaults from this registry",
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
-    "hub.merge_model": "free text; empty means 'use the default model', no constant",
     "subagents.models.lo": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.med": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.hi": "free text; empty removes the tier; 'default' tracks it, no constant",
@@ -966,6 +999,10 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # arbitrary "round-trip-probe" spelling would do fine — but a real name
     # keeps the sample honest about what the field carries).
     settings_io._validate_aida_name: "Sovereign",
+    settings_io._validate_librarian_name: "Archivist",
+    # A subagent tier's ordinary form is still a bare selector (#2428 adds the
+    # ``{model, effort}`` mapping beside it; test_config covers that form).
+    settings_io.validate_tier_value: "openai/gpt-5-mini",
 }
 
 
@@ -1389,7 +1426,7 @@ def test_openrouter_defaults_mean_no_opinion() -> None:
         for key in settings_io.BY_KEY
         if key.startswith("providers.openrouter.")
     }
-    assert len(defaults) == 14
+    assert len(defaults) == 15
     # STILL None with all 14 defaults present, including the ON-by-default
     # ``provider_affinity``. That is the point of asserting it here: that key is
     # a HARNESS switch read by ``SessionStreamFn._affinity_enabled``, and it is
@@ -3123,3 +3160,62 @@ def test_delegated_rows_round_trip_through_the_policy_reader(manager: ConfigMana
     )
     policy = policy_from_config(ConfigManager(manager.config_dir))
     assert (policy.delegated_enabled, policy.delegated_max_age_hours) == (False, 96)
+
+
+class TestTheLapsedAskWindowRow:
+    """``asks.lapsed_visible_for`` (decisions D6/D7): a four-choice dropdown."""
+
+    def test_the_row_is_a_nested_enum_in_its_own_live_section(self) -> None:
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        assert setting.path == ("asks", "lapsed_visible_for")
+        assert setting.kind is settings_io.Kind.ENUM
+        assert setting.default == "7d"
+        section = next(s for s in settings_io.SECTIONS if s.name == setting.section)
+        assert section.name == "asks"
+        assert section.scope is settings_io.Scope.LIVE
+
+    def test_the_choices_are_exactly_the_readers_table(self) -> None:
+        from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
+
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        values = [choice.value for choice in setting.choices]
+        assert values == ["at_expiry", "1h", "24h", "7d"]
+        assert set(values) == set(LAPSED_VISIBLE_FOR_S)
+
+    @pytest.mark.parametrize("value", ["at_expiry", "1h", "24h", "7d"])
+    def test_every_choice_validates(self, value: str) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["asks.lapsed_visible_for"], value) is None
+
+    @pytest.mark.parametrize("value", ["2h", "", "7D", 3600, None])
+    def test_a_value_outside_the_dropdown_is_refused(self, value: object) -> None:
+        assert (
+            settings_io.validate(settings_io.BY_KEY["asks.lapsed_visible_for"], value) is not None
+        )
+
+    def test_the_help_fits_with_the_default_clause(self) -> None:
+        setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
+        assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+
+def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
+    manager: ConfigManager,
+) -> None:
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+
+    assert setting.kind is Kind.ENUM
+    assert setting.default == "auto"
+    assert {choice.value for choice in setting.resolved_choices} == {
+        "auto",
+        "provider",
+        "client",
+        "off",
+    }
+    assert settings_io.read_setting(manager, setting) == "auto"
+
+    settings_io.write_setting(manager, setting, "off")
+    assert settings_io.read_setting(manager, setting) == "off"
+
+    with pytest.raises(ValueError):
+        settings_io.write_setting(manager, setting, "bogus")
+    # The rejected write did not land.
+    assert settings_io.read_setting(manager, setting) == "off"

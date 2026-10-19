@@ -1218,7 +1218,13 @@ def _send_card(app, call_id: str, message: str) -> ToolCard:
     """The visible `send` row a quiet turn paints when it replies."""
     card = ToolCard(call_id, "send", {"target": "peer-a", "message": message})
     app._append_block(card)
-    card.mark_done("delivered")
+    # A painted success is not execution evidence. Supply the same typed end
+    # this fixture represents; the acceptance test's members/assertions stay
+    # unchanged, while manual state-only cards intentionally remain UNKNOWN.
+    from local_operator.harness.types import ToolResult
+
+    result = ToolResult(tool_call_id=call_id, tool_name="send")
+    card.mark_done("delivered", result=result)
     return card
 
 
@@ -1335,6 +1341,51 @@ class TestQuietGroupFold:
             bar.toggle_expanded()
             await pilot.pause()
             assert card.display, "opening the bar lists the work it triggered"
+
+    @pytest.mark.asyncio
+    async def test_the_bar_states_the_hidden_work_below_the_old_three_action_gate(self) -> None:
+        """The summary carries the KINDS the fold hides, not just the count.
+
+        Design round 1, D-1: with `mixed_actions` gated at >=3 real tools, this
+        two-receipt/one-tool run read only `messages · 2` while expanding to
+        three rows — a reader who counts got 3 != 2, and the work row (the
+        actionable kind: a real tool the operator may care about) was invisible
+        on the collapsed line. The design's fact shape (quiet-turns.md §5)
+        defines `actions` as "n non-quiet tool rows" with no such gate.
+        """
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            app._append_block(ToolCard("t1", "bash", {"command": "ls"}))
+            await pilot.pause()
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            row = bar._build_row(100).plain
+            assert "messages · 2" in row
+            assert "1 action" in row, f"the hidden work row must be stated: {row!r}"
+            assert not bar.group.mixed_actions, "the old gate did not fire, yet the clause is owed"
+            # A group with NO work states no actions clause (never `0 actions`).
+            bar.toggle_expanded()
+            await pilot.pause()
+            assert "0 action" not in row
+
+    @pytest.mark.asyncio
+    async def test_a_workless_group_states_no_actions_clause(self) -> None:
+        """The non-zero guard: receipts alone must not gain `0 actions`."""
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            await _deliver(pilot, app, session, "one", "p1")
+            await _deliver(pilot, app, session, "two", "p2")
+            await _settle_for_quiet_bars(pilot, app)
+            (bar,) = _quiet_bars(app)
+            row = bar._build_row(100).plain
+            assert "messages · 2" in row
+            assert "action" not in row, f"receipt-only group states no work: {row!r}"
 
     @pytest.mark.asyncio
     async def test_a_user_row_closes_the_run_and_later_receipts_form_another_group(self) -> None:
@@ -1547,6 +1598,135 @@ class TestQuietGroupFold:
             assert bars[0] is first and bars[0].group == frozen, "closed facts moved"
 
     @pytest.mark.asyncio
+    async def test_one_completed_peer_exchange_quiet_close_folds_at_idle_without_user_opener(
+        self,
+    ) -> None:
+        """One received note plus its successful send is the original idle case.
+
+        Two incoming receipts already satisfy the default quiet-group threshold;
+        that fixture cannot establish this single-exchange acceptance. Do not add
+        a USER/answer or another receipt to lend this case unrelated authority.
+        The send is the existing completed-card fixture, not real IPC delivery;
+        the quiet start/end use the actual app message handlers.
+        """
+        import json
+        import os
+        from pathlib import Path
+
+        from local_operator.harness.types import (
+            QUIET_TURN_KEY,
+            TextContent,
+            ToolExecutionEndEvent,
+            ToolExecutionStartEvent,
+            ToolResult,
+        )
+        from local_operator.tui.events import ToolEnded, ToolStarted
+        from local_operator.tui.widgets.transcript import work_record_of_block
+        from tests.unit.tui.test_owned_work_context import _capture_mounted_frame
+
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        body = "One synthetic peer request, acknowledged without another user turn."
+        ack = "Acknowledged the single synthetic request."
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            assert app._session is session
+            await _deliver(pilot, app, session, body, "single-peer")
+            send = _send_card(app, "single-send", ack)
+            await pilot.pause()
+            view = app.query_one(TranscriptView)
+            peers = _peer_blocks(app)
+            assert len(peers) == 1
+            peer = peers[0]
+            expected_ids = [
+                work_record_of_block(peer).source_id,
+                work_record_of_block(send).source_id,
+            ]
+
+            def capture(phase: str) -> None:
+                # Export before assertions too: a missing bar must leave evidence
+                # of the real styled app, not only an assertion's widget repr.
+                _capture_mounted_frame(app, view, phase)
+                directory = os.environ.get("OWNED_WORK_EVIDENCE_DIR")
+                if directory:
+                    path = Path(directory) / f"{phase}.json"
+                    facts = json.loads(path.read_text())
+                    # Keep the discriminating path independent of optional
+                    # expansion/payload APIs: first prove whether a bar exists.
+                    facts["exchange"] = {
+                        "bar_count": len(_quiet_bars(app)),
+                        "visible_block_types": [
+                            type(block).__name__ for block in view.blocks() if block.display
+                        ],
+                        "delivered_message_ids": sorted(app._live_peer_receipts),
+                        "original_source_ids": expected_ids,
+                    }
+                    path.write_text(json.dumps(facts, indent=2))
+
+            capture("single-before-quiet-close")
+            assert not any(
+                isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks()
+            )
+            assert "single-peer" in app._live_peer_receipts
+            assert send.state == "success"
+            assert app._welcome is not None
+            assert not app._welcome_visible and app._welcome.region.height == 0
+            app.post_message(
+                ToolStarted(
+                    ToolExecutionStartEvent(
+                        tool_call_id="single-quiet",
+                        tool_name="no_reply",
+                        args={},
+                    )
+                )
+            )
+            app.post_message(
+                ToolEnded(
+                    ToolExecutionEndEvent(
+                        tool_call_id="single-quiet",
+                        tool_name="no_reply",
+                        result=ToolResult(
+                            tool_call_id="single-quiet",
+                            tool_name="no_reply",
+                            content=[TextContent(text="Quiet.")],
+                            details={QUIET_TURN_KEY: True},
+                        ),
+                    )
+                )
+            )
+            await pilot.pause()
+            capture("single-quiet-close-immediate")
+            for _ in range(10):
+                await pilot.pause()
+            capture("single-settled-idle")
+            bars = _quiet_bars(app)
+            assert (
+                len(bars) == 1
+            ), "one completed peer exchange must condense at idle without another receipt or USER"
+            bar = bars[0]
+            assert (bar.group.count, bar.group.actions) == (1, 1)
+            assert not bar._expanded
+            assert [
+                work_record_of_block(member).source_id for member in bar._members
+            ] == expected_ids
+            assert [type(member).__name__ for member in bar._members] == [
+                "PeerMessageBlock",
+                "ToolCard",
+            ]
+            assert not peer.display and not send.display
+            assert not any(card.tool_name == "no_reply" for card in app.query(ToolCard))
+            assert [block for block in view.blocks() if block.display][-1] is bar
+            bar.toggle_expanded()
+            await pilot.pause()
+            capture("single-expanded")
+            assert bar._expanded and peer.display and send.display
+            assert peer.text() == body and send.retained_payloads()[0]["message"] == ack
+            assert send.tool_call_id == "single-send"
+            assert not any(
+                isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks()
+            )
+
+    @pytest.mark.asyncio
     async def test_the_idle_shape_folds_to_one_bar_with_nothing_after_it(self) -> None:
         """The operator's idle acceptance: [receipt, send, receipt, send] with
         the quiet `no_reply` pair arriving present-but-hidden (S1) — ONE bar,
@@ -1716,10 +1896,18 @@ class TestQuietGroupFold:
 
     @pytest.mark.asyncio
     async def test_a_member_re_read_as_a_splitter_dissolves_the_bar(self, monkeypatch) -> None:
-        """Belt-for-belt: if a member ever RE-READS as a splitter (the mount
-        order and the empty-assistant boundary should make this unreachable),
-        the restate unfolds rather than keep hiding — the safe direction every
-        refusal in this file takes."""
+        """A member that re-reads as a splitter gives up only THAT row.
+
+        This used to unfold the whole bar (every member shown, the bar removed).
+        That is the reported flicker: on a live turn a member re-reads as a
+        splitter whenever its own row becomes attention-bearing — a tool that
+        FAILED, an interruption, a `never sent`, an ask — so a fold that had
+        just swallowed a batch handed all of its rows back a frame later and the
+        next append folded them again. The fold now releases the splitter and the
+        rows behind it (the rows a reader must see) and keeps standing over the
+        rows it already condensed, which is the latch the other clients hold
+        (`docs/design/quiet-turns.md` §5, native: "once condensed stays
+        condensed")."""
         import local_operator.tui.widgets.transcript as transcript_mod
 
         session = FakeSession()
@@ -1733,6 +1921,7 @@ class TestQuietGroupFold:
             await _deliver(pilot, app, session, "two", "p2")
             await _settle_for_quiet_bars(pilot, app)
             (bar,) = _quiet_bars(app)
+            held = list(bar._members)
 
             real = transcript_mod.quiet_group_record_of
             flip = {"on": False}
@@ -1751,6 +1940,18 @@ class TestQuietGroupFold:
             await pilot.pause()
 
             blocks = app.query_one(TranscriptView).blocks()
-            assert bar not in blocks, "the refused bar is removed"
+            assert bar in blocks, "the fold keeps standing over the rows it condensed"
             assert card.display, "the row it would have hidden is visible again"
-            assert all(p.display for p in _peer_blocks(app))
+            held_ids = {id(member) for member in bar._members}
+            assert all(
+                peer.display for peer in _peer_blocks(app) if id(peer) not in held_ids
+            ), "every row the fold released shows in place"
+            assert held[0] in bar._members, "the rows before the splitter stay folded"
+            assert not held[0].display, "and stay hidden, which is the point of the fold"
+            # A latched bar re-derives its FACTS from the rows it still holds:
+            # the released splitter was a work row, and a bar that went on
+            # counting it would claim work it no longer hides.
+            assert len(bar._members) == 1
+            assert bar.group.count == 1, "one receipt, stated as one"
+            assert bar.group.actions == 0, "the released work row is not claimed"
+            assert len(bar.group.row_ids) == 1

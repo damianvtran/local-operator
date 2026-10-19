@@ -207,37 +207,78 @@ describe("SessionScreen and queued asks", () => {
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 	});
 
-	it("takes a foreign row's `open` to that conversation, and does not pop back", async () => {
-		/* r2-M1 (agent review round 2), a reproduced functional regression inside
-		   the U2 back-handling: the sheet used to navigate and THEN close itself,
-		   and closing gives the sheet's entry back with `history.back()` — so the
-		   entry the navigation had just pushed was the one the pop discarded and
-		   the hash landed back on `#/s/asks`. Two facts are asserted, because they
-		   fail separately: the route the reader ends on, and the state the route's
-		   entry carries (the flag leaking is the mechanism, and a router that
-		   spreads the current state is what let it leak). */
+	it("lists only this conversation's asks when its sheet is opened", async () => {
+		/* Ben's report (2026-10-15): opening one session's questions showed every
+		   session's asks. The aggregate read returns all of them; the sheet opened
+		   from a conversation must show that conversation's rows and no other. */
 		const { getAsks } = await import("./api");
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ ask_id: "other-1", session_id: "other" })],
+			asks: [
+				ask({ ask_id: "mine-1", session_id: "mine" }),
+				ask({
+					ask_id: "other-1",
+					session_id: "other",
+					questions: [
+						{
+							id: "q1",
+							question: "rename the other workspace?",
+							options: [{ label: "rename", description: "" }],
+							multi: false,
+							secret: false,
+							persist: false,
+						},
+					],
+				}),
+			],
 		});
 		window.location.hash = "#/s/mine";
 		render(<SessionScreen sessionId="mine" />);
-		slot = { projection: projection({ asks: [ask()], asks_open: 1 }), connected: true };
+		slot = {
+			projection: projection({
+				session_id: "mine",
+				asks: [ask({ ask_id: "mine-1", session_id: "mine" })],
+				asks_open: 1,
+			}),
+			connected: true,
+		};
 		render(<SessionScreen sessionId="mine" />);
 		fireEvent.click(screen.getByTestId("ask-dock"));
-		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
-		const entriesBefore = window.history.length;
-		fireEvent.click(screen.getByRole("button", { name: "open" }));
-		await waitFor(() => expect(window.location.hash).toBe("#/s/other"));
-		expect(Boolean(window.history.state?.askSheet)).toBe(false);
-		/* REPLACE, not push (agent review round 3, NIT): a push would satisfy the
-		   two assertions above while leaving the sheet's own entry — and its
-		   stale `askSheet` — in the stack, so the next Back would land on a
-		   closed sheet. The entry count is what tells the two apart. */
-		expect(window.history.length).toBe(entriesBefore);
-		/* Give a queued traversal every chance to undo it. */
-		await new Promise((resolve) => setTimeout(resolve, 40));
-		expect(window.location.hash).toBe("#/s/other");
+		const dialog = await screen.findByRole("dialog");
+		await waitFor(() => expect(dialog.querySelectorAll("[data-ask-status]").length).toBeGreaterThan(0));
+		expect(dialog.textContent).toContain("queue behind the flag?");
+		expect(dialog.textContent).not.toContain("rename the other workspace?");
+		expect(dialog.querySelectorAll("[data-ask-status]").length).toBe(1);
+		expect(dialog.querySelector('[data-ask-id="mine-1"]')).not.toBeNull();
+	});
+
+	it("gives a lapsed-only queue a quiet header entry that does not say waiting", () => {
+		render(<SessionScreen sessionId="s1" />);
+		slot = {
+			/* #2388: the runtime counts a timed-out ask settled, so the tally is 0 while
+			   the row rides; the entry is gated on the ROWS, so the Dismiss door stays. */
+			projection: projection({ asks: [ask({ status: "timed_out" })], asks_open: 0 }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+		const entry = screen.getByRole("button", { name: "queued asks in this session (1 timed out)" });
+		expect(entry.textContent).toBe("? 1");
+		expect(entry.className).not.toMatch(/text-accent/);
+		expect(screen.queryByRole("button", { name: /waiting/ })).toBeNull();
+	});
+
+	it("counts only the offered questions in the header when lapsed ones sit beside them", () => {
+		render(<SessionScreen sessionId="s1" />);
+		slot = {
+			projection: projection({
+				asks: [ask(), ask({ ask_id: "ask-8", status: "timed_out" })],
+				asks_open: 1,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+		expect(
+			screen.getByRole("button", { name: "queued asks in this session (1 question waiting)" }),
+		).toBeTruthy();
 	});
 
 	it("collapses the sheet on Back instead of leaving the conversation", async () => {

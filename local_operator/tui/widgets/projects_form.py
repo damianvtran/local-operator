@@ -1,4 +1,4 @@
-"""The projects page's FORM state (S6d parity P4): create a project as a page.
+"""The projects page's FORM state (S6d parity P4, LOH-19 P2): create or edit a project as a page.
 
 Why a form at all, and why it is a MODE of the projects page rather than a
 screen of its own: the spec's information architecture makes the form a third
@@ -28,6 +28,15 @@ scaffold is never submitted (see :meth:`ProjectsFormPage.collect`), so a
 project created by someone who never touched the editor has NO description
 rather than a body made of headings nobody wrote. It is text, not a cage —
 selecting it all and deleting is how a reader clears it.
+
+EDIT MODE (LOH-19 P2) is the same page, not a fork: :meth:`prefill` fills it
+with a project's current values, the scaffold rule does not apply (an empty
+description there is a value the reader may be clearing), and the key stops
+following the title because the handle is what every other surface references.
+Saving collects a DIFF against the state the form opened on
+(:func:`~local_operator.tui.projects_edit.build_edit_plan`) so one changed
+field writes one field — the store's per-field last-writer-wins contract —
+while a save with nothing changed is a receipt, never a write.
 """
 
 from __future__ import annotations
@@ -41,6 +50,11 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Input, Static, TextArea
 
+# i18n: the field placeholders and readback rows below are user-facing
+# form copy; they live in tui.projects with the rest of the projects surface.
+from local_operator.i18n.keys import tui_projects as _x
+from local_operator.i18n.keys import tui_projects_edit as _e
+from local_operator.i18n.text import tr
 from local_operator.projects import (
     ATTRIBUTION_MAX,
     DESCRIPTION_MAX,
@@ -50,7 +64,11 @@ from local_operator.projects import (
     TITLE_MAX,
     ProjectEdit,
 )
+from local_operator.tui.projects_edit import ProjectEditState, build_edit_plan
 from local_operator.tui.projects_render import StyleFor, _styles
+
+_t = tr("tui.projects")
+_te = tr("tui.projects_edit")
 
 #: The starter text the description editor opens with on CREATE. Starter text,
 #: not a value — see the module docstring.
@@ -230,12 +248,30 @@ class FormCycleRow(Static):
         self._ink = _styles(style_for)("muted")
         self._repaint()
 
-    def set_value(self, value: str) -> None:
-        self._value = value if value in self._options else self._options[0]
+    def set_value(self, value: str, *, keep_foreign: bool = False) -> None:
+        """Set the row's word.
+
+        ``keep_foreign`` is the EDIT form's rule (LOH-19 P2): a row written by
+        a newer build may carry a word this build does not offer, and letting
+        the first option swallow it would make an unrelated field's save
+        rewrite the status (the store's own forward-compat rule is that an
+        unknown word is carried through untouched). The word stays on screen
+        verbatim until the reader steps it.
+        """
+        if value in self._options or (keep_foreign and value):
+            self._value = value
+        else:
+            self._value = self._options[0]
         self._repaint()
 
     def _step(self, delta: int) -> None:
-        index = (self._options.index(self._value) + delta) % len(self._options)
+        if self._value in self._options:
+            index = self._options.index(self._value)
+        else:
+            # A foreign word has no index; stepping from it lands on the
+            # nearest end of the vocabulary rather than raising.
+            index = -1 if delta > 0 else 0
+        index = (index + delta) % len(self._options)
         self._value = self._options[index]
         self._repaint()
 
@@ -261,7 +297,7 @@ class FormCycleRow(Static):
 
 
 class ProjectsFormPage(Vertical):
-    """The create form: the fields, their validation, and the refusal rows.
+    """The project form: the fields, their validation, and the refusal rows.
 
     Everything the form needs to be honest lives here; everything it needs to
     WRITE lives in the host, which it reaches only through ``on_submit``.
@@ -300,13 +336,25 @@ class ProjectsFormPage(Vertical):
         on_cancel: Callable[[], None],
         *,
         on_state_change: Callable[[], None] | None = None,
+        on_edit_submit: Callable[[ProjectEdit], None] | None = None,
+        on_no_change: Callable[[], None] | None = None,
         known_teams: Iterable[str] = (),
         style_for: StyleFor | None = None,
     ) -> None:
         super().__init__(classes="projects-form-page")
         self._on_submit = on_submit
+        #: The EDIT mode's write and its no-op receipt (LOH-19 P2). Both are
+        #: optional so the CREATE path's host contract is unchanged: a host
+        #: that only knows how to create keeps working against the same page.
+        self._on_edit_submit = on_edit_submit
+        self._on_no_change = on_no_change
         self._on_cancel = on_cancel
         self._on_state_change = on_state_change
+        #: The state the form opened on, when it is an EDIT form. ``None`` is
+        #: the create form, and every create rule branches on it: no scaffold
+        #: hint, no title-drives-the-key, and the collected values are the full
+        #: set rather than the diff.
+        self._edit_initial: ProjectEditState | None = None
         self._style_for = style_for
         self._known_teams = tuple(known_teams)
         #: True while the key follows the title. Editing the key detaches it;
@@ -327,18 +375,32 @@ class ProjectsFormPage(Vertical):
         #: set the initial values (``None`` until then, which reads as clean).
         self._initial: tuple[str, ...] | None = None
 
-        self._title_input = Input(placeholder="a human-readable name", id="projects-form-title")
-        self._key_input = Input(placeholder="the reference handle", id="projects-form-key")
+        self._title_input = Input(
+            placeholder=_t(_x.form_title_placeholder()), id="projects-form-title"
+        )
+        self._key_input = Input(placeholder=_t(_x.form_key_placeholder()), id="projects-form-key")
         self._description = TextArea(id="projects-form-description")
         self._status_row = FormCycleRow(
             PROJECT_STATUSES, "planning", id="projects-form-status", style_for=style_for
         )
-        self._tags_input = Input(placeholder="comma or space separated", id="projects-form-tags")
-        self._team_input = Input(placeholder="team", id="projects-form-team")
-        self._owner_input = Input(placeholder="owner", id="projects-form-owner")
-        self._target_input = Input(placeholder="YYYY-MM-DD", id="projects-form-target")
-        self._start_input = Input(placeholder="YYYY-MM-DD", id="projects-form-start")
-        self._estimate_input = Input(placeholder="points", id="projects-form-estimate")
+        self._tags_input = Input(
+            placeholder=_t(_x.form_tags_placeholder()), id="projects-form-tags"
+        )
+        self._team_input = Input(
+            placeholder=_t(_x.form_team_placeholder()), id="projects-form-team"
+        )
+        self._owner_input = Input(
+            placeholder=_t(_x.form_owner_placeholder()), id="projects-form-owner"
+        )
+        self._target_input = Input(
+            placeholder=_t(_x.form_date_placeholder()), id="projects-form-target"
+        )
+        self._start_input = Input(
+            placeholder=_t(_x.form_date_placeholder()), id="projects-form-start"
+        )
+        self._estimate_input = Input(
+            placeholder=_t(_x.form_estimate_placeholder()), id="projects-form-estimate"
+        )
         self._unit_row = FormCycleRow(
             ESTIMATE_UNITS, "points", id="projects-form-unit", style_for=style_for
         )
@@ -436,6 +498,7 @@ class ProjectsFormPage(Vertical):
         """
         self._key_follows = True
         self._key_written = ""
+        self._edit_initial = None
         self._title_input.value = ""
         self._key_input.value = ""
         self._description.text = DESCRIPTION_SCAFFOLD
@@ -450,6 +513,7 @@ class ProjectsFormPage(Vertical):
         self.clear_errors()
         self.disarm_confirm()
         self._key_block.set_hint("follows the title until you edit it")
+        self._description_block.set_hint(DESCRIPTION_HINT)
         self._tags_block.set_hint(self._tags_hint())
         try:
             # (1, 0) is the blank row under `## Summary` (see `on_mount`) — UX
@@ -459,6 +523,54 @@ class ProjectsFormPage(Vertical):
             pass
         # Un-armed until the host takes the baseline it will return to.
         self._initial = None
+
+    def prefill(self, state: ProjectEditState) -> None:
+        """Open the EDIT mode on one project's current values (LOH-19 P2).
+
+        Called by the host AFTER ``reset`` and after the page is displayed, so
+        every field already has its create-time state and this is the one
+        write that turns it into an edit. The order matters: ``_edit_initial``
+        is armed FIRST, because assigning the title below raises the same
+        change event the create form reads as "the reader typed" and would
+        otherwise auto-slug the key out from under the stored one.
+
+        The key does NOT follow the title here: the handle is what every other
+        surface references, so an edit that only changes the title must not
+        silently rename it. Clearing it is refused by the builder (a project
+        needs a key), which is why the create form's re-follow rule has no
+        edit counterpart.
+        """
+        self._edit_initial = state
+        self._key_follows = False
+        self._key_written = ""
+        self._title_input.value = state.title
+        self._key_input.value = state.name
+        self._description.text = state.description
+        self._status_row.set_value(state.status, keep_foreign=True)
+        self._tags_input.value = ", ".join(state.tags)
+        self._team_input.value = state.team
+        self._owner_input.value = state.owner
+        self._start_input.value = state.start_date
+        self._target_input.value = state.target_date
+        self._estimate_input.value = state.estimate
+        self._unit_row.set_value(state.estimate_unit, keep_foreign=True)
+        self.clear_errors()
+        self.disarm_confirm()
+        # The scaffold hint describes text that is not here; the edit form's
+        # description is the stored one, and an empty one is honestly empty.
+        self._description_block.set_hint("")
+        self._key_block.set_hint(_te(_e.key_hint_edit()))
+        self._tags_block.set_hint(self._tags_hint())
+        self.scroll_fields_home()
+        try:
+            self._description.move_cursor((0, 0))
+        except Exception:  # noqa: BLE001 — caret placement is a nicety
+            pass
+
+    @property
+    def edit_mode(self) -> bool:
+        """Whether this form is editing an existing project (else a create)."""
+        return self._edit_initial is not None
 
     def fields(self) -> list[Any]:
         """The focusable controls in TAB ORDER (the form's own, not Textual's)."""
@@ -540,9 +652,9 @@ class ProjectsFormPage(Vertical):
 
     # -- key following the title -------------------------------------------
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input is self._title_input and self._key_follows:
+        if self._edit_initial is None and event.input is self._title_input and self._key_follows:
             self._write_key(slug_for_title(event.value))
-        elif event.input is self._key_input:
+        elif self._edit_initial is None and event.input is self._key_input:
             if event.value == self._key_written:
                 # Our own slug write, not the reader — see ``_key_written``.
                 pass
@@ -567,7 +679,7 @@ class ProjectsFormPage(Vertical):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """The description's two live rules: its refusal, and its scaffold hint."""
         self._clear_error_for(event.text_area)
-        if event.text_area is self._description:
+        if event.text_area is self._description and self._edit_initial is None:
             # The hint states a rule about the STARTER TEXT; once the writer has
             # typed, it is describing a state that no longer exists (UX round 1,
             # U6).
@@ -602,11 +714,15 @@ class ProjectsFormPage(Vertical):
         path set it (agent review round 1, R1-3).
         """
         self._key_block.set_hint(
-            "follows the title until you edit it"
-            if self._key_follows
-            # How to get the behaviour BACK is the half a reader cannot guess
-            # (design review round 1, N2).
-            else "set by hand — clear it to follow the title again"
+            _te(_e.key_hint_edit())
+            if self._edit_initial is not None
+            else (
+                "follows the title until you edit it"
+                if self._key_follows
+                # How to get the behaviour BACK is the half a reader cannot guess
+                # (design review round 1, N2).
+                else "set by hand — clear it to follow the title again"
+            )
         )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -650,6 +766,48 @@ class ProjectsFormPage(Vertical):
         """The description, or ``None`` while the scaffold is untouched."""
         text = self._description.text
         return None if text == DESCRIPTION_SCAFFOLD else text
+
+    def edit_state(self) -> ProjectEditState:
+        """The form's values as the edit builder reads them (text, not store types).
+
+        The description is read RAW here rather than through
+        :meth:`_description_value`: in an edit an empty description is a value
+        the reader may be clearing, not a scaffold they never touched.
+        """
+        return ProjectEditState(
+            title=self._title_input.value.strip(),
+            name=self._key_input.value.strip(),
+            description=self._description.text,
+            status=self._status_row.value,
+            tags=tuple(self._tags()),
+            team=self._team_input.value.strip(),
+            owner=self._owner_input.value.strip(),
+            start_date=self._start_input.value.strip(),
+            target_date=self._target_input.value.strip(),
+            estimate=self._estimate_value(),
+            estimate_unit=self._unit_row.value,
+        )
+
+    def collect_edit(self) -> None:
+        """Validate an EDIT-mode save and send the changed fields only.
+
+        A no-change save is a RECEIPT, not a write (the store's per-field
+        contract would otherwise churn ``updated_at`` for nothing): the host's
+        ``on_no_change`` says so where the reader pressed. A refusal paints
+        under its field and keeps the form open, exactly as a create's does.
+        """
+        self.clear_errors()
+        if self._edit_initial is None or self._on_edit_submit is None:
+            return
+        plan = build_edit_plan(self._edit_initial, self.edit_state())
+        if plan.refusal:
+            self._fail(plan.field, plan.refusal)
+            return
+        if plan.no_change or plan.edit is None:
+            if self._on_no_change is not None:
+                self._on_no_change()
+            return
+        self._on_edit_submit(plan.edit)
 
     def _estimate_value(self) -> str:
         return self._estimate_input.value.strip()
@@ -875,6 +1033,9 @@ class ProjectsFormPage(Vertical):
     def action_save(self) -> None:
         if self._confirm:
             return
+        if self._edit_initial is not None:
+            self.collect_edit()
+            return
         edit = self.collect()
         if edit is None:
             return
@@ -893,9 +1054,9 @@ class ProjectsFormPage(Vertical):
             # the readback states: a surface a test cannot assert is a surface
             # nobody can pin (P3's U6, the same reason).
             if block.hint:
-                rows.append(f"{block.field_label} hint: {block.hint}")
+                rows.append(_t(_x.form_readback_hint(label=block.field_label, hint=block.hint)))
             if block.error:
-                rows.append(f"{block.field_label} error: {block.error}")
+                rows.append(_t(_x.form_readback_error(label=block.field_label, error=block.error)))
         if self._confirm:
             rows.append(DISCARD_PROMPT)
         return rows

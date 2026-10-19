@@ -70,6 +70,12 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
+# i18n: the card title, contract line and superseded marker below are
+# user-facing aside copy; they live in tui.small with the other small
+# shared TUI fragments.
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
+
 #: The aside prompt, re-exported so ``tui/app.py``'s
 #: ``from ...aside_panel import ASIDE_PROMPT`` keeps working unchanged. The text
 #: lives at SESSION level (``local_operator.session.aside``) because a prompt
@@ -79,6 +85,8 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.assistant import flatten
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+_t = tr("tui.small")
 
 #: The card takes the COMPOSER's width and the composer's left and right
 #: edges (``overlay.composer_column``), not a measure of its own. It used to be
@@ -1042,7 +1050,7 @@ class AsidePanel(Static):
         if turn.state == "running":
             rows.append(Text(f"{ANSWER_INDENT}…", style=dim))
         elif turn.state == "cancelled":
-            rows.append(Text(f"{ANSWER_INDENT}(superseded)", style=dim))
+            rows.append(Text(f"{ANSWER_INDENT}{_t(_x.aside_superseded())}", style=dim))
         elif turn.state == "error":
             rows.extend(self._error_rows(turn.error, body, danger))
         return rows
@@ -1160,9 +1168,9 @@ class AsidePanel(Static):
         on, and it is the same rank the usage card gives its second title slot.
         """
         row = Text()
-        row.append("Aside", style=Style(color=theme_mod.semantic_color("fg")))
+        row.append(_t(_x.aside_title()), style=Style(color=theme_mod.semantic_color("fg")))
         row.append(
-            "  off the record — nothing here joins the chat",
+            _t(_x.aside_off_the_record()),
             style=Style(color=theme_mod.semantic_color("muted")),
         )
         row.truncate(max(1, self._content_width()), overflow="ellipsis")

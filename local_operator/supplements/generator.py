@@ -30,6 +30,12 @@ round-1 review R4/R7 reading of §2.5): with NO block kept it is ``state=failed`
 ``error="bound:<name>"``; with blocks kept the row is ``state=done`` -- the only state the
 frozen reader paints as a settled block -- and the bound is recorded in the row's ``detail``.
 
+TURNS COUNT COMPLETIONS, NOT ATTEMPTS. ``turns`` counts generation turns that actually
+RETURNED; a provider-attempt failure (the ``permits_fallback`` set: auth/quota/transient/
+timeout) does not consume one, because the alternate exists for exactly that event and must
+keep the room to answer AND to repair. A failure sequence is itself bounded at primary +
+alternate (``bound:attempts``), so no provider-failure sequence can cycle.
+
 TURN 2 IS A REPAIR, NOT A SECOND CHANCE. Only the rejected blocks are re-asked, with the
 validator's own errors, and turn 2's output replaces only them (§2.5). A block that fails
 twice is dropped and the failure recorded -- never rendered.
@@ -87,10 +93,26 @@ MAX_EVIDENCE_BYTES: Final = 64 * 1024
 
 #: Bound names that reach ``error="bound:<name>"`` on the row (memo §2.5).
 BOUND_TURNS: Final = "turns"
+#: Provider attempts WITHOUT a completed turn, per failure sequence: the primary plus at most
+#: its one alternate (the ladder is one swap). Firing it means every permitted model was tried
+#: and none answered -- an explicit, recorded ceiling rather than a silent drop.
+BOUND_ATTEMPTS: Final = "attempts"
 BOUND_TOKENS: Final = "tokens"
 BOUND_TIME: Final = "time"
 BOUND_COST: Final = "cost"
 BOUND_COMPONENTS: Final = "components"
+
+#: The failure-sequence ceiling :data:`BOUND_ATTEMPTS` enforces.
+MAX_PROVIDER_ATTEMPTS: Final = 2
+
+#: The two terminal ``error`` spellings that ARE a provider failure, so the outcome may carry
+#: the typed :data:`failure_kind` as the row's ``cause`` (secret-safety: kinds only, never
+#: provider prose). Any other failure -- a bound, a validator-only loss, a plain crash --
+#: leaves ``cause`` empty even when provider failures happened earlier in the run.
+PROVIDER_TERMINAL_ERRORS: Final[tuple[str, ...]] = (
+    "generator:ProviderError",
+    f"bound:{BOUND_ATTEMPTS}",
+)
 
 #: How many components one job may keep (memo §2.5's ``MAX_COMPONENTS``). Not a settings key:
 #: the memo's config table has no row for it, so it is a code constant like the caps above.
@@ -141,6 +163,11 @@ class GenerationOutcome:
     cost_usd: float = 0.0
     cost_known: bool = True
     error: str = ""
+    #: The typed cause of a provider-terminal failure (``failure_kind`` prefixed
+    #: ``provider_``): ``provider_auth|quota|transient|timeout|request|content|context|
+    #: unknown``. Empty unless the failure that ENDED the job was the provider's own (see
+    #: :data:`PROVIDER_TERMINAL_ERRORS`); a run its fallback saved carries none.
+    cause: str = ""
     #: True when the fork answered the single word ``NONE``: a legitimate "no figure helps".
     none: bool = False
     #: The steer instruction this version was generated with, echoed for the row.
@@ -226,6 +253,27 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
 
+#: How much of a rejection reaches ``detail``: the first blocks, each clipped. The row is
+#: journaled once and read by surfaces; a verbose ``describe()`` must not grow it unboundedly.
+_REJECTION_DETAIL_BLOCKS: Final = 2
+_REJECTION_DETAIL_CHARS: Final = 160
+
+
+def _rejection_reasons(rejected: Sequence[Rejected]) -> str:
+    """``describe()`` of the first rejected blocks, clipped -- WHY the repair is being asked."""
+    listed = "; ".join(
+        _clip(item.describe(), _REJECTION_DETAIL_CHARS)
+        for item in rejected[:_REJECTION_DETAIL_BLOCKS]
+    )
+    hidden = len(rejected) - _REJECTION_DETAIL_BLOCKS
+    return f"{listed}; +{hidden} more" if hidden > 0 else listed
+
+
+def _rejection_note(turn: int, rejected: Sequence[Rejected]) -> str:
+    """One line per rejected turn: the count and the first reasons (the row was opaque)."""
+    return f"turn {turn}: {len(rejected)} rejected — {_rejection_reasons(rejected)}"
+
+
 def evidence_block(
     datasets: Sequence[Dataset],
     *,
@@ -280,8 +328,8 @@ def evidence_block(
         if used + payload_bytes > MAX_EVIDENCE_BYTES:
             break
         used += payload_bytes + 1
-        parts.append(f"<dataset>{payload}</dataset>")
-    parts.append("</evidence>")
+        parts.append(f"<dataset>{payload}</dataset>")  # i18n: ignore model-facing evidence envelope
+    parts.append("</evidence>")  # i18n: ignore model-facing evidence envelope
     if instruction:
         parts.append(steer_instruction(instruction))
     return scrub_shapes("\n".join(parts))
@@ -351,6 +399,11 @@ async def generate(
     detail: list[str] = []
     attempts: list[str] = []
     alternate = model.alternate
+    # ``turns`` counts COMPLETED generation turns (see the module docstring): a provider
+    # failure must not consume one, or the alternate loses the repair turn it was owed.
+    # ``failure_streak`` bounds a failure SEQUENCE so it can never cycle past the ladder.
+    failure_streak = 0
+    terminal_provider_cause = ""
 
     def account(usage: Any) -> None:
         nonlocal tokens_in, tokens_out, cost, cost_known
@@ -380,8 +433,13 @@ async def generate(
     )
 
     while turns < max(1, max_turns):
-        turns += 1
-        stage = "generating" if turns == 1 else "repairing"
+        # The increment lives AFTER ``complete`` returns (below): a provider failure is the
+        # very event the alternate exists for, so it must not spend one of the turns the
+        # alternate needs -- with the old increment-before-call, one quota failure plus one
+        # rejected fallback block exhausted maxTurns=2 and the fallback's repair was never
+        # asked (2026-10-17 operator report, session 8197f86e639d). The loop condition is
+        # therefore "another completion may still run".
+        stage = "generating" if turns == 0 else "repairing"
         await _progress(stage)
         request = _fork_request(
             model.spec, prompt, max_output_tokens=max_output_tokens, purpose=policy.PURPOSE_RENDER
@@ -402,27 +460,58 @@ async def generate(
             ):
                 account(exc.usage if isinstance(exc, CompletionFailure) else None)
             diagnosis = failure_detail(cause)
-            detail.append(f"turn {turns}: {diagnosis}")
+            # The line names the generation turn this attempt was FILLING; unlike a
+            # completed turn it does not consume one (the loop note above).
+            detail.append(
+                f"turn {turns + 1}: {diagnosis}"
+            )  # i18n: ignore internal journal (dev log)
             logger.warning("supplements: generator %s failed: %s", model.label, diagnosis)
             error = f"generator:{type(cause).__name__}"
-            if alternate is None or not permits_fallback(cause):
+            if isinstance(cause, ProviderError):
+                terminal_provider_cause = f"provider_{failure_kind(cause)}"
+            failure_streak += 1
+            if not permits_fallback(cause):
+                break
+            if failure_streak >= MAX_PROVIDER_ATTEMPTS:
+                # The ladder's explicit ceiling: primary + alternate already failed with no
+                # completed turn between them, so no further provider attempt can be spent.
+                detail.append(
+                    # i18n: ignore internal journal (dev log)
+                    f"bound:{BOUND_ATTEMPTS} {failure_streak} provider attempt(s) failed "
+                    "without a completed turn"
+                )
+                error = f"bound:{BOUND_ATTEMPTS}"
+                break
+            if alternate is None:
                 break
             if turns >= max(1, max_turns):
-                detail.append(f"bound:{BOUND_TURNS} no turn remains for fallback")
+                # An invariant today -- failures do not consume turns, so the loop condition
+                # has already guaranteed the fallback a slot -- kept as the named reason a
+                # fallback continuation would be refused should that invariant ever change.
+                detail.append(
+                    f"bound:{BOUND_TURNS} no turn remains for fallback"
+                )  # i18n: ignore internal journal (dev log)
                 break
             if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
                 detail.append(
+                    # i18n: ignore internal journal (dev log)
                     f"bound:{BOUND_COST} reached or affordability unavailable before fallback"
                 )
                 error = f"bound:{BOUND_COST}"
                 break
             if timeout_s is not None and clock() - start >= timeout_s:
-                detail.append(f"bound:{BOUND_TIME} reached before fallback")
+                detail.append(
+                    f"bound:{BOUND_TIME} reached before fallback"
+                )  # i18n: ignore internal journal (dev log)
                 error = f"bound:{BOUND_TIME}"
                 break
             model, alternate = alternate, None
             error = ""
             continue
+        # A completion RETURNED: this is the event that consumes a generation turn, and a
+        # completed turn is what resets a failure sequence.
+        turns += 1
+        failure_streak = 0
         account(usage)
         if (
             max_output_tokens > 0
@@ -433,6 +522,7 @@ async def generate(
             # truncated block is exactly what the repair turn exists for -- but it must leave
             # a record, or "which bound touched this job" is unknowable (round-1 review R7).
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_TOKENS} turn {turns} hit the {max_output_tokens}-token "
                 "per-turn limit"
             )
@@ -444,16 +534,22 @@ async def generate(
             # Exposed BEFORE any later await can be cancelled: this is the copy the runner
             # recovers on its ``wait_for`` (round-1 review R4).
             accepted_sink[:] = accepted
+        if rejected_now:
+            # WHY a block failed, in the journal: "N block(s) still rejected" alone left a
+            # reader unable to tell a fabrication from a malformed chart without rerunning.
+            detail.append(_rejection_note(turns, rejected_now))
         if not accepted_now and not rejected_now:
             # The fork answered the single word NONE (a legitimate "no figure helps").
             none = True
-            detail.append(f"turn {turns}: NONE")
+            detail.append(f"turn {turns}: NONE")  # i18n: ignore internal journal (dev log)
             break
         if len(accepted) > max_components:
             # More blocks passed than the row may carry: keep the first MAX_COMPONENTS and
             # record the trim. Dropping the extras is the memo's own cap (§2.5), and silently
             # keeping three of four would make the recorded decision a lie.
-            detail.append(f"components bound: kept {max_components} of {len(accepted)}")
+            detail.append(
+                f"components bound: kept {max_components} of {len(accepted)}"
+            )  # i18n: ignore internal journal (dev log)
             accepted = accepted[:max_components]
             error = f"bound:{BOUND_COMPONENTS}"
             if accepted_sink is not None:
@@ -465,8 +561,9 @@ async def generate(
             # never rendered -- and the drop is recorded (memo §2.5: "dropped and the
             # failure recorded").
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_TURNS} {len(rejected)} block(s) still rejected at "
-                f"{turns} of {max(1, max_turns)} turn(s)"
+                f"{turns} of {max(1, max_turns)} turn(s) — {_rejection_reasons(rejected)}"
             )
             error = f"bound:{BOUND_TURNS}" if not accepted else error
             break
@@ -477,12 +574,14 @@ async def generate(
         # guard for a turn that hangs mid-flight.
         if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_COST} cap: ${cost:.4f} of ${max_cost_usd:.2f} reached before repair"
             )
             error = f"bound:{BOUND_COST}" if not accepted else error
             break
         if timeout_s is not None and clock() - start >= timeout_s:
             detail.append(
+                # i18n: ignore internal journal (dev log)
                 f"bound:{BOUND_TIME} wall clock {clock() - start:.1f}s of {timeout_s:.0f}s "
                 "reached before repair"
             )
@@ -500,6 +599,7 @@ async def generate(
         cost_usd=cost,
         cost_known=cost_known,
         error=error,
+        cause=terminal_provider_cause if error in PROVIDER_TERMINAL_ERRORS else "",
         none=none,
         instruction=instruction,
         detail=tuple(detail),
@@ -526,18 +626,30 @@ def permits_fallback(exc: Exception) -> bool:
     )
 
 
+#: ``failure_kind``'s allowlist: the typed kind set ``failure_detail`` reports and the
+#: ``provider_<kind>`` cause vocabulary both draw from, so a surface can map kinds to its own
+#: copy without ever seeing provider prose (secret-safety rule).
+_PROVIDER_KINDS: Final = frozenset(
+    {"auth", "quota", "transient", "timeout", "request", "content", "context", "unknown"}
+)
+
+
+def failure_kind(exc: Exception) -> str:
+    """The allowlisted kind of a provider failure; ``unknown`` for anything else."""
+    from local_operator.providers.failover import ProviderError
+
+    if not isinstance(exc, ProviderError):
+        return "unknown"
+    return exc.kind if exc.kind in _PROVIDER_KINDS else "unknown"
+
+
 def failure_detail(exc: Exception) -> str:
     """Only typed allowlisted facts persist; provider prose may echo secrets or URLs."""
     from local_operator.providers.failover import ProviderError
 
     if not isinstance(exc, ProviderError):
         return "generation unavailable"
-    kind = (
-        exc.kind
-        if exc.kind
-        in {"auth", "quota", "transient", "timeout", "request", "content", "context", "unknown"}
-        else "unknown"
-    )
+    kind = failure_kind(exc)
     status = exc.status if isinstance(exc.status, int) and 100 <= exc.status <= 599 else None
     return f"ProviderError status={status} kind={kind}"
 

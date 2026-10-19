@@ -245,12 +245,28 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             assert withheld == {
                 "highlights",
                 "hub",
+                # No desktop destination: the page reads and writes THIS
+                # terminal's source stores/config root. Withheld deliberately.
+                "import",
                 "keys",
                 "links",
                 "memory",
                 "mobile",
                 "network",
                 "notifications",
+                # TUI-only request ledger; no desktop destination ships.
+                "review",
+                # TUI-only: one conversation's live wakes, written through that
+                # session. The desktop's schedules page reads the machine-wide
+                # index instead, so there is no destination to point at.
+                "schedule",
+                # TUI-only: this machine's derived asset catalog and its
+                # metadata sidecar. The desktop owns a Library pane over its
+                # own catalog; a destination here would paint the wrong host.
+                "library",
+                # TUI-only: the optional Librarian package's local state and
+                # its pinned conversation. Same wrong-machine argument.
+                "librarian",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The

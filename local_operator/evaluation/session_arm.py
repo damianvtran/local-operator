@@ -115,6 +115,7 @@ from local_operator.evaluation.adapters.api import (
 )
 from local_operator.evaluation.adapters.supervisor import (
     AdapterSupervisor,
+    AmbiguousRebindCleared,
     HostVerifier,
     VerifiedAdapterSession,
     discard_rescue,
@@ -142,6 +143,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeSpec,
     UndeclaredDisclosedInfra,
     _observation_phase_failure,
+    _rebindable_failure,
     _terminal_kind,
 )
 from local_operator.evaluation.runner.model import EpisodeTurn
@@ -233,6 +235,37 @@ RECOVERY_AFTER_READBACK_LOSS = (
     "blindly; re-read the current state before acting again -- a `wait` batch "
     "changes nothing and returns the current screen."
 )
+
+#: The sentence a CLEARED ambiguous delivery delivers (the session probed the
+#: guest's control server and it answered; see ``AmbiguousRebindCleared``).
+#: Deliberately a sibling of ``RECOVERY_AFTER_READBACK_LOSS`` rather than a
+#: reuse: that sentence's claim is "your last batch ran", which is true only
+#: when the adapter DECLARED the commit, while this one's batch dropped
+#: mid-delivery -- so its effect is UNKNOWN and the sentence must say exactly
+#: that, never the stronger claim. It keeps the sibling's how-to-get-current
+#: advice for the sibling's reason: a ``wait`` batch changes nothing and its
+#: own read-back returns the live screen, which is what "verify the screen"
+#: needs to be actionable.
+RECOVERY_AFTER_AMBIGUOUS_DELIVERY = (
+    "Recovered: the connection to the environment failed while your last batch "
+    "was in flight, so its effect is UNKNOWN -- it may or may not have applied. "
+    "The episode continues. Do not assume it failed and do not repeat it "
+    "blindly; verify the screen before re-issuing anything -- a `wait` batch "
+    "changes nothing and returns the current screen."
+)
+
+#: The ambiguous-delivery re-bind budget: how many times ONE episode may turn
+#: a ``delivery=ambiguous`` execute failure into a re-bind after the guest's
+#: control server answered a bounded probe (see ``AmbiguousRebindCleared`` and
+#: ``_deliver_ambiguous_recovery``). A harness RESILIENCE budget, not a
+#: benchmark step budget: nothing here adds a model step, a task or a cost --
+#: a re-bind happens INSTEAD of the episode's death, on the same batch the
+#: model already sent. Two, because the measured failure is a control-server
+#: restart under an in-flight request: a single re-bind would charge the whole
+#: recovery to one unlucky reconnect, and an unbounded one would let a
+#: flapping guest spend an entire run; the third ambiguous delivery in one
+#: episode poisons and ends exactly as it did before the probe existed.
+AMBIGUOUS_REBIND_BUDGET = 2
 
 #: The completion challenge's channel sentence -- the ONE part of the shared
 #: challenge text (``provider_client.build_completion_challenge``) that states
@@ -690,9 +723,10 @@ RecordBatch = Callable[[str, Mapping[str, Any]], None]
 ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 
 #: The re-bind seam: one bounded attempt to fetch the observation the episode
-#: may continue from, called by the bridge only after an execute failure the
-#: adapter declared COMMITTED (``_observation_phase_failure``). The driver
-#: fills it with the read-only ``observe`` call; tests fill it with a fake.
+#: may continue from, called by the bridge after an execute failure that is
+#: RE-BINDABLE (``_rebindable_failure``: the committed read-back class, or a
+#: pre-dispatch refusal). The driver fills it with the read-only ``observe``
+#: call; tests fill it with a fake.
 #: ``None`` means the bridge has no re-read path and a failed execute is
 #: terminal -- legibly (see ``ActionBridge._after_failed_execute``).
 RecoverObservation = Callable[[], Awaitable[Observation]]
@@ -777,10 +811,13 @@ class ActionBridge:
     #: a receipt (see ``_split_ask_delivery``).
     ask: Callable[[ActionBatch], Awaitable[Any]] | None = None
     #: The re-bind seam (see :data:`RecoverObservation`): exactly ONE read of
-    #: the environment's current observation, attempted only after an execute
-    #: failure the adapter declared committed. The bridge owns WHEN; the
-    #: driver owns the RPC. ``None`` degrades a failed execute to a legible
-    #: end rather than a silent one.
+    #: the environment's current observation, attempted after an execute
+    #: failure that is re-bindable (``_rebindable_failure``: the committed
+    #: read-back class, or a pre-dispatch refusal), or after the SESSION cleared
+    #: an ambiguous delivery for it (``AmbiguousRebindCleared`` -- raised only
+    #: once a bounded probe of the guest's control server answered). The bridge
+    #: owns WHEN; the driver owns the RPC. ``None`` degrades a failed execute
+    #: to a legible end rather than a silent one.
     recover: RecoverObservation | None = None
     #: The task as it was stated -- the reset observation's text -- restated by
     #: the completion challenge (the same source the runner's gate uses).
@@ -1637,26 +1674,68 @@ class ActionBridge:
         failure the ADAPTER declared committed, and the episode stays dead even
         when the environment is healthy again. So this method attempts exactly
         ONE re-bind through the driver's ``recover`` seam (a read-only fetch of
-        the environment's current observation), and only for that committed
-        class (``_observation_phase_failure``) -- the same predicate the
-        read-back retries trust. For any other failure the batch's state is
-        ambiguous, the supervisor has poisoned the session, and re-reading is
-        not safe; the episode ends legibly instead.
+        the environment's current observation).
+
+        WHICH FAILURES QUALIFY. Three, and the third arrives as the SESSION's
+        verdict rather than as an error class:
+
+        * the adapter declared the batch committed and only the read-back was
+          lost (``_observation_phase_failure``);
+        * the worker refused before any adapter code ran
+          (``_refused_before_dispatch`` -- ``invalid_state``, the task_077
+          wedge): a refusal applied NOTHING, so a read-only re-read is safe;
+        * ``AmbiguousRebindCleared``: a ``delivery=ambiguous`` execute failure
+          that the session's bounded probe of the environment's control server
+          CLEARED -- the batch dropped mid-delivery, its effect is UNKNOWN, and
+          the model is told so rather than being told it ran. The bridge reads
+          the session's verdict, never the error class, on purpose: a probe
+          that failed, or a budget that ran out, arrives as the untouched
+          original error below and ends the episode exactly as it did before
+          the probe existed.
+
+        For any OTHER failure the batch's state is ambiguous, the supervisor has
+        poisoned the session, and re-reading is not safe; the episode ends
+        legibly instead.
+
+        This is the ONLY consumer of ``_rebindable_failure``; the read-back
+        retry loops keep the committed-only predicate because their recovery is
+        ``resume_observation`` ("the batch committed, skip the re-apply"), which
+        a refusal must not trigger.
 
         THE BOUND AND ITS COST. One ``recover`` call per failed batch, and none
         at all on the healthy path; the call itself is bounded by the caller's
         own step timeout plus the RPC layer's 1 s cancel grace (one RPC,
         181 s worst case in the campaign config: the 180 s budget + the 1 s
-        grace).
+        grace). A cleared ambiguous delivery adds the session's probe FIRST
+        (``AMBIGUOUS_PROBE_TIMEOUT_S`` + the same 1 s grace) and is bounded at
+        the episode level by ``AMBIGUOUS_REBIND_BUDGET``.
         When it cannot yield an observation the episode ends HERE, terminally
         (:meth:`_end_wedged`). ``finish`` stays refused for a wedged bridge on
         purpose: no screen exists to bind it to, and the driver stops the turn
         instead of leaving the model to discover that by refusing it.
         """
 
+        # The session's ambiguous-delivery clearance: a wrapper carrying the
+        # original wire error, raised only after the probe answered. Unwrapped
+        # FIRST so every sentence, record and test below still names the real
+        # failure; the clearance is the bridge's licence to attempt the
+        # read-only re-bind, and its absence is what keeps a failed probe's
+        # ending byte-identical to the pre-probe build.
+        cleared_error: AmbiguousRebindCleared | None = (
+            error if isinstance(error, AmbiguousRebindCleared) else None
+        )
+        original: Exception = cleared_error.original if cleared_error is not None else error
         recover = self.recover
-        committed = _observation_phase_failure(error)
-        recovery_attempted = recover is not None and committed
+        # ``committed`` keeps its STRICT meaning for the wedge sentence ("the
+        # adapter declared the batch committed"); the RE-BIND gate is wider --
+        # it also admits a pre-dispatch refusal (``invalid_state``), which is
+        # provably non-committed but still safe to re-read, and the session's
+        # ambiguous-delivery clearance. See ``_refused_before_dispatch`` for
+        # the accuracy loss the refusal closes.
+        committed = _observation_phase_failure(original)
+        recovery_attempted = recover is not None and (
+            cleared_error is not None or _rebindable_failure(original)
+        )
         recovered: Observation | None = None
         recover_error: Exception | None = None
         if recovery_attempted and recover is not None:
@@ -1665,9 +1744,16 @@ class ActionBridge:
             except Exception as failure:  # noqa: BLE001 - the wedge sentence names it
                 recover_error = failure
         if recovered is not None:
-            return self._deliver_recovery(error=error, recovered=recovered)
+            if cleared_error is not None:
+                return self._deliver_ambiguous_recovery(
+                    error=original,
+                    recovered=recovered,
+                    attempt=cleared_error.attempt,
+                    attempts=cleared_error.attempts,
+                )
+            return self._deliver_recovery(error=original, recovered=recovered)
         return self._end_wedged(
-            error=error,
+            error=original,
             committed=committed,
             recovery_attempted=recovery_attempted,
             recover_error=recover_error,
@@ -1716,6 +1802,76 @@ class ActionBridge:
             )
         details: dict[str, Any] = {
             "recovered": True,
+            "observation_id": recovered.observation_id,
+        }
+        if self._pending_ask_receipt is not None:
+            details["ask"] = self._pending_ask_receipt
+        return {
+            "content": content,
+            "is_error": True,
+            "details": details,
+        }
+
+    def _deliver_ambiguous_recovery(
+        self,
+        *,
+        error: Exception,
+        recovered: Observation,
+        attempt: int,
+        attempts: int,
+    ) -> dict[str, Any]:
+        """Re-arm the token after a PROBED ambiguous delivery, and answer.
+
+        The claim is the WEAKER one (see ``RECOVERY_AFTER_AMBIGUOUS_DELIVERY``):
+        the batch may or may not have applied, and the sentence says so -- it is
+        the one part of this path that must not be a copy of the committed
+        sibling's, because "your last batch ran" would be an overstatement the
+        probe cannot support (it proved the control server answers; it cannot
+        prove what the dropped request did).
+
+        The screen-follows-the-sentence rule is ``_deliver_recovery``'s, for
+        its reason: when the recovered observation IS the one the model last
+        saw it is NOT re-rendered, because the renderer's byte-identical dedup
+        speaks a claim ("your last action changed nothing visible") this path
+        cannot make -- whether the batch applied-and-changed-nothing or never
+        applied is exactly what is unknown.
+
+        The journal event carries the retry count and the cause
+        (``attempt``/``attempts``, the shape ``observation_retry`` records), so
+        a bundle shows the ambiguity and its recovery rather than a
+        suspiciously clean run.
+        """
+
+        token = self._token
+        if token is not None:
+            token.record_in_flight(recovered)
+        shown_before = self._last_observation
+        content: list[Any] = [
+            *self._pending_ask_delivery,
+            TextContent(text=RECOVERY_AFTER_AMBIGUOUS_DELIVERY),
+        ]
+        if shown_before is None or shown_before.observation_id != recovered.observation_id:
+            rendered = self.render(recovered)
+            self._last_shown = (recovered.observation_id, rendered)
+            self._last_observation = recovered
+            content = [*content, *rendered]
+        if self.record is not None:
+            self.record(
+                "ambiguous_rebind",
+                {
+                    "steps": self._steps,
+                    # The failed delivery's epoch was consumed at admission;
+                    # the batch was ATTEMPTED, whatever the guest did with it.
+                    "attempted_epoch": True,
+                    "attempt": attempt,
+                    "attempts": attempts,
+                    "transport_error": _bounded_cause(error, limit=500),
+                    "observation_id": recovered.observation_id,
+                },
+            )
+        details: dict[str, Any] = {
+            "recovered": True,
+            "ambiguous_rebind": True,
             "observation_id": recovered.observation_id,
         }
         if self._pending_ask_receipt is not None:
@@ -2316,7 +2472,7 @@ async def run_session_episode(
     # sink's own sentence, never a traceback: nothing was allocated, so there is
     # nothing to rescue.
     try:
-        record = RecordSink(record_root / "events.jsonl")
+        record = RecordSink(record_root / "events.jsonl", artifact_root=config.artifact_root)
     except RecordSinkError as error:
         return SessionArmOutcome(
             status="failed_pre_bundle",
@@ -2380,6 +2536,13 @@ async def run_session_episode(
             rescue_required=_mark_rescue_required,
             answer_owner=answer_owner,
             execution_overhead_seconds_per_action=(config.execution_overhead_seconds_per_action),
+            # The arm's ambiguous-delivery re-bind budget: this IS the caller
+            # that wires the consumer (the action bridge's
+            # ``_deliver_ambiguous_recovery``), so this is the caller that
+            # supplies the bound. Every other VerifiedAdapterSession -- the
+            # runner's reply-channel arm today -- keeps the 0 default and its
+            # ambiguous endings exactly as they were.
+            ambiguous_rebind_budget=AMBIGUOUS_REBIND_BUDGET,
         )
         requirements = await adapter_session.inspect_requirements(
             InspectRequirementsParams(), timeout=config.prepare_timeout
@@ -2469,8 +2632,8 @@ async def run_session_episode(
             surface=surface,
             render=renderer.render,
             execute=_make_execute(adapter_session, config, record),
-            # The re-bind seam: one read-only ``observe`` after a failed
-            # execute the adapter declared committed (see ``_make_recover``).
+            # The re-bind seam: one read-only ``observe`` after a re-bindable
+            # failed execute (see ``_make_recover``).
             recover=_make_recover(adapter_session, config, spec.episode_id),
             max_steps=config.max_steps,
             record=lambda kind, payload: record.write(
@@ -3433,6 +3596,10 @@ def _make_execute(
                     timeout=config.step_timeout,
                 )
             except Exception as error:
+                # COMMITTED-ONLY, mirroring ``episode._execute_with_observation_recovery``:
+                # the recovery here is ``resume_observation``, which resumes a
+                # batch the adapter declared COMMITTED. A pre-dispatch refusal is
+                # handled at the bridge's read-only re-bind instead.
                 if attempt == attempts or not _observation_phase_failure(error):
                     raise
                 record.write(
@@ -3454,11 +3621,13 @@ def _make_recover(
     """The re-bind seam: ONE bounded read of the environment's current state.
 
     WHY ONE, AND WHY THIS CALL. The bridge calls this only after an execute
-    failure the adapter declared committed (``phase == "observation"``: the
-    batch applied, only the read-back lost) and whose configured read-back
-    retries have already run out -- so this is NOT a retry of that read-back
-    (raising those is a comparability-affecting change, see INFRA.md) but a
-    fresh state read through the read-only ``observe`` method every adapter
+    failure that is RE-BINDABLE -- the committed read-back class
+    (``phase == "observation"``: the batch applied, only the read-back lost) or
+    a pre-dispatch refusal (``invalid_state``: nothing applied) -- and whose
+    configured read-back retries have already run out, so this is NOT a retry
+    of that read-back (raising those is a comparability-affecting change, see
+    INFRA.md) but a fresh state read through the read-only ``observe`` method
+    every adapter
     already answers (``reset_start`` reads observation zero through it). It
     re-establishes what the bridge lost: a current observation the token can
     be re-armed with. When it cannot -- the environment is still unable to

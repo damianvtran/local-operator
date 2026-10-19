@@ -132,3 +132,70 @@ def test_new_unicode_aliases_share_scheduler_and_transaction_identity(tmp_path, 
             pass
     assert len(transaction_keys) == 2  # No inode exists yet.
     assert transaction_keys[0] == transaction_keys[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("excluded", [False, True])
+async def test_bash_resolved_memory_is_authoritative_before_spawn(monkeypatch, tmp_path, excluded):
+    """The actual tool boundary resolves once and survives strict env filtering.
+
+    Abort at its real subprocess binding: no synthetic PID is ever queried or
+    signalled. The builder still executes the real allowlist/exclude policy.
+    Filtering must precede the budget's potentially quarantining config read;
+    otherwise malformed configuration can silently downgrade credential policy.
+    """
+    import errno
+    from types import SimpleNamespace
+
+    from local_operator import memory_guard as mg
+
+    events = []
+    budget = mg.Budget(48, 38, None, None, None, "override", "unit resolved budget")
+    key = mg.RESOLVED_MEMORY_MB_ENV
+
+    def resolve(value):
+        assert value == 48
+        events.append("resolve")
+        return budget
+
+    monkeypatch.setattr(builtin, "_configured_memory_budget", resolve)
+    monkeypatch.setattr(builtin, "_configured_bash_shell", lambda: None)
+    monkeypatch.setattr(builtin, "resolve_bash_shell", lambda value: "/bin/bash")
+    real_builder = builtin.shell_env.child_environment
+    policy_type = builtin.shell_env.ShellEnvironmentPolicy
+
+    def environment(policy, *, injections):
+        events.append("filter")
+        controlled = policy_type(
+            mode="allowlist", exclude=frozenset({key}) if excluded else frozenset()
+        )
+        return real_builder(
+            controlled,
+            parent={key: "999", "PATH": "/usr/bin:/bin"},
+            injections={**injections, key: "777"},
+        )
+
+    monkeypatch.setattr(
+        builtin,
+        "shell_env",
+        SimpleNamespace(**{**vars(builtin.shell_env), "child_environment": environment}),
+    )
+
+    async def spawn(*argv, **kwargs):
+        assert events == ["filter", "resolve"], "policy must be latched before the budget read"
+        assert kwargs["env"][key] == "48"
+        events.append("spawn")
+        raise OSError(errno.ENOENT, "controlled budget spawn stop", argv[0])
+
+    monkeypatch.setattr(
+        builtin, "asyncio", SimpleNamespace(**{**vars(asyncio), "create_subprocess_exec": spawn})
+    )
+    result = await builtin.execute_bash(
+        "memory-inheritance",
+        {"command": "printf memory-budget-probe", "memory_mb": 48},
+        AbortSignal(),
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+    assert result.is_error
+    assert events == ["filter", "resolve", "spawn"]

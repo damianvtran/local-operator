@@ -31,7 +31,7 @@ import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -107,7 +107,13 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
-from local_operator.incidents import CONTINUATION_LIMIT_CAUSE, REASONING_ECHO_MARKERS
+from local_operator.i18n.keys import tui_notices as _nt
+from local_operator.i18n.messages import Msg
+from local_operator.incidents import (
+    CONTINUATION_LIMIT_CAUSE,
+    OUTPUT_LIMIT_CAUSE,
+    REASONING_ECHO_MARKERS,
+)
 from local_operator.model.effort import real_rungs
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -117,6 +123,29 @@ from local_operator.model.effort import real_rungs
 COMPOSE_NOTICE_INTERVAL_S = 0.2
 
 logger = logging.getLogger(__name__)
+
+
+def _notice(
+    message: Msg,
+    *,
+    kind: Literal["info", "warning", "error"] = "warning",
+    headline: str = "",
+) -> NoticeEvent:
+    """One typed notice: catalogue text plus its additive ``code``/``params``.
+
+    ``text`` stays present and English-first (RFC §2.6) so every existing
+    client keeps rendering what it rendered before; the id and parameters let
+    a locale-aware viewer re-render without parsing the sentence. Callers keep
+    passing ``kind``/``headline`` exactly as they did on the raw constructor.
+    """
+    body = message.envelope()
+    return NoticeEvent(
+        text=body["text"],
+        code=body["code"],
+        params=body["params"],
+        kind=kind,
+        headline=headline,
+    )
 
 
 class _ToolDone:
@@ -286,6 +315,212 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 #: (``added``/``removed``/``path``/``spill`` handles) whose readers compare
 #: exact values.
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
+
+# The producer caps diffs at 200 rows; this independent publication budget leaves
+# framing room, not permission to accept unbounded executor metadata. Refusal
+# still walks N slots to preserve container/nonstring identity (not O(cap)).
+_DIFF_DETAIL_ROWS = 256
+_DIFF_DETAIL_BYTES = 128 * 1024
+_DIFF_DETAIL_WITHHELD = "[output withheld: credential redaction requires a complete bounded diff]"
+_DIFF_HUNK = re.compile(
+    r"@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@[^\r\n]*"
+)
+_DIFF_ROW_BREAKS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
+    """Publish a bounded diff COPY without losing multiline credential proof.
+
+    A line-at-a-time callback releases unknown PEM body rows. Joining the raw
+    diff is also wrong: a removed header and an added footer can manufacture a
+    cross-side credential and erase unrelated documentation. Parse complete
+    hunks, judge original old/new views separately, and project only consumed
+    equality evidence. No executor bytes, metadata, types or registrations are
+    rewritten; ambiguous/capped/invalid fields are explicitly withheld.
+    """
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    scalar = isinstance(value, str)
+    if not scalar and not isinstance(value, (list, tuple)):
+        return value
+    if not scalar and not any(isinstance(item, str) for item in value):
+        return value
+
+    def withheld() -> Any:
+        if scalar:
+            return _DIFF_DETAIL_WITHHELD
+        first = True
+        out: list[Any] = []
+        # Deliberately O(N): no refused string body is inspected or copied, but
+        # dropping arbitrary nonstring items/positions would change the contract.
+        for item in value:
+            if isinstance(item, str):
+                out.append(_DIFF_DETAIL_WITHHELD if first else "")
+                first = False
+            else:
+                out.append(item)
+        return tuple(out) if isinstance(value, tuple) else out
+
+    calls = input_bytes = input_rows = output_bytes = output_rows = 0
+
+    def byte_size(text: str, limit: int) -> int:
+        if len(text) > limit:
+            raise ValueError
+        size = len(text.encode("utf-8", errors="surrogatepass"))
+        if size > limit:
+            raise ValueError
+        return size
+
+    def invoke(text: str) -> str:
+        nonlocal calls, input_bytes, input_rows, output_bytes, output_rows
+        calls += 1
+        input_bytes += byte_size(text, _DIFF_DETAIL_BYTES)
+        input_rows += text.count("\n") + 1
+        if (
+            calls > 2 * _DIFF_DETAIL_ROWS
+            or input_bytes > 3 * _DIFF_DETAIL_BYTES
+            or input_rows > 3 * _DIFF_DETAIL_ROWS
+        ):
+            raise ValueError
+        result = redact(text)
+        if not isinstance(result, str):
+            raise ValueError
+        output_bytes += byte_size(result, 3 * _DIFF_DETAIL_BYTES - output_bytes)
+        # Check population before splitting/materializing output rows. All other
+        # splitlines separators are forbidden in projected nominal rows too.
+        output_rows += result.count("\n") + 1
+        if output_rows > 3 * _DIFF_DETAIL_ROWS:
+            raise ValueError
+        return result
+
+    def changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
+        if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
+            raise ValueError
+        original = [text for _, text in rows]
+        returned = result.split("\n")
+        if original == returned:
+            return set()
+        # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
+        # never anchor. Across all calls there are <=2R original context rows
+        # and <=3R output rows (combined <=5R); byte populations are <=5B.
+        occurrences = sorted(
+            [(text, 0, index) for index, text in enumerate(original)]
+            + [(text, 1, index) for index, text in enumerate(returned)]
+        )
+        anchors: list[tuple[int, int]] = []
+        at = 0
+        while at < len(occurrences):
+            end = at + 1
+            while end < len(occurrences) and occurrences[end][0] == occurrences[at][0]:
+                end += 1
+            group = occurrences[at:end]
+            if len(group) == 2 and group[0][1] == 0 and group[1][1] == 1:
+                anchors.append((group[0][2], group[1][2]))
+            at = end
+        anchors.sort()
+        if any(a[1] >= b[1] for a, b in zip(anchors, anchors[1:])):
+            raise ValueError
+        affected: set[int] = set()
+        left_old = left_new = 0
+        for old, new in anchors + [(len(original), len(returned))]:
+            old_gap = original[left_old:old]
+            new_gap = returned[left_new:new]
+            if old_gap != new_gap:
+                if not old_gap:
+                    raise ValueError  # insertion-only output has no safe source projection
+                affected.update(index for index, _ in rows[left_old:old])
+            # Equal gaps consume each row once; no arbitrary duplicate elsewhere
+            # can justify retaining an original masked body row.
+            left_old, left_new = old + 1, new + 1
+        return affected
+
+    try:
+        if scalar:
+            byte_size(value, _DIFF_DETAIL_BYTES)
+            if len(value.splitlines()) > _DIFF_DETAIL_ROWS:
+                raise ValueError
+            return invoke(value)
+        if len(value) > _DIFF_DETAIL_ROWS:
+            raise ValueError
+        total = 0
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError  # a barrier cannot silently join two partial hunks
+            total += byte_size(item, _DIFF_DETAIL_BYTES - total)
+            if any(char in _DIFF_ROW_BREAKS for char in item):
+                raise ValueError
+        if len(value) < 3 or not value[0].startswith("--- ") or not value[1].startswith("+++ "):
+            raise ValueError
+        hunks: list[tuple[list[tuple[int, str]], list[tuple[int, str]]]] = []
+        at = 2
+        previous_old_end = previous_new_end = -1
+        while at < len(value):
+            frame = _DIFF_HUNK.fullmatch(value[at])
+            if frame is None:
+                raise ValueError
+            old_start, new_start = int(frame[1]), int(frame[3])
+            old_count = int(frame[2]) if frame[2] is not None else 1
+            new_count = int(frame[4]) if frame[4] is not None else 1
+            if (
+                not old_count + new_count
+                or (old_count and not old_start)
+                or (new_count and not new_start)
+            ):
+                raise ValueError
+            if old_start < previous_old_end or new_start < previous_new_end:
+                raise ValueError
+            previous_old_end, previous_new_end = old_start + old_count, new_start + new_count
+            old: list[tuple[int, str]] = []
+            new: list[tuple[int, str]] = []
+            at += 1
+            # Iterate OBSERVED rows only, never declared numeric ranges. A cap
+            # ellipsis, premature frame, unconsumed tail or count mismatch fails
+            # the entire field before any supposedly processed content escapes.
+            saw_change = False
+            while old_count or new_count:
+                if at >= len(value) or not value[at] or value[at][0] not in " +-":
+                    raise ValueError
+                tag, text = value[at][0], value[at][1:]
+                if tag in " -":
+                    old.append((at, text))
+                    old_count -= 1
+                if tag in " +":
+                    new.append((at, text))
+                    new_count -= 1
+                if tag in "+-":
+                    saw_change = True
+                if old_count < 0 or new_count < 0:
+                    raise ValueError
+                at += 1
+            # A hunk that claims to be a change must actually CHANGE something.
+            # Context-only hunks carry no edit to explain and are exactly the
+            # shape that lets a removed header and an added body row read as a
+            # credential, so they are refused rather than projected (review R1).
+            if not saw_change:
+                raise ValueError
+            hunks.append((old, new))
+            if len(hunks) > _DIFF_DETAIL_ROWS // 2:
+                raise ValueError
+        affected: set[int] = set()
+        # All contextual judgements see ORIGINAL views, before a header/row mask
+        # could destroy proof. Learning keeps the same known-value authority.
+        for old, new in hunks:
+            for rows in (old, new):
+                if rows:
+                    affected.update(changed_rows(rows, invoke("\n".join(text for _, text in rows))))
+        out = []
+        for index, item in enumerate(value):
+            masked = invoke(item)
+            if any(char in _DIFF_ROW_BREAKS for char in masked):
+                raise ValueError
+            out.append(item[0] + REDACTION_MARKER if index in affected else masked)
+        return tuple(out) if isinstance(value, tuple) else out
+    except Exception:
+        # No exception args/content/lengths go to diagnostics. This is a fixed
+        # withholding receipt, not a claim that an incomplete field is contained.
+        return withheld()
+
+
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
 
@@ -360,6 +595,73 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: allowance per turn would re-buy the same diagnosis. Each re-ask is one
 #: extra model call.
 MAX_WORDLESS_STOP_RECOVERIES = 1
+
+#: What the loop tells the model after a turn was cut off at the output limit
+#: with NOTHING produced, on a model the loop has no cheaper rung to retreat to
+#: (the router's ``auto`` sentinel: the level is delegated to the server, so
+#: ``_lower_effort`` declines — see its docstring). The empty message itself is
+#: REMOVED from the wire history by that arm (an assistant turn with no content
+#: blocks is illegal on the Anthropic wire, and replaying "I said nothing"
+#: teaches the re-ask to say nothing), so without this prompt neither the model
+#: nor a reader of a resumed session can see why the conversation continues.
+#: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
+LENGTH_STOP_RECOVERY_PROMPT = (
+    "Harness recovery notice: your last message hit your output limit "
+    "before anything visible was produced — no text and no tool calls arrived, "
+    "so the turn would have ended here with nothing to show for it. Continue "
+    "the work: produce your next tool call, or your final answer if the work is "
+    "done, keeping each step well inside the output budget."
+)
+
+#: How many times ONE run re-asks a model whose turn was cut off at the output
+#: limit with nothing visible, on a model with NO cheaper effort rung to retreat
+#: to — the router's ``auto`` sentinel (the level is delegated, so nothing sits
+#: below it), or a ladder already at its cheapest real rung. DISTINCT from
+#: ``MAX_EMPTY_TRUNCATION_RETRIES`` above: that budget buys a
+#: RETREAT (one rung lower, where the budget goes to output instead of thought),
+#: and here no rung exists to buy — the turn simply
+#: ended, having produced NOTHING, and the child settled looking finished. That
+#: is the measured fleet shape this budget is for: 281 ``length`` stops across
+#: ~173 sessions, 149 of them silent, 141 on ``radient/auto``, 138 with
+#: ``output_tokens == reasoning_tokens == 8192``; 140 of the silent stops sat
+#: inside 91 of 3320 child sessions, which is the cost this arm exists to remove.
+#:
+#: ONE: a single re-ask states the one fact only this layer knows (the turn was
+#: cut off, not finished) and gives the model a chance to produce its next action
+#: in smaller pieces. A SECOND silent length turn in the same run is the model's
+#: answer about this budget, not an accident, and ends the run NAMED rather than
+#: bare (``incidents.OUTPUT_LIMIT_CAUSE``) so a parent reads "cut off" and not
+#: "finished". Run-scoped like every sibling recovery (the wordless, echo,
+#: connectivity and nameless budgets): a fresh allowance per turn would re-buy
+#: the same diagnosis.
+MAX_LENGTH_SILENT_RECOVERIES = 1
+
+#: How many times ONE run continues an answer that the output limit cut off
+#: mid-prose. A prose truncation is the one length end the loop deliberately did
+#: NOT continue -- the reader was expected to ask -- and for an interactive
+#: session that is right. For a delegated CHILD it is the exact failure the
+#: operator reported: the deliverable IS that message (a review verdict, a QA
+#: report, a handoff), it arrives cut, and the only actor left is a parent that
+#: pays a resume to get the rest. ONE continuation finishes the answer in place;
+#: a second truncation ends the run NAMED (``incidents.OUTPUT_LIMIT_CAUSE``)
+#: rather than bare, so a cut PURE-PROSE deliverable can never be read as a
+#: finished one. Gated by ``LoopConfig.continue_truncated_answer`` (children
+#: only): an interactive session keeps today's notice-and-end behaviour. A
+#: text+call turn is deliberately NOT this arm's: its call is re-asked by the
+#: call arm, and this one does not claim its prose remainder is recovered
+#: (agent review round 1, M-1).
+MAX_TRUNCATED_ANSWER_CONTINUATIONS = 1
+
+#: What the loop tells the model after the output limit cut its answer off
+#: mid-prose. Second person, like its recovery siblings, and it names the one
+#: instruction that matters: continue from the cut, do not restart. Persisted as
+#: harness chrome (see ``harness.rows.harness_chrome_prompts``) so replay shows
+#: the notice rather than attributing the harness's words to the user.
+CONTINUE_TRUNCATED_ANSWER_PROMPT = (
+    "Harness recovery notice: your last message was cut off mid-answer by your "
+    "output limit — the rest of it was never sent. Continue from exactly where "
+    "it stopped, without repeating what you already wrote, and finish the answer."
+)
 
 #: How many times ONE run will continue a turn that the network cut short —
 #: the laptop closed at home and opened at work, which is minutes of no route
@@ -1426,6 +1728,225 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     return message.model_copy(update={"tool_calls": calls})
 
 
+def _plan_guard_arguments(name: str, arguments: Any) -> Any:
+    """``arguments`` with the two ADMITTED reference positions left out of the guard.
+
+    Each position mirrors, on the same classifier, what the TOOL layer exempts — the
+    plan gate must ask its question about the same copy the tools ask theirs of, or the
+    call is refused one level above the exemption that was meant to admit it:
+
+    * a ``memory`` call with ``op=recall`` whose ``text`` IS a minted reference
+      (``tools/memory_tools._guarded_fact_args``, #2524 — spelled here because that
+      helper is not on main yet; the masking is identical: the ``text`` VALUE is
+      emptied, the parameter and every sibling argument are kept);
+    * a ``read`` call whose ``path`` carries an admitted ``q`` VALUE, built from
+      ``memory_tools``' own ``_recall_reference``/``_guarded_path`` (#2511) so the two
+      layers cannot drift on which character of the call is removed.
+
+    Both are decided by ``memory.structural_reference``, so a secret-shaped value in
+    either position is left in place and still trips the guard. A call with no admitted
+    position — every other op, name and shape — is returned BY IDENTITY, which is what
+    lets the caller keep today's inputs, and today's verdict, exactly.
+
+    A masked copy is handed over only if the guard's own walk of it ANSWERS, which is what
+    ``_plan_guard_copy_encodable`` decides by ASKING that walk — read it for why no check
+    of a serialization can answer this question. A copy the walk cannot be asked about is
+    not used, and the caller's ORIGINALS go to the guard instead: that is the copy, and
+    therefore the verdict, of the tree before this change.
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+    if name == "memory" and arguments.get("op") == "recall":
+        from local_operator.memory import structural_reference
+
+        if structural_reference(arguments.get("text")):
+            masked = {**arguments, "text": ""}
+            return masked if _plan_guard_copy_encodable(masked) else arguments
+        return arguments
+    # ``memory_tools`` (sqlite3, urllib) is imported only where it can be used: every
+    # planned call in every session reaches this helper, and only a read's ``path`` can
+    # carry the exempt ``q``. The two clauses below mirror ``_recall_reference``'s own
+    # first line, so a call they skip is one that helper answers ``None`` for too.
+    if name != "read" or not isinstance(arguments.get("path"), str):
+        return arguments
+    from local_operator.tools.memory_tools import _guarded_path, _recall_reference
+
+    if _recall_reference(name, arguments.get("path")) is not None:
+        masked = {**arguments, "path": _guarded_path(arguments["path"])}
+        return masked if _plan_guard_copy_encodable(masked) else arguments
+    return arguments
+
+
+def _plan_guard_copy_encodable(value: Any) -> bool:
+    """Whether the guard's own walk over ``value`` ANSWERS, rather than raising out of it.
+
+    ``retained_arguments`` walks a memory call with ``memory_privacy.guard_encoded``, and
+    that walk ENCODES every string it reaches (``guard()``'s byte-cap arm is
+    ``len(value.encode("utf-8"))``) and re-serializes every dict/list with
+    ``ensure_ascii=False``. A wire document carrying a lone-surrogate escape (``"\\ud800"``)
+    decodes to a bare surrogate character, which the re-serialization writes back
+    UNWRAPPED, so encoding it raises ``UnicodeEncodeError``. Nothing on the path catches
+    it — it is a ``ValueError``, and ``retained_arguments`` catches ``MemoryError`` — so
+    it would leave the planning loop and abort the rest of the batch's planning rather
+    than produce a verdict.
+
+    The walk is MORE than a serialization of ``value``: it also ``json.loads``es any
+    string that ``lstrip()``s to ``{``/``[`` and walks the DECODED copy (depth <= 4, see
+    ``memory_privacy.guard_encoded``). That decoded copy is where a wire document can carry
+    the character as PLAIN ASCII text — ``{"a": "\\ud800"}`` is thirteen characters that
+    encode fine, and only the string's own re-DECODE reaches the bare surrogate. MEASURED
+    on ``d259fb91d``: for a read whose admitted ``q`` reference was blanked and which
+    carried that spelling as a sibling, a check of the copy's JSON spelling answered
+    ``True``, the masked copy was handed over, and the walk raised ``UnicodeEncodeError``
+    out of the seam two frames later.
+
+    Which is why this helper asks the question OF the walk instead of re-spelling its
+    reach: the copy it approves is the copy the walk then gets, so the two cannot
+    disagree about which strings are reached. The cost is one extra walk, paid only by the
+    calls that HAVE an admitted reference position.
+    """
+    from local_operator.memory import MemoryError
+    from local_operator.memory_privacy import guard_encoded
+
+    try:
+        guard_encoded(value)
+    except UnicodeEncodeError:
+        # The one failure this helper screens for: a string the walk must encode holds a
+        # character UTF-8 cannot carry, and the walk has no verdict to give about it.
+        return False
+    except MemoryError:
+        # The walk stopped with an ANSWER (the byte cap, or a recognised sensitive
+        # value). That is the outcome this helper exists to secure, and the verdict it
+        # belongs to is ``retained_arguments``' to make, on this same copy, a moment
+        # later — never this helper's to pre-empt.
+        return True
+    return True
+
+
+def _decode_plan_guard_raw(raw: str) -> tuple[Any, bool]:
+    """``json.loads(raw)``, and whether decode -> encode provably keeps every value.
+
+    ``_plan_guard_raw`` replaces the guard's copy of the wire JSON with a decode ->
+    re-serialize round trip while the executor still dispatches the ORIGINAL
+    ``call.raw_arguments``. So anything that trip cannot carry across is content the
+    guard stops seeing: a call the guard refuses today would run. A JSON document has
+    exactly two spellings a provider can stream where that happens, and both are
+    DETECTED here rather than judged safe one by one:
+
+    * a DUPLICATE KEY — ``json.loads`` keeps the last occurrence and silently drops the
+      earlier value, and the value it drops leaves the guard's copy while the original
+      raw still carries it. Measured: a read whose raw is
+      ``{"path":"memory://global?q=<colliding id>","raw":"<Luhn-valid card>","raw":"true"}``
+      is refused when the raw reaches the guard and RUNS on the re-encoded copy.
+      ``json.dumps`` cannot emit a duplicate key at all, so no corpus row spelled with
+      it can express this case: the tests spell that raw by hand.
+    * a NUMBER LITERAL whose own spelling the encoder does not reproduce, because
+      ``json.dumps`` writes ``repr()`` of the parsed value (``1E5`` -> ``100000.0``),
+      which can shorten a digit run the card/IBAN arms look for. The review's second
+      spelling does NOT reproduce: ``4111111111111111.0`` parses to a float whose
+      ``repr()`` is that same literal, so the encoder emits ``4111111111111111.0`` —
+      MEASURED, and therefore no test asserts an evasion for it.
+
+    Escape and whitespace spellings are NOT lossy in the direction that matters: the
+    decoded copy holds the same or more literal characters than the wire spelling did,
+    so they are left to the round trip — which is what keeps an ordinary spaced
+    ``{"path": "memory://global?q=<ref>"}`` masking exactly as it does today. A raw
+    this cannot PROVE lossless makes the caller hand the guard the original (fail
+    closed), so the refusal it produces today still fires.
+    """
+    duplicated = False
+    respelled = False
+
+    def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicated
+        if len({key for key, _ in pairs}) != len(pairs):
+            duplicated = True
+        return dict(pairs)
+
+    def _int(text: str) -> int:
+        nonlocal respelled
+        value = int(text)
+        respelled |= repr(value) != text
+        return value
+
+    def _float(text: str) -> float:
+        nonlocal respelled
+        value = float(text)
+        respelled |= repr(value) != text
+        return value
+
+    # ``NaN`` / ``Infinity`` / ``-Infinity`` are deliberately NOT hooked: ``parse_constant``
+    # is not passed. They are tokens this round trip re-emits IDENTICALLY — ``json.dumps``
+    # writes the same three words back (measured: ``{"a": NaN}`` -> ``{"a":NaN}``) — so the
+    # guard's copy holds exactly what the wire held and no value is dropped. Flagging them
+    # as respelled would close no hole and would fail closed on calls that work today
+    # (``repr(float("nan"))`` is ``'nan'``, not ``'NaN'``, so hooking them would mark every
+    # such document lossy): over-refusal, not safety. QA round 2's gap 3 — recorded here so
+    # a later reader does not "fix" this into refusing calls that work.
+    decoded = json.loads(raw, object_pairs_hook=_object, parse_int=_int, parse_float=_float)
+    return decoded, not (duplicated or respelled)
+
+
+def _plan_guard_raw(name: str, raw: str) -> str:
+    """``raw`` with the same two positions blanked, or ``raw`` itself unchanged.
+
+    The streamed wire JSON is a SEPARATE carrier: ``retained_arguments`` decodes it
+    and guards its text as well, so masking the argument dict alone would leave a
+    live (streamed) call refused on its raw spelling. Only a parseable ``raw`` whose
+    own copy holds an admitted reference is re-serialized, and only when the decoder
+    and the encoder can carry the rest of it ACROSS UNCHANGED (see
+    ``_decode_plan_guard_raw``) — an unparseable ``raw``, a non-object one, one whose
+    own value is NOT an admitted reference, one whose masked copy the guard's walk cannot
+    be asked about (``_plan_guard_copy_encodable``), and one whose round trip is lossy are
+    all returned untouched, so the fail-closed refusal each produces today is unchanged.
+    """
+    try:
+        decoded, lossless = _decode_plan_guard_raw(raw)
+    except (ValueError, TypeError):
+        return raw
+    masked = _plan_guard_arguments(name, decoded)
+    if masked is decoded or not lossless:
+        return raw
+    try:
+        return json.dumps(masked, ensure_ascii=False, separators=(",", ":"))
+    except (ValueError, TypeError):
+        return raw
+
+
+def _plan_guard_inputs(name: str, arguments: Any, raw: str | None) -> tuple[Any, str | None]:
+    """The inputs the plan-time sensitivity guard is asked about, and NOTHING else.
+
+    ``_plan_call`` asks ``retained_arguments`` whether one call carries a recognised
+    sensitive memory value, and refuses the call before any schema validator or tool
+    sees it. That question is asked of the WHOLE argument dict and of the whole wire
+    JSON, so the exemption PR #2511 gave a read's ``q`` and PR #2524 gave a recall's
+    ``text`` — both applied at the TOOL layer — never got to run: the call was
+    refused one level ABOVE them, and every live path (native dispatch, the eval
+    bridge's ``dispatch_tool``, the monitor runner) funnels through this seam.
+
+    So the guard is handed a MASKED COPY that blanks exactly those two value
+    positions, each classified by the same ``structural_reference`` the tool layer
+    uses. It is for the DECISION alone: ``_plan_call`` still dispatches the caller's
+    original arguments, and ``retained_arguments`` keeps computing its own redacted
+    copies for history/events from those originals. A masked copy that still trips
+    the guard — a secret in a sibling parameter, a secret-shaped value in either of
+    the two positions, an unparseable raw — refuses through the very same branch,
+    byte-identically to today. A masked copy the guard's walk cannot be ASKED about
+    (see ``_plan_guard_copy_encodable``) is not handed over at all, in either carrier.
+    """
+    masked_arguments = _plan_guard_arguments(name, arguments)
+    if masked_arguments is arguments:
+        return arguments, raw
+    masked_raw = _plan_guard_raw(name, raw) if raw else raw
+    # The wire JSON is a SECOND carrier of the same call and the walk re-decodes it too,
+    # so a masked raw the walk cannot be asked about makes the pair no more usable than
+    # an unwalkable argument copy: BOTH go back, and the guard is then asked exactly what
+    # the tree before this change asked it.
+    if raw and not _plan_guard_copy_encodable(masked_raw):
+        return arguments, raw
+    return masked_arguments, masked_raw
+
+
 #: User-facing copy for the input-refusal recovery tokens the failover walk
 #: records on the end event (``provider_payload["input_refusal_recovery"]``).
 #: A token this map does not know degrades to its underscores read as spaces:
@@ -1573,6 +2094,27 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # Turns this run has re-asked after a ``length`` cut-off produced nothing
+        # on a model with no cheaper rung to retreat to -- see
+        # ``MAX_LENGTH_SILENT_RECOVERIES``. Run-scoped and topped up by nothing,
+        # like every sibling recovery budget.
+        length_silent_recoveries = 0
+        # Turns this run has continued after the output limit cut an answer
+        # mid-prose -- see ``MAX_TRUNCATED_ANSWER_CONTINUATIONS``. Run-scoped and
+        # topped up by nothing, like every sibling recovery budget.
+        truncated_answer_continuations = 0
+        # Whether the model call that LAST ended this run was a silent length
+        # cut-off whose recovery budget was spent. Reset per model call (below)
+        # rather than only set once: a run that recovers through a late injection
+        # and then answers has NOT ended cut off, and stamping a cause on its end
+        # would tell the parent a completed run was truncated.
+        length_silent_cut_off = False
+        # Whether the LAST model call ended on a prose truncation the run could
+        # not continue (the budget was spent, or the flag is off). Reset per
+        # call beside its silent sibling for the same reason: the terminal end
+        # describes the last call only, and a run that later answers cleanly must
+        # not inherit an earlier call's brand.
+        length_answer_cut_off = False
         # Turns this run has re-asked after arriving with no text and no tool
         # calls on a clean stop -- see ``MAX_WORDLESS_STOP_RECOVERIES``.
         # Run-scoped and topped up by nothing, like the truncation budget
@@ -1682,6 +2224,10 @@ class AgentLoop:
                             return
 
                     assistant, stop_reason, stream_error = None, "stop", None
+                    # Per model call: the flag describes how THIS call ended, and
+                    # the terminal end event reads it for the last call only.
+                    length_silent_cut_off = False
+                    length_answer_cut_off = False
                     turn_connectivity_loss = False
                     turn_retryable_interruption = False
                     turn_attempted_selector: "ModelSpec | None" = None
@@ -1733,6 +2279,18 @@ class AgentLoop:
                             yield event
                     if assistant is None:
                         raise RuntimeError("model turn produced no assistant message")
+
+                    # THE RETREAT IS SPENT BY THE ONE CALL IT PAID FOR. The
+                    # ceiling exists to stop a retry climbing back to the rung
+                    # that produced silence; leaving it set pinned every LATER
+                    # call in this run (the rest of a tool loop, a continuation
+                    # after this answer) to the cheaper rung with no notice and
+                    # no rung of the run's own choosing. The session's setting
+                    # was never touched either way (the loop's ``config.model``
+                    # is the run's snapshot, not the host's spec -- see
+                    # ``_current_model``), so clearing here is what keeps the
+                    # retreat bounded to the retry it announced.
+                    effort_ceiling = None
 
                     if not (turn_connectivity_loss or turn_retryable_interruption):
                         # A CLEAN turn reaps the fault-only window: the run has
@@ -2203,14 +2761,7 @@ class AgentLoop:
                                 update={"requires_reasoning_echo": True}
                             )
                             echo_fill_route = (turn_model.provider, turn_model.model_id)
-                            yield NoticeEvent(
-                                text=(
-                                    "the provider refused this request for a "
-                                    "missing reasoning echo — retrying with the "
-                                    "echo filled in at the same effort"
-                                ),
-                                kind="warning",
-                            )
+                            yield _notice(_nt.reasoning_echo_filled(), kind="warning")
                             has_more_tool_calls = True
                             continue
                         # SECOND recovery, and the one that needs a gate: a
@@ -2285,14 +2836,7 @@ class AgentLoop:
                                 # just refused (the empty-truncation retreat sets
                                 # one for the same reason).
                                 effort_ceiling = thinking_off
-                                yield NoticeEvent(
-                                    text=(
-                                        "the provider refused this request for a "
-                                        "missing reasoning echo — retrying with "
-                                        "thinking disabled"
-                                    ),
-                                    kind="warning",
-                                )
+                                yield _notice(_nt.reasoning_echo_thinking_off(), kind="warning")
                                 has_more_tool_calls = True
                                 continue
                         # Pair every dangling tool call so the wire stays legal.
@@ -2498,18 +3042,105 @@ class AgentLoop:
                                 config.model = config.model.model_copy(
                                     update={"reasoning_effort": lower}
                                 )
+                                # The ceiling covers the retry, not the run:
+                                # cleared immediately after that call returns
+                                # (see the note under ``assistant is None``).
                                 effort_ceiling = lower
-                                yield NoticeEvent(
-                                    text=(
-                                        f"model spent its whole output budget "
-                                        f"thinking and produced nothing — "
-                                        f"retrying at effort {lower}"
-                                    ),
-                                    kind="warning",
+                                yield _notice(
+                                    _nt.budget_exhausted_retry(effort=lower), kind="warning"
                                 )
                                 has_more_tool_calls = True
                                 continue
                         if silent:
+                            # NO RETREAT RUNG AND NOTHING PRODUCED. ``lower`` is
+                            # ``None`` for the router's ``auto`` sentinel (it
+                            # delegates the level to the server, so no rung sits
+                            # below it -- ``_lower_effort``), so this arm used to
+                            # be the whole story: a notice, and a run that ended
+                            # having produced NOTHING while every surface read it
+                            # as finished. A delegated CHILD is the case that
+                            # matters most -- its deliverable is the point, and
+                            # the parent paid to resume it.
+                            #
+                            # So the loop spends one re-ask first, the
+                            # wordless-stop recovery's shape: state the one fact
+                            # only this layer knows (cut off at the output limit,
+                            # not finished) and give the model a chance to
+                            # produce its next action in smaller pieces. The
+                            # graceful-cancel boundary is honoured exactly as the
+                            # retreat above honours it: a requested stop must not
+                            # pay for one more request.
+                            #
+                            # ``retry_eligible`` is part of the condition and not
+                            # decorative: it is what keeps a LADDERED model's
+                            # exhausted retries on their existing path. On that
+                            # shape the loop DID retreat (it offered two cheaper
+                            # rungs and the model returned empty on each), the
+                            # retries are spent, and the remaining move -- stepping
+                            # the model down -- belongs to the operator. The arm
+                            # here is the one with NO rung to offer at all: the
+                            # ladder is consulted and declines (``lower is None``
+                            # while the retries are unspent) — the router's
+                            # ``auto`` sentinel, or a ladder already at its
+                            # cheapest real rung.
+                            if (
+                                lower is None
+                                and retry_eligible
+                                and not graceful_length
+                                and length_silent_recoveries < MAX_LENGTH_SILENT_RECOVERIES
+                            ):
+                                length_silent_recoveries += 1
+                                # The empty turn must not reach the re-ask's wire
+                                # history, for the empty-truncation retry's two
+                                # reasons: an assistant message with no content
+                                # blocks is illegal on the Anthropic wire, and
+                                # replaying "I said nothing" teaches the re-ask to
+                                # say nothing.
+                                if context.messages and context.messages[-1] is assistant:
+                                    context.messages.pop()
+                                if new_messages and new_messages[-1] is assistant:
+                                    new_messages.pop()
+                                # Persisted for the same reason every recovery
+                                # prompt is: a resumed session must be able to see
+                                # why it was re-asked. Harness chrome -- see
+                                # ``harness.rows.harness_chrome_prompts``.
+                                recovery = Message.user(LENGTH_STOP_RECOVERY_PROMPT)
+                                context.messages.append(recovery)
+                                new_messages.append(recovery)
+                                yield _notice(_nt.budget_exhausted_continue(), kind="warning")
+                                # No TurnEndEvent, for the wordless recovery's
+                                # reason: nothing was announced or shown for this
+                                # turn, so there is no live row to settle.
+                                has_more_tool_calls = True
+                                continue
+                            if lower is None and not graceful_length:
+                                # The turn is ending with NOTHING and the loop has
+                                # no move left to offer: either no rung exists at
+                                # all (the ``auto`` sentinel), its ONE re-ask is
+                                # already spent, or a laddered model spent its own
+                                # lower-effort retries and kept returning empty.
+                                # Every one of those ends must be NAMED at its end
+                                # instead of left bare -- a bare end every surface
+                                # reads as a completed answer, which is how a
+                                # cut-off child reached its parent saying it had
+                                # finished (``incidents.OUTPUT_LIMIT_CAUSE``;
+                                # ``Session._classify_cut_off`` turns the pair into
+                                # an involuntary error outcome).
+                                #
+                                # Reached only AFTER the re-ask arm above, which
+                                # continues when it fires, so ``length_silent_
+                                # recoveries`` is necessarily spent when that shape
+                                # gets here; ``retry_eligible`` being false (a
+                                # laddered model's retries spent) is the other
+                                # shape, and both are the same fact -- the loop
+                                # cannot continue this turn. The graceful boundary
+                                # is read again here (the same predicate the arms
+                                # above and the boundary below use) so a requested
+                                # stop can never be branded involuntary. Reset per
+                                # model call (above), so a run that recovers
+                                # through a late injection and then answers is not
+                                # branded with an earlier call's cut-off.
+                                length_silent_cut_off = True
                             # No cheaper rung to retry at (or the retries are
                             # spent): the turn is about to end with NOTHING on
                             # screen — minutes of "thinking" and then silence,
@@ -2529,14 +3160,8 @@ class AgentLoop:
                                 # the only cause left to name -- a ladder claim
                                 # here would be false.
                                 cause = "a stop was requested"
-                            yield NoticeEvent(
-                                text=(
-                                    "the model spent its whole output budget "
-                                    f"thinking and produced no visible output "
-                                    f"({cause}) — retry, or switch to a model "
-                                    "with a larger output budget"
-                                ),
-                                kind="warning",
+                            yield _notice(
+                                _nt.budget_exhausted_no_output(cause=cause), kind="warning"
                             )
                         elif has_text:
                             # A partial ANSWER, which is the case the missing
@@ -2555,21 +3180,49 @@ class AgentLoop:
                             # prevent, on a turn where there genuinely IS an answer
                             # to cut off (design round 2, D7).
                             #
-                            # The remedy clause is not decoration: with no call in
-                            # flight this is the one truncation the loop does NOT
-                            # auto-continue (above), so the reader is the only actor
-                            # left and every sibling row in the family names a move
-                            # (design round 1, D4). A cut call IS re-asked, but only
-                            # the call: the answer's remainder was never sent, and
-                            # only the reader can ask for it.
-                            yield NoticeEvent(
-                                text=(
-                                    "the model hit the output limit — this answer "
-                                    "is cut off, and the rest was never sent — "
-                                    "ask again to continue, or narrow the request"
-                                ),
-                                kind="warning",
-                            )
+                            # The remedy clause is not decoration: for a session
+                            # with no reader who can ask — a delegated CHILD,
+                            # whose parent can continue it only by paying for a
+                            # resume — the loop continues the answer ITSELF, once,
+                            # when ``continue_truncated_answer`` is on, and the
+                            # notice says so. Every other session keeps the
+                            # move it can actually make. A cut call IS re-asked,
+                            # but only the call: the answer's remainder was never
+                            # sent.
+                            if (
+                                config.continue_truncated_answer
+                                and not assistant.tool_calls
+                                and not _graceful_cancel_requested(config)
+                                and truncated_answer_continuations
+                                < MAX_TRUNCATED_ANSWER_CONTINUATIONS
+                            ):
+                                truncated_answer_continuations += 1
+                                # Persisted for the same reason every recovery
+                                # prompt is: a resumed session must be able to
+                                # see why the conversation continues. Harness
+                                # chrome -- see
+                                # ``harness.rows.harness_chrome_prompts``.
+                                recovery = Message.user(CONTINUE_TRUNCATED_ANSWER_PROMPT)
+                                context.messages.append(recovery)
+                                new_messages.append(recovery)
+                                yield _notice(_nt.output_limit_continuing(), kind="warning")
+                                # No TurnEndEvent: the turn is still live, and the
+                                # row settles when the continued answer arrives.
+                                has_more_tool_calls = True
+                                continue
+                            if (
+                                config.continue_truncated_answer
+                                and not assistant.tool_calls
+                                and not _graceful_cancel_requested(config)
+                            ):
+                                # The one continuation is spent and the answer is
+                                # STILL cut: the end must be NAMED, or a parent
+                                # reads a truncated report as a finished one —
+                                # the same misread the silent arm's brand
+                                # removes. A text+call turn is left alone here:
+                                # the call arm owns its re-ask.
+                                length_answer_cut_off = True
+                            yield _notice(_nt.output_limit_cut_off(), kind="warning")
                         elif assistant.tool_calls:
                             # Visible truncation with a call in flight and no prose
                             # to pronounce it: the call was NOT executed (the
@@ -2605,18 +3258,12 @@ class AgentLoop:
                             # call's own row, from the arm marker that result
                             # carries (not from this model-facing text, which a
                             # row must not paint: review F2).
-                            yield NoticeEvent(
-                                text=(
-                                    "the model hit the output limit mid tool call "
-                                    "— nothing was executed; re-asking it to "
-                                    "re-emit the call in smaller pieces"
-                                    if any(cut_calls)
-                                    else "the model hit the output limit before the "
-                                    "call ran — nothing was executed; re-asking it "
-                                    "to re-issue the call as it is"
-                                ),
-                                kind="warning",
+                            notice_message = (
+                                _nt.output_limit_tool_call()
+                                if any(cut_calls)
+                                else _nt.output_limit_before_call()
                             )
+                            yield _notice(notice_message, kind="warning")
                         # Truncated: pair placeholders, do NOT execute.
                         #
                         # A synthetic result rather than the bare
@@ -2724,14 +3371,7 @@ class AgentLoop:
                             recovery = Message.user(WORDLESS_STOP_RECOVERY_PROMPT)
                             context.messages.append(recovery)
                             new_messages.append(recovery)
-                            yield NoticeEvent(
-                                text=(
-                                    "the model's reply arrived empty (no text, no "
-                                    "tool calls) — re-asking it for its next "
-                                    "action or finish"
-                                ),
-                                kind="warning",
-                            )
+                            yield _notice(_nt.empty_reply(), kind="warning")
                             # No TurnEndEvent, for the nameless recovery's
                             # reason: nothing was announced or shown for this
                             # turn, so there is no live row to settle.
@@ -2799,10 +3439,7 @@ class AgentLoop:
                         )
                         context.messages.append(recovery)
                         new_messages.append(recovery)
-                        yield NoticeEvent(
-                            text="Repeated tool errors — requesting a different approach.",
-                            kind="warning",
-                        )
+                        yield _notice(_nt.repeated_tool_errors(), kind="warning")
                     # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
                     # ``no_reply`` call is an affirmative way to end the turn,
                     # so a batch whose LAST result carries the quiet marker ends
@@ -2912,14 +3549,7 @@ class AgentLoop:
                         # an aside's question with "withdrawn unasked"). Say what
                         # happened and what it means, in words that do not
                         # depend on knowing the loop's vocabulary.
-                        yield NoticeEvent(
-                            text=(
-                                "This turn was stopped because it kept being asked to "
-                                "keep going; the pending message was dropped. Reply with "
-                                "what to do next."
-                            ),
-                            kind="warning",
-                        )
+                        yield _notice(_nt.kept_going_stopped(), kind="warning")
                         # The pending batch is dropped (as today), and the end
                         # NAMES the cause: ``aborted=True`` is what the taxonomy
                         # reads as involuntary, and ``cut_off_cause`` is the token
@@ -2988,7 +3618,22 @@ class AgentLoop:
                         return
                 break
 
-            yield AgentEndEvent(messages=new_messages, generation=generation)
+            # THE LAST MODEL CALL'S SHAPE, carried rather than re-derived: a run
+            # whose final call was a silent length cut-off with its recovery
+            # budget spent ends INVOLUNTARY and NAMED. Every other end keeps the
+            # bare shape (``aborted=False``, no cause) that reads as a deliberate
+            # completion. This is the same one-writer-per-fact split the
+            # continuation guard uses: the loop stamps the token and the
+            # involuntariness, the classifier renders the sentence
+            # (``Session._classify_cut_off``, ``tests/unit/session/test_cut_off_turns.py``).
+            yield AgentEndEvent(
+                messages=new_messages,
+                aborted=length_silent_cut_off or length_answer_cut_off,
+                cut_off_cause=(
+                    OUTPUT_LIMIT_CAUSE if (length_silent_cut_off or length_answer_cut_off) else ""
+                ),
+                generation=generation,
+            )
         finally:
             self._unwire_deadline(deadline_task)
             # The fault-only recovery window dies with the run for the same
@@ -4073,9 +4718,16 @@ class AgentLoop:
         # Refuse recognised sensitive memory values BEFORE a schema validator
         # can quote an invalid value in its diagnostic. Keep the original call
         # for this guard/executor; history/events alone receive redacted copies.
+        # The guard is asked about a MASKED COPY so the two reference positions
+        # the tools exempt (a read's ``q``, a recall's ``text``) are decided here
+        # too — see _plan_guard_inputs; the executor below still gets the
+        # caller's own arguments.
         from local_operator.memory_privacy import retained_arguments
 
-        _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
+        guard_arguments, guard_raw = _plan_guard_inputs(
+            call.name, call.arguments, call.raw_arguments
+        )
+        _, _, sensitive_memory = retained_arguments(call.name, guard_arguments, guard_raw)
         if sensitive_memory:
             from local_operator.memory import (
                 MEMORY_TOOL_CONTRACT_ERROR,
@@ -4402,7 +5054,7 @@ class AgentLoop:
                             ToolExecutionEndEvent(
                                 tool_call_id=nested.id,
                                 tool_name=name,
-                                result=result,
+                                result=self._span_stripped_result(result, context),
                                 duration_s=result.duration_s,
                                 is_error=True,
                             )
@@ -4460,7 +5112,7 @@ class AgentLoop:
                         ToolExecutionEndEvent(
                             tool_call_id=nested.id,
                             tool_name=name,
-                            result=result,
+                            result=self._span_stripped_result(result, context),
                             duration_s=result.duration_s,
                             is_error=result.is_error,
                         )
@@ -4714,7 +5366,7 @@ class AgentLoop:
                     ToolExecutionEndEvent(
                         tool_call_id=item.call.id,
                         tool_name=item.tool.name if item.tool is not None else item.call.name,
-                        result=result,
+                        result=self._span_stripped_result(result, context),
                         duration_s=result.duration_s,
                         is_error=result.is_error,
                     )
@@ -5130,7 +5782,7 @@ class AgentLoop:
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
                                 tool_name=item.tool.name,
-                                result=result,
+                                result=self._span_stripped_result(result, context),
                                 # Both halves, like the three sibling emitters.
                                 # `duration_s` has no validator ORing it with
                                 # `result.duration_s` the way `_sync_error_flag`
@@ -5429,6 +6081,43 @@ class AgentLoop:
             new_messages.append(message)
 
     @staticmethod
+    def _span_stripped_result(result: ToolResult, context: LoopContext) -> ToolResult:
+        """The copy a LIVE ``ToolExecutionEndEvent`` may carry (LOH-28 R3-1).
+
+        ``_append_results`` redacts the model's copy later, but the event is
+        emitted from the raw result and read by the TUI, the attached client
+        and the operator API. The identifier span's per-session token is
+        protocol, not content: a live reader must never see it (nor a PUA
+        marker), so the event gets a plain-text copy with every own span
+        resolved to its content. The raw result is left untouched for the
+        existing redaction path, which stays the single writer of the
+        model-visible text.
+        """
+        store = getattr(getattr(context, "tool_context", None), "variables", None)
+        strip = getattr(store, "strip_identifier_spans", None)
+        if not callable(strip):
+            return result
+
+        def scrub(value: Any) -> Any:
+            if isinstance(value, str):
+                return strip(value)
+            if isinstance(value, dict):
+                return {key: scrub(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(scrub(item) for item in value)
+            return value
+
+        content: list[Content] = []
+        for item in result.content:
+            value = getattr(item, "text", None)
+            content.append(
+                item.model_copy(update={"text": strip(value)}) if isinstance(value, str) else item
+            )
+        return result.model_copy(update={"content": content, "details": scrub(result.details)})
+
+    @staticmethod
     async def _redact_content(
         content: list[Content],
         redact: Callable[[str], str],
@@ -5558,52 +6247,28 @@ class AgentLoop:
         """
         if not details:
             return details
-        # The ORDER here is the rebuild's order below: every string of each
-        # key's value, list/tuple items only (a non-``str`` item cannot carry
-        # text and rides back through untouched).
-        texts: list[str] = []
-        for key in _CONTENT_BEARING_DETAIL_KEYS:
-            value = details.get(key)
-            if isinstance(value, str):
-                texts.append(value)
-            elif isinstance(value, (list, tuple)):
-                texts.extend(item for item in value if isinstance(item, str))
-        if not texts:
-            return details  # decided ON the loop: the common result pays no hop
+        if not any(
+            isinstance(details.get(key), str)
+            or (
+                isinstance(details.get(key), (list, tuple))
+                and any(isinstance(item, str) for item in details[key])
+            )
+            for key in _CONTENT_BEARING_DETAIL_KEYS
+        ):
+            return details
 
-        def _run() -> list[str]:
+        def _run() -> dict[str, Any]:
             with (
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
-                return [redact(text) for text in texts]
+                out = dict(details)
+                for key in _CONTENT_BEARING_DETAIL_KEYS:
+                    if key in details:
+                        out[key] = _redact_diff_detail(details[key], redact)
+                return out
 
-        masked = await asyncio.to_thread(_run)
-        out = dict(details)
-        index = 0
-        for key in _CONTENT_BEARING_DETAIL_KEYS:
-            value = details.get(key)
-            if isinstance(value, str):
-                out[key] = masked[index]
-                index += 1
-            elif isinstance(value, (list, tuple)):
-                rebuilt: list[Any] = []
-                for item in value:
-                    if isinstance(item, str):
-                        rebuilt.append(masked[index])
-                        index += 1
-                    else:
-                        # Not text, so it neither takes a mask nor shifts one:
-                        # the index advances only over the strings the
-                        # collection phase banked (review round 1, R-2 — an
-                        # enumerated position put the mask one ahead for every
-                        # non-``str`` item and read past the list).
-                        rebuilt.append(item)
-                # Same concrete sequence back, so a consumer that checks the
-                # container type (the card accepts any Sequence, but a future
-                # one may not) sees exactly the shape it stored.
-                out[key] = list(rebuilt) if isinstance(value, list) else tuple(rebuilt)
-        return out
+        return await asyncio.to_thread(_run)
 
     @staticmethod
     def _drain_pending(pending: list[AgentMessage], context: LoopContext) -> int:
@@ -5837,7 +6502,9 @@ def validate_tool_arguments(
     required = schema.get("required", []) or []
     for name in required:
         if name not in arguments:
-            errors.append(f"missing required argument '{name}'")
+            errors.append(
+                f"missing required argument '{name}'"
+            )  # i18n: ignore model-facing tool argument error
     for name, value in arguments.items():
         prop_schema = properties.get(name)
         if not isinstance(prop_schema, dict):
@@ -5874,7 +6541,9 @@ def validate_tool_arguments(
             except ValidationError:
                 continue
         else:
-            errors.append(f"argument '{name}' does not match type {' | '.join(types)}")
+            errors.append(
+                f"argument '{name}' does not match type {' | '.join(types)}"
+            )  # i18n: ignore model-facing tool argument error
     return errors
 
 

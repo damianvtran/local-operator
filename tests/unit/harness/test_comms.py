@@ -1269,8 +1269,11 @@ def test_a_resume_carries_the_childs_role_and_tier_forward(tmp_path, monkeypatch
     resolved = comms_mod.ModelSpec(provider="anthropic", model_id="claude-opus-5")
     # ``strict`` is what the resume passes now: a tier that broke since launch
     # refuses the resume rather than inheriting (test_pinned_subagent_model).
+    # ``**roster`` is the member-override half of the same call: the resume
+    # resolves against the roster the child's slot is named by, exactly as the
+    # launch does, so this double has to model the real signature.
     parent._resolve_subagent_model = (  # type: ignore[attr-defined]
-        lambda agent, effort, strict=False: resolved
+        lambda agent, effort, strict=False, **roster: resolved
     )
     comms = SubagentComms(parent)  # type: ignore[arg-type]
     jobs.add("job-1", status="cancelled")
@@ -3506,6 +3509,32 @@ def test_a_child_whose_transcript_vanished_is_not_resumable(tmp_path) -> None:
     [row] = comms.roster()
 
     assert row.status == "failed"
+    assert row.resumable is False
+    assert row.detail == "no transcript on disk"
+
+
+def test_a_child_whose_directory_was_reaped_reports_gone(tmp_path) -> None:
+    """The retention pass removes whole session directories; the roster must
+    answer with the existing clean ``gone`` row rather than raise or advertise
+    a resume of nothing. This is the shape a parent reaches after its child's
+    record was reaped, and the one the module docstring promises (accepted
+    trade-off: a resumed ancient parent gets "gone").
+    """
+    import shutil
+
+    comms, jobs, _child, _parent = wire()
+    session_dir = tmp_path / "reaped"
+    session_dir.mkdir()
+    comms.attach("job-1", FakeChild(), session_dir)
+    comms.detach("job-1")
+    shutil.rmtree(session_dir)
+    # The job row was swept with the record (the reaped-directory case), which
+    # lands the status on the ``gone`` fallback.
+    del jobs.jobs["job-1"]
+
+    [row] = comms.roster()
+
+    assert row.status == "gone"
     assert row.resumable is False
     assert row.detail == "no transcript on disk"
 

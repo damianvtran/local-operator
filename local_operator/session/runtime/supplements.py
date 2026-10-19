@@ -71,6 +71,7 @@ from local_operator.supplements.contract import (
     SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
     SupplementDetails,
+    SupplementSound,
 )
 from local_operator.supplements.decision import Decision
 from local_operator.supplements.decision import decide as decide_supplement
@@ -83,7 +84,7 @@ from local_operator.supplements.persistence import (
     superseded,
 )
 from local_operator.supplements.prompt import MAX_INSTRUCTION_CHARS
-from local_operator.supplements.trigger import final_answer, refusal
+from local_operator.supplements.trigger import final_answer, refusal, turn_sounds
 from local_operator.supplements.validate import Component
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ class _JobInputs:
     datasets: tuple[Dataset, ...]
     user_text: str
     answer_text: str
+    sounds: tuple[SupplementSound, ...] = ()
     instruction: str = ""
     version: int = 1
     #: The job's newest row, as the write path published it after its append landed (a plain
@@ -522,6 +524,9 @@ class SupplementRunner:
         answer = final_answer(provenance.items, persisted=transcript.has_entry)
         if answer is None:
             return
+        # Generated audio already passed the tool delivery boundary; unlike a
+        # file candidate it has no path for the prefilter/classifier to discover.
+        sounds = turn_sounds(provenance.items)
         want_files = settings.files
         want_graphics = settings.graphics and GENERATOR_AVAILABLE
         started = time.perf_counter()
@@ -544,7 +549,7 @@ class SupplementRunner:
             pre.rejected,
             pre.elapsed_ms,
         )
-        if pre.skipped:
+        if pre.skipped and not sounds:
             return
         components: list[Component] = []
         prepared_detail: list[str] = []
@@ -588,7 +593,9 @@ class SupplementRunner:
                     more=deliverables[settings.max_featured :],
                     vendor="prepared",
                 )
-            await self._write(answer.id, decision, components=components, detail=prepared_detail)
+            await self._write(
+                answer.id, decision, components=components, detail=prepared_detail, sounds=sounds
+            )
             return
         if decision.graphics and want_graphics:
             # Files AND graphics: the generator half runs on its own task so a steer can cut
@@ -601,9 +608,10 @@ class SupplementRunner:
                 provenance.user_text,
                 answer.text,
                 settings,
+                sounds=sounds,
             )
             return
-        await self._write(answer.id, decision)
+        await self._write(answer.id, decision, sounds=sounds)
 
     async def _write(
         self,
@@ -612,6 +620,7 @@ class SupplementRunner:
         *,
         components: Sequence[Component] = (),
         detail: Sequence[str] = (),
+        sounds: Sequence[SupplementSound] = (),
     ) -> None:
         """Journal the decision. A decision with nothing to show writes NOTHING.
 
@@ -619,7 +628,7 @@ class SupplementRunner:
         costing a journal line per turn the vendor declined; the spam-rate measurement reads
         the DEBUG line and the golden set, not the journal.
         """
-        if decision.empty and not decision.more and not components:
+        if decision.empty and not decision.more and not components and not sounds:
             return
         job = new_job_id()
         stored = await self._store(components)
@@ -634,7 +643,12 @@ class SupplementRunner:
                 version = int(base.get("version", 0) or 0) + 1 if base is not None else 1
                 final = dict(
                     build_details(
-                        anchor=anchor, job=job, version=version, state="done", decision=decision
+                        anchor=anchor,
+                        job=job,
+                        version=version,
+                        state="done",
+                        decision=decision,
+                        sounds=sounds,
                     )
                 )
                 if stored:
@@ -667,6 +681,8 @@ class SupplementRunner:
         user_text: str,
         answer_text: str,
         settings: policy.SupplementSettings,
+        *,
+        sounds: Sequence[SupplementSound] = (),
     ) -> None:
         """Schedule the fork for a graphics "yes" (memo §2.5).
 
@@ -681,6 +697,7 @@ class SupplementRunner:
             datasets=tuple(datasets),
             user_text=user_text,
             answer_text=answer_text,
+            sounds=tuple(sounds[:3]),
         )
         self._remember(inputs)
         previous = self._task
@@ -765,6 +782,7 @@ class SupplementRunner:
                     version=version,
                     state="decided",
                     decision=inputs.decision,
+                    sounds=inputs.sounds,
                 )
             )
 
@@ -804,6 +822,10 @@ class SupplementRunner:
             )
             components = await self._store(outcome.components)
             error = outcome.error if not components else ""
+            # The cause describes the TERMINAL failure exactly as ``error`` does: with blocks
+            # kept the row settles ``done``, and both are cleared together (round-1 review
+            # R2 -- a done row carried ``cause`` while its ``error`` had been cleared).
+            cause = outcome.cause if not components else ""
             state = "failed" if error else "done"
 
             def build_final(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
@@ -833,6 +855,12 @@ class SupplementRunner:
                     # reported here, never as ``error`` on a ``done`` row (memo §2.5 as
                     # amended; round-1 R7).
                     final["detail"] = list(outcome.detail)
+                if cause:
+                    # The typed cause of a provider-terminal failure: the allowlisted
+                    # ``provider_<kind>`` vocabulary only (``generator.failure_kind``), never
+                    # provider prose (secret-safety rule). Cleared with the error on a
+                    # components-kept row (round-1 review R2).
+                    final["cause"] = cause
                 return final
 
             final = await self._commit_row(
@@ -927,7 +955,10 @@ class SupplementRunner:
         resolve_tier = getattr(self._session, "_resolve_subagent_model", None)
         if callable(resolve_tier):
             try:
-                tier = resolve_tier("task", "hi")
+                # The tier's MODEL only: this is not a delegated role, and its
+                # per-turn token cap counts reasoning, so a ``hi`` tier's
+                # ``max`` effort must not ride along (#2428).
+                tier = resolve_tier("task", "hi", apply_tier_effort=False)
             except Exception:  # noqa: BLE001 -- a bad tier is not a failed job
                 logger.debug("supplements: hi tier could not be resolved", exc_info=True)
         return generator.resolve_design_model(
@@ -1090,6 +1121,11 @@ class SupplementRunner:
                 components=(
                     [dict(item) for item in (details.get("components") or [])]
                     if state == "done"
+                    else []
+                ),
+                sounds=(
+                    [dict(item) for item in (details.get("sounds") or [])][:3]
+                    if state in ("decided", "done")
                     else []
                 ),
                 model=str(details.get("model", "") or ""),

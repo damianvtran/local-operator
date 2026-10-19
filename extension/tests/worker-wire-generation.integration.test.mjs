@@ -156,7 +156,7 @@ async function loadWorker() {
         setup(b) {
           b.onResolve({ filter: /^\.\/tab-groups$/ }, () => ({ path: "tab-groups", namespace: "g" }));
           b.onLoad({ filter: /.*/, namespace: "g" }, () => ({
-            contents: `const gatePromise = globalThis.__lopGate;\nexport const reconcileCommandTab = async () => undefined;\nexport const retitle = async () => {\n  await gatePromise;\n  return { tab: "bridge:1:old", url: "https://old-request.test", title: "OLD" };\n};\n`,
+            contents: `const gatePromise = globalThis.__lopGate;\nexport const reconcileCommandTab = async () => globalThis.__lopWorkerReconcile?.();\nexport const retitle = async () => {\n  await gatePromise;\n  return { tab: "bridge:1:old", url: "https://old-request.test", title: "OLD" };\n};\n`,
             loader: "js",
           }));
         },
@@ -173,6 +173,8 @@ async function loadWorker() {
     gate: { release },
     wires,
     warnings,
+    session,
+    local,
     /** Deliver a daemon frame to a specific socket, as that socket's peer. */
     deliver: (wire, frame) => wire.onmessage?.({ data: JSON.stringify(frame) }),
     /** Wait for a NEW socket to appear — the reconnect fast path (~1 s). */
@@ -185,6 +187,7 @@ async function loadWorker() {
     close: async () => {
       console.warn = realWarn;
       delete globalThis.__lopGate;
+      delete globalThis.__lopWorkerReconcile;
       await rm(dir, { recursive: true, force: true });
     },
   };
@@ -247,4 +250,42 @@ test("a request on the current wire is still answered, and still pushes its tab 
   } finally {
     await worker.close();
   }
+});
+
+test("ownership inspection crosses actual worker wire without reconciliation or storage writes", async () => {
+  const worker = await loadWorker();
+  try {
+    const [wire] = worker.wires;
+    const proof = "i".repeat(40);
+    worker.session.set("ownerScopes", {
+      [proof]: { session: "session:synthetic-inspection", generation: "old", allocations: {} },
+    });
+    const before = JSON.stringify([...worker.session]);
+    const localBefore = JSON.stringify([...worker.local]);
+    let reconcileCalls = 0;
+    globalThis.__lopWorkerReconcile = () => { reconcileCalls++; throw Error("inspection reconciled tab"); };
+    for (const area of [chrome.storage.session, chrome.storage.local]) {
+      area.set = async () => { throw Error("inspection wrote storage"); };
+      area.remove = async () => { throw Error("inspection removed storage"); };
+    }
+    const send = async (id, params) => {
+      worker.deliver(wire, { id, method: "owner_inspect", params });
+      for (let i = 0; i < 60 && !wire.sent.some(frame => frame.id === id); i++) await tick();
+      const response = wire.sent.find(frame => frame.id === id);
+      assert.ok(response, "wire inspection responded");
+      return response;
+    };
+    const params = { owner_proof: proof, requester: "session:synthetic-inspection", owner_generation: "new", previous_generation: "old", previous_generations: [] };
+    const result = await send("inspect-current-wire", params);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.result, { version: 1, scope_missing: false, session_match: true, generation_current: false, generation_previous: true, generation_ancestry: false, request_ancestry_count: 0 });
+    assert.deepEqual((await send("inspect-foreign", { ...params, requester: "session:foreign" })).result, { version: 1, session_match: false });
+    const legacy = await send("inspect-legacy", {});
+    assert.equal(legacy.ok, false);
+    assert.equal(legacy.error.code, "owner_refused");
+    assert.equal(reconcileCalls, 0);
+    assert.equal(JSON.stringify([...worker.session]), before);
+    assert.equal(JSON.stringify([...worker.local]), localBefore);
+    assert.equal(wire.sent.some(frame => frame.event === "tab_update" || frame.event === "tab_closed"), false);
+  } finally { await worker.close(); }
 });

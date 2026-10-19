@@ -15,10 +15,12 @@
  *  * A queued ask has a DEADLINE, and the card says when it is (`expires_at`,
  *    rendered on the client clock per §5) rather than leaving the user to guess
  *    whether anybody is still waiting.
- *  * A queued ask can be DISMISSED. Dismissal injects nothing — it buys no
- *    turn — which is why it is offered as a quiet third action rather than a
+ *  * A queued ask can be DISMISSED. Dismissal asks the model nothing — it buys
+ *    no turn — which is why it is offered as a quiet third action rather than a
  *    second button beside Decline, and why its own state line says "no reply
- *    was sent".
+ *    was sent". What it can still OWE is the deadline notice that ask never got
+ *    (design `ask-nonblocking.md` §14), delivered on the conversation's next
+ *    run: the agent's fact, not this card's action.
  *
  * THE SEND BUTTON IS ENABLED ONLY BY A COMPLETE MAP. Every question id must
  * carry a value; a question the user deliberately skipped is sent as an EMPTY
@@ -36,7 +38,16 @@
 import { useMemo, useState } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
-import { answeredPairs, askStateLine, isAnswerable, isDeadConversation, unansweredQuestions } from "../lib/asks";
+import { Disclosure } from "./ui/disclosure";
+import {
+	answeredPairs,
+	askStateLine,
+	LAPSED_BODY,
+	isAnswerable,
+	isDeadConversation,
+	isLapsed,
+	unansweredQuestions,
+} from "../lib/asks";
 import { clearAskDraft, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
@@ -209,9 +220,11 @@ export function AskCard({
 
 	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
 	   `runtime_live === false` means the relay will have to bring the conversation
-	   up before the op can land, which is a ~30 s envelope against a warm
-	   answer's 1–3 s. `undefined` (an older daemon, or a row from a projection)
-	   promises nothing and keeps the bare `…`.
+	   up before the op can land — FOR ANSWER AND DECLINE, which is a ~30 s envelope
+	   against a warm answer's 1–3 s. A dismissal is the exception that takes the
+	   no-boot door on every surface (design §14, fork A), so `cold` buys it nothing
+	   and nothing here mentions it. `undefined` (an older daemon, or a row from a
+	   projection) promises nothing and keeps the bare `…`.
 
 	   BOTH FACTS ARE READ OFF THE ROW, not passed as props: they are the
 	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
@@ -221,6 +234,14 @@ export function AskCard({
 	const state = askStateLine(row, nowMs);
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
+	/* A LAPSED ASK IS SHOWN, NOT OFFERED (Ben's report, 2026-10-15). Its deadline
+	   has passed and the agent has gone ahead without it, so options and a send under
+	   it read as though the agent were still waiting on them. The store would still
+	   take a late answer on `timed_out` (`isAnswerable` keeps saying so); the phone
+	   deliberately stops inviting one. `lapsed` gates the controls only — the dead
+	   and dismiss rules below are unchanged. */
+	const lapsed = isLapsed(row);
+	const offered = answerable && !lapsed;
 
 	/* A ROW THE AGGREGATE ALREADY KNOWS IS DEAD IS TERMINAL BEFORE THE TAP
 	   (design round 2, D6 + UX U7), and DEAD IS A CONJUNCTION (design round 3,
@@ -230,7 +251,7 @@ export function AskCard({
 	   transcript was shown as a dead end while `ask_respond` on it returned
 	   `200 {"ok": true, "detail": "answered"}` — the same class of lie in the
 	   other direction, and the reason the predicate lives in `lib/asks.ts` and is
-	   shared by this card, the sheet's strip and its `open` control. Gated
+	   shared by this card, the sheet's strip and the sheet's title count. Gated
 	   further on `answerable`: a SETTLED row in a dead conversation is a receipt,
 	   not a dead end, and must keep its receipt. */
 	const goneFromWire = isDeadConversation(row) && answerable;
@@ -243,8 +264,8 @@ export function AskCard({
 	const dismissible = status === "timed_out";
 	const questions = useMemo(() => (Array.isArray(row.questions) ? row.questions : []), [row]);
 	const open_questions = useMemo(
-		() => (answerable ? unansweredQuestions(row) : []),
-		[answerable, row],
+		() => (offered ? unansweredQuestions(row) : []),
+		[offered, row],
 	);
 
 	const skipped = useMemo(() => new Set(draft.skipped), [draft.skipped]);
@@ -363,13 +384,8 @@ export function AskCard({
 					? "text-ink-dim"
 					: "text-ink-muted";
 
-	return (
-		<div
-			data-testid="ask-card"
-			data-ask-id={row.ask_id}
-			data-ask-status={String(row.status || "open")}
-			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
-		>
+	const body = (
+		<>
 			{/* THE STATE LINE STANDS DOWN WHEN THE CARD IS TERMINAL. "Queued — the
 			    agent is continuing; expires in 11 m" beside "this conversation no
 			    longer exists" is the same contradiction §5's preamble forbids — the
@@ -377,8 +393,11 @@ export function AskCard({
 			    The refusal sentence is the whole state. */}
 			{terminal ? null : (
 				<span className={cn("flex flex-wrap items-center gap-x-2 text-meta", toneClass)}>
-					<span role="status">{state.text}</span>
-					{row.urgent && answerable ? (
+					{/* Under the `Timed out` badge the line starts at what that means:
+					    the badge says the word one line above (#2481 UX round 2, U13). A
+					    lapsed, non-terminal card is always inside that Disclosure. */}
+					<span role="status">{lapsed ? LAPSED_BODY : state.text}</span>
+					{row.urgent && offered ? (
 						<span className="text-ink-dim">· urgent</span>
 					) : null}
 				</span>
@@ -398,7 +417,64 @@ export function AskCard({
 				<p className="text-body-sm text-danger">
 					{gone ? error : CONVERSATION_GONE_COPY}
 				</p>
-			) : answerable ? (
+			) : lapsed ? (
+				<>
+					{/* READ-ONLY: the question the agent asked, so the reader knows what
+					    lapsed, and nothing to answer it with. Dismiss is the only op. A
+					    lapsed row is always `timed_out` (`isLapsed`; the index readers
+					    re-derive a stale `open` past its deadline), so the Dismiss gate and
+					    the queue's own rule are the same statement. It stays apart from any
+					    Decline: declining ANSWERS the agent, dismissing answers nobody and
+					    buys no turn (the agent is told on its next run — §14). */}
+					{questions.map((question, index) => (
+						<span
+							key={String(question.id ?? index)}
+							className="flex items-baseline gap-2 text-body-sm text-ink-muted"
+						>
+							{questions.length > 1 ? (
+								<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
+									{index + 1}/{questions.length}
+								</span>
+							) : null}
+							<span className="min-w-0">{question.question}</span>
+						</span>
+					))}
+					{dismissible ? (
+						<>
+							<button
+								type="button"
+								disabled={busy !== ""}
+								aria-busy={busy === "dismiss" || undefined}
+								onClick={dismiss}
+								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+							>
+								{/* D1 (design round 1): the label IS the width, so it stays put while
+								    the dismissal is in flight. The in-flight mark used to be the bare
+								    glyph "…", which collapsed the control from 208 px to a 44 px square
+								    under the thumb — a glitch rather than feedback, and now the whole
+								    in-flight life of a dismissal is one append and a flash. The only
+								    change is that it dims (`disabled`) and says it is busy. Kept off the
+								    answer/decline pair, where D1 called the same glyph optional. */}
+								dismiss — send no reply
+							</button>
+							{/* NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16). A dismissal
+							    on a conversation with no runtime used to ENGAGE it to record the
+							    dismissal, so the card owed the reader that fact before the tap (UX
+							    round 1, U3) and stated its ~30 s while it ran (design round 1, D1 =
+							    UX U1). A dismissal now takes the no-boot door on both surfaces — one
+							    append against the log, no boot, no turn — so "dismiss — send no
+							    reply" above is the WHOLE truth, warm or cold, and there is nothing
+							    left to promise or to wait out. Left as a comment rather than an
+							    absence, because the next reader came here looking for the engage
+							    copy the other ops still genuinely carry: the cold ANSWER's clock at
+							    the bottom of this card, and the sheet's strip above it. */}
+							{error && errorOp === "dismiss" ? (
+								<p className="text-body-sm text-danger">{error}</p>
+							) : null}
+						</>
+					) : null}
+				</>
+			) : offered ? (
 				<>
 					{open_questions.map((question, index) => {
 						const id = String(question.id);
@@ -472,9 +548,7 @@ export function AskCard({
 					    is also a claim, and it was the wrong one. */}
 					{busy !== "" && cold ? (
 						<p className="text-body-sm text-ink-muted">
-							{busy === "dismiss"
-								? "bringing the session up to record the dismissal — this can take up to ~30 s"
-								: "bringing the session up — this can take up to ~30 s"}
+							bringing the session up — this can take up to ~30 s
 						</p>
 					) : null}
 
@@ -509,40 +583,6 @@ export function AskCard({
 							{busy === "decline" ? "…" : "decline"}
 						</button>
 					</div>
-					{/* DISMISS IS A THIRD, QUIETER ACTION and it is deliberately not
-					    beside Decline: declining ANSWERS the agent ("decide yourself"),
-					    dismissing answers nobody and buys no turn. A pair of equal
-					    buttons would make them look like two ways of saying no. Its own
-					    state line says what happened. */}
-					{dismissible ? (
-						<>
-							<button
-								type="button"
-								disabled={busy !== ""}
-								onClick={dismiss}
-								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
-							>
-								{busy === "dismiss" ? "…" : "dismiss — send no reply"}
-							</button>
-							{/* ITS OWN STATE LINE, because on a cold conversation the promise
-							    it makes ("send no reply") is no longer the whole truth: the
-							    relay brings the conversation up to RECORD the dismissal, so the
-							    conversation surfaces as active (UX round 1, U3). Stated before
-							    the tap, in the same quiet register as the deadline lines.
-
-							    NO BUDGET HERE (UX round 2, U8): the sheet's strip one element
-							    up already states `this can take up to ~30 s` for this row, and a
-							    second copy of the number buys nothing the first line did not. */}
-							{cold ? (
-								<p className="text-meta text-ink-dim">
-									sends no reply — the conversation is brought up to record it.
-								</p>
-							) : null}
-							{error && errorOp === "dismiss" ? (
-								<p className="text-body-sm text-danger">{error}</p>
-							) : null}
-						</>
-					) : null}
 				</>
 			) : (
 				<>
@@ -573,12 +613,55 @@ export function AskCard({
 						</span>
 					)}
 					{/* NO DISMISS HERE, deliberately (agent review round 1, R1): dismiss is
-					    a `timed_out` action and a timed-out ask renders in the ANSWERABLE
+					    a `timed_out` action and a timed-out ask renders in the LAPSED
 					    branch above, so every status that reaches this branch (answered,
 					    late, declined, dismissed, withdrawn, expired, unknown) can only
 					    be refused. An EXPIRED ask additionally keeps no error register at
 					    all (§5) — the remedy is in the state line. */}
 				</>
+			)}
+		</>
+	);
+
+	return (
+		<div
+			data-testid="ask-card"
+			data-ask-id={row.ask_id}
+			data-ask-status={String(row.status || "open")}
+			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
+		>
+			{lapsed && !terminal ? (
+				/* A LAPSED ASK IS COLLAPSED BEHIND ITS BADGE (decision D11, Ben's
+				   2026-10-15 request): it reads the way the desktop's declined row does,
+				   one line with a status word, and seeing it is an explicit tap. The
+				   app-wide `Disclosure` idiom, never a second collapse pattern, closed by
+				   default and taking no focus on mount (D12: a lapsed ask never claims
+				   the user). The body is the read-only card above — the lapsed line, the
+				   question, and Dismiss, which stays inside so nothing on the collapsed
+				   header can be tapped by accident. A TERMINAL row is not wrapped: its
+				   refusal sentence is the whole state and must stay readable. */
+				<Disclosure
+					headerClassName="gap-2"
+					header={(open: boolean) => (
+						<>
+							<span className="shrink-0 rounded-sm border border-hairline px-1.5 text-meta text-ink-muted">
+								Timed out
+							</span>
+							{/* The header names the question only while CLOSED (#2481 UX U7):
+							    open, the body states it in full, and a truncated copy one line
+							    above it said the same thing twice. */}
+							{open ? null : (
+								<span className="min-w-0 truncate text-body-sm text-ink-muted">
+									{questions[0]?.question ?? ""}
+								</span>
+							)}
+						</>
+					)}
+				>
+					<div className="flex flex-col gap-2 pt-1">{body}</div>
+				</Disclosure>
+			) : (
+				body
 			)}
 		</div>
 	);

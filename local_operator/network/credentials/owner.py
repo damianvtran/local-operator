@@ -835,6 +835,22 @@ class MeshCredentialBroker:
             )
         store = self._auth_store_instance()
         storage = McpTokenStorage(url, store)
+        unavailable = BrokerError(
+            code="unavailable",
+            key=key,
+            owner_device=self.self_device,
+            owner_device_name=self.self_device_name,
+            message=(
+                "the owner's MCP grant state could not be verified; "
+                "check its credential store and retry"
+            ),
+        )
+        # A known-rejected family must cost no refresh/discovery request, even
+        # when its old access token quotes a future expiry. An unreadable marker
+        # is not proof that the family is alive (grant_is_dead alone is lossy).
+        marker = storage.grant_marker()
+        if marker is None:
+            return unavailable
         # The ROW's integer id. ``storage.credential_id`` is NOT one: it is the logical
         # string ``mcp_oauth:<url>``, and ``int()`` of it made every MCP grant answer
         # ``internal ValueError`` (review round 1, F4).
@@ -855,12 +871,19 @@ class MeshCredentialBroker:
         #
         # The same read the provider path makes, read before the refresh runs.
         before = self._row_stamps(MCP_OAUTH_PROVIDER)
-        try:
-            await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
-        except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
-            return self._classify_refresh_failure(exc, key)
+        if not marker.is_dead:
+            try:
+                await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
+            except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
+                return self._classify_refresh_failure(exc, key)
 
         refreshed = self._row_stamps(MCP_OAUTH_PROVIDER).get(row_id, 0) > before.get(row_id, 0)
+        # Refresh may have tombstoned this family or a new login may have
+        # replaced it while we awaited. Bind the access read to the CURRENT
+        # existing chain, not the marker cached before that await.
+        selected_marker = storage.grant_marker()
+        if selected_marker is None:
+            return unavailable
         try:
             tokens = await storage.get_tokens()
         except Exception as exc:  # noqa: BLE001
@@ -873,7 +896,10 @@ class MeshCredentialBroker:
             )
         token = str(getattr(tokens, "access_token", "") or "")
         expiry = storage.stored_token_expiry()
-        if not token or _already_expired(expiry):
+        current_marker = storage.grant_marker()
+        if current_marker is None or current_marker.stamp != selected_marker.stamp:
+            return unavailable
+        if current_marker.is_dead or not token or _already_expired(expiry):
             # The row exists but holds no USABLE access token: either it has none, or
             # the token it has died and the refresh above could not replace it (no
             # reachable authorization server, a grant the server already rejected).

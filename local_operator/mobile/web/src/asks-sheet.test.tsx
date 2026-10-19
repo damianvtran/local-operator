@@ -1,14 +1,14 @@
 // @vitest-environment happy-dom
 //
 // The asks sheet — the EXPANDED surface (design §5.3). It reads the aggregate
-// from `GET /api/asks` (so it works for a conversation the phone is not
-// addressing, including one woken by a wake or a monitor), labels a foreign
-// row with its conversation, and re-reads when the outstanding population
-// moves rather than waiting for a manual refresh.
+// from `GET /api/asks` (index-backed, so it answers for a conversation whose
+// runtime is gone), shows only the rows of the conversation it was opened from,
+// and re-reads when the outstanding population moves rather than waiting for a
+// manual refresh.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AsksSheet } from "./components/asks-sheet";
-import type { PendingAsk, SessionSummary } from "./types";
+import type { PendingAsk, SessionProjection, SessionSummary } from "./types";
 
 vi.mock("./api", () => ({
 	getAsks: vi.fn(async () => ({ asks: [] })),
@@ -17,12 +17,31 @@ vi.mock("./api", () => ({
 
 let rows: SessionSummary[] = [];
 let revision = 0;
+/* The opening conversation's own projection slot (its `asks` rows), as the
+   session screen's stream would deliver it. */
+let slot: { projection: SessionProjection | null; connected: boolean } = {
+	projection: null,
+	connected: true,
+};
+/* The list frame's revision is the REAL signature rule, folded here the way the
+   store folds it: the counter moves only when the signature of `rows` does. A
+   test can then say "asks_open stayed 0" and mean it, instead of choosing the
+   revision by hand. A test that wants to force a bump still assigns `revision`. */
+let lastSignature = "";
 vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
 		useSessions: () => ({ sessions: rows, connected: true }),
-		useAsksRevision: () => revision,
+		useProjection: () => slot,
+		useAsksRevision: () => {
+			const next = actual.asksPopulationSignature(rows);
+			if (next !== lastSignature) {
+				lastSignature = next;
+				revision += 1;
+			}
+			return revision;
+		},
 	};
 });
 
@@ -31,7 +50,7 @@ const { getAsks } = await import("./api");
 function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	return {
 		ask_id: "a1",
-		session_id: "other",
+		session_id: "mine",
 		cwd: "/tmp/w",
 		created_at: 1,
 		expires_at: Date.now() + 600_000,
@@ -48,7 +67,7 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 
 function summary(patch: Partial<SessionSummary> = {}): SessionSummary {
 	return {
-		session_id: "other",
+		session_id: "mine",
 		section: "active",
 		conversation_name: "woken-by-monitor",
 		cwd: "/tmp/w",
@@ -66,6 +85,8 @@ function summary(patch: Partial<SessionSummary> = {}): SessionSummary {
 beforeEach(() => {
 	rows = [];
 	revision = 0;
+	lastSignature = "";
+	slot = { projection: null, connected: true };
 	(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask()] });
 });
 
@@ -76,34 +97,46 @@ afterEach(() => {
 
 describe("AsksSheet", () => {
 	it("renders nothing until it is opened, and reads the aggregate when it is", async () => {
-		const { container } = render(<AsksSheet open={false} onClose={() => {}} />);
+		const { container } = render(<AsksSheet open={false} onClose={() => {}} currentSessionId="mine" />);
 		expect(container.firstChild).toBeNull();
 		expect(getAsks).not.toHaveBeenCalled();
 	});
 
-	it("lists a foreign conversation's ask under its own name, with a way in", async () => {
-		rows = [summary()];
-		const navigate = vi.fn();
-		const close = vi.fn();
-		render(
-			<AsksSheet open onClose={close} currentSessionId="mine" onOpenConversation={navigate} />,
-		);
-		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
-		expect(screen.getByText("woken-by-monitor")).toBeTruthy();
-		const link = screen.getByRole("button", { name: "open" });
-		fireEvent.click(link);
-		expect(navigate).toHaveBeenCalledWith("other");
-		/* THE SHEET DOES NOT CLOSE ITSELF HERE (agent review round 2, M1 = design
-		   D7's neighbour): a close after the route change popped the entry the
-		   navigation had just pushed. The parent owns the whole transition. */
-		expect(close).not.toHaveBeenCalled();
-		/* And it is a 44 px control like every other on this sheet (D7 = U9),
-		   not the 28x17 bare link it was. */
-		expect(link.className).toMatch(/min-h-11/);
-		expect(link.className).not.toMatch(/underline/);
+	it("lists and counts only the opening conversation's asks", async () => {
+		/* Ben's report (2026-10-15): the sheet opened from one conversation listed
+		   every conversation's asks. The aggregate still carries them all; the sheet
+		   filters to its own conversation BEFORE it orders or counts, so the title
+		   states the same set the list shows. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [
+				ask({ ask_id: "mine-1" }),
+				ask({
+					ask_id: "other-1",
+					session_id: "other",
+					questions: [
+						{ id: "q1", question: "a", options: [], multi: false, secret: false, persist: false },
+						{ id: "q2", question: "b", options: [], multi: false, secret: false, persist: false },
+					],
+				}),
+			],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 question")).toBeTruthy());
+		const cards = screen.getAllByTestId("ask-card");
+		expect(cards.length).toBe(1);
+		expect(cards[0].getAttribute("data-ask-id")).toBe("mine-1");
 	});
 
-	it("answers against the row's OWN session route, not the screen's", async () => {
+	it("says nothing is waiting when only other conversations have asks", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "other-1", session_id: "other" })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText(/nothing waiting/)).toBeTruthy());
+		expect(screen.queryByTestId("ask-card")).toBeNull();
+	});
+
+	it("answers against the opening conversation's session route", async () => {
 		const { sendCommand } = await import("./api");
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
@@ -112,7 +145,7 @@ describe("AsksSheet", () => {
 		});
 		fireEvent.click(screen.getByRole("button", { name: /send answer/ }));
 		await waitFor(() =>
-			expect(sendCommand).toHaveBeenCalledWith("other", {
+			expect(sendCommand).toHaveBeenCalledWith("mine", {
 				op: "ask_respond",
 				ask_id: "a1",
 				answers: { q1: ["yes — dark behind the flag"] },
@@ -122,7 +155,7 @@ describe("AsksSheet", () => {
 
 	it("says nothing is waiting when the aggregate is empty", async () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
-		render(<AsksSheet open onClose={() => {}} />);
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByText(/nothing waiting/)).toBeTruthy());
 	});
 
@@ -134,11 +167,40 @@ describe("AsksSheet", () => {
 		await waitFor(() => expect(getAsks).toHaveBeenCalledTimes(2));
 	});
 
+	it("re-reads when a lapsed ask is dismissed elsewhere, although asks_open stays 0", async () => {
+		/* #2388: a timed-out ask no longer counts in `asks_open`, so a session
+		   holding only a lapsed ask publishes 0 before AND after another surface
+		   dismisses it (or answers it late) — the list frame's signature cannot move.
+		   The sheet must still drop the gone row promptly, not on the 20 s backstop;
+		   the signal is the opening conversation's own projection rows. */
+		const lapsed = ask({ ask_id: "t", status: "timed_out" });
+		const withAsks = (asks: PendingAsk[]) =>
+			({ asks, asks_open: 0 }) as unknown as SessionProjection;
+		rows = [summary({ asks_open: 0 })];
+		slot = { projection: withAsks([lapsed]), connected: true };
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [lapsed] });
+		const { rerender } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 timed out")).toBeTruthy());
+		expect(screen.getAllByTestId("ask-card").length).toBe(1);
+		expect(getAsks).toHaveBeenCalledTimes(1);
+
+		/* Another surface dismisses it: the index no longer lists it, the session's
+		   projection drops the row, and the list frame still says asks_open 0. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
+		rows = [summary({ asks_open: 0 })];
+		slot = { projection: withAsks([]), connected: true };
+		rerender(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(getAsks).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(screen.queryAllByTestId("ask-card").length).toBe(0));
+		expect(screen.getByText("asks")).toBeTruthy();
+		expect(screen.getByText(/nothing waiting/)).toBeTruthy();
+	});
+
 	it("states the daemon's refusal reason when the read fails", async () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
 			new Error("the ask index could not be read"),
 		);
-		render(<AsksSheet open onClose={() => {}} />);
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() =>
 			expect(screen.getByText("the ask index could not be read")).toBeTruthy(),
 		);
@@ -151,7 +213,7 @@ describe("AsksSheet", () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
 			asks: [ask({ ask_id: "a-new", created_at: 900 }), ask({ ask_id: "a-old", created_at: 1 })],
 		});
-		render(<AsksSheet open onClose={() => {}} />);
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
 		const cards = screen.getAllByTestId("ask-card");
 		expect(cards[0].getAttribute("data-ask-id")).toBe("a-old");
@@ -164,7 +226,7 @@ describe("AsksSheet", () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
 			new Error("could not reach the daemon"),
 		);
-		render(<AsksSheet open onClose={() => {}} />);
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByText("could not reach the daemon")).toBeTruthy());
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask()] });
 		fireEvent.click(screen.getByRole("button", { name: /try again/ }));
@@ -235,22 +297,18 @@ describe("AsksSheet", () => {
 	});
 
 	it("keeps the affordances on a LIVE conversation with no transcript", async () => {
-		/* Design round 3, D7: the strip, the card and `open` all key on
+		/* Design round 3, D7: the strip and the card both key on
 		   `isDeadConversation` — the CONJUNCTION — so a live row with no transcript
-		   answers as normal and its conversation can still be opened. Gating on
-		   durability alone silenced the sheet one element above a card that then
-		   refused a working answer. */
+		   answers as normal. Gating on durability alone silenced the sheet one
+		   element above a card that then refused a working answer. */
 		rows = [];
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ session_id: "gone", runtime_live: true, durable: false })],
+			asks: [ask({ runtime_live: true, durable: false })],
 		});
-		render(
-			<AsksSheet open onClose={() => {}} currentSessionId="mine" onOpenConversation={() => {}} />,
-		);
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
 		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
-		expect(screen.getByRole("button", { name: "open" })).toBeTruthy();
 	});
 
 	it("does not count questions a dead row can never have answered", async () => {
@@ -261,8 +319,8 @@ describe("AsksSheet", () => {
 		   one element apart" rule, applied to the title. */
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
 			asks: [
-				ask({ ask_id: "live", session_id: "s-live", runtime_live: true, durable: false }),
-				ask({ ask_id: "gone", session_id: "gone", runtime_live: false, durable: false }),
+				ask({ ask_id: "live", runtime_live: true, durable: false }),
+				ask({ ask_id: "gone", runtime_live: false, durable: false }),
 			],
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
@@ -273,24 +331,60 @@ describe("AsksSheet", () => {
 		/* The other half: nothing is waiting on the user, so the title states the
 		   surface rather than a number nobody can act on. */
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ ask_id: "gone", session_id: "gone", runtime_live: false, durable: false })],
+			asks: [ask({ ask_id: "gone", runtime_live: false, durable: false })],
 		});
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
 		await waitFor(() => expect(screen.getByText("asks")).toBeTruthy());
 	});
 
-	it("withholds `open` for a conversation that cannot be opened", async () => {
-		/* UX round 2, U7: the control navigated to `#/s/<id>`, which sat on
-		   "connecting to session…" with nothing to do but go back. A row whose
-		   transcript is gone has no conversation to open. */
-		rows = [];
+	it("titles a lapsed-only queue by what it holds, and counts only offered questions as waiting", async () => {
+		/* Design round 1, D1: "asks · 1 question" above a card reading Lapsed
+		   stated a live decision one element above the card that says there is
+		   none. */
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
-			asks: [ask({ session_id: "gone", durable: false })],
+			asks: [ask({ ask_id: "t", status: "timed_out" })],
 		});
-		render(
-			<AsksSheet open onClose={() => {}} currentSessionId="mine" onOpenConversation={() => {}} />,
+		const { unmount } = render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 timed out")).toBeTruthy());
+		/* Collapsed behind its badge (D11): the sheet lists it, the user opens it. */
+		expect(screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded")).toBe(
+			"false",
 		);
-		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
-		expect(screen.queryByRole("button", { name: "open" })).toBeNull();
+		unmount();
+
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "o" }), ask({ ask_id: "t", status: "timed_out" })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getByText("asks · 1 question")).toBeTruthy());
+	});
+
+	it("promises no bring-up above a lapsed ask, which offers nothing to answer", async () => {
+		/* A lapsed (`timed_out`) card shows its question read-only, so
+		   "answering will bring it up" would promise a tap the card one element
+		   below does not have. */
+		rows = [summary({ ended: false })];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "t", status: "timed_out", runtime_live: false })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(1));
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+		expect(screen.getByText("the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.queryByText(/this conversation is not running/)).toBeNull();
+	});
+
+	it("keeps a timed-out ask collapsed beside an open one, which stays fully offered", async () => {
+		/* D11: only the lapsed row collapses; the open card keeps its controls. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "o" }), ask({ ask_id: "t", status: "timed_out" })],
+		});
+		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		const badges = screen.getAllByRole("button", { name: /Timed out/ });
+		expect(badges.length).toBe(1);
+		expect(badges[0].getAttribute("aria-expanded")).toBe("false");
+		expect(screen.getByPlaceholderText("your answer")).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
 	});
 });

@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 
 // Actual navigation/state/ownership modules, disposable Chrome/CDP transport.
 // No browser process, live bridge, install, config, or operator tab is touched.
-export async function fixture() {
+export async function fixture({ realDeadline = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "lop-ownership-"));
   let store = {}; let next = 100;
   const tabs = new Map(); const removed = [];
@@ -48,7 +48,9 @@ export async function fixture() {
     // export them or esbuild fails the build ("No matching export in
     // fixture:settle"). Handing back the op unchanged keeps the harness's
     // fault injection (which rejects) exactly as it was.
-    settle: `export const settle=async()=>{};export const CHROME_API_DEADLINE_MS=5000;export const deadline=(op)=>op;`,
+    settle: realDeadline
+      ? `export const settle=async()=>{}; export { CHROME_API_DEADLINE_MS, deadline } from ${JSON.stringify(resolve("src/driver/deadline.ts"))};`
+      : `export const settle=async()=>{};export const CHROME_API_DEADLINE_MS=5000;export const deadline=(op)=>op;`,
     "tab-groups": `export const reconcileTabGroup=async()=>{};`,
   };
   const outfile = join(dir, "bundle.mjs");

@@ -37,10 +37,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
@@ -208,6 +209,9 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
+        # Each finite display proof has its own deterministic key. Unlike the
+        # hot checkpoint this archive must survive compaction of later turns.
+        "frontend_peer_cycle_display_v1",
         # A turn supplement lands AFTER the turn settled (memo §2.4 "Activity clock"):
         # re-ranking a session as freshly worked because a callout arrived would reorder
         # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
@@ -220,6 +224,13 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
         # ``stt.sidecar`` drift rule: this module does not import the writer).
         "video_job_v1",
+        # The audio lane's post-cancel settlement record (``local_operator.
+        # audiogen.settle``): a job that refused a mid-flight cancel finishes
+        # minutes later, so the row lands while the user is away. Bookkeeping
+        # by the same rule as the video record above; the writer passes
+        # ``preserve_mtime=True`` and the literal is pinned against
+        # ``audiogen.settle.AUDIO_SETTLE_CUSTOM_TYPE`` by a unit test.
+        "audio_settle_v1",
         # A busy-turn handoff checkpoint is a record ABOUT the session (see
         # ``CHECKPOINT_CUSTOM_TYPE``): its write must not read as operator
         # activity, or a mid-turn rollover would keep the session ranked fresh.
@@ -2073,6 +2084,87 @@ class Transcript:
 
         return await self._commit(build, preserve_mtime=preserve_mtime)
 
+    async def append_imported(
+        self,
+        entries: Sequence[TranscriptEntry],
+        *,
+        messages: Mapping[str, Message | CustomMessage] | None = None,
+    ) -> list[TranscriptEntry]:
+        """Commit pre-built imported rows with their SOURCE timestamps.
+
+        Why this exists instead of ``append_message``: the live append path
+        stamps ``time.time()``, and an imported conversation whose every row
+        claims the import moment loses its real chronology, its per-turn cost
+        history and any later "what happened when" query. Here the caller owns
+        both the entry id and the timestamp; this method only validates and
+        publishes.
+
+        ``messages`` re-encodes message rows through ``encode_message_payload``
+        against THIS transcript's attachment store, so inline base64 leaves the
+        row and the bytes live once in the content-addressed store. An entry
+        without a matching message keeps its payload verbatim (compaction and
+        custom rows).
+
+        Validation is deliberately strict and runs BEFORE the write: duplicate
+        ids (inside the batch or against committed rows), an unknown entry
+        type, a non-finite timestamp, or a compaction anchor absent from both
+        this batch and the existing journal is a programming error that would
+        otherwise produce a transcript replay can silently misread. An anchor
+        LATER in the same batch is legal — imported rows are written archive
+        first, compaction marker after — so the known-id set is the union, not
+        just the committed prefix.
+        """
+        incoming = list(entries)
+        if not incoming:
+            return []
+        ids = [entry.id for entry in incoming]
+        if len(set(ids)) != len(ids):
+            raise ValueError("imported batch contains duplicate entry ids")
+        known = self._entry_ids | set(ids)
+        existing = self._entry_ids.intersection(ids)
+        if existing:
+            raise ValueError(f"imported entry ids already committed: {sorted(existing)[:3]}")
+        for entry in incoming:
+            if entry.type not in (ENTRY_MESSAGE, ENTRY_COMPACTION, ENTRY_CUSTOM):
+                raise ValueError(f"unsupported imported entry type: {entry.type}")
+            if not math.isfinite(entry.ts) or entry.ts < 0:
+                raise ValueError("imported entry timestamp must be finite and non-negative")
+            if entry.type == ENTRY_COMPACTION:
+                anchor = str(entry.payload.get("first_kept_entry_id") or "")
+                if not anchor or anchor not in known:
+                    raise ValueError(
+                        "compaction anchor must exist in the imported batch or transcript"
+                    )
+
+        supplied = messages or {}
+        for entry in incoming:
+            if entry.type == ENTRY_MESSAGE and entry.id not in supplied:
+                raise ValueError("every imported message entry must carry its Message")
+        for entry_id, message in supplied.items():
+            if entry_id not in set(ids):
+                raise ValueError("a supplied message does not match any imported entry")
+            if message.id != entry_id:
+                raise ValueError("message id must equal its transcript entry id")
+            if not isinstance(message, (Message, CustomMessage)):
+                raise ValueError("imported messages must be Message or CustomMessage")
+
+        def build() -> list[TranscriptEntry]:
+            rows: list[TranscriptEntry] = []
+            for entry in incoming:
+                message = supplied.get(entry.id)
+                if message is None:
+                    rows.append(entry)
+                    continue
+                kind = CUSTOM_KIND_MESSAGE if isinstance(message, Message) else CUSTOM_KIND_CUSTOM
+                payload = {
+                    "kind": kind,
+                    **encode_message_payload(message, self._attachments),
+                }
+                rows.append(TranscriptEntry(entry.id, entry.ts, entry.type, payload))
+            return rows
+
+        return await self._commit(build)
+
     async def append_compaction(
         self,
         summary: str,
@@ -2141,7 +2233,12 @@ class Transcript:
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
-        self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+        self,
+        custom_type: str,
+        details: dict[str, Any],
+        *,
+        preserve_mtime: bool = False,
+        entry_id: str | None = None,
     ) -> TranscriptEntry:
         """Append a host bookkeeping entry (wake schedules, checkpoints, …).
 
@@ -2154,6 +2251,7 @@ class Transcript:
         return await self._append(
             ENTRY_CUSTOM,
             {"custom_type": custom_type, "details": details},
+            entry_id=entry_id,
             preserve_mtime=preserve_mtime,
         )
 

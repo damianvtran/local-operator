@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from local_operator.i18n.keys import tui_small as copy
+from local_operator.i18n.text import tr
 from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui.input_decode import install_nonfatal_stdin_decode
@@ -21,6 +23,11 @@ from local_operator.tui.terminal_modes import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The slice's catalogued copy. Resolved per call, not held in a constant, so
+#: this module registers no locale refresher (text.py: only module-level
+#: CONSTANTS re-materialise on a move).
+_t = tr("tui.small")
 
 
 def _register_secret_session(app: Any) -> Any:
@@ -181,6 +188,31 @@ def _schedule_aida_boot_ensure(app: Any) -> "asyncio.Task[None]":
 
     task = asyncio.create_task(_aida_boot_ensure())
     app._aida_boot_task = task
+    return task
+
+
+def _schedule_librarian_boot_ensure(app: Any) -> "asyncio.Task[None]":
+    """Schedule the Librarian's first-run ensure, beside Aida's.
+
+    The TUI is itself the human surface Aida's server-side gate asks about, so
+    no activation predicate is repeated here: ``ensure_session``'s own enable
+    gate (``librarian.enabled`` plus ``LOCAL_OPERATOR_NO_LIBRARIAN``) is the
+    only switch. SCHEDULED, NEVER AWAITED for the same measured reason as
+    ``_schedule_aida_boot_ensure`` — a first run builds a session and installs
+    the wake supervisor. Kept on the app so it cannot be collected mid-flight,
+    and best-effort: her bootstrap is worth a log line, never a failed boot.
+    """
+
+    async def _librarian_boot_ensure() -> None:
+        try:
+            from local_operator.librarian import ensure_session
+
+            await ensure_session()
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.warning("librarian: boot ensure failed", exc_info=True)
+
+    task = asyncio.create_task(_librarian_boot_ensure())
+    app._librarian_boot_task = task
     return task
 
 
@@ -359,6 +391,7 @@ async def run_tui(
         # (§13).
         registration = _register_secret_session(app)
         _schedule_aida_boot_ensure(app)
+        _schedule_librarian_boot_ensure(app)
         _schedule_click_preparation(app)
         _schedule_seed_update_notices(app)
         try:
@@ -383,5 +416,8 @@ async def run_tui(
             if app.return_code != REEXEC_CODE:
                 hint = app.resume_hint()
                 if hint:
-                    print(f"\nsession ended — resume with:\n  {hint}\n")
+                    # `_t` resolves the catalogue value, whose leading and
+                    # trailing newlines are part of the message; a plain
+                    # print() supplies the line's own final newline after it.
+                    print(_t(copy.session_resume_hint(hint=hint)))
         return int(app.return_code or 0)

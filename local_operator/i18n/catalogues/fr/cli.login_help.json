@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "Se connecter à un fournisseur (OAuth ou clé API)",
+  "cli.login_help.provider": "Fournisseur auquel se connecter (p. ex. openai, anthropic, kimi, xai). Omettre pour lister les fournisseurs compatibles avec la connexion."
+}

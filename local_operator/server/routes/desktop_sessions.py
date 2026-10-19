@@ -108,6 +108,7 @@ from local_operator.session.attention import (
     SupersededCompletionToken,
 )
 from local_operator.session.catalog import (
+    CATALOGUE_SORTS,
     SCOPE_KINDS,
     SCOPE_NAME_MAX_LENGTH,
     CatalogueScope,
@@ -693,6 +694,29 @@ class Pin(Input):
     """
 
     pinned: StrictBool
+
+
+class TagCategory(Input):
+    id: str | None = None
+    name: str = Field(
+        description="Trimmed unique category name, 1..24 characters; Untagged is reserved."
+    )
+
+
+class TagRegistry(Input):
+    tags: list[TagCategory] = Field(max_length=32)
+
+
+class TagAssignment(Input):
+    tags: list[str] = Field(
+        max_length=8,
+        description="Existing assignment order is preserved; new tags append in this order.",
+    )
+    primary: str | None
+    expected_revision: str | int | None = Field(
+        default=None,
+        description="Optional exact per-session tags revision observed by this client.",
+    )
 
 
 class Archive(Input):
@@ -1980,6 +2004,7 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         ) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
+            AsideAdoptRefused,
             AsideUnanswered,
             AttachmentUnavailable,
             AudioInputUnsupported,
@@ -2036,6 +2061,20 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # ``cold_reason``/``attaching`` on the snapshot), and it is present
             # (empty when the owner named no cause this build knows) so the body's
             # keys never vary.
+            raise HTTPException(
+                409,
+                _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                | {"reason": error.reason},
+            ) from None
+        if isinstance(error, AsideAdoptRefused):
+            # The aside adopt's typed refusal (decision D3), in ``ForkRefused``'s
+            # exact body shape and for its reason: the owner answered promptly
+            # that it would not write the pair (the conversation closed, or its
+            # live list ends in an open tool batch), so a 503
+            # ``runtime_unreachable`` would say something false about the
+            # transport. Above the ``RuntimeError`` arm by construction: this is
+            # a ``ValueError``. ``reason`` is the closed-set token; the adopt
+            # route reads ``code`` to release its ``adopted`` latch.
             raise HTTPException(
                 409,
                 _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
@@ -2305,6 +2344,30 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     return CatalogueScope(kind, name)
 
 
+def _requested_sort(sort: str) -> str:
+    """The order a request asked for, or ``""`` for the rank order.
+
+    REFUSES BY NAME, the same rule :func:`_requested_scope` states: a client
+    that sent an order this build does not know gets an answer naming the field
+    and the accepted values. That answer is load-bearing here rather than
+    courteous -- the framework IGNORES a query parameter a handler does not
+    declare, so an unknown ``sort`` answered silently would be served the rank
+    order the client did not ask for, and the caller could not tell a working
+    new feature from an old backend.
+
+    An EMPTY STRING IS ABSENCE, matching the scope parameters' own rule: ``""``
+    is what a client sends for "the default order", and it is exactly the
+    answer every pre-existing caller gets.
+    """
+    value = sort.strip()
+    if value and value not in CATALOGUE_SORTS:
+        raise HTTPException(
+            422,
+            _wd.sort_unknown(sorts=", ".join(CATALOGUE_SORTS)).envelope(code="sort_unknown"),
+        )
+    return value
+
+
 async def _delegated_cleanup_notice(request: Request) -> dict[str, Any] | None:
     """The one-time "delegated sessions were cleaned up" notice as a READ-ONLY peek.
 
@@ -2373,6 +2436,16 @@ async def list_sessions(
     scope_kind: str = Query(default=""),
     scope_name: str = Query(default=""),
     cursor: str = Query(default=""),
+    # THE ORDER THE PAGE IS READ IN. Absent means the rank order -- byte for
+    # byte the answer that existed before this parameter -- and "activity" is
+    # the desktop sidebar's own head order (rows that need the reader first,
+    # then everything else newest-activity-first), which is what keeps a
+    # reader's recent conversations inside the first page on a store whose
+    # cold population a wake band would otherwise fill. Declared as a plain
+    # string and refused BY NAME below (``_requested_sort``), the same rule
+    # ``_requested_scope`` states: an unknown value must be told, not silently
+    # answered with a different ordering.
+    sort: str = Query(default=""),
     # THE CENSUS IS OPT-IN, and its POPULATION is fixed: visible sessions that are
     # NOT ARCHIVED (``ScopeCounts``' own docstring carries the reasoning -- every
     # default list in the app hides archived rows, and a badge inflated by rows
@@ -2384,6 +2457,7 @@ async def list_sessions(
     # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
     # cannot be answered by anything the store says.
     scope = _requested_scope(scope_kind, scope_name)
+    requested_sort = _requested_sort(sort)
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
@@ -2408,6 +2482,7 @@ async def list_sessions(
             scope=scope,
             cursor=cursor or None,
             with_counts=with_counts,
+            sort=requested_sort,
         )
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
         # DECIDED, not left open: concatenated on the wire rather than published
@@ -2432,7 +2507,7 @@ async def list_sessions(
         # disagree about, so ordering the extras by it would put a second
         # ordering authority inside one section and make the app's Pinned list
         # read as catalogue order followed by pin order.
-        sessions = page.rows + page.pinned_off_page + page.remote
+        sessions = page.rows + page.off_page + page.remote
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the
@@ -3567,6 +3642,30 @@ async def child_attachment(
 
 
 @router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}/waveform",
+)
+async def child_attachment_waveform(
+    session_id: str, child_id: str, digest: AttachmentDigest, request: Request
+):
+    """Waveform peaks of an attachment referenced by a CHILD transcript's rows.
+
+    The child twin of :func:`attachment_waveform`, sharing its payload, gates
+    and headers; the containment proof (``_contained_child_dir``) runs before
+    the store is touched, so this is the same membership gate the child byte
+    route is rather than a partition. A child's audio artifacts register in
+    the same content-addressed store as the parent's, so a surface that
+    renders a subagent's generated audio reaches it exactly as it reaches
+    the parent's.
+    """
+    async with errors(request):
+        payload = await host(request).child_attachment_waveform(session_id, child_id, digest)
+    return JSONResponse(
+        payload,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+    )
+
+
+@router.get(
     "/v1/desktop/sessions/{session_id}/attachments/{digest}",
     # The image's own mime type is the response type, so the published contract
     # must not claim the CRUD JSON envelope its neighbours return. Declaring the
@@ -3646,6 +3745,42 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
         # re-deciding that for itself. `tunnels/gateway.py` sets the same
         # header on this repo's other byte-serving surface.
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/v1/desktop/sessions/{session_id}/attachments/{digest}/waveform")
+async def attachment_waveform(session_id: str, digest: AttachmentDigest, request: Request):
+    """Precomputed waveform peaks for one attachment: ``{version, bars, peaks}``.
+
+    The audio surfaces' waveform source. Peaks are computed ONCE at artifact
+    creation (``session.attachments.cache_media`` -> ``audiogen.peaks``: 240
+    max-abs bars at 8 kHz mono, 0..1) and stored as the ``<digest>.peaks.json``
+    sidecar beside the bytes. A missing legacy sidecar gets a bounded server
+    repair off the event loop (8 MiB input, one decoder, 10-second deadline);
+    successful repairs persist and failed attempts are cached. A render loop
+    never decodes media. The server contract's v1 result carries no ``waveform`` field, so
+    the sidecar is the default source and remains the source when a future
+    server lane ships its own peaks.
+
+    Shape and gates mirror the byte route beside it: the digest is the
+    traversal gate (declared in the path — FastAPI refuses a non-matching
+    shape before the handler runs, and trailing ``/waveform`` makes the two
+    routes unambiguously distinct), the session id is the same existence
+    check, and a digest held by another device answers the same 409
+    ``attachment_on_peer`` the byte route does. A digest with no sidecar is an
+    ordinary 404 when bounded recovery is unavailable or fails — and the
+    surface paints its no-waveform state,
+    exactly as a missing image degrades to a placeholder.
+
+    ``no-store`` rides along with ``nosniff`` for the family's reason:
+    everything under ``/v1/desktop/`` is bearer-gated session data, and a
+    shared cache must not retain one user's media metadata.
+    """
+    async with errors(request):
+        payload = await host(request).attachment_waveform(session_id, digest)
+    return JSONResponse(
+        payload,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
     )
 
 
@@ -4187,8 +4322,15 @@ async def asks(request: Request):
     """
     async with errors(request):
         from local_operator.asks.store import index_asks
+        from local_operator.asks.visibility import lapsed_visible_ms
 
-        rows = await asyncio.to_thread(index_asks, store_root(request))
+        root = store_root(request)
+        # ``asks.lapsed_visible_for`` (decision D8). The desktop server starts
+        # no config watcher, so the window is polled fresh per request — ON the
+        # loop, where a poll's listener fan-out belongs (the team-bridge status
+        # route's pattern) — and only the int crosses into the worker thread.
+        window = lapsed_visible_ms(root, poll_now=True)
+        rows = await asyncio.to_thread(index_asks, root, lapsed_visible_ms=window)
         return reply({"asks": rows})
 
 
@@ -4292,6 +4434,46 @@ async def notified(session_id: str, body: Notified, request: Request):
         await _refuse_remote_write(request, session_id, noun="notification")
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
+
+
+@router.get("/v1/desktop/tags", response_model=CRUDResponse[dict[str, Any]])
+async def tags(request: Request):
+    async with errors(request):
+        return reply(await host(request).tags())
+
+
+@router.put("/v1/desktop/tags", response_model=CRUDResponse[dict[str, Any]])
+async def replace_tags(body: TagRegistry, request: Request):
+    # Desired state is retry-safe and admits no work, so no receipt is needed.
+    async with errors(request):
+        try:
+            return reply(
+                await host(request).replace_tags([(tag.id, tag.name) for tag in body.tags])
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+
+@router.put("/v1/desktop/sessions/{session_id}/tags", response_model=CRUDResponse[dict[str, Any]])
+async def session_tags(session_id: str, body: TagAssignment, request: Request):
+    from local_operator.session.session_tags import TagRevisionConflict
+
+    async with errors(request):
+        await _refuse_remote_write(request, session_id, noun="tag assignment")
+        try:
+            return reply(
+                await host(request).set_tags(
+                    session_id, body.tags, body.primary, body.expected_revision
+                )
+            )
+        except TagRevisionConflict as exc:
+            raise HTTPException(
+                409,
+                _wd.desktop_refusal(error="Tags changed elsewhere.").envelope(code="tags_conflict")
+                | {"result": exc.current},
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
 
 @router.post("/v1/desktop/sessions/{session_id}/pin", response_model=CRUDResponse[PinState])

@@ -88,5 +88,400 @@
     "role": "picker copy",
     "tone": "plain",
     "note": "Textual binding description for existing Escape action; one short word."
+  },
+  "tui.projects.detail.no_text": {
+    "role": "detail update body placeholder",
+    "tone": "plain, factual",
+    "note": "Drawn in place of a project update entry whose body is empty after clamping, so the row exists and reads as an explicit absence rather than a blank gap. Parentheses are part of the value, matching the '(unnamed)' convention in this catalogue. One dim no-wrap line. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.detail.no_description": {
+    "role": "detail description placeholder",
+    "tone": "plain, factual",
+    "note": "Drawn in place of a project description when the record has none (empty or whitespace-only), so the detail page's description section reads as an explicit absence rather than a blank gap. One dim no-wrap line. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.title": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Shared lowercase title word across canvas, form and detail. One clipped title row; keep short."
+  },
+  "tui.projects.new_project": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Form title suffix including leading space and middle-dot separator; one clipped row."
+  },
+  "tui.projects.active_view": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Canvas title suffix; view is the localized display name, never the routing token. Preserve separator and one-row budget."
+  },
+  "tui.projects.tracked": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Tracked-project count in title; count is preformatted ASCII integer text to preserve existing ungrouped bytes. No English singular/other branch exists. One clipped clause."
+  },
+  "tui.projects.zoom": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Timeline-only title clause; tier is the opaque renderer tier token, not translated here. Leading separator and one-row budget."
+  },
+  "tui.projects.updated": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Shared canvas/detail freshness suffix; stamp retains existing local strftime %H:%M exactly. Do not reinterpret as relative time; one clipped clause."
+  },
+  "tui.projects.this_session": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Optional calling-session association count; count is preformatted ASCII integer text. Keep parentheses and separator; sheds first when title is narrow."
+  },
+  "tui.projects.view_list": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Human display name for stable list token; lowercase inside title, not routing vocabulary. One short word."
+  },
+  "tui.projects.view_board": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Human display name for stable board token; lowercase inside title, not routing vocabulary. One short word."
+  },
+  "tui.projects.view_timeline": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Human display name for stable timeline token; lowercase inside title, not routing vocabulary. One short word."
+  },
+  "tui.projects.unnamed": {
+    "role": "project title copy",
+    "tone": "plain",
+    "note": "Detail title fallback when project has no display name; preserve parentheses and keep short within one clipped row."
+  },
+  "tui.projects.binding_show_list": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing show_list action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_show_board": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing show_board action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_show_timeline": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing show_timeline action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_cycle_view": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing cycle_view action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_open_detail": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing open_detail action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_create": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing create action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_message": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing message action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_start": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing start action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_copy_attachment": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing copy_attachment action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_preview_attachment": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing preview_attachment action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_refresh": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing refresh action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_zoom_in": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing zoom_in action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_zoom_out": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing zoom_out action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_up": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing up action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_down": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing down action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_left": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_left action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_right": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_right action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_up": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_up action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_down": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_down action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_left": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_left action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_page_right": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing page_right action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_home": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_home action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_scroll_end": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing scroll_end action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_jump": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing jump action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_next_section": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing next_section action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_prev_section": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing prev_section action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.binding_leave": {
+    "role": "binding help",
+    "tone": "plain",
+    "note": "Textual binding description for existing leave action; key and action remain stable. Short help label, unchanged interaction; no wrapping guarantee."
+  },
+  "tui.projects.form.title_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's title field, shown only while the field is empty: the title is the human-readable name people read, as opposed to the reference key beside it. Lowercase fragment, not a sentence; keep it short enough for the field at narrow widths. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.key_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's key field, shown only while empty: the key is the stable reference handle everything else points at (and follows the title until edited by hand). Lowercase fragment, not a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.tags_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's tags field: it states the two accepted separators so the reader does not guess at a format the store would refuse. Lowercase fragment, not a sentence. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.team_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's team field: the single word naming what belongs in the field (a team name). One word, lowercase; keep it that short. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.owner_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's owner field: the single word naming what belongs in the field (the owning person). One word, lowercase; keep it that short. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.date_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of BOTH date fields in the project form (target date and start date): the one accepted date spelling, ISO year-month-day with zero padding. This is a FORMAT TOKEN the store parses, not prose — keep the exact YYYY-MM-DD shape and digits layout in every locale so the hint always matches what validates. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.estimate_placeholder": {
+    "role": "input placeholder",
+    "tone": "plain, instructive",
+    "note": "Placeholder of the project form's estimate field: it names the default estimate unit (points; the adjacent cycle row offers the unit choices). One lowercase word matching the unit vocabulary the store accepts — if the unit words are ever translated, this must move with them. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.readback_hint": {
+    "role": "form readback row",
+    "tone": "plain, factual",
+    "note": "One row of the form's plain-text readback (the surface tests and geometry probes assert), restating a field's hint: '{label} hint: {hint}'. {label} is the field's short internal name and {hint} is the already-rendered hint text; both are kept verbatim, and the colon-space layout is part of the readback contract other assertions prefix-match on, so keep the shape. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.form.readback_error": {
+    "role": "form readback row",
+    "tone": "plain, factual",
+    "note": "One row of the form's plain-text readback (the surface tests and geometry probes assert), restating a field's refusal: '{label} error: {error}'. {label} is the field's short internal name and {error} is the already-rendered refusal sentence; both are kept verbatim, and tests prefix-match rows on '{label} error:', so keep the shape exactly. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "tui.projects.render.more_not_shown_indent": {
+    "role": "overflow row",
+    "tone": "dim",
+    "note": "Indented overflow row on the board; the indent differs from its Text sibling below, so it is its own key."
+  },
+  "tui.projects.render.more_not_shown": {
+    "role": "overflow row",
+    "tone": "dim",
+    "note": "Unindented overflow row for the same fact; raw digit."
+  },
+  "tui.projects.render.no_estimate_or_dates": {
+    "role": "empty state",
+    "tone": "dim",
+    "note": "Shown when a project carries neither an estimate nor dates; reused at both call sites so the two cannot drift."
+  },
+  "tui.projects.render.no_progress": {
+    "role": "empty state",
+    "tone": "dim",
+    "note": "The short form used in a card's fact row; distinct from no_progress_recorded, which is the detail page's fuller sentence."
+  },
+  "tui.projects.render.reported_ago": {
+    "role": "status fragment",
+    "tone": "dim",
+    "note": "Age of the last progress report; suffix carries a parenthetical built in code, and the age is already humanised."
+  },
+  "tui.projects.render.live_count": {
+    "role": "count",
+    "tone": "live",
+    "note": "Number of live sessions attached; raw digit."
+  },
+  "tui.projects.render.no_dates_count": {
+    "role": "list tail",
+    "tone": "dim",
+    "note": "Header of the undated-items tail; the count is the list length and the trailing colon and space introduce what follows."
+  },
+  "tui.projects.render.no_dates_label": {
+    "role": "list tail",
+    "tone": "dim",
+    "note": "Same tail when a section label is known; the label is a section name from the data, not copy."
+  },
+  "tui.projects.render.progress_none": {
+    "role": "status row",
+    "tone": "dim",
+    "note": "Detail-page progress row when the record is empty; the colon is the label/value separator."
+  },
+  "tui.projects.render.progress_reported": {
+    "role": "status row",
+    "tone": "dim",
+    "note": "Detail-page progress row; suffix carries the reporter/staleness/refresh clauses built in code, then the colon introduces the value."
+  },
+  "tui.projects.render.no_linked_sessions": {
+    "role": "empty state",
+    "tone": "dim",
+    "note": "Shown when a project has no linked sessions."
+  },
+  "tui.projects.render.working_prefix": {
+    "role": "label",
+    "tone": "dim",
+    "note": "Label introducing the working-session list; the trailing space is layout."
+  },
+  "tui.projects.render.session_missing": {
+    "role": "row",
+    "tone": "plain",
+    "note": "A linked session that is no longer on the ledger; the bracket is part of the marker and the identifier stays untranslated."
+  },
+  "tui.projects.render.more_working": {
+    "role": "overflow row",
+    "tone": "dim",
+    "note": "Overflow for the working list; leading separator and raw digit."
+  },
+  "tui.projects.render.filed_by": {
+    "role": "row",
+    "tone": "dim",
+    "note": "Sessions that filed items; ids are identifiers and more is an overflow clause built in code."
+  },
+  "tui.projects.render.no_progress_recorded": {
+    "role": "empty state",
+    "tone": "dim",
+    "note": "The detail page's fuller empty state; its own key because it reads as a sentence where no_progress reads as a value."
+  },
+  "tui.projects.render.running_settled": {
+    "role": "counts",
+    "tone": "dim",
+    "note": "Running/settled todo counts; both digits are raw."
+  },
+  "tui.projects.render.todos_counts": {
+    "role": "counts",
+    "tone": "dim",
+    "note": "Open-over-total todo counts; raw digits."
+  },
+  "tui.projects.render.own_session": {
+    "role": "row",
+    "tone": "name",
+    "note": "Stands in for a session identifier when the row is the reader's own session."
+  },
+  "tui.projects.render.open_over_total": {
+    "role": "counts",
+    "tone": "dim",
+    "note": "Open-over-total counts on the detail page; raw digits and the spaced slash are layout."
+  },
+  "tui.projects.render.next_clause": {
+    "role": "row suffix",
+    "tone": "dim",
+    "note": "Names the next milestone; the leading em dash and space attach it to the row it follows."
+  },
+  "tui.projects.render.todo_snapshots_none": {
+    "role": "empty state",
+    "tone": "dim",
+    "note": "Shown when no todo snapshots exist for the project."
+  },
+  "tui.projects.render.more_lines_hint": {
+    "role": "affordance",
+    "tone": "muted",
+    "note": "The feed's expansion affordance; the brackets, the count and the return symbol are all part of the hint, and the noun/verb words are built in code (recorded as the next tranche)."
+  },
+  "tui.projects.render.older_updates": {
+    "role": "trailing row",
+    "tone": "dim",
+    "note": "Trailing row for the render cap; raw digit."
+  },
+  "tui.projects.start.title": {
+    "role": "heading",
+    "tone": "plain",
+    "note": "Card title for the start-session flow; lower-case house style like the send card's."
+  },
+  "tui.projects.start.filter_placeholder": {
+    "role": "placeholder",
+    "tone": "dim",
+    "note": "Placeholder in the filter input."
+  },
+  "tui.projects.start.legend": {
+    "role": "legend",
+    "tone": "dim",
+    "note": "The card's key legend; the arrows and the escape word are display vocabulary, the verbs translate."
+  },
+  "tui.projects.start.more": {
+    "role": "overflow",
+    "tone": "muted",
+    "note": "Row-count overflow when the card cannot show every row."
+  },
+  "tui.projects.notice_read_only": {
+    "role": "read-only notice",
+    "tone": "plain",
+    "note": "Pinned on page entry and every refused write for a follower session whose runtime lives on another device. Full sentence; the footer paints one line and wraps. Names no command because there is none on this surface."
+  },
+  "tui.projects.refusal_done_gate": {
+    "role": "form refusal",
+    "tone": "plain",
+    "note": "Edit form's status-field refusal when marking done with open milestones. {names} is the comma-joined milestone names in store order. Deliberately omits force_done: the form cannot supply that parameter, so suggesting it sends the reader to a surface this page does not have (UX round 1, U4)."
   }
 }

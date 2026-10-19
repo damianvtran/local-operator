@@ -1386,22 +1386,89 @@ def collapse_adjacent_updates(entries: Sequence[Any]) -> list[tuple[Any, int]]:
 
 
 def truncate_row(row: str, *, cap: int = PROJECT_ROW_CAP) -> str:
-    """Truncate a listing row to ``cap`` CELLS (not characters) with ``…``.
+    """Truncate a listing row to ``cap`` VISIBLE CELLS with ``…``.
 
     Cells, not ``len``: the cap exists to bound what the reader SEES, and a
     CJK description measured 272 cells in a 160-character row — the row wrapped
     to three visual lines on the surface whose constant was supposed to bound
     it (agent review round 1, F4).
+
+    SPAN-AWARE (LOH-28 Q3-1): an identifier is rendered as
+    ``OPEN<token>:value CLOSE``; those marker bytes are invisible to the
+    reader, so they must not be counted against the cap, and a cut inside one
+    is forbidden — the caller would get a broken prefix (and the key, which is
+    the addressing handle, would be destroyed). A span that would cross the
+    cut is included WHOLE, then the row ends; ordinary text is never cut
+    inside a span.
     """
     from rich.cells import cell_len
 
-    if cell_len(row) <= cap:
+    from local_operator.variables import IDENTIFIER_SPAN_CLOSE, IDENTIFIER_SPAN_OPEN
+
+    def content_of(segment: str) -> str:
+        """The visible content of a span whose OPEN is at ``segment[0]``, else ``""``."""
+        close = segment.find(IDENTIFIER_SPAN_CLOSE, 1)
+        if close < 0:
+            return ""
+        colon = segment.find(":", 1, close)
+        return segment[(colon + 1 if colon != -1 else 1) : close]
+
+    def visible_cells(text: str) -> int:
+        total = 0
+        index = 0
+        while index < len(text):
+            if text[index] == IDENTIFIER_SPAN_OPEN:
+                close = text.find(IDENTIFIER_SPAN_CLOSE, index + 1)
+                if close < 0:
+                    index += 1
+                    continue
+                colon = text.find(":", index + 1, close)
+                total += cell_len(text[(colon + 1 if colon != -1 else index + 1) : close])
+                index = close + 1
+                continue
+            total += cell_len(text[index])
+            index += 1
+        return total
+
+    if visible_cells(row) <= cap:
         return row
     clipped = ""
-    for char in row:
-        if cell_len(clipped + char) > cap - 1:
-            break
-        clipped += char
+    cells = 0
+    index = 0
+    capped = False
+    while index < len(row):
+        if row[index] == IDENTIFIER_SPAN_OPEN:
+            close = row.find(IDENTIFIER_SPAN_CLOSE, index + 1)
+            if close < 0:
+                break
+            content = content_of(row[index:])
+            content_cells = cell_len(content)
+            if capped:
+                # Past the visible cap, ordinary prose is dropped but a LATER
+                # identifier is still the address the caller needs (the key
+                # after a wide title). Keep it whole, space-separated.
+                clipped += " " + row[index : close + 1]
+            elif cells + content_cells > cap - 1:
+                # Extend THROUGH the span rather than cut its prefix: an
+                # identifier is an address, not prose.
+                clipped += row[index : close + 1]
+                cells += content_cells
+                capped = True
+            else:
+                clipped += row[index : close + 1]
+                cells += content_cells
+            index = close + 1
+            continue
+        if capped:
+            index += 1
+            continue
+        cells += cell_len(row[index])
+        if cells > cap - 1:
+            capped = True
+            index += 1
+            continue
+        clipped += row[index]
+        index += 1
     return clipped.rstrip() + "…"
 
 

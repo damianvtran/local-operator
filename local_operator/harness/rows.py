@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The five, and why each is persisted:
+    The SEVEN, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
@@ -159,6 +159,13 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
       no text and no tool calls on a clean stop; the live run showed a notice
       instead.
+    - ``LENGTH_STOP_RECOVERY_PROMPT`` — the re-ask after a turn was cut off at
+      the model's OUTPUT limit with nothing visible, on a model with no cheaper
+      effort rung to retreat to; the live run showed a notice instead.
+    - ``CONTINUE_TRUNCATED_ANSWER_PROMPT`` — the continuation after the output
+      limit cut a delegated CHILD's answer off mid-prose; the live run showed a
+      notice instead, and the child finishes the deliverable rather than its
+      parent paying a resume for the rest.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -169,7 +176,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     Imported lazily and gathered here rather than listed per host: this list
     having been copied INCOMPLETELY into the phone fold (it suppressed the
     third and rendered the first two) is the drift this function exists to
-    make impossible. A fourth prompt is added in one place.
+    make impossible. A new prompt is added in one place.
 
     This tuple is the EXACT-match half of the decision only. Chrome prompts
     with a family of shapes rather than a single string live in the producer's
@@ -185,6 +192,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     """
     from local_operator.harness.loop import (
         CONNECTIVITY_CONTINUATION_PROMPT,
+        CONTINUE_TRUNCATED_ANSWER_PROMPT,
+        LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
     )
@@ -197,6 +206,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
+        LENGTH_STOP_RECOVERY_PROMPT,
+        CONTINUE_TRUNCATED_ANSWER_PROMPT,
     )
 
 
@@ -211,7 +222,7 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the prompts that are
-    single fixed strings (the five listed above); a producer-side recogniser covers each family the
+    single fixed strings (the seven listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's
@@ -951,17 +962,16 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
 def ask_timeout_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_timeout`` row: ``(text, kind)``.
 
-    It says the agent MOVED ON and that the ask is still answerable, because
-    both halves are true and each is useless without the other: "timed out"
-    alone reads as finished, and "you can still answer" alone hides that the
-    agent stopped waiting. ``warning`` ink: this is the moment the user learns
-    their silence had a cost.
+    It says the agent went ahead WITHOUT the answer, in the phone's lapsed-card
+    words. It no longer adds "you can still answer": no surface offers a late
+    answer since decision D10, so that half became untrue. ``warning`` ink: this
+    is the moment the user learns their silence had a cost.
     """
     details = details or {}
     ask_id = str(details.get("ask_id") or "")
     waited = gate_waited_text(details)
     return (
-        f"Timed out after {waited} — the agent moved on; you can still answer (ask {ask_id})",
+        f"Timed out after {waited} — the agent goes ahead without your answer (ask {ask_id})",
         "warning",
     )
 
@@ -1236,7 +1246,15 @@ def wake_display_name(wake_id: str) -> str:
     try:
         from local_operator.aida import proactive as aida_proactive
 
-        return aida_proactive.wake_display_label(wake_id)
+        label = aida_proactive.wake_display_label(wake_id)
+        if label != wake_id:
+            return label
+        # THE LIBRARIAN'S ROWS ride the same one-lookup contract: Aida's mapper
+        # answers unknown ids with the id itself, so an unchanged answer is the
+        # hand-off point, not a fallback.
+        from local_operator.librarian import proactive as librarian_proactive
+
+        return librarian_proactive.wake_display_label(wake_id)
     except Exception:  # noqa: BLE001 — a label is never worth a receipt
         return wake_id
 

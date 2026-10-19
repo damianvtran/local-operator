@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "Accès téléphone : piloter les sessions lop de cette machine",
+  "cli.mobile_help.install": "Installer le daemon, le mot de passe et le LaunchAgent",
+  "cli.mobile_help.status": "État du daemon, du contrôle d’accès et des sessions actives",
+  "cli.mobile_help.daemon_action": "{action, select, start{Démarrer} stop{Arrêter} restart{Redémarrer} other{{action}}} le daemon",
+  "cli.mobile_help.logs": "Suivre les logs du daemon et des runtimes en continu",
+  "cli.mobile_help.logs_lines": "Lignes par fichier (deux fichiers au plus sont lus)",
+  "cli.mobile_help.logs_follow": "Suivre par nom, pour voir un log créé ou pivoté pendant la surveillance (un suivi lié à un descripteur rate les deux)",
+  "cli.mobile_help.password": "Afficher ou faire tourner le mot de passe du portail",
+  "cli.mobile_help.devices": "Lister les appareils push de cet ordinateur, ou révoquer ou réautoriser l’un d’eux",
+  "cli.mobile_help.devices_command": "list (par défaut), revoke <device_id>, ou unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "le device_id que liste `lop mobile devices` ; requis par revoke/unrevoke",
+  "cli.mobile_help.devices_port": "le port du daemon mobile (par défaut : celui du daemon)",
+  "cli.mobile_help.uninstall": "Retirer le LaunchAgent",
+  "cli.mobile_help.uninstall_purge": "Supprimer aussi le mot de passe",
+  "cli.mobile_help.serve": "Exécuter le daemon (au premier plan)"
+}

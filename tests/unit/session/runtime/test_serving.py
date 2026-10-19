@@ -14,7 +14,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 
@@ -61,7 +61,10 @@ class FakeSession:
         self.session_id = "sess-1"
         self.model_label = "test/model"
         self.effective_model_label = "test/model"
-        self.model = None
+        #: The current spec, or ``None`` before a model is resolved. The type is
+        #: stated because the pair-only-switch regression assigns a real spec
+        #: here to stand in for a session the user is already on (#2471).
+        self.model: ModelSpec | None = None
         self.conversation_name = ""
         self.is_streaming = False
         self._handlers: list[Any] = []
@@ -288,6 +291,31 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
     session = FakeSession()
     handle = ServingSessionHandle(session, loop, cwd="/tmp", auto_approve=auto_approve)
     return handle, session
+
+
+def _skill_payload(typed: str) -> str:
+    """The persisted form of a ``$skill`` invocation: what a CLIENT sent.
+
+    Built from the REAL ``Skill`` and the REAL renderer, the way the fold-parity
+    test does it: a hand-spelled tag would pin a payload shape the product never
+    produces, and it is the payload's own ``invocation`` attribute that the fix
+    reads back. Expansion is the client's duty (a desktop renders it in
+    ``local-operator-ui``'s ``skill-invocation.ts``), which is why the harness is
+    handed this and never the typed line.
+    """
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import parse_invocation, render_invocation
+
+    skill = Skill(
+        name="research",
+        description="research things",
+        file_path=Path("/skills/research/SKILL.md"),
+        base_dir=Path("/skills/research"),
+        source="user",
+    )
+    invocation = parse_invocation(typed, {"research": skill})
+    assert invocation is not None
+    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
 
 
 def test_default_conversation_name_is_empty_not_a_placeholder() -> None:
@@ -1104,6 +1132,53 @@ async def test_first_prompt_wears_a_provisional_title_before_the_model_answers()
     # Failure released the latch and stashed the opener for a route-edge retry.
     assert handle._name_requested is False
     assert handle._pending_name_text == "review what regressed in mobile titles"
+
+
+@pytest.mark.asyncio
+async def test_a_skill_payload_names_the_conversation_after_the_typed_line() -> None:
+    """D8: the opener is the SENT payload, and the title must not be.
+
+    A desktop expands ``$skill`` client-side, so this handle is handed the
+    payload. Naming from it wore the payload's own header as the conversation's
+    name — "The user invoked the `research` skill…" — and put the whole SKILL.md
+    body in the phone's list row. The typed line rides the payload's
+    ``invocation`` attribute, so that is what the label and the generation
+    prompt are derived from.
+    """
+    handle, session = make_handle()
+    payload = _skill_payload("$research the widget market")
+    assert "SKILL_BODY_MARKER" in payload
+
+    handle._maybe_name_conversation(payload)
+
+    # The stand-in the list wears is the typed line, not the payload.
+    assert handle._fold.projection.conversation_name == "$research the widget market"
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # And the opener the title is GENERATED from is the typed line too: the body
+    # never reaches the naming call, in either half of the message it sends.
+    assert session._complete_calls, "no naming call was made"
+    for _system, prompt in session._complete_calls:
+        assert "$research the widget market" in prompt
+        assert "SKILL_BODY_MARKER" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_ordinary_prose_is_still_named_from_itself() -> None:
+    """Negative control: the collapse is a payload reader, not a new normaliser.
+
+    A message that is not a rendered payload must reach naming character for
+    character — the WIDGET case is an ordinary one-turn request.
+    """
+    handle, session = make_handle()
+
+    handle._maybe_name_conversation("reconcile the widget market figures")
+
+    assert handle._fold.projection.conversation_name == "Reconcile the widget market figures"
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert "reconcile the widget market figures" in session._complete_calls[0][1]
 
 
 @pytest.mark.asyncio
@@ -2004,6 +2079,131 @@ async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
         True,
         True,
     ], "a switch is a deliberate choice, so a pinned fallback must be withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported "I set Max and it went back to High" (#2471), at the seam
+    every level-less switch uses.
+
+    ``build_model_spec`` seeds the model's own default, and ``Session.set_model``
+    assigns the spec BEFORE its same-pair early return -- so the composer's
+    model chip, which sends the pair and no level, erased the chosen depth
+    whenever its row was picked (including the row already in force). The
+    explicit level outranks the derived seed, but only a level that IS a
+    choice: a value equal to the model's own default is a seed and is not
+    promoted to a decision (that is the terminal's discriminator too). A
+    session with NO level keeps the historical seed behaviour as well, asserted
+    as the last control.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    chosen = build_model_spec("deepseek", "deepseek-flash").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session.model = chosen
+
+    # THE REPRODUCTION: picking the row already in force (the desktop's
+    # ``/model deepseek/deepseek-flash`` on a session already on it).
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert applied[-1].reasoning_effort == "max"
+
+    # A genuine model change carries the choice too: "I dropped to max for this
+    # work" did not mean "until I switch models".
+    await handle.set_model_effort("deepseek", "deepseek-v4-pro", None)
+    assert applied[-1].reasoning_effort == "max"
+
+    # A SEED IS NOT A CHOICE (review round 1, MAJOR-1): deepseek-flash's seed is
+    # ``high`` and that is also its default, so a session that never chose a
+    # level must not have that seed promoted -- it would be journalled as a
+    # selection on a switch, and the birth path would store a level nobody
+    # picked. The target's own seed (none here) is what the base produced.
+    session.model = build_model_spec("deepseek", "deepseek-flash")
+    await handle.set_model_effort("openai", "gpt-5.4", None)
+    assert applied[-1].reasoning_effort == build_model_spec("openai", "gpt-5.4").reasoning_effort
+
+    # Control: with no level of its own a same-pair switch also still gets the
+    # target's seed, which is the behaviour every pre-existing caller relies on.
+    session.model = build_model_spec("deepseek", "deepseek-flash")
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert (
+        applied[-1].reasoning_effort
+        == build_model_spec("deepseek", "deepseek-flash").reasoning_effort
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_pair_only_re_pick_stores_the_chosen_level_in_the_journal(tmp_path) -> None:
+    """The persisted half, through a REAL Session (review round 1, NIT).
+
+    The test above stubs ``Session.set_model``, which is exactly the method
+    whose assign-before-early-return order made the bug possible; a stub cannot
+    regress it. This one runs the real session and reads the ``selected_model``
+    journal row the next resume consumes, so the fix is pinned where the report
+    was observed: Max chosen, the model row re-picked, the stored selection
+    still Max.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    class _Stream:
+        async def __call__(self, request: Any, signal: Any = None) -> AsyncIterator[Any]:
+            """Never called: the switch and the journal write make no request."""
+            if False:  # pragma: no cover — makes this an async generator
+                yield
+
+        def set_route_handler(self, handler: Any) -> None:  # noqa: ANN401 — test double
+            pass
+
+        def set_notice_handler(self, handler: Any) -> None:  # noqa: ANN401 — test double
+            pass
+
+        def on_model_changed(self, model: Any) -> None:  # noqa: ANN401 — test double
+            pass
+
+        def withdraw_fallback(self) -> None:
+            pass
+
+    boot = build_model_spec("anthropic", "claude-sonnet-5-5").model_copy(
+        update={"reasoning_effort": "high"}
+    )
+    session = Session(
+        model=boot,
+        stream_fn=_Stream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    session.set_model(
+        build_model_spec("deepseek", "deepseek-flash").model_copy(
+            update={"reasoning_effort": "max"}
+        ),
+        explicit=True,
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+
+    assert session.model.reasoning_effort == "max"
+    await session._persist_selected_model()
+    rows = [
+        entry.payload["details"]
+        for entry in session._transcript.entries()
+        if entry.payload.get("custom_type") == "selected_model"
+    ]
+    assert rows, "the selection journal must carry a row for the switch"
+    assert rows[-1]["selector"] == "deepseek/deepseek-flash"
+    assert rows[-1]["effort"] == "max"
 
 
 @pytest.mark.asyncio

@@ -9,15 +9,22 @@ will take is indistinguishable from one that writes none.
 
 from __future__ import annotations
 
+import asyncio
 import errno
+import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
+from local_operator.evaluation.adapters.api import (
+    Requirement,
+    ScopedInfraValue,
+    SecretRef,
+)
 from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
@@ -26,6 +33,7 @@ from local_operator.evaluation.evidence.models import (
     CleanupPayload,
     EnvironmentStepPayload,
     ErrorPayload,
+    EvidenceArtifactRef,
     ModelResponsePayload,
     ObservationPayload,
     ReconciliationPayload,
@@ -40,9 +48,13 @@ from local_operator.evaluation.runner.episode import (
     MAX_STDERR_TAIL_CHARS,
     EpisodeConfig,
     EpisodeRunner,
+    _canary_values_outside_own_roots,
+    _failure_diagnostic_text,
+    _failure_layer,
 )
 from local_operator.evaluation.runner.model import EpisodeModelClient
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
+from local_operator.evaluation.runner.secrets import StaticSecretResolver
 from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
@@ -86,6 +98,7 @@ def _runner(
     redactions: RedactionSet | None = None,
     spec: Any = None,
     config: Any = None,
+    secrets: Any = None,
 ) -> EpisodeRunner:
     return EpisodeRunner(
         spec or build_spec(episode_id),
@@ -96,6 +109,7 @@ def _runner(
         launch=lambda _: adapter,
         rescue=_rescue_ok,
         redactions=redactions,
+        secrets=secrets,
     )
 
 
@@ -508,6 +522,870 @@ async def test_scorer_failure_can_only_abandon_as_ambiguous(
     assert report.abandonment.reason == "ambiguous_finalization"
     # Rescue runs before abandonment: cloud safety must not wait on a writer.
     assert outcome.rescue_complete is True
+
+
+def _failure_diagnostics(root: Path) -> list[tuple[ErrorPayload, str | None]]:
+    """Every failure-diagnostic event in a bundle, with the text it points at."""
+
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    found: list[tuple[ErrorPayload, str | None]] = []
+    for event in report.events:
+        if event.kind != "error":
+            continue
+        payload = event.payload
+        assert isinstance(payload, ErrorPayload)
+        text = None
+        if payload.detail_artifact is not None:
+            text = (root / "artifacts" / payload.detail_artifact.sha256).read_text()
+        found.append((payload, text))
+    return found
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "layer", "code_prefix", "needle"),
+    [
+        # ADAPTER / judge: the scorer answered with a failure, the harness is fine.
+        (
+            SupervisionError("judge backend returned 502"),
+            "adapter",
+            "adapter-",
+            "judge backend returned 502",
+        ),
+        # UNEXPECTED: a bug in the harness, not the scorer. Filed separately so
+        # it never reads as an adapter outage.
+        (RuntimeError("unexpected boom in score path"), "internal", "internal-", "unexpected boom"),
+    ],
+)
+async def test_a_scoring_failure_records_its_type_and_message(
+    tmp_path: Path,
+    episode_id: str,
+    failure: BaseException,
+    layer: str,
+    code_prefix: str,
+    needle: str,
+) -> None:
+    """The measured gap: two OSWorld runs abandoned with only ``evidencefailure``.
+
+    A scoring failure after ``scoring_start`` can only abandon, and the
+    abandonment field is a ``StrictIdentifier`` -- so the exception TYPE and
+    TEXT were discarded and a canary refusal, a judge outage and a harness bug
+    were indistinguishable after the fact. The diagnostic event and its
+    bounded artifact are what the abandonment verification now sees, while the
+    abandonment keeps its existing shape and code.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": failure})
+    outcome = await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    diagnostics = _failure_diagnostics(root)
+    assert len(diagnostics) == 1
+    payload, text = diagnostics[0]
+    assert text is not None
+    assert payload.diagnostic_code.startswith(code_prefix)
+    assert f"layer: {layer}" in text
+    assert "phase: scoring" in text
+    assert f"operation: score-{episode_id}" in text
+    assert f"exception: {type(failure).__name__}" in text
+    assert needle in text
+    # The terminal itself is unchanged: only the diagnosis is new.
+    abandonment = verify_bundle(root).abandonment
+    assert abandonment is not None
+    assert abandonment.reason == "ambiguous_finalization"
+    if layer == "adapter":
+        assert abandonment.diagnostic_code == "supervisionerror"
+
+
+@pytest.mark.asyncio
+async def test_an_evidence_refusal_at_scoring_is_labelled_evidence(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The canary-refusal shape: the score exists but the bundle refuses its bytes.
+
+    This is the case that produced the measured ``evidencefailure`` string. The
+    layer has to read ``evidence`` -- not ``adapter`` -- because the judge
+    answered and the fix is in the capture, not the scorer.
+    """
+
+    secret = "[redacted]"
+    base = tmp_path / "evidence-case"
+    base.mkdir()
+    payload = json.dumps(
+        {"evaluator_diagnostics": {"stderr": {"text": f"key {secret}"}}},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    sha = hashlib.sha256(payload).hexdigest()
+    artifacts = base / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    (artifacts / sha).write_bytes(payload)
+    adapter = FakeAdapter(
+        base,
+        episode_id,
+        score=ScoreArtifact(
+            status="scored",
+            binary=0,
+            details=EvidenceArtifactRef(
+                sha256=sha, media_type="application/json", byte_count=len(payload)
+            ),
+        ),
+    )
+    outcome = await _runner(
+        base,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "finish"]),
+        spec=replace(build_spec(episode_id), secret_refs=(SecretRef(name="IDENT_ROW"),)),
+        secrets=StaticSecretResolver({"IDENT_ROW": secret}),
+    ).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    diagnostics = _failure_diagnostics(root)
+    assert len(diagnostics) == 1
+    reported, text = diagnostics[0]
+    assert text is not None
+    assert reported.diagnostic_code == "evidence-evidencefailure"
+    assert "layer: evidence" in text
+    # R8: the receipt is what refused the bytes, so the operation names the
+    # receipt -- not the scoring operation id, which points at the wrong write.
+    assert "operation: receipt:scoring_result" in text
+    assert "exception: _EvidenceFailure" in text
+    # The captured score's secret is never republished by the diagnosis.
+    assert secret not in text
+    assert secret not in b"".join(
+        path.read_bytes() for path in (root / "artifacts").iterdir() if path.is_file()
+    ).decode(errors="ignore")
+    abandonment = verify_bundle(root).abandonment
+    assert abandonment is not None
+    assert abandonment.diagnostic_code == "evidencefailure"
+
+
+@pytest.mark.asyncio
+async def test_a_diagnostic_that_cannot_be_cleared_is_dropped(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAIL-OPEN: an uncleanable diagnostic must cost the diagnosis, not the terminal.
+
+    The rendering is scanned first, but the store scans again and
+    this test skips the first line of defence on purpose: it makes the produced
+    TEXT carry a canary so ``publish_failure_diagnostic`` refuses it. The
+    artifact is dropped, the event still names the class and layer, and the
+    abandonment proceeds with exactly today's status and code.
+    """
+
+    import local_operator.evaluation.runner.episode as episode_module
+
+    secret = "[redacted]"
+    monkeypatch.setattr(
+        episode_module,
+        "_failure_diagnostic_text",
+        lambda *args, **kwargs: f"message: carrying {secret}\n",
+    )
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": SupervisionError("scorer died")})
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(),
+        redactions=RedactionSet.from_resolved_values((secret,)),
+    ).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    assert report.abandonment.reason == "ambiguous_finalization"
+    assert report.abandonment.diagnostic_code == "supervisionerror"
+    diagnostics = _failure_diagnostics(root)
+    assert len(diagnostics) == 1
+    payload, text = diagnostics[0]
+    assert payload.detail_artifact is None and text is None
+    assert secret not in b"".join(
+        path.read_bytes() for path in (root / "artifacts").iterdir() if path.is_file()
+    ).decode(errors="ignore")
+
+
+@pytest.mark.asyncio
+async def test_a_redactable_diagnostic_withholds_only_the_message(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A secret-shaped message is WITHHELD whole; the class and phase survive."""
+
+    secret = "[redacted]"
+    adapter = FakeAdapter(
+        tmp_path, episode_id, failures={"score": SupervisionError(f"judge echoed {secret}")}
+    )
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(),
+        redactions=RedactionSet.from_resolved_values((secret,)),
+    ).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    payload, text = _failure_diagnostics(root)[0]
+    assert text is not None and payload.detail_artifact is not None
+    assert secret not in text
+    assert WITHHELD in text
+    assert "exception: SupervisionError" in text and "phase: scoring" in text
+
+
+@pytest.mark.asyncio
+async def test_a_successful_score_writes_no_diagnostic(tmp_path: Path, episode_id: str) -> None:
+    """No extra artifact, no extra event: the success path is byte-unchanged."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    outcome = await _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
+    ).run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid
+    assert [event.kind for event in report.events].count("error") == 0
+    # A successful run already publishes execution artifacts; the assertion is
+    # that no FAILURE diagnostic was added to them.
+    assert not any(
+        b"layer: " in path.read_bytes() for path in (root / "artifacts").iterdir() if path.is_file()
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_evidence_write_failure_names_the_failed_write(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second measured class: an episode dying as ``evidence-write-failed``.
+
+    A run whose evidence write fails abandons with a fixed literal, so the
+    raising syscall was nowhere on disk. The diagnostic names the operation
+    that failed, the errno symbol, its strerror and the bundle path element --
+    never the content -- while the terminal keeps today's status and code.
+    """
+
+    from local_operator.evaluation.evidence.store import EvidenceBundleInvalid
+
+    original_append = EvidenceWriter.append
+
+    def failing_append(self: Any, kind: Any, payload: Any, **kwargs: Any) -> Any:
+        if kind == "model_request":
+            io_error = OSError(errno.ENOSPC, "No space left on device", "events.jsonl")
+            raise EvidenceBundleInvalid("journal write refused") from io_error
+        return original_append(self, kind, payload, **kwargs)
+
+    monkeypatch.setattr(EvidenceWriter, "append", failing_append)
+    adapter = FakeAdapter(tmp_path, episode_id)
+    outcome = await _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
+    ).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    assert report.abandonment.reason == "infrastructure_failure"
+    assert report.abandonment.diagnostic_code == "evidence-write-failed"
+    diagnostics = _failure_diagnostics(root)
+    assert len(diagnostics) == 1
+    payload, text = diagnostics[0]
+    assert text is not None
+    assert payload.diagnostic_code == "evidence-evidencefailure"
+    assert "layer: evidence" in text and "phase: evidence" in text
+    assert "operation: append:model_request" in text
+    assert "exception: _EvidenceFailure" in text
+    assert "errno: ENOSPC" in text
+    assert "strerror: No space left on device" in text
+    assert "path: events.jsonl" in text
+
+
+@pytest.mark.asyncio
+async def test_an_escape_from_the_failure_path_still_leaves_a_terminal(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Class 3, the measured one: the writer is open and NOTHING was recorded.
+
+    Two OSWorld episodes (task_015, task_021) exited rc=1 after a passed
+    preflight with three events and ``state: open``. The escape is inside the
+    failure path itself -- here a raw ``OSError`` out of ``_finalize_failure``'s
+    own append, which ``_append`` does not wrap -- and ``_run_with_bundle``
+    used to catch only ``_EvidenceFailure``, so the process left with the
+    writer closed and no terminal.
+    """
+
+    async def exploding_finalize(self: Any, error: Any) -> Any:
+        raise RuntimeError("harness bug inside the failure path")
+
+    monkeypatch.setattr(EpisodeRunner, "_finalize_failure", exploding_finalize)
+    adapter = FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError("worker died")},
+        fail_after={"execute": 1},
+    )
+    outcome = await _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "step", "finish"])
+    ).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    assert report.abandonment.reason == "infrastructure_failure"
+    assert report.abandonment.diagnostic_code == "runtimeerror"
+    diagnostics = _failure_diagnostics(root)
+    assert len(diagnostics) == 1
+    payload, text = diagnostics[0]
+    assert text is not None
+    assert payload.diagnostic_code == "internal-runtimeerror"
+    assert "layer: internal" in text
+    assert "phase: run" in text and "operation: execute" in text
+    assert "exception: RuntimeError" in text
+    assert "harness bug inside the failure path" in text
+
+
+@pytest.mark.asyncio
+async def test_an_escape_after_finalization_abandons_as_ambiguous(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same handler after ``finalization_start`` must use the legal reason.
+
+    ``finalization_start`` is durable by then, and the abandonment model
+    refuses finalization authority on any reason but
+    ``ambiguous_finalization`` -- so a handler that always claimed
+    ``infrastructure_failure`` would itself fail exactly on the runs that got
+    furthest.
+    """
+
+    def broken_reconciliation(self: Any, payload: Any, **kwargs: Any) -> Any:
+        raise OSError(errno.EIO, "Input/output error", "events.jsonl")
+
+    monkeypatch.setattr(EvidenceWriter, "record_reconciliation", broken_reconciliation)
+    adapter = FakeAdapter(tmp_path, episode_id)
+    outcome = await _runner(
+        tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["step", "finish"])
+    ).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    assert report.abandonment.reason == "ambiguous_finalization"
+    # R3: the raw OSError is wrapped at the write wrapper now, so the diagnostic
+    # names the receipt that failed and still carries the errno it raised.
+    payload, text = _failure_diagnostics(root)[0]
+    assert text is not None
+    assert "operation: receipt:reconciliation" in text
+    assert "errno: EIO" in text and "path: events.jsonl" in text
+
+
+def _diagnostic_bytes_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ONLY the diagnostic artifact's own bytes fail to write (ENOSPC).
+
+    The journal's writes are JSON lines; the diagnostic's are the text body
+    this artifact publishes, so the prefix discriminates them without touching
+    any other durable write. A plain write error is exactly the R2 shape: it is
+    NOT a redaction refusal, and the old code poisoned the writer on it.
+    """
+
+    from local_operator.evaluation.evidence import store as store_module
+
+    original = store_module._write_all
+
+    def failing_write_all(fd: int, data: bytes, calls: Any) -> None:
+        if data.startswith(b"layer: "):
+            raise OSError(errno.ENOSPC, "No space left on device", "artifacts/.artifact.tmp")
+        original(fd, data, calls)
+
+    monkeypatch.setattr(store_module, "_write_all", failing_write_all)
+
+
+def _no_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same-code CONTROL: the pre-change runner, which published nothing."""
+
+    monkeypatch.setattr(EpisodeRunner, "_publish_failure_diagnostic", lambda *a, **k: None)
+
+
+DIAGNOSTIC_FAILURES = [
+    "render",
+    "publish",
+    "record",
+    "sweep",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", DIAGNOSTIC_FAILURES)
+async def test_the_diagnostic_never_changes_the_terminal(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, way: str
+) -> None:
+    """FAIL-OPEN, one case per way the diagnostic can fail.
+
+    The acceptance criterion for this branch is an EQUALITY with the pre-change
+    runner, not merely "something reasonable": each case runs a control with the
+    diagnostic disabled entirely and compares status and diagnostic string.
+    """
+
+    import local_operator.evaluation.runner.episode as episode_module
+    from local_operator.evaluation.evidence.store import EvidenceBundleInvalid
+
+    async def scenario(root: Path, ident: str) -> Any:
+        adapter = FakeAdapter(
+            root, ident, failures={"score": SupervisionError("judge backend returned 502")}
+        )
+        return await _runner(root, ident, adapter=adapter, model=ScriptedModel()).run()
+
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    _no_diagnostic(monkeypatch)
+    control = await scenario(control_root, f"{episode_id}-control")
+    monkeypatch.undo()
+
+    if way == "render":
+        monkeypatch.setattr(
+            episode_module,
+            "_failure_diagnostic_text",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("renderer broke")),
+        )
+    elif way == "publish":
+        _diagnostic_bytes_write(monkeypatch)
+    elif way == "record":
+        monkeypatch.setattr(
+            EvidenceWriter,
+            "record_failure_diagnostic",
+            lambda *a, **k: (_ for _ in ()).throw(EvidenceBundleInvalid("event refused")),
+        )
+    else:
+        monkeypatch.setattr(
+            EvidenceWriter,
+            "discard_unreferenced_artifacts",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sweep broke")),
+        )
+
+    subject_root = tmp_path / "subject"
+    subject_root.mkdir()
+    subject = await scenario(subject_root, f"{episode_id}-subject")
+
+    assert subject.status == control.status, (way, subject.diagnostic, control.diagnostic)
+    assert subject.diagnostic == control.diagnostic, (way, subject.diagnostic)
+    assert subject.bundle_root is not None
+    assert verify_bundle(subject.bundle_root).valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", DIAGNOSTIC_FAILURES)
+async def test_the_evidence_path_diagnostic_never_changes_the_terminal(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch, way: str
+) -> None:
+    """The same four fail-open cases on the EVIDENCE-WRITE path.
+
+    It reaches ``_abandon_for_evidence`` instead of the scoring path, so it
+    gets its own control: a failure in this path must leave ``abandoned`` and
+    ``evidence-write-failed`` exactly as the pre-change runner did.
+    """
+
+    import local_operator.evaluation.runner.episode as episode_module
+    from local_operator.evaluation.evidence.store import EvidenceBundleInvalid
+
+    original_append = EvidenceWriter.append
+
+    def failing_append(self: Any, kind: Any, payload: Any, **kwargs: Any) -> Any:
+        if kind == "model_request":
+            raise OSError(errno.EIO, "Input/output error", "events.jsonl")
+        return original_append(self, kind, payload, **kwargs)
+
+    def apply_way(faults: pytest.MonkeyPatch) -> None:
+        if way == "render":
+            faults.setattr(
+                episode_module,
+                "_failure_diagnostic_text",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("renderer broke")),
+            )
+        elif way == "publish":
+            _diagnostic_bytes_write(faults)
+        elif way == "record":
+            faults.setattr(
+                EvidenceWriter,
+                "record_failure_diagnostic",
+                lambda *a, **k: (_ for _ in ()).throw(EvidenceBundleInvalid("event refused")),
+            )
+        else:
+            faults.setattr(
+                EvidenceWriter,
+                "discard_unreferenced_artifacts",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sweep broke")),
+            )
+
+    async def scenario(root: Path, ident: str, *, control: bool) -> Any:
+        with monkeypatch.context() as faults:
+            faults.setattr(EvidenceWriter, "append", failing_append)
+            if control:
+                faults.setattr(EpisodeRunner, "_publish_failure_diagnostic", lambda *a, **k: None)
+            apply_way(faults)
+            adapter = FakeAdapter(root, ident)
+            return await _runner(
+                root, ident, adapter=adapter, model=ScriptedModel(["step", "finish"])
+            ).run()
+
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    control = await scenario(control_root, f"{episode_id}-control", control=True)
+    subject_root = tmp_path / "subject"
+    subject_root.mkdir()
+    subject = await scenario(subject_root, f"{episode_id}-subject", control=False)
+
+    assert subject.status == control.status, (way, subject.diagnostic, control.diagnostic)
+    assert subject.diagnostic == control.diagnostic, (way, subject.diagnostic)
+    assert subject.bundle_root is not None
+    assert verify_bundle(subject.bundle_root).valid
+
+
+@pytest.mark.asyncio
+async def test_a_journal_failure_on_the_diagnostic_event_keeps_the_terminal(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR (round 2): the diagnostic's own journal write must not poison.
+
+    ``_persist_prevalidated_event`` poisons on any OSError, and poison refuses
+    even ``abandon()``. Review measured an ENOSPC on the diagnostic EVENT's
+    bytes: control ``abandoned``, subject ``abandonment_failed`` with the
+    journal head untouched. The rollback (truncate back to the pre-append
+    length) keeps the writer open and the journal byte-identical.
+    """
+
+    from local_operator.evaluation.evidence import store as store_module
+
+    original = store_module._write_all
+
+    def failing_write_all(fd: int, data: bytes, calls: Any) -> None:
+        if b'"kind":"error"' in data:
+            raise OSError(errno.ENOSPC, "No space left on device", "events.jsonl")
+        original(fd, data, calls)
+
+    async def scenario(root: Path, ident: str, *, control: bool) -> Any:
+        with monkeypatch.context() as faults:
+            faults.setattr(store_module, "_write_all", failing_write_all)
+            if control:
+                faults.setattr(EpisodeRunner, "_publish_failure_diagnostic", lambda *a, **k: None)
+            adapter = FakeAdapter(
+                root,
+                ident,
+                failures={"score": SupervisionError("judge backend returned 502")},
+            )
+            return await _runner(root, ident, adapter=adapter, model=ScriptedModel()).run()
+
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    control = await scenario(control_root, f"{episode_id}-control", control=True)
+    subject_root = tmp_path / "subject"
+    subject_root.mkdir()
+    subject = await scenario(subject_root, f"{episode_id}-subject", control=False)
+
+    assert control.status == "abandoned", control.diagnostic
+    assert subject.status == control.status, (subject.diagnostic, control.diagnostic)
+    assert subject.diagnostic == control.diagnostic
+    root = subject.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    # The journal is back to exactly the pre-append bytes: no half event.
+    assert report.events[-1].kind == "scoring_start"
+    assert not any(
+        b"layer: " in path.read_bytes() for path in (root / "artifacts").iterdir() if path.is_file()
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_temp_unlink_leaves_no_residue(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR (round 2): the sweep also removes writer-owned ``.artifact.*.tmp``.
+
+    When the publish's own temp unlink fails, the staging file survives and the
+    verifier rejects its NAME; the digest sweep deliberately ignores it, so the
+    abandonment was refused. Two faults are needed to reach it, hence minor.
+    """
+
+    original_publish = EvidenceWriter.publish_failure_diagnostic
+
+    def publish_and_leak(self: Any, data: bytes, **kwargs: Any) -> Any:
+        ref = original_publish(self, data, **kwargs)
+        # Exactly the residue a failed temp unlink leaves: a staging file the
+        # diagnostic's own publish could not remove.
+        fd = os.open(
+            ".artifact.deadbeef.tmp",
+            os.O_CREAT | os.O_WRONLY,
+            0o600,
+            dir_fd=self._artifacts_fd,
+        )
+        os.close(fd)
+        return ref
+
+    monkeypatch.setattr(EvidenceWriter, "publish_failure_diagnostic", publish_and_leak)
+    adapter = FakeAdapter(
+        tmp_path, episode_id, failures={"score": SupervisionError("judge backend returned 502")}
+    )
+    outcome = await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert not [path for path in (root / "artifacts").iterdir() if path.name.endswith(".tmp")]
+
+
+def test_an_oserror_message_does_not_carry_its_path() -> None:
+    """NIT (round 2): the message line must not undo the basename reduction."""
+
+    text = _failure_diagnostic_text(
+        OSError(errno.EIO, "Input/output error", "/abs/bundle/events.jsonl"),
+        redactions=None,
+        layer="evidence",
+        phase="evidence",
+        operation="append:observation",
+    )
+    assert "/abs/bundle" not in text
+    assert "path: events.jsonl" in text
+    assert "message: OSError: [Errno 5] Input/output error" in text
+
+    silent = _failure_diagnostic_text(
+        OSError(errno.EIO, None, "/abs/bundle/events.jsonl"),
+        redactions=None,
+        layer="evidence",
+        phase="evidence",
+        operation="append:observation",
+    )
+    assert "/abs/bundle" not in silent
+    assert "message: OSError: [Errno 5]" in silent
+
+
+@pytest.mark.asyncio
+async def test_a_poisoning_publish_failure_would_have_lost_the_bundle(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2's measured control, kept: the diagnostic's ENOSPC must not poison.
+
+    Before the best-effort flag this exact injection produced
+    ``abandonment_failed`` (the writer poisoned by a disposable 3 KB write)
+    while the no-diagnostic control abandoned cleanly. The status is now the
+    control's, and the event still names the class.
+    """
+
+    _diagnostic_bytes_write(monkeypatch)
+    adapter = FakeAdapter(
+        tmp_path, episode_id, failures={"score": SupervisionError("judge backend returned 502")}
+    )
+    outcome = await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    payload, text = _failure_diagnostics(root)[0]
+    assert text is None and payload.detail_artifact is None
+    assert payload.diagnostic_code == "adapter-supervisionerror"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_diagnostic_event_does_not_orphan_the_scoring_bundle(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: the scoring path sweeps its own orphan.
+
+    A refused event after a successful publish left an unreferenced artifact,
+    and ``abandon()`` refuses that -- the scoring path reported
+    ``abandonment_failed`` where the pre-change runner abandoned. The sweep
+    removes the orphan before the terminal.
+    """
+
+    from local_operator.evaluation.evidence.store import EvidenceBundleInvalid
+
+    monkeypatch.setattr(
+        EvidenceWriter,
+        "record_failure_diagnostic",
+        lambda *a, **k: (_ for _ in ()).throw(EvidenceBundleInvalid("event refused")),
+    )
+    adapter = FakeAdapter(
+        tmp_path, episode_id, failures={"score": SupervisionError("judge backend returned 502")}
+    )
+    outcome = await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # The diagnostic's own bytes were swept; execution artifacts that the
+    # journal names are untouched.
+    assert not any(
+        b"layer: " in path.read_bytes() for path in (root / "artifacts").iterdir() if path.is_file()
+    )
+    assert report.abandonment is not None
+    assert report.abandonment.reason == "ambiguous_finalization"
+
+
+@pytest.mark.asyncio
+async def test_a_validation_error_never_publishes_its_input(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """R4: ``input_value=`` can quote the secret that failed validation."""
+
+    from pydantic import BaseModel, ValidationError
+
+    secret = "[redacted]"
+
+    class _Wire(BaseModel):
+        value: int
+
+    with pytest.raises(ValidationError) as caught:
+        _Wire(value=secret)  # type: ignore[arg-type]
+    failure = caught.value
+    assert secret in str(failure)  # the leak this test closes, in the raw text
+
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": failure})
+    outcome = await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    assert outcome.status == "abandoned", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    payload, text = _failure_diagnostics(root)[0]
+    assert text is not None
+    assert "ValidationError" in text and "value" in text
+    assert secret not in text
+    assert "input_value" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_records_its_terminal_and_still_raises(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6: stopped work must not be reported as a normal outcome.
+
+    The terminal is written synchronously (a cancelled task re-raises at every
+    await), then the cancellation is re-raised to the caller.
+    """
+
+    async def cancelled_execute(self: Any, handshake: Any) -> Any:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(EpisodeRunner, "_execute", cancelled_execute)
+    adapter = FakeAdapter(tmp_path, episode_id)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel()).run()
+
+    roots = list((tmp_path / "evidence").iterdir())
+    assert len(roots) == 1
+    report = verify_bundle(roots[0])
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.abandonment is not None
+    assert report.abandonment.diagnostic_code == "cancellederror"
+
+
+def test_a_deadline_is_not_an_evidence_failure() -> None:
+    """R5: ``TimeoutError``/``ConnectionError`` are OSError subclasses.
+
+    Classifying by ``isinstance(error, OSError)`` before the adapter branch
+    filed a judge deadline or a dropped connection as an evidence-layer
+    failure -- the wrong fix for the reader, whose next step depends on it.
+    """
+
+    from local_operator.evaluation.evidence.store import EvidenceBundleInvalid
+
+    assert _failure_layer(TimeoutError("judge deadline")) == "adapter"
+    assert _failure_layer(ConnectionError("judge unreachable")) == "adapter"
+    assert _failure_layer(SupervisionError("worker died")) == "adapter"
+    assert _failure_layer(OSError(errno.EIO, "Input/output error")) == "evidence"
+    assert _failure_layer(EvidenceBundleInvalid("bundle refused")) == "evidence"
+    assert _failure_layer(RuntimeError("bug")) == "internal"
+
+
+@pytest.mark.asyncio
+async def test_failed_rescue_gets_one_immediate_retry(tmp_path: Path, episode_id: str) -> None:
+    """A single fast rescue failure must not strand the instance.
+
+    Measured leak (2026-10-17, ep-4386740c6af0): the rescue failed once, fast
+    and silently, its descriptor stayed in the inbox and its instance ran for
+    hours. The retry is bounded at one extra attempt so a genuinely broken
+    rescue cannot loop; the still-broken case keeps the descriptor for the
+    sweep, and the complete case retires it.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import load_pending_rescue
+
+    attempts: list[int] = []
+
+    async def _flaky(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        attempts.append(1)
+
+        class _Aggregate:
+            descriptor_id = descriptor.descriptor_id
+            complete = len(attempts) >= 2
+
+        return _Aggregate()
+
+    adapter = FakeAdapter(tmp_path, episode_id, failures={"score": SupervisionError("scorer died")})
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+    runner._rescue = _flaky  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome = await runner.run()
+
+    assert outcome.status == "abandoned"
+    assert outcome.rescue_complete is True
+    assert len(attempts) == 2
+    # A complete aggregate retires the descriptor: the sweep has nothing left.
+    assert load_pending_rescue(build_config(tmp_path).rescue_root) is None
+
+    second = tmp_path / "still-broken"
+    second.mkdir()
+    broken_attempts: list[int] = []
+
+    async def _broken(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        broken_attempts.append(1)
+
+        class _Aggregate:
+            descriptor_id = descriptor.descriptor_id
+            complete = False
+
+        return _Aggregate()
+
+    adapter2 = FakeAdapter(second, f"{episode_id}-b", failures={"score": SupervisionError("x")})
+    runner2 = _runner(second, f"{episode_id}-b", adapter=adapter2, model=ScriptedModel())
+    runner2._rescue = _broken  # pyright: ignore[reportAttributeAccessIssue]
+
+    outcome2 = await runner2.run()
+
+    assert outcome2.rescue_complete is False
+    assert len(broken_attempts) == 2  # bounded: exactly one retry
+    # Still broken: the descriptor stays for the sweep to pick up.
+    assert load_pending_rescue(build_config(second).rescue_root) is not None
+
+    # Episode-level budget: the bound is per episode, not per call site
+    # (both the close-out and evidence-failure paths can ask), so a third
+    # launch is refused outright and the sweep is left the descriptor.
+    assert await runner2._attempt_rescue() is False
+    assert len(broken_attempts) == 2
 
 
 @pytest.mark.asyncio
@@ -2889,6 +3767,225 @@ async def test_a_secret_in_the_stderr_tail_withholds_the_tail_whole(
     assert "upstream said" not in text
     assert _TAIL_HEADER in text and WITHHELD in text
     assert text.startswith("SupervisionError: worker died mid-observe")
+
+
+@pytest.mark.asyncio
+async def test_the_episodes_own_path_is_not_a_canary(tmp_path: Path, episode_id: str) -> None:
+    """A resolved value the episode's own roots contain cannot prove a leak.
+
+    Measured failure this closes (2026-10-17): the OSWorld rig's sealed infra
+    refs widen the redaction set, so the benchmark's own INPUTS ROOT -- a path
+    prefix of the run's cache directories -- became a canary; the scoring
+    details capture carries the evaluator's log lines, which name those cache
+    paths; the scoring receipt's scan then refused the artifact wholesale and
+    every episode that reached scoring died with ``evidencefailure``. A
+    location cannot distinguish leakage from ordinary operation, so values in
+    that relationship with the episode's own roots are dropped from the
+    canary set; a real secret still widens it, and still withholds the text
+    that carries it.
+    """
+
+    own_path = str(tmp_path)
+    secret = "S3CRET-CANARY-6c1f"
+    spec = replace(
+        build_spec(episode_id),
+        secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+    )
+    resolver = StaticSecretResolver({"OWN_PATH_ROW": own_path, "AWS_ACCESS_KEY_ID": secret})
+
+    # (a) Text naming the episode's own tree SURFACES: the path value was
+    # resolved but is not a canary (it is a substring of the roots themselves).
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(f"fetching {own_path}/cache/file.ics\n".encode())
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "step", "finish"]),
+        spec=spec,
+        secrets=resolver,
+    ).run()
+    assert outcome.status == "failed", outcome.diagnostic
+    assert outcome.bundle_root is not None
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert f"fetching {own_path}/cache/file.ics" in text
+
+    # (b) The resolved SECRET still withholds a tail that carries it: the
+    # drop is scoped to values the episode's own roots contain, not a
+    # weakening of the canary set.
+    second = tmp_path / "secret-case"
+    second.mkdir()
+    adapter2 = _fatal_adapter(second, f"{episode_id}-secret")
+    adapter2.stderr_tail = _StubTail(f"carrying {secret}\n".encode())
+    outcome2 = await _runner(
+        second,
+        f"{episode_id}-secret",
+        adapter=adapter2,
+        model=ScriptedModel(["step", "step", "finish"]),
+        spec=replace(
+            build_spec(f"{episode_id}-secret"),
+            secret_refs=(SecretRef(name="OWN_PATH_ROW"), SecretRef(name="AWS_ACCESS_KEY_ID")),
+        ),
+        secrets=resolver,
+    ).run()
+    assert outcome2.status == "failed", outcome2.diagnostic
+    assert outcome2.bundle_root is not None
+    text2 = _fatal_detail_text(outcome2.bundle_root)
+    assert secret not in text2 and "carrying" not in text2
+    assert WITHHELD in text2
+
+
+def test_canary_drop_requires_path_shape(tmp_path: Path) -> None:
+    """The drop is scoped to path-shaped locations, not bare containment.
+
+    Round-1 hardening, made DISCRIMINATING in round 2: the roots live under a
+    directory literally named ``[redacted]`` and the secret value is that same
+    bare identifier, so the PRE-remediation predicate (bare containment)
+    drops it and this test fails -- which is exactly the collision the
+    narrowing exists to keep as a canary (a details artifact carrying
+    "credential [redacted] accepted" must still be refused).
+    """
+
+    base = tmp_path / "[redacted]"
+    roots = (base / "a", base / "b")
+    values = (
+        str(tmp_path),
+        str(base / "a"),
+        str(base / "a" / "x"),
+        "[redacted]",
+        "not-a-path-but-text",
+    )
+    kept = _canary_values_outside_own_roots(values, roots)
+    # The three path-shaped locations are dropped (ancestor, equal, inside);
+    # the identifier that is merely a path COMPONENT of every root, and the
+    # non-path text, are kept -- in order.
+    assert kept == ("[redacted]", "not-a-path-but-text")
+
+
+@pytest.mark.asyncio
+async def test_scoring_details_publish_own_path_but_refuse_real_secret(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The exit criterion at the ACTUAL failing path, from both directions.
+
+    DISCRIMINATING since round 2: the episode's roots live under a directory
+    literally named ``[redacted]`` and the secret value is that same bare
+    identifier, so under the PRE-remediation predicate every root contains it,
+    the capture carrying it publishes, and the refusal assertion below fails.
+    With the path-shape rule the identifier stays a canary and the refusal is
+    real. (a) own-path-only details bytes publish and the run seals scored;
+    (b) the same capture plus the identifier-shaped secret [redacted]
+    refused at the receipt and the bundle takes the ambiguity path.
+    """
+
+    base = tmp_path / "[redacted]"
+    base.mkdir()
+    identifier = "[redacted]"
+    own_path = str(base)
+
+    async def _run_with_details(text: str, suffix: str, secrets: dict[str, str]) -> Any:
+        # The supervision layer's reference check enforces the declared media
+        # type, so the capture is canonical JSON with the payload text inside
+        # -- the same envelope the real evaluator diagnostics use.
+        payload = json.dumps(
+            {"evaluator_diagnostics": {"stderr": {"text": text}}},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        sha = hashlib.sha256(payload).hexdigest()
+        artifacts = base / "artifacts"
+        artifacts.mkdir(exist_ok=True)
+        (artifacts / sha).write_bytes(payload)
+        details = EvidenceArtifactRef(
+            sha256=sha, media_type="application/json", byte_count=len(payload)
+        )
+        case_id = f"{episode_id}-{suffix}"
+        adapter = FakeAdapter(
+            base, case_id, score=ScoreArtifact(status="scored", binary=0, details=details)
+        )
+        return await _runner(
+            base,
+            case_id,
+            adapter=adapter,
+            model=ScriptedModel(["step", "finish"]),
+            spec=replace(
+                build_spec(case_id),
+                secret_refs=tuple(SecretRef(name=name) for name in secrets),
+            ),
+            secrets=StaticSecretResolver(secrets),
+        ).run()
+
+    # (a) The measured case: own-path text publishes, episode seals scored.
+    sealed = await _run_with_details(
+        f"fetching {own_path}/cache/file.ics", "own", {"OWN_PATH_ROW": own_path}
+    )
+    assert sealed.status == "completed", sealed.diagnostic
+    assert sealed.score is not None and sealed.score.status == "scored"
+    assert sealed.bundle_root is not None and verify_bundle(sealed.bundle_root).valid
+    published = sealed.bundle_root / "artifacts"
+    assert any(
+        f"fetching {own_path}/cache/file.ics".encode() in path.read_bytes()
+        for path in published.iterdir()
+        if path.is_file()
+    )
+
+    # (b) The collision: the identifier-shaped secret stays a canary, so the
+    # capture carrying it is refused and the bundle takes the ambiguity path.
+    refused = await _run_with_details(
+        f"carrying {own_path} under {identifier}",
+        "secret",
+        {"OWN_PATH_ROW": own_path, "IDENT_ROW": identifier},
+    )
+    assert refused.status == "abandoned", refused.diagnostic
+    assert refused.score is None
+    assert refused.bundle_root is not None
+    report = verify_bundle(refused.bundle_root)
+    assert report.abandonment is not None
+    # The recorded terminal says the run died on evidence, which is this
+    # case's whole point: the identifier-shaped secret made the receipt
+    # unpublishable.
+    assert report.abandonment.diagnostic_code == "evidencefailure"
+    assert report.abandonment.reason == "ambiguous_finalization"
+    assert not any(
+        identifier.encode() in path.read_bytes()
+        for path in (refused.bundle_root / "artifacts").iterdir()
+        if path.is_file()
+    )
+
+
+@pytest.mark.asyncio
+async def test_rescue_cancellation_propagates_without_retry(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A CancelledError during rescue must not launch a second worker.
+
+    Round-1 hardening: the broad retry handler used to swallow cancellation
+    and start another rescue after the run was told to stop; the fix raises
+    before it, so exactly one launch happened and the cancellation reaches the
+    caller.
+    """
+
+    launches: list[int] = []
+
+    async def _cancelling(descriptor: Any, **kwargs: Any) -> Any:
+        del kwargs
+        launches.append(1)
+        raise asyncio.CancelledError()
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel())
+
+    class _StubDescriptor:
+        descriptor_id = "d" * 64
+
+    runner._descriptor = _StubDescriptor()  # pyright: ignore[reportAttributeAccessIssue]
+    runner._rescue = _cancelling  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._attempt_rescue()
+
+    assert len(launches) == 1
+    assert runner._rescue_launches == 1
 
 
 @pytest.mark.asyncio

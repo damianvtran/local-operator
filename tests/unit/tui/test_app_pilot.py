@@ -16,7 +16,7 @@ import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import pytest
@@ -264,7 +264,9 @@ async def test_terminal_loss_settles_gate_without_exiting_during_active_work(wor
     with (
         patch.object(app, "_terminal_reader_alive", return_value=False),
         patch.object(app, "exit", side_effect=lambda: exits.append(True)),
-        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 100.0]),
+        # The app's own clock seam, not the shared ``time`` module — see
+        # ``_repeating_clock`` for the drained-iterator class this removes.
+        patch.object(app, "_clock", _repeating_clock([0.0, 100.0])),
     ):
         app._check_terminal_frontend()
         app._check_terminal_frontend()
@@ -284,7 +286,6 @@ async def test_pending_gate_waits_for_reconnect_then_settles_and_reaps_after_wor
     app._session = session
     exits: list[bool] = []
     readers = iter([False, True, False, False, False, False, False])
-    times = iter([0.0, 2.0, 3.0, 33.0, 34.0, 40.0, 43.0])
 
     def deny_and_resume() -> None:
         approval.resolve(False, answer="n")
@@ -296,7 +297,17 @@ async def test_pending_gate_waits_for_reconnect_then_settles_and_reaps_after_wor
         patch.object(app, "_settle_ask_picker"),
         patch.object(app, "_settle_key_prompt"),
         patch.object(app, "exit", side_effect=lambda: exits.append(True)),
-        patch("local_operator.tui.app.time.monotonic", side_effect=lambda: next(times)),
+        # THE APP'S OWN CLOCK SEAM, NOT THE SHARED ``time`` MODULE. Patching
+        # ``local_operator.tui.app.time.monotonic`` rewrites the clock for every
+        # consumer in the process, and one of them is an unrelated caller that
+        # drains this 7-item iterator into ``RuntimeError: coroutine raised
+        # StopIteration`` — the cell's actual failure (reproduced: the 8th
+        # caller on a finite clock raises). ``_clock`` is the seam the app
+        # already carries for a test that must cross a grace window, and
+        # ``_repeating_clock`` makes the fake repeat its last reading rather than
+        # raise, so neither the process-wide scope nor the drained-iterator class
+        # survives here.
+        patch.object(app, "_clock", _repeating_clock([0.0, 2.0, 3.0, 33.0, 34.0, 40.0, 43.0])),
     ):
         app._check_terminal_frontend()  # gate grace starts
         app._check_terminal_frontend()  # reconnect preserves the gate
@@ -331,7 +342,9 @@ async def test_terminal_loss_reaps_independently_of_remote_viewers(
     with (
         patch.object(app, "_terminal_reader_alive", return_value=False),
         patch.object(app, "exit", side_effect=lambda: exits.append(True)),
-        patch("local_operator.tui.app.time.monotonic", side_effect=[0.0, 3.0]),
+        # The app's own seam, not the shared ``time`` module — the scope note on
+        # the cell above applies here for the same reason.
+        patch.object(app, "_clock", _repeating_clock([0.0, 3.0])),
     ):
         app._check_terminal_frontend()
         app._check_terminal_frontend()
@@ -764,8 +777,11 @@ class FakeSession:
         self.asides.append(list(turns))
         return ""
 
-    async def adopt_aside(self, messages: list[Any]) -> None:
+    async def adopt_aside(self, messages: list[Any]) -> Literal["queued", "applied"] | None:
+        # ``None`` is the protocol's "applied" (an older implementation); a
+        # subclass may answer the real ``"queued"``/``"applied"`` states.
         self.adopted.append(list(messages))
+        return None
 
     async def compact_now(self) -> CompactionOutcome:
         return self._answer_compaction()
@@ -789,6 +805,25 @@ class FakeSession:
 
 async def _factory(session: FakeSession) -> FakeSession:
     return session
+
+
+def _repeating_clock(values: Sequence[float]) -> Callable[[], float]:
+    """A fake clock that yields ``values`` in order, then REPEATS the last one.
+
+    WHY NOT A BARE ITERATOR. A ``side_effect=lambda: next(times)`` clock is a
+    finite sequence every caller in the process shares when the fake is installed
+    process-wide (``patch("local_operator.tui.app.time.monotonic")`` rewrites the
+    ``time`` module itself), and the caller that drains it is not always the one
+    the test aimed at — the eighth consumer raises ``RuntimeError: coroutine
+    raised StopIteration``. Repetition removes the drained-iterator class outright
+    so the fake can never fail for being asked one more time than it staged, and
+    the two cells that need a clock jump now patch it onto the app's own
+    ``_clock`` seam (one app instance) rather than the shared module.
+    """
+    staged = list(values)
+    if not staged:
+        raise ValueError("a repeating clock needs at least one reading")
+    return lambda: staged.pop(0) if len(staged) > 1 else staged[0]
 
 
 def _renderable_plain(renderable) -> str:
@@ -6742,7 +6777,16 @@ async def test_loop_goal_suppresses_turn_ended_toast() -> None:
     session = GoalSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        # WAIT ON THE BOOT WORKER BEFORE WRITING THE FLAG — a bare `pilot.pause()`
+        # does not. `_loop_suppress_completion` is a property on
+        # `self._interaction`, which is a placeholder `SessionInteraction(None)`
+        # until `_adopt_session` replaces it, and a replacement starts with
+        # `suppress_completion=False`. On a loaded worker the boot worker
+        # therefore lands AFTER a bare pause: the flag is written onto the
+        # placeholder and adoption resets it, so the held turn below notifies and
+        # `completion_notifies == []` fails (reproduced deterministically by
+        # awaiting the boot worker between the flag write and the settle).
+        await await_session_boot(app)
         completion_notifies: list[int | None] = []
         real_notify = app._notify
 
@@ -13429,14 +13473,14 @@ async def test_the_aside_copy_key_writes_nothing_to_the_session() -> None:
 
 @pytest.mark.asyncio
 async def test_the_aside_copy_key_works_while_the_answer_is_still_streaming() -> None:
-    """Streaming is when the key matters MOST, because `^f` is refused there.
+    """Streaming is when the key matters MOST, because `^f` has nothing to keep.
 
-    `_aside_can_fork` returns False while the session streams — splicing a
-    message into a live batch produces a request no provider accepts. That is a
-    constraint on WRITING to the session, and copying does not write, so this
-    path must stay open. Routing the payload through `fork_messages()` would
-    have failed exactly here: it is gated on `AsideTurn.forkable`, which needs
-    `state == "done"`, so mid-stream it returns an empty list.
+    While the aside's own answer is still streaming the card holds no settled
+    exchange, so `_aside_can_fork` is False (`fork_messages()` is gated on
+    `AsideTurn.forkable`, which needs `state == "done"`) — whether or not the
+    MAIN session is mid-turn, since a mid-turn fork now queues (decision D5).
+    Copying does not need a settled exchange, so this path must stay open;
+    routing its payload through `fork_messages()` would have failed exactly here.
     """
     from tests.unit.tui.test_aside import AsideSession
 
@@ -13451,7 +13495,7 @@ async def test_the_aside_copy_key_works_while_the_answer_is_still_streaming() ->
         panel.append_answer(generation, "PARTIAL-TEXT so far")
         await pilot.pause()
         assert panel.turns[-1].state == "running"
-        assert app._aside_can_fork() is False, "precondition: ^f is refused here"
+        assert app._aside_can_fork() is False, "precondition: nothing settled to fork"
 
         app._clipboard = ""
         await pilot.press("ctrl+r")
@@ -14546,13 +14590,14 @@ async def test_a_desktop_pin_shows_in_the_tui_and_a_tui_pin_shows_on_the_desktop
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
-    # The server lifespan ENSURES AIDA (her session, pin and cadence) on
-    # every boot of the real app — a deliberate product behaviour — and this
-    # test asserts EXACT pin and row sets on this root. The documented kill
-    # switch is what keeps its subject (pin semantics) isolated from a feature
-    # it does not test; without it her boot-time session is a fourth row and
-    # her pin a second line in the store.
+    # The server lifespan ENSURES AIDA and the LIBRARIAN (their sessions, pins
+    # and cadences) on every boot of the real app — a deliberate product
+    # behaviour — and this test asserts EXACT pin and row sets on this root.
+    # The documented kill switches are what keep its subject (pin semantics)
+    # isolated from features it does not test; without them the assistants'
+    # boot-time sessions are extra rows and their pins extra lines in the store.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_LIBRARIAN", "1")
     for name in list(os.environ):
         if name.startswith("CMUX_"):
             monkeypatch.delenv(name)
@@ -14642,13 +14687,14 @@ async def test_a_pinned_run_the_desktop_cannot_list_produces_no_row(tmp_path, mo
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
-    # The server lifespan ENSURES AIDA (her session, pin and cadence) on
-    # every boot of the real app — a deliberate product behaviour — and this
-    # test asserts EXACT pin and row sets on this root. The documented kill
-    # switch is what keeps its subject (pin semantics) isolated from a feature
-    # it does not test; without it her boot-time session is a fourth row and
-    # her pin a second line in the store.
+    # The server lifespan ENSURES AIDA and the LIBRARIAN (their sessions, pins
+    # and cadences) on every boot of the real app — a deliberate product
+    # behaviour — and this test asserts EXACT pin and row sets on this root.
+    # The documented kill switches are what keep its subject (pin semantics)
+    # isolated from features it does not test; without them the assistants'
+    # boot-time sessions are extra rows and their pins extra lines in the store.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_LIBRARIAN", "1")
     for name in list(os.environ):
         if name.startswith("CMUX_"):
             monkeypatch.delenv(name)

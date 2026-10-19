@@ -99,7 +99,7 @@ def _wire(rows: Sequence[dict[str, Any]] | None) -> dict[str, Any]:
     """
     if rows is None:
         return {"asks": None, "asks_open": None}
-    outstanding = sum(1 for row in rows if row["status"] in ("open", "timed_out"))
+    outstanding = sum(1 for row in rows if row["status"] == "open")
     return {"asks": list(rows) or None, "asks_open": outstanding}
 
 
@@ -1217,8 +1217,13 @@ async def test_the_first_hint_outbids_the_drawer_clause_at_80_columns(enabled):
         await _pump(pilot)
         live_header = listing.header_text(80)
         assert "enter answer" in live_header, live_header
+        # The clause yields to the hint, never the other way. At 80 columns both
+        # now fit ("Pending" is twelve cells shorter than the old "Waiting or
+        # moved on", #2481), so the ladder is checked where they cannot.
+        narrow = listing.header_text(64)
+        assert "enter answer" in narrow, narrow
         assert (
-            "questions waiting" not in live_header
+            "questions waiting" not in narrow
         ), "the drawer clause should have yielded to the hint, not the other way"
 
 

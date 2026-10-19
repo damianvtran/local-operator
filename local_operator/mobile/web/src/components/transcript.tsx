@@ -21,7 +21,14 @@ import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
-import { hubReceiptLabel, isHubReceipt, quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
+import {
+	hubReceiptLabel,
+	isHubReceipt,
+	quietGroupClauseFacts,
+	quietGroupLabel,
+	type QuietGroup,
+} from "../lib/quiet-groups";
+import { contextualQuietGroupsOf } from "../lib/peer-cycles";
 import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
@@ -353,15 +360,50 @@ function QuietGroupRow({
 					<span className="shrink-0" title={countTitle} aria-label={countTitle}>
 						{partial ? `${group.count}+` : `${group.count}`}
 					</span>
-					{group.mixedActions ? <span>· {group.actions} actions</span> : null}
-					{group.replyRequested ? <span>· {group.replyRequested} reply requested</span> : null}
-					{group.steered ? <span>· {group.steered} steered</span> : null}
+					{/* The clause set (presence AND order) comes from the SHARED
+					    derivation, never from inline conditions here: the desktop and
+					    the phone disagreed for exactly as long as each decided its own
+					    gate, so the one place that decides is `quietGroupClauseFacts`
+					    - the same function the parity fixture pins. `count:` is the
+					    line's leading number and is not rendered as a clause, so it is
+					    filtered out rather than duplicated. */}
+					{quietGroupClauseFacts(group, { partial })
+						.filter((fact) => !fact.startsWith("count:"))
+						.map((fact) => (
+							<span key={fact}>· {clauseText(fact)}</span>
+						))}
 				</span>
 			}
 		>
 			{children}
 		</Disclosure>
 	);
+}
+
+/** A clause FACT rendered as this surface's words.
+ *
+ * The facts (the shared derivation) carry the identifier and its count; the
+ * wording lives with the surface that says it, exactly as the family word does
+ * (`quietGroupLabel`). The plural is handled HERE because the actions clause is
+ * reachable at 1: the TUI says `1 action` / `2 actions`, and a bar that printed
+ * `1 actions` would be the kind of copy defect the design round exists to
+ * catch. The catalogue has no `tui.transcript.group_actions` string on this
+ * wire, so the words are the module's own, matching `quietGroupLabel`'s
+ * precedent rather than inventing a lookup path this surface does not have.
+ */
+function clauseText(fact: string): string {
+	const [name, rawCount] = fact.split(":");
+	const count = Number(rawCount);
+	switch (name) {
+		case "actions":
+			return `${count} action${count === 1 ? "" : "s"}`;
+		case "reply_requested":
+			return `${count} reply requested`;
+		case "steered":
+			return `${count} steered`;
+		default:
+			return fact;
+	}
 }
 
 export function Transcript({
@@ -374,6 +416,7 @@ export function Transcript({
 	topInset = 0,
 	supplements,
 	projectionPid = 0,
+	peerCycles = false,
 	tailContent,
 	emptyContent,
 }: {
@@ -392,6 +435,8 @@ export function Transcript({
 	/** The projection's own process identity, for the reader rule's `job_live`
 	 *  (`lib/supplement.ts`, `beatLive`): 0 is a disk rebuild. */
 	projectionPid?: number;
+	/** Explicit owner-channel negotiation; never inferred from an entry. */
+	peerCycles?: boolean;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -499,7 +544,7 @@ export function Transcript({
 	   open tail grows in place under its stable key. The definition lives once
 	   in `lib/quiet-groups` and is pinned across clients by the shared parity
 	   fixture. */
-	const groups = quietGroupsOf(visible);
+	const groups = contextualQuietGroupsOf(visible, pid, peerCycles);
 	const groupsByFirstId = new Map(groups.map((group) => [group.rowIds[0], group]));
 	const groupedIds = new Set(groups.flatMap((group) => group.rowIds));
 	const entriesById = new Map(visible.map((entry) => [entry.id, entry]));

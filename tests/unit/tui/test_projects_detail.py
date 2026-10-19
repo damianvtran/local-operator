@@ -325,12 +325,12 @@ async def test_the_detail_cursor_walks_selectables_and_the_hint_names_the_verb(
         assert page.selectable_count == 4  # three milestones + the session link
         # The label NAMES the row it would toggle (UX round 1, U3).
         assert page.selected_index == 0 and page.selected_action_label() == "toggle groundwork"
-        assert view._open_hint._label == " toggle groundwork"  # the context slot
+        assert view._open_hint._label == "toggle groundwork"  # bare; _build adds the gap
         for _ in range(3):
             await pilot.press("down")
         await pilot.pause()
         assert page.selected_index == 3 and page.selected_action_label() == "open"
-        assert view._open_hint._label == " open"
+        assert view._open_hint._label == "open"
         for _ in range(4):
             await pilot.press("down")
         await pilot.pause()
@@ -1451,9 +1451,10 @@ async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
             if size == (60, 20):
                 assert not view._open_hint.display
                 assert not view._refresh_hint.display
-    # The detail ladder itself: all P2 hints at 100; `pgup/pgdn` still shown
-    # at 60 (measured rung widths: 60-full / 47 without refresh / 29 without
-    # page / 24 without the esc label / 14 move only / esc alone).
+    # The detail ladder itself at 100x30: the page's OWN keys outrank the
+    # canvas-era extras, so `e edit · a add · x remove` are advertised and
+    # `r refresh` (which would make the row 97 cells against 94 available)
+    # is not. LOH-19 P2's discoverability fix.
     session2 = _ProjectSession()
     session2.project_registry = _rich_registry(tmp_path / "second")
     app = OperatorApp(lambda: _factory(session2))
@@ -1463,7 +1464,10 @@ async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
         await pilot.press("d")
         await pilot.pause()
         assert view._move_hint.display and view._page_hint.display
-        assert view._refresh_hint.display and view._open_hint.display
+        assert view._open_hint.display
+        assert view._edit_hint.display and view._add_hint.display
+        assert view._remove_hint.display  # a milestone row has the cursor
+        assert not view._refresh_hint.display
 
 
 async def test_d_opens_with_no_actions_and_enter_is_inert(tmp_path: Path) -> None:
@@ -1821,6 +1825,11 @@ def test_the_row_scoped_keys_displace_no_shipped_hint() -> None:
         def selected_preview_open(self) -> bool:
             return False
 
+        def selected_milestone(self) -> dict[str, Any] | None:
+            # The LOH-19 P2 `x remove` rung is armed only on a milestone row;
+            # this sweep models the widest case (every optional key present).
+            return {"name": "groundwork"}
+
     view = ProjectsView()
     view._detail_page = _Selection()  # type: ignore[assignment]
     rungs = view._detail_hint_rungs()
@@ -1860,8 +1869,9 @@ def test_the_row_scoped_keys_displace_no_shipped_hint() -> None:
             else:
                 assert not seen_off, "a row-scoped key returns after a rung without it"
     labels = {label for plan, _esc in rungs for _hint, label, _lead in plan}
-    assert " copy" in labels
-    assert " preview" in labels
+    # Labels are BARE: HintButton._build supplies the one space after the key.
+    assert "copy" in labels
+    assert "preview" in labels
 
 
 @pytest.mark.asyncio
@@ -2281,6 +2291,9 @@ def test_the_painted_order_keeps_the_specs_pair_adjacent() -> None:
         def selected_preview_open(self) -> bool:
             return False
 
+        def selected_milestone(self) -> dict[str, Any] | None:
+            return {"name": "groundwork"}
+
     view = ProjectsView()
     view._detail_page = _Selection()  # type: ignore[assignment]
     rungs = view._detail_hint_rungs()
@@ -2296,7 +2309,15 @@ def test_the_painted_order_keeps_the_specs_pair_adjacent() -> None:
     assert names.index("copy") + 1 == names.index("preview")
     assert names[names.index("open") + 1] == "copy"
     # The narrow sibling keeps the pair's first half and sheds the preview.
-    second = [hint for hint, _label, _lead in rungs[1][0]]
+    # Located rather than indexed: LOH-19 P2 added a WIDER rung at the top
+    # (the shipped widest plus `e`/`a`/`x`), so the sibling is no longer
+    # rungs[1] — the ladder's own order is what this test is about.
+    second = next(
+        [hint for hint, _label, _lead in plan]
+        for plan, _esc in rungs
+        if any(hint is view._copy_hint for hint, _l, _c in plan)
+        and not any(hint is view._preview_hint for hint, _l, _c in plan)
+    )
     assert view._copy_hint in second
     assert view._preview_hint not in second
 
@@ -2447,7 +2468,7 @@ async def test_a_boundary_length_name_keeps_the_row_on_one_line(
         assert page._selectables[page.selected_index] is row
         await pilot.press("space")
         await _settle_preview(pilot)
-        again = page._selectables[page.selected_index]
+        again = await _settled_selected_row(pilot, page)
         assert again.size.height == 1, "the row wrapped once the picture was mounted"
         await pilot.resize_terminal(*other)
         for _ in range(3):
@@ -2460,6 +2481,32 @@ async def _settle_preview(pilot: Any) -> None:
     """Let the reveal's passes and the page's own re-fit all land."""
     for _ in range(10):
         await pilot.pause()
+
+
+async def _settled_selected_row(pilot: Any, page: Any, *, frames: int = 40) -> Any:
+    """The selected row, once its box has been re-measured at its fit.
+
+    WHY THIS EXISTS. ``_settle_preview``'s fixed ten pauses bet that the picture
+    mount's cascade — re-show, deferred refit, and the layout pass that
+    re-measures the re-authored line — completes inside a count of loop turns.
+    Each hop is a message on its own pump, and a loaded shard processes fewer
+    of them per turn: the read landed between the refit and the re-measure and
+    saw the row at its PRE-fit box (measured: a boundary-length name at the
+    60-column frame is four rows before the fit, one after; reproduced
+    deterministically by deferring the refit behind the pause budget). CI job
+    116820540042 hit exactly that read: ``assert 4 == 1`` at this file's :2451.
+    Wait on the fact the assertion reads — the row back on one line — with the
+    frame count kept only as a deadlock backstop, the shape ``_boot`` and the
+    archive suite's ``_await_notice`` already use. The row is re-read every turn
+    because a late re-show replaces the selectables it holds.
+    """
+    row = page._selectables[page.selected_index]
+    for _ in range(frames):
+        if row.size.height == 1:
+            return row
+        await pilot.pause()
+        row = page._selectables[page.selected_index]
+    return row
 
 
 @pytest.mark.asyncio

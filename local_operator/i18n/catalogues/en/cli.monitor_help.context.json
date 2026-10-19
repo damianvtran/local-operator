@@ -1,0 +1,32 @@
+{
+  "cli.monitor_help.monitor": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Top-level summary: inspect standing monitors, or cancel one only when its session has no runtime open."
+  },
+  "cli.monitor_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "status lists all monitors on this machine ordered by their next scheduled check, soonest first."
+  },
+  "cli.monitor_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Shared --json help for both status and cancel: output is machine-readable. Preserve the flag token."
+  },
+  "cli.monitor_help.cancel": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "cancel is allowed only on a session with no runtime open; a live session changes its own monitors from inside. Preserve this safety restriction."
+  },
+  "cli.monitor_help.session": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "First cancel positional argument identifies the session that owns the monitor."
+  },
+  "cli.monitor_help.monitor_id": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "Second cancel positional argument identifies the monitor; m1 and m2 are literal example IDs, not words to translate."
+  }
+}

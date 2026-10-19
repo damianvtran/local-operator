@@ -1240,6 +1240,10 @@ class AttachClient:
             # page model (it forbids extras).
             if "display-history-entry-times-v1" in record.capabilities:
                 auth["display_history_entry_times"] = True
+            # This Python transport now accepts the optional strict page field;
+            # old owners never receive an unsupported negotiation flag.
+            if "display-history-peer-cycle-records-v1" in record.capabilities:
+                auth["display_history_peer_cycle_records"] = True
         if self._operator_nonce:
             auth["operator_nonce"] = self._operator_nonce
         if self._supplements_supported:
@@ -2367,8 +2371,16 @@ class AttachClient:
         )
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
-        """Fork an aside exchange into the conversation on the authoritative owner."""
-        return await self._request("adopt_aside", messages=messages)
+        """Fork an aside exchange into the conversation on the authoritative owner.
+
+        Returns the owner's ``adopt_state`` (``"queued"`` or ``"applied"``),
+        read off the ack's extra field (decision D4). An owner from before
+        the field sends none, and that owner refused mid-turn adopts rather
+        than queueing them, so an absent field means applied.
+        """
+        reply = await self._request_frame("adopt_aside", messages=messages)
+        self._raise_for_reply_error(reply)
+        return "queued" if reply.get("adopt_state") == "queued" else "applied"
 
     # -- turn supplements (memo §2.7) ---------------------------------------
     #
@@ -2599,7 +2611,12 @@ class AttachClient:
         return await self._request("ask_decline", **fields)
 
     async def ask_dismiss(self, ask_id: str, *, by: str = "") -> str:
-        """Dismiss a TIMED-OUT ask from the view. Injects nothing, ever."""
+        """Dismiss a TIMED-OUT ask from the view. Asks the model nothing, ever.
+
+        What it can still OWE is the ask's deadline notice, when that was never
+        delivered (fork A, 2026-10-16, design §14): the queue's reconcile writes
+        it in its dismissed wording rather than the dismissal cancelling it.
+        """
         fields: dict[str, Any] = {"ask_id": ask_id}
         if by:
             fields["by"] = by

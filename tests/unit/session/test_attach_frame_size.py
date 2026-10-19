@@ -711,9 +711,158 @@ _BOUNDED_COLLECTION_FIELDS = {
     "loop": "five scalar keys, replaced per publish; both free-text values clipped at entry",
 }
 
+
+def _busy_peer_cycle_display(
+    *, output_text: str | None = None, session_id: str = "frame-session", epoch: str = "frame-epoch"
+) -> dict[str, Any]:
+    """Produce the real HOT_RECORDS cap, each near its UTF-8 record-byte cap.
+
+    Multibyte synthetic child output exposes the difference between the archive
+    bound and JSON's escaped wire bytes. No raw incoming/root body is duplicated
+    and no hand-built invalid proof is used to make the frame guard look busy.
+    """
+    from local_operator.harness.peer_cycle_display import (
+        HOT_RECORDS,
+        MAX_RECORD_BYTES,
+        DisplayCycleAccumulator,
+    )
+    from local_operator.harness.types import (
+        Message,
+        MessageEndEvent,
+        PeerMessageDeliveredEvent,
+        ToolCall,
+    )
+
+    near_limit = output_text is None
+    if output_text is None:
+        output_text = "界" * 18_000
+    records = []
+    for number in range(HOT_RECORDS):
+        root = f"frame-root-{number}"
+        send = root + ":" + "a" * 32
+        quiet = root + ":" + "b" * 32
+        fold = DisplayCycleAccumulator(session_id, epoch, lambda text: text)
+        fold.observe(
+            PeerMessageDeliveredEvent(message_id=f"frame-peer-{number}", body="incoming", sender={})
+        )
+        fold.observe(
+            MessageEndEvent(
+                message=Message(
+                    id=f"frame-parent-{number}",
+                    role="assistant",
+                    tool_calls=[ToolCall(id=root, name="eval", arguments={"code": "opaque"})],
+                )
+            )
+        )
+        fold.observe(
+            ToolExecutionStartEvent(tool_name="eval", tool_call_id=root, args={"code": "opaque"})
+        )
+        fold.observe(
+            ToolExecutionStartEvent(tool_name="send", tool_call_id=send, args={"message": "reply"})
+        )
+        fold.observe(
+            ToolExecutionEndEvent(
+                tool_name="send",
+                tool_call_id=send,
+                is_error=False,
+                result=ToolResult(
+                    tool_name="send", tool_call_id=send, content=[TextContent(text=output_text)]
+                ),
+            )
+        )
+        fold.observe(ToolExecutionStartEvent(tool_name="no_reply", tool_call_id=quiet, args={}))
+        fold.observe(
+            ToolExecutionEndEvent(
+                tool_name="no_reply",
+                tool_call_id=quiet,
+                is_error=False,
+                result=ToolResult(
+                    tool_name="no_reply", tool_call_id=quiet, details={"__quiet_turn": True}
+                ),
+            )
+        )
+        fold.observe(
+            ToolExecutionEndEvent(
+                tool_name="eval",
+                tool_call_id=root,
+                is_error=False,
+                result=ToolResult(
+                    tool_name="eval", tool_call_id=root, details={"kernel_generation": "opaque"}
+                ),
+            )
+        )
+        assert len(fold.records) == 1
+        record = fold.records[0]
+        record_bytes = len(json.dumps(record, ensure_ascii=False).encode())
+        assert record_bytes <= MAX_RECORD_BYTES
+        if near_limit:
+            assert record_bytes > MAX_RECORD_BYTES - 12_000
+        records.append(record)
+    return {"refs": [record["id"] for record in records], "records": records}
+
+
+def test_peer_cycle_hot_proof_is_byte_bounded_on_snapshot_and_delta_without_mutating_source() -> (
+    None
+):
+    from local_operator.session.frontend_state import (
+        PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES,
+    )
+
+    proof = _busy_peer_cycle_display()
+    original = json.loads(json.dumps(proof))
+    store = FrontendStateStore(
+        FrontendSessionState(session_id="frame-session", epoch="frame-epoch")
+    )
+    update = store.mutate(peer_cycle_display=proof)
+    assert update is not None
+    marker = {
+        "refs": proof["refs"],
+        "records": [],
+        "status": "metadata_budget",
+        "remaining": proof["refs"],
+    }
+    assert update.changes["peer_cycle_display"] == marker
+    assert len(json.dumps(marker).encode()) <= PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
+    # Budget exhaustion must never fabricate HARD-refusal IDs: a consumer treats
+    # `unavailable` as revocation of a previously validated same-owner graph, so
+    # a byte cap that filled that field would silently drop a loaded proof.
+    assert "unavailable" not in marker
+    assert marker["remaining"] == marker["refs"]
+    subscription = store.subscribe(lambda _update: None)
+    assert subscription.sync.snapshot.peer_cycle_display == original
+    wire = sync_wire_payload(subscription.sync)
+    assert wire["snapshot"]["peer_cycle_display"] == marker
+    assert subscription.sync.snapshot.peer_cycle_display == original
+    assert proof == original
+    assert _line_bytes({"op": "frontend_sync", "data": wire}) <= _MAX_LINE_BYTES
+
+
+def test_small_complete_peer_cycle_hot_proof_is_not_replaced_by_an_unavailable_marker() -> None:
+    from local_operator.session.frontend_state import (
+        PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES,
+    )
+
+    proof = _busy_peer_cycle_display(output_text="sent")
+    assert len(json.dumps(proof).encode()) <= PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
+    store = FrontendStateStore(
+        FrontendSessionState(session_id="frame-session", epoch="frame-epoch")
+    )
+    update = store.mutate(peer_cycle_display=proof)
+    assert update is not None
+    assert update.changes["peer_cycle_display"] == proof
+    wire = sync_wire_payload(store.subscribe(lambda _update: None).sync)
+    assert wire["snapshot"]["peer_cycle_display"] == proof
+
+
 #: Fields that grow with use and are therefore bounded HERE, by this module.
 #: Each must be exercised by the class guard below.
 _CAPPED_COLLECTION_FIELDS = {
+    # HOT_RECORDS × archive bytes is not a wire bound (escaping can multiply
+    # child output). Snapshot/delta copies cap the complete payload at 64 KiB;
+    # an overcrowded snapshot yields this optional accelerator, never raw rows.
+    "peer_cycle_display": (
+        "64-KiB aggregate wire budget; metadata-budget ID list / crowded-frame yield"
+    ),
     "usage_components": "capped at accumulation (USAGE_COMPONENT_CAP)",
     # Capped at the WIRE by `_bound_asks_in_place`: the fold bounds the row
     # COUNT (PROJECTION_CAP, 20) and this bounds the BYTES, because a
@@ -721,10 +870,13 @@ _CAPPED_COLLECTION_FIELDS = {
     # model-authored free text. Twenty rows of the widest shape measured
     # ~28 KB against a frame with ~110 B of slack at this head -- a field
     # that could put the attach frame through the socket line without any
-    # of it being wrong on its own.
+    # of it being wrong on its own. Nothing inside a row is ever cut: an ask
+    # is answered whole, so the bound drops whole tail rows past a text
+    # budget, and the frame-level yield drops the whole field.
     "asks": (
-        "text clipped and the list yielded when the frame has no room "
-        "(_bound_asks_in_place / _yield_asks_when_the_frame_has_no_room)"
+        "whole tail rows dropped past a text budget, and the list yielded when "
+        "the frame has no room (_bound_asks_in_place / "
+        "_yield_asks_when_the_frame_has_no_room)"
     ),
     "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
     # Swept at the RECORD (GOAL_HISTORY_MAX, newest-first) and yielded at the
@@ -1282,6 +1434,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             for index in range(20)
         ],
         "asks_open": 20,
+        "peer_cycle_display": _busy_peer_cycle_display(session_id="s1", epoch="e1"),
     }
     missing = _collection_fields() - set(populated)
     assert not missing, (
@@ -1323,6 +1476,10 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     }
 
     assert frame["data"]["snapshot"]["attention"] == attention
+    # The all-year frame already spends its line budget. Complete proof stays
+    # in the store/archive, while its optional hot wire copy cannot break attach.
+    assert "peer_cycle_display" not in frame["data"]["snapshot"]
+    assert state.peer_cycle_display == populated["peer_cycle_display"]
     size = _line_bytes(frame)
     # The record YIELDED on this frame rather than being counted on to fit, which
     # is what makes the assertion below a measurement of the BOUNDED shape: the
@@ -7032,3 +7189,33 @@ def test_the_delta_route_caps_spend_channel_rows_too() -> None:
         "the same bound as the snapshot (see _cap_spend_channel_rows_in_place)"
     )
     assert rows[-1]["channel"] == "other"
+
+
+def test_peer_cycle_budget_marker_withholds_without_revoking_loaded_proof() -> None:
+    """The budget marker must never read as a hard refusal of loaded proof.
+
+    `unavailable` is the consumer's REVOCATION vocabulary: a UI that sees a
+    previously validated same-owner record ID there drops the loaded graph and
+    its physical rows. Exhausting a byte budget is withholding, not
+    refutation, so the marker carries IDs as `remaining` only.
+    """
+    from local_operator.session.frontend_state import (
+        PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES,
+        _bound_peer_cycle_display_in_place,
+    )
+
+    proof = _busy_peer_cycle_display()
+    fields = {"peer_cycle_display": proof}
+    _bound_peer_cycle_display_in_place(fields)
+    marker = fields["peer_cycle_display"]
+    assert "unavailable" not in marker
+    assert marker["remaining"] == proof["refs"]
+    assert marker["status"] == "metadata_budget"
+    assert len(json.dumps(marker).encode()) <= PEER_CYCLE_DISPLAY_WIRE_BUDGET_BYTES
+
+    # A genuine hard-refusal envelope is NOT reinterpreted by this bound: only
+    # a dict that carries an oversized hot payload is rewritten at all.
+    refusal = {"records": [], "unavailable": ["conflicted-id"]}
+    untouched = {"peer_cycle_display": dict(refusal)}
+    _bound_peer_cycle_display_in_place(untouched)
+    assert untouched["peer_cycle_display"] == refusal

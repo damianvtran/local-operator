@@ -686,6 +686,11 @@ def test_wire_fixture_is_the_golden_payload_and_the_contract() -> None:
         "basis",
         "price_versions",
     }
+    # ADDITIVE unpriced reason: present ONLY on a row that carries the condition,
+    # so a priced row above keeps the exact key set every older reader knows.
+    assert [row["unpriced_reason"] for row in fixture["rows"] if "unpriced_reason" in row] == [
+        "cancelled_outcome_unknown"
+    ]
     assert set(fixture["children"]) == {"total_micro", "knowledge"}
     assert set(fixture["by_basis"]) == {
         "billed",
@@ -1409,3 +1414,230 @@ def test_pending_calls_counts_unique_charges_not_marker_lines() -> None:
     # join the count either (it would never go away).
     orphan = payload([], pending=[{"channel": "tts", "ts_ms": 3}])
     assert "pending" not in orphan
+
+
+# ---------------------------------------------------------------------------
+# The ``audio`` channel (the sound-generation lane's ledger home)
+# ---------------------------------------------------------------------------
+
+
+def test_the_audio_channel_is_registered_with_its_label_and_place() -> None:
+    """Registration in all three tables is the whole contract.
+
+    A channel id present in ``CHANNELS`` but missing from ``CHANNEL_LABELS``
+    or ``CHANNEL_ORDER`` fails the vocabulary-coverage test above; this pin
+    goes further and names the DISPLAY words and the canonical position, so a
+    silent relabel or a reorder is a red test rather than a panel that moved.
+    """
+    from local_operator.session.channel_spend import CHANNEL_LABELS, CHANNEL_ORDER
+
+    assert "audio" in CHANNELS
+    assert CHANNEL_LABELS["audio"] == "Generated audio"
+    assert CHANNEL_ORDER.index("audio") == CHANNEL_ORDER.index("image") + 1
+    assert CHANNEL_ORDER.index("audio") < CHANNEL_ORDER.index(
+        "other"
+    ), "the audio channel was inserted before ``other``, not appended after it"
+
+
+def test_map_audio_cost_labels_matches_the_frozen_audio_contract() -> None:
+    from local_operator.session.channel_spend import (
+        COST_SOURCE_CATALOGUE,
+        COST_SOURCE_NONE,
+        COST_SOURCE_SERVER,
+        map_audio_cost_labels,
+    )
+
+    # Radient: the server's figure, quote reads estimated, billed reads billed.
+    assert map_audio_cost_labels(
+        route="radient",
+        cost_source="reported",
+        billing_basis="estimated",
+        price_version="Radient ... (basis: quote)",
+        has_amount=True,
+    ) == (BASIS_ESTIMATED, COST_SOURCE_SERVER, "Radient ... (basis: quote)")
+    assert (
+        map_audio_cost_labels(
+            route="radient",
+            cost_source="reported",
+            billing_basis="billed",
+            price_version="Radient ... (basis: billed)",
+            has_amount=True,
+        )[0]
+        == BASIS_BILLED
+    )
+    # BYOK: a rate-table estimate, catalogue-sourced, never a charge.
+    assert map_audio_cost_labels(
+        route="elevenlabs",
+        cost_source="rate_table",
+        billing_basis="estimated",
+        price_version="audio-rates@2026-10-17",
+        has_amount=True,
+    ) == (BASIS_ESTIMATED, COST_SOURCE_CATALOGUE, "audio-rates@2026-10-17")
+    # No amount at all: not tracked, never a fabricated zero.
+    assert map_audio_cost_labels(
+        route="openai",
+        cost_source=None,
+        billing_basis=None,
+        price_version=None,
+        has_amount=False,
+    ) == (BASIS_NOT_TRACKED, COST_SOURCE_NONE, "")
+    # An unlabelled amount degrades to estimated (never read as a charge).
+    assert (
+        map_audio_cost_labels(
+            route="elevenlabs",
+            cost_source="something-new",
+            billing_basis=None,
+            price_version=None,
+            has_amount=True,
+        )[0]
+        == BASIS_ESTIMATED
+    )
+
+
+def test_an_audio_row_folds_into_the_published_payload() -> None:
+    """The fold accepts the id and the record keeps its estimate flag."""
+    from local_operator.session.channel_spend import (
+        CHANNEL_LABELS,
+        new_record_id,
+        now_ms,
+        usd_to_micro,
+    )
+
+    record_row = ChannelSpendRecord(
+        record_id=new_record_id("audio", "req-1"),
+        ts_ms=now_ms(),
+        channel="audio",
+        provider="elevenlabs",
+        model="eleven_multilingual_v2",
+        units=1000.0,
+        unit="chars",
+        amount_micro=usd_to_micro(0.08),
+        billing_basis=BASIS_ESTIMATED,
+        cost_source="catalogue",
+        price_version="audio-rates@2026-10-17",
+        status="ok",
+        request_id="req-1",
+    )
+    spend = fold_records([record_row])
+    rows = {rec.channel: rec for rec in spend.rows()}
+    assert "audio" in rows
+    assert rows["audio"].amount_micro == 80_000
+    assert rows["audio"].billing_basis == BASIS_ESTIMATED, "the estimate flag survives the fold"
+    assert CHANNEL_LABELS["audio"] == "Generated audio"
+
+
+# -- one decision model, one row: canonical ids and explicit unpriced reasons --
+
+
+def decision_record(
+    record_id: str,
+    *,
+    model: str,
+    amount_micro: int | None,
+    status: str = "ok",
+) -> ChannelSpendRecord:
+    return record(
+        record_id=record_id,
+        channel="classification",
+        provider="radient",
+        model=model,
+        amount_micro=amount_micro,
+        basis=BASIS_BILLED,
+        status=status,
+        units=1,
+        unit="calls",
+    )
+
+
+def test_historical_spellings_of_one_decision_model_are_one_priced_row() -> None:
+    """The defect: a priced ``jev-1.13.0`` row and a failed ``jev-1.13`` attempt.
+
+    Before the canonical key they drew two rows for one model, and the failed
+    one said only "price not stated". They are one row now: the priced amount
+    plus the failed attempt, with an explicit not-billed reason.
+    """
+    rows = [
+        row
+        for row in payload(
+            [
+                decision_record("classification:ok", model="jev-1.13.0", amount_micro=11),
+                decision_record(
+                    "classification:failed", model="jev-1.13", amount_micro=None, status="failed"
+                ),
+            ]
+        )["rows"]
+        if row["channel"] == "classification"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["model"] == "jev-1.13"
+    assert rows[0]["amount_micro"] == 11
+    assert rows[0]["units"] == 2.0
+    assert rows[0]["unpriced_reason"] == "failed_not_billed"
+
+
+def test_a_dated_vendor_echo_groups_under_the_canonical_id() -> None:
+    rows = [
+        row
+        for row in payload(
+            [
+                decision_record(
+                    "classification:dated", model="typesafe/jev-1.13-20261001", amount_micro=11
+                ),
+                decision_record(
+                    "classification:cancelled",
+                    model="typesafe/jev-1.13",
+                    amount_micro=None,
+                    status="cancelled",
+                ),
+            ]
+        )["rows"]
+        if row["channel"] == "classification"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["model"] == "jev-1.13"
+    assert rows[0]["unpriced_reason"] == "cancelled_outcome_unknown"
+
+
+def test_a_failed_only_group_states_why_no_amount_is_present() -> None:
+    (row,) = payload(
+        [
+            decision_record(
+                "classification:failed", model="jev-1.13.0", amount_micro=None, status="failed"
+            )
+        ]
+    )["rows"]
+    assert row["amount_micro"] is None, "unknown, never a fabricated zero"
+    assert row["knowledge"] == "exact", "the failed-unbilled presumption is not missing money"
+    assert row["unpriced_reason"] == "failed_not_billed"
+
+
+def test_a_cancelled_group_says_the_outcome_is_unknown() -> None:
+    (row,) = payload(
+        [
+            decision_record(
+                "classification:cancelled",
+                model="jev-1.13.0",
+                amount_micro=None,
+                status="cancelled",
+            )
+        ]
+    )["rows"]
+    assert row["unpriced_reason"] == "cancelled_outcome_unknown"
+
+
+def test_an_ok_row_without_an_amount_says_the_server_stated_no_price() -> None:
+    (row,) = payload([decision_record("classification:ok", model="jev-1.13", amount_micro=None)])[
+        "rows"
+    ]
+    assert row["unpriced_reason"] == "not_stated"
+
+
+def test_money_mixed_with_an_unstated_ok_attempt_reads_partial() -> None:
+    (row,) = payload(
+        [
+            decision_record("classification:ok", model="jev-1.13", amount_micro=11),
+            decision_record("classification:parked", model="jev-1.13", amount_micro=None),
+        ]
+    )["rows"]
+    assert row["amount_micro"] == 11
+    assert row["unpriced_reason"] == "partial"

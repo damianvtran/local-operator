@@ -59,7 +59,36 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import cli_agents_help as _ag
+from local_operator.i18n.keys import cli_aida_help as _ad
+from local_operator.i18n.keys import cli_browser as _b
+from local_operator.i18n.keys import cli_browser_help as _bh
+from local_operator.i18n.keys import cli_config_help as _cf
+from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_global_help as _gh
+from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_hub_shared_help as _hs
+from local_operator.i18n.keys import cli_install_help as _in
+from local_operator.i18n.keys import cli_login_help as _li
+from local_operator.i18n.keys import cli_login_status_help as _ls
+from local_operator.i18n.keys import cli_logout_help as _lo
+from local_operator.i18n.keys import cli_mcp_help as _mh
+from local_operator.i18n.keys import cli_memory_help as _me
+from local_operator.i18n.keys import cli_mobile_help as _mb
+from local_operator.i18n.keys import cli_model_help as _mo
+from local_operator.i18n.keys import cli_monitor_help as _mn
+from local_operator.i18n.keys import cli_qwencloud_help as _qc
+from local_operator.i18n.keys import cli_refresh_help as _re
+from local_operator.i18n.keys import cli_resume_click_help as _rc
+from local_operator.i18n.keys import cli_send_help as _se
+from local_operator.i18n.keys import cli_serve_help as _sv
+from local_operator.i18n.keys import cli_services_help as _sr
+from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_stop_help as _st
+from local_operator.i18n.keys import cli_teams_help as _th
+from local_operator.i18n.keys import cli_update_help as _up
+from local_operator.i18n.keys import cli_wake_help as _wh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
@@ -119,20 +148,10 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
-CLI_DESCRIPTION = """
-    Local Operator - An environment for agentic AI models to perform tasks on the local device.
-
-    Supports multiple hosting platforms including DeepSeek, OpenAI, Anthropic, Ollama, Kimi
-    and Alibaba. Features include interactive chat, safe code execution,
-    context-aware conversation history, and built-in safety checks.
-
-    Configure your preferred model and hosting platform via command line arguments. Your
-    configuration file is located at ~/.local-operator/config.yml and can be edited directly.
-"""
-
 #: RFC §3.1 render point for this slice's copy (the exec verb's help text and
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
+_bt = tr("cli.browser")
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -159,26 +178,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parent_parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode for verbose output",
+        help=_gh.debug().envelope(locale=help_locale)["text"],
     )
     parent_parser.add_argument(
         "--agent",
         "--agent-name",
         type=str,
-        help="Select a legacy named agent (creates it if missing). Without --train, "
-        "use a separate persisted session; exec --profile attaches a reusable role instead.",
+        help=_gh.agent().envelope(locale=help_locale)["text"],
         dest="agent_name",
     )
     parent_parser.add_argument(
         "--train",
         action="store_true",
-        help="Use the legacy agent history directory (or an autosave agent) instead "
-        "of a separate session. Ordinary sessions are also persisted and resumable; "
-        "--resume takes precedence over this directory selection.",
+        help=_gh.train().envelope(locale=help_locale)["text"],
     )
 
     # Main parser
-    parser = argparse.ArgumentParser(description=CLI_DESCRIPTION, parents=[parent_parser])
+    parser = argparse.ArgumentParser(
+        description=_gh.description().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
 
     parser.add_argument(
         "--resume",
@@ -187,10 +205,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SESSION_ID",
         dest="resume",
-        help="Resume a previous session by id, replaying its transcript. The id is the one"
-        " printed when a session is stopped with Ctrl+C twice, and is the directory name under"
-        " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
-        " session.",
+        help=_gh.resume().envelope(locale=help_locale)["text"],
     )
     # ``installed_version()``, not ``version("local-operator")``: install
     # metadata is written once and never moves when the checkout's
@@ -225,7 +240,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"v{installed_version()}",
-        help="Show program's version number and exit",
+        help=_gh.version().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--hosting",
@@ -253,62 +268,59 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "zai",
             "test",
         ],
-        help="Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, "
-        "alibaba, google, mistral, test, openrouter, xai, zai)",
+        help=_gh.hosting().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, "
-        "grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, "
-        "mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, "
-        "the provider's suggested model is used.",
+        help=_gh.model().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--run-in",
         type=str,
-        help="The working directory to run the operator in.  Must be a valid directory.",
+        help=_gh.run_in().envelope(locale=help_locale)["text"],
         dest="run_in",
     )
     # --- Additive root flags (rewrite) ------------------------------------
     parser.add_argument(
         "--yolo",
         action="store_true",
-        help="Auto-approve all tool executions (read/write/exec tiers) without prompting",
+        help=_gh.yolo().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--no-tui",
         action="store_true",
         dest="no_tui",
-        help="Disable the full-screen TUI; use the plain headless REPL instead",
+        help=_gh.no_tui().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--tui",
         action="store_true",
         dest="tui",
-        help="Force the full-screen TUI even when stdout is not a tty "
-        "(errors clearly if the TUI cannot run without a tty)",
+        help=_gh.tui().envelope(locale=help_locale)["text"],
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
     # Human inspection shares the TUI runner, not the model tool schema.
     from local_operator.memory_cli import configure_parser as configure_memory_parser
 
-    memory_parser = subparsers.add_parser("memory", help="Inspect and correct scoped memory")
+    memory_parser = subparsers.add_parser(
+        "memory", help=_me.memory().envelope(locale=help_locale)["text"]
+    )
     configure_memory_parser(memory_parser)
     # Credential command
     credential_parser = subparsers.add_parser(
         "credential",
-        help="Manage API keys and credentials for different hosting platforms",
+        help=_cr.credential().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     credential_subparsers = credential_parser.add_subparsers(dest="credential_command")
     credential_update_parser = credential_subparsers.add_parser(
-        "update", help="Update a credential", parents=[parent_parser]
+        "update", help=_cr.update().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
     credential_delete_parser = credential_subparsers.add_parser(
-        "delete", help="Delete a credential", parents=[parent_parser]
+        "delete", help=_cr.delete().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
     # The F1 credential shim (github adapter): run BY GIT from a child whose env
@@ -318,62 +330,53 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # than hiding it, so `lop credential --help` still shows the full verb set.
     git_helper_parser = credential_subparsers.add_parser(
         "git-helper",
-        help=(
-            "Serve the git credential protocol from the brokered environment "
-            "(invoked by git; not for direct use)"
-        ),
+        help=(_cr.git_helper().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     git_helper_parser.add_argument("operation", nargs="?", default="get")
 
-    credential_key_help = (
-        "Credential key to manage (e.g., RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, "
-        "ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, GOOGLE_AI_STUDIO_API_KEY, "
-        "MISTRAL_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY)"
-    )
+    credential_key_help = _cr.key().envelope(locale=help_locale)["text"]
 
     credential_update_parser.add_argument("key", type=str, help=credential_key_help)
     credential_delete_parser.add_argument("key", type=str, help=credential_key_help)
 
     # Config command
     config_parser = subparsers.add_parser(
-        "config", help="Manage configuration settings", parents=[parent_parser]
+        "config", help=_cf.config().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     config_subparsers = config_parser.add_subparsers(dest="config_command")
     # Open command
     config_subparsers.add_parser(
         "open",
-        help="Open the configuration file in the default editor",
+        help=_cf.open().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # Edit command
     config_edit_parser = config_subparsers.add_parser(
         "edit",
-        help="Edit a specific configuration value in the config file",
+        help=_cf.edit().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     config_edit_parser.add_argument(
         "key",
         type=str,
-        help="Configuration key to update (e.g., hosting, model_name, conversation_length, "
-        "detail_length, max_learnings_history, auto_save_conversation)",
+        help=_cf.edit_key().envelope(locale=help_locale)["text"],
     )
     config_edit_parser.add_argument(
         "value",
         type=str,
-        help="New value for the configuration key (type is automatically converted "
-        "based on the key)",
+        help=_cf.edit_value().envelope(locale=help_locale)["text"],
     )
 
     # List command
     config_subparsers.add_parser(
         "list",
-        help="List available configuration options and their descriptions",
+        help=_cf.list().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
     config_subparsers.add_parser(
-        "create", help="Create a new configuration file", parents=[parent_parser]
+        "create", help=_cf.create().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
     # Instructions command. Takes ``--agent`` from ``parent_parser``, which is
@@ -381,15 +384,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # actually assemble rather than only the two global sources.
     config_subparsers.add_parser(
         "instructions",
-        help="Show which custom-instruction files a session assembles, in order "
-        "(paths and sizes only, never their contents)",
+        help=_cf.instructions().envelope(locale=help_locale)["text"],
         # ``description=`` as well as ``help=``: the latter renders only on the
         # PARENT ``config --help`` page, so without this the command's own
         # ``--help`` is blank above the options list.
-        description="Show which custom-instruction files a session assembles, in "
-        "order, with the size each contributed and whether it was collapsed as a "
-        "duplicate, truncated, or overlaps an earlier source. Paths and sizes "
-        "only, never the contents.",
+        description=_cf.instructions_description().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
@@ -398,17 +397,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # `aida/profile.py` resolves the file itself; see that module for why.
     aida_parser = subparsers.add_parser(
         "aida",
-        help="Aida's profile notes: record what she should remember",
+        help=_ad.aida().envelope(locale=help_locale)["text"],
     )
     aida_subparsers = aida_parser.add_subparsers(dest="aida_command")
     aida_note_parser = aida_subparsers.add_parser(
         "note",
-        help="Append a note under 'About the operator' in system_prompt.md",
-        description="Record a note into <config root>/system_prompt.md, inside the "
-        "marked 'About the operator' section, so every future session and "
-        "subagent sees it. The file is resolved from the config root and is never "
-        "an argument; the note must not contain the section markers. Omit TEXT to "
-        "read the note from STDIN (multi-line notes need no quoting).",
+        help=_ad.note().envelope(locale=help_locale)["text"],
+        description=_ad.note_description().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     aida_note_parser.add_argument(
@@ -416,129 +411,125 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="?",
         type=str,
         default=None,
-        help="The note to record; omit to read it from STDIN",
+        help=_ad.note_text().envelope(locale=help_locale)["text"],
     )
 
     # Agents command
-    agents_parser = subparsers.add_parser("agents", help="Manage agents", parents=[parent_parser])
+    agents_parser = subparsers.add_parser(
+        "agents", help=_ag.agents().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
     agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
     list_parser = agents_subparsers.add_parser(
-        "list", help="List all agents", parents=[parent_parser]
+        "list", help=_ag.list().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     list_parser.add_argument(
         "--page",
         type=int,
         default=1,
-        help="Page number to display (default: 1)",
+        help=_ag.list_page().envelope(locale=help_locale)["text"],
     )
     list_parser.add_argument(
         "--perpage",
         type=int,
         default=10,
-        help="Number of agents per page (default: 10)",
+        help=_ag.list_perpage().envelope(locale=help_locale)["text"],
     )
     create_parser = agents_subparsers.add_parser(
-        "create", help="Create a new agent", parents=[parent_parser]
+        "create", help=_ag.create().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     create_parser.add_argument(
         "name",
         type=str,
-        help="Name of the agent to create",
+        help=_ag.create_name().envelope(locale=help_locale)["text"],
     )
     delete_parser = agents_subparsers.add_parser(
         "delete",
-        help="Delete an agent (local by name or Radient by ID)",
+        help=_ag.delete().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     delete_group = delete_parser.add_mutually_exclusive_group(required=True)
     delete_group.add_argument(
         "--name",
         type=str,
-        help="Name of the agent to delete locally",
+        help=_ag.delete_name().envelope(locale=help_locale)["text"],
         dest="name",
     )
     delete_group.add_argument(
         "--id",
         type=str,
-        help="ID of the agent to delete from Radient",
+        help=_ag.delete_id().envelope(locale=help_locale)["text"],
         dest="agent_id",
     )
     delete_parser.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Delete an agent from this organization's workspace instead of the "
-        "public hub (Agent Hub org sharing; requires `lop login radient`)",
+        help=_ag.delete_org().envelope(locale=help_locale)["text"],
     )
     # Push command
     push_parser = agents_subparsers.add_parser(
         "push",
-        help="Push (upload) an agent to Radient; `--org` and `--hub-id` push through "
-        "the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only "
-        "with changes pending, 3 declined, 130 cancelled)",
+        help=_ag.push().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     push_group = push_parser.add_mutually_exclusive_group(required=True)
     push_group.add_argument(
         "--name",
         type=str,
-        help="Name of the agent to push to Radient",
+        help=_ag.push_name().envelope(locale=help_locale)["text"],
     )
     push_group.add_argument(
         "--id",
         type=str,
-        help="ID of the agent to push to Radient (explicit overwrite)",
+        help=_ag.push_id().envelope(locale=help_locale)["text"],
     )
     push_parser.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Publish into this organization's workspace instead of the public hub "
-        "(Agent Hub org sharing; requires `lop login radient`)",
+        help=_ag.push_org().envelope(locale=help_locale)["text"],
     )
     push_parser.add_argument(
         "--hub-id",
         type=str,
         default=None,
-        help="Republish (overwrite) this hub listing from the local agent (checks for "
-        "personal references first); needs --name (--id is a local id)",
+        help=_ag.push_hub_id().envelope(locale=help_locale)["text"],
     )
-    _add_hub_publish_flags(push_parser)
+    _add_hub_publish_flags(push_parser, help_locale=help_locale)
     # Pull command
     pull_parser = agents_subparsers.add_parser(
-        "pull", help="Pull (download) an agent from Radient", parents=[parent_parser]
+        "pull", help=_ag.pull().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     pull_parser.add_argument(
         "--id",
         type=str,
         required=True,
-        help="ID of the agent to pull from Radient",
+        help=_ag.pull_id().envelope(locale=help_locale)["text"],
     )
     pull_parser.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Pull from this organization's workspace instead of the public hub "
-        "(Agent Hub org sharing; requires `lop login radient`)",
+        help=_ag.pull_org().envelope(locale=help_locale)["text"],
     )
     # Sync command
     sync_parser = agents_subparsers.add_parser(
         "sync",
-        help="Update installed starters and hub-pulled agents to their latest text",
+        help=_ag.sync().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     sync_group = sync_parser.add_mutually_exclusive_group()
     sync_group.add_argument(
         "--name",
         type=str,
-        help="Sync only the installed profile with this name",
+        help=_ag.sync_name().envelope(locale=help_locale)["text"],
     )
     sync_group.add_argument(
         "--all",
         action="store_true",
-        help="Sync every installed starter and hub-pulled agent (default when --name is absent)",
+        help=_ag.sync_all().envelope(locale=help_locale)["text"],
     )
-    _add_hub_sync_flags(sync_parser)
+    _add_hub_sync_flags(sync_parser, help_locale=help_locale)
     sync_parser.add_argument(
         "--force",
         action="store_true",
@@ -546,280 +537,289 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # Teams command
-    teams_parser = subparsers.add_parser("teams", help="Manage teams", parents=[parent_parser])
-    teams_subparsers = teams_parser.add_subparsers(dest="teams_command")
-    teams_subparsers.add_parser("list", help="List all teams", parents=[parent_parser])
-    teams_create = teams_subparsers.add_parser(
-        "create", help="Create a new team", parents=[parent_parser]
+    teams_parser = subparsers.add_parser(
+        "teams", help=_th.teams().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
-    teams_create.add_argument("name", type=str, help="Name of the team to create")
+    teams_subparsers = teams_parser.add_subparsers(dest="teams_command")
+    teams_subparsers.add_parser(
+        "list", help=_th.list().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
+    teams_create = teams_subparsers.add_parser(
+        "create", help=_th.create().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
+    teams_create.add_argument(
+        "name", type=str, help=_th.create_name().envelope(locale=help_locale)["text"]
+    )
     teams_create.add_argument(
         "--manager",
         type=str,
         default="manager",
-        help="Role or specialist who orchestrates (default: manager)",
+        help=_th.create_manager().envelope(locale=help_locale)["text"],
     )
     teams_create.add_argument(
         "--member",
         action="append",
         default=[],
         dest="members",
-        help="Roster slot as role or role:count (repeatable)",
+        help=_th.create_member().envelope(locale=help_locale)["text"],
     )
-    teams_create.add_argument("--description", type=str, default="", help="One-line description")
+    teams_create.add_argument(
+        "--description",
+        type=str,
+        default="",
+        help=_th.create_description().envelope(locale=help_locale)["text"],
+    )
     teams_create.add_argument(
         "--label",
         type=str,
         default=None,
-        help="Display label shown in listings, the chart and the status band "
-        "(free text; addressing still uses the name)",
+        help=_th.create_label().envelope(locale=help_locale)["text"],
     )
     teams_create.add_argument(
         "--alias",
         action="append",
         default=[],
         dest="aliases",
-        help="Extra addressing key for this team (repeatable; letters, digits, "
-        "dot, underscore, hyphen)",
+        help=_th.create_alias().envelope(locale=help_locale)["text"],
     )
     teams_show = teams_subparsers.add_parser(
-        "show", help="Show a team's roster and briefs", parents=[parent_parser]
+        "show", help=_th.show().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
-    teams_show.add_argument("name", type=str, help="Name of the team to show")
+    teams_show.add_argument(
+        "name", type=str, help=_th.show_name().envelope(locale=help_locale)["text"]
+    )
     teams_delete = teams_subparsers.add_parser(
-        "delete", help="Delete a team by name", parents=[parent_parser]
+        "delete", help=_th.delete().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     teams_delete.add_argument(
         "--name",
         type=str,
         required=True,
-        help="Name of the team to delete",
+        help=_th.delete_name().envelope(locale=help_locale)["text"],
     )
     teams_push = teams_subparsers.add_parser(
         "push",
-        help="Push a team to an organization or the public hub (Agent Hub); exit codes: "
-        "0 published, 1 error, 2 preview-only with changes pending, 3 declined, "
-        "130 cancelled",
+        help=_th.push().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    teams_push.add_argument("name", type=str, help="Name of the local team to push")
+    teams_push.add_argument(
+        "name", type=str, help=_th.push_name().envelope(locale=help_locale)["text"]
+    )
     teams_push_target = teams_push.add_mutually_exclusive_group()
     teams_push_target.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Organization tenant to publish into (`lop teams push --org <tenant_id> "
-        "<team>`; requires `lop login radient`)",
+        help=_th.push_org().envelope(locale=help_locale)["text"],
     )
     teams_push_target.add_argument(
         "--public",
         action="store_true",
-        help="Publish to the public Agent Hub instead of an organization",
+        help=_th.push_public().envelope(locale=help_locale)["text"],
     )
     teams_push.add_argument(
         "--id",
         type=str,
         dest="hub_id",
         default=None,
-        help="Hub team id to overwrite (republish; what `lop teams push` printed as "
-        '"Team ID"); needs --org or --public',
+        help=_th.push_id().envelope(locale=help_locale)["text"],
     )
-    _add_hub_publish_flags(teams_push)
+    _add_hub_publish_flags(teams_push, help_locale=help_locale)
     teams_pull = teams_subparsers.add_parser(
         "pull",
-        help="Pull a team from the hub by id, or by name from the public hub " "(Agent Hub)",
+        help=_th.pull().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     teams_pull.add_argument(
         "team_id",
         type=str,
-        help="ID of the published team to pull, or a public team's name "
-        "(`lop teams pull a-team`; names resolve over the public listing)",
+        help=_th.pull_team_id().envelope(locale=help_locale)["text"],
     )
     teams_pull.add_argument(
         "--org",
         type=str,
         default=None,
-        help="Organization tenant the team belongs to (`lop teams pull --org "
-        "<tenant_id> <team-id>`; requires `lop login radient`)",
+        help=_th.pull_org().envelope(locale=help_locale)["text"],
     )
 
     teams_sync = teams_subparsers.add_parser(
         "sync",
-        help="Check pulled teams against the hub and merge their updates",
+        help=_th.sync().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     teams_sync_group = teams_sync.add_mutually_exclusive_group()
-    teams_sync_group.add_argument("--name", type=str, help="Sync only the team with this name")
     teams_sync_group.add_argument(
-        "--all", action="store_true", help="Sync every linked team (default when --name is absent)"
+        "--name", type=str, help=_th.sync_name().envelope(locale=help_locale)["text"]
     )
-    _add_hub_sync_flags(teams_sync)
+    teams_sync_group.add_argument(
+        "--all", action="store_true", help=_th.sync_all().envelope(locale=help_locale)["text"]
+    )
+    _add_hub_sync_flags(teams_sync, help_locale=help_locale)
     teams_link = teams_subparsers.add_parser(
         "link",
-        help="Link a local team to a hub team so it can receive updates",
+        help=_th.link().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    teams_link.add_argument("name", type=str, help="Name of the local team")
-    teams_link.add_argument("hub_team_id", type=str, help="ID of the hub team to link it to")
     teams_link.add_argument(
-        "--org", type=str, default=None, help="Organization tenant that owns the hub team"
+        "name", type=str, help=_th.link_name().envelope(locale=help_locale)["text"]
+    )
+    teams_link.add_argument(
+        "hub_team_id", type=str, help=_th.link_hub_team_id().envelope(locale=help_locale)["text"]
+    )
+    teams_link.add_argument(
+        "--org", type=str, default=None, help=_th.link_org().envelope(locale=help_locale)["text"]
     )
     teams_link.add_argument(
         "--accept-unknown-baseline",
         action="store_true",
-        help="Link even though the local copy differs from the hub's (nothing is deleted)",
+        help=_th.link_accept_unknown_baseline().envelope(locale=help_locale)["text"],
     )
 
     teams_search = teams_subparsers.add_parser(
         "search",
-        help="Search the public Agent Hub for teams",
+        help=_th.search().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     teams_search.add_argument(
         "query",
         nargs="?",
         default=None,
-        help="Text to match against a public team's name or description "
-        "(omit to list the newest teams)",
+        help=_th.search_query().envelope(locale=help_locale)["text"],
     )
     teams_search.add_argument(
-        "--page", type=int, default=1, help="Page to list when no query is given (default: 1)"
+        "--page", type=int, default=1, help=_th.search_page().envelope(locale=help_locale)["text"]
     )
     teams_search.add_argument(
         "--perpage",
         type=int,
         default=20,
-        help="Teams per page for a listing (default: 20; the hub maxes at 100)",
+        help=_th.search_perpage().envelope(locale=help_locale)["text"],
     )
     teams_search.add_argument(
-        "--json", action="store_true", help="Print the raw listing or matches as JSON"
+        "--json", action="store_true", help=_th.search_json().envelope(locale=help_locale)["text"]
     )
 
     hub_parser = subparsers.add_parser(
-        "hub", help="Agent Hub update status", parents=[parent_parser]
+        "hub", help=_hu.hub().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     hub_subparsers = hub_parser.add_subparsers(dest="hub_command")
     hub_status = hub_subparsers.add_parser(
         "status",
-        help="Show which pulled agents and teams have hub updates",
+        help=_hu.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    hub_status.add_argument("--json", action="store_true", help="Emit the desktop route payload")
+    hub_status.add_argument(
+        "--json", action="store_true", help=_hu.status_json().envelope(locale=help_locale)["text"]
+    )
     hub_links = hub_subparsers.add_parser(
         "links",
-        help="List every hub link (healthy or not) with its source, scope and policy",
+        help=_hu.links().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     hub_links.add_argument("--kind", choices=["agent", "team", "skill"], default=None)
-    hub_links.add_argument("--json", action="store_true", help="Emit the desktop links payload")
+    hub_links.add_argument(
+        "--json", action="store_true", help=_hu.links_json().envelope(locale=help_locale)["text"]
+    )
     hub_link_group = hub_subparsers.add_parser(
         "link",
-        help="Edit one hub link's independent policy",
+        help=_hu.link().envelope(locale=help_locale)["text"],
     )
     hub_link_subparsers = hub_link_group.add_subparsers(dest="hub_link_command", required=True)
     hub_link = hub_link_subparsers.add_parser(
         "set",
-        help="Set this link's subscribe and/or auto_push policy",
+        help=_hu.link_set().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    hub_link.add_argument("link_id", help="The link id from `lop hub links`")
+    hub_link.add_argument(
+        "link_id", help=_hu.link_set_link_id().envelope(locale=help_locale)["text"]
+    )
     hub_link.add_argument(
         "--subscribe",
         choices=["true", "false"],
         default=None,
-        help="Unattended inbound synchronization for this link",
+        help=_hu.link_set_subscribe().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument(
         "--auto-push",
         choices=["true", "false"],
         default=None,
-        help="Unattended outbound publication for this link",
+        help=_hu.link_set_auto_push().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument(
         "--expected-revision",
         default=None,
-        help="The policy revision you last saw (CAS); omitted reads it fresh first",
+        help=_hu.link_set_expected_revision().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument(
         "--confirm-public-egress",
         action="store_true",
-        help="Explicit consent to publish authored changes to a PUBLIC origin",
+        help=_hu.link_set_confirm_public_egress().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument("--json", action="store_true")
 
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
-        "serve", help="Start the FastAPI server", parents=[parent_parser]
+        "serve", help=_sv.serve().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     serve_parser.add_argument(
         "--host",
         type=str,
         default="127.0.0.1",
-        help=(
-            "Host address (default: 127.0.0.1). Loopback-only by policy: every "
-            "non-loopback bind is refused. File serving is unclamped on loopback "
-            "connections; reach this API remotely through an explicit tunnel or an "
-            "SSH port-forward."
-        ),
+        help=(_sv.host().envelope(locale=help_locale)["text"]),
     )
     serve_parser.add_argument(
         "--port",
         type=int,
         default=1111,
-        help="Port for the server (default: 1111)",
+        help=_sv.port().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--reload",
         action="store_true",
-        help="Enable hot reload for the server",
+        help=_sv.reload().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--listener-fd",
         type=int,
         default=None,
-        help=(
-            "Adopt an already-bound listening socket instead of binding one. "
-            "Set by a daemon replacing its own process image onto a new build "
-            "(`server/reload`), so the port never has a moment with nothing "
-            "behind it. Not a user-facing flag."
-        ),
+        help=(_sv.listener_fd().envelope(locale=help_locale)["text"]),
     )
 
     # Mobile command: the phone-facing control plane (daemon + supervision).
     # Same lazy-import rule as ``serve`` — the mobile modules pull starlette/
     # uvicorn only when a mobile command actually runs.
     mobile_parser = subparsers.add_parser(
-        "mobile", help="Phone access: control this machine's lop sessions", parents=[parent_parser]
+        "mobile", help=_mb.mobile().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     mobile_subparsers = mobile_parser.add_subparsers(dest="mobile_command")
-    mobile_subparsers.add_parser("install", help="Install the daemon, password and LaunchAgent")
-    mobile_subparsers.add_parser("status", help="Daemon health, gate and live sessions")
+    mobile_subparsers.add_parser("install", help=_mb.install().envelope(locale=help_locale)["text"])
+    mobile_subparsers.add_parser("status", help=_mb.status().envelope(locale=help_locale)["text"])
     for action in ("start", "stop", "restart"):
-        mobile_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
+        mobile_subparsers.add_parser(
+            action, help=_mb.daemon_action(action=action).envelope(locale=help_locale)["text"]
+        )
     logs_parser = mobile_subparsers.add_parser(
-        "logs", help="Tail the daemon's and the runtimes' logs"
+        "logs", help=_mb.logs().envelope(locale=help_locale)["text"]
     )
     logs_parser.add_argument(
-        "--lines", type=int, default=100, help="Lines per file (up to two are read)"
+        "--lines", type=int, default=100, help=_mb.logs_lines().envelope(locale=help_locale)["text"]
     )
     logs_parser.add_argument(
         "--follow",
         "-f",
         action="store_true",
-        help=(
-            "Follow by name, so a log created or rotated while you watch is seen "
-            "(a descriptor-bound follow misses both)"
-        ),
+        help=(_mb.logs_follow().envelope(locale=help_locale)["text"]),
     )
-    mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
+    mobile_subparsers.add_parser(
+        "password", help=_mb.password().envelope(locale=help_locale)["text"]
+    )
     # The operator surface ADR 0006 §4 names for the device lifecycle: the way
     # back from a revoke is never the device's own act, so it is a command a
     # human runs on this computer. Stdlib-only arguments here, like the rest of
     # the mobile block; the HTTP client is imported when the command runs.
     devices_parser = mobile_subparsers.add_parser(
         "devices",
-        help="List this computer's push devices, or revoke/unrevoke one",
+        help=_mb.devices().envelope(locale=help_locale)["text"],
         # Rendered from the constants the code returns, so the help cannot name a
         # status the command does not use (design round 1, D8: it promised "1 any
         # other failure" while a missing id returned 2).
@@ -836,22 +836,30 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs="?",
         choices=("list", "revoke", "unrevoke"),
         default="list",
-        help="list (default), revoke <device_id>, or unrevoke <device_id>",
+        help=_mb.devices_command().envelope(locale=help_locale)["text"],
     )
     devices_parser.add_argument(
         "device_id",
         nargs="?",
-        help="the device_id `lop mobile devices` lists; required by revoke/unrevoke",
+        help=_mb.devices_device_id().envelope(locale=help_locale)["text"],
     )
     devices_parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help="the mobile daemon's port (default: the daemon's own default)",
+        help=_mb.devices_port().envelope(locale=help_locale)["text"],
     )
-    uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
-    uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
-    serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
+    uninstall_parser = mobile_subparsers.add_parser(
+        "uninstall", help=_mb.uninstall().envelope(locale=help_locale)["text"]
+    )
+    uninstall_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help=_mb.uninstall_purge().envelope(locale=help_locale)["text"],
+    )
+    serve_mobile_parser = mobile_subparsers.add_parser(
+        "serve", help=_mb.serve().envelope(locale=help_locale)["text"]
+    )
     serve_mobile_parser.add_argument("--port", type=int, default=4098)
 
     # Register only stdlib arguments here. JWT/HTTP/service code remains lazy
@@ -897,82 +905,90 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # cannot be refreshed headlessly). stdlib-only registration, same rule.
     qwencloud_parser = subparsers.add_parser(
         "qwencloud-ticket",
-        help="Store the QwenCloud console session cookie that /usage reads",
+        help=_qc.qwencloud_ticket().envelope(locale=help_locale)["text"],
     )
     qwencloud_actions = qwencloud_parser.add_subparsers(dest="qwencloud_command")
-    qwencloud_actions.add_parser(
-        "set", help="Store the cookie; the value is read from STDIN, never argv"
-    )
-    qwencloud_actions.add_parser(
-        "status", help="Whether a cookie is stored and how old it is; never the value"
-    )
-    qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
-    qwencloud_actions.add_parser(
-        "migrate", help="Move a plaintext ticket into the encrypted secret store"
-    )
+    qwencloud_actions.add_parser("set", help=_qc.set().envelope(locale=help_locale)["text"])
+    qwencloud_actions.add_parser("status", help=_qc.status().envelope(locale=help_locale)["text"])
+    qwencloud_actions.add_parser("rm", help=_qc.rm().envelope(locale=help_locale)["text"])
+    qwencloud_actions.add_parser("migrate", help=_qc.migrate().envelope(locale=help_locale)["text"])
 
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
-        "browser", help="Connect the browser tool to a Chromium extension", parents=[parent_parser]
+        "browser", help=_bh.browser().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
     browser_subparsers = browser_parser.add_subparsers(dest="browser_command")
-    install_browser = browser_subparsers.add_parser("install", help="Install the bridge daemon")
+    install_browser = browser_subparsers.add_parser(
+        "install", help=_bh.install().envelope(locale=help_locale)["text"]
+    )
     install_browser.add_argument("--port", type=int, default=4099)
     status_browser = browser_subparsers.add_parser(
-        "status", help="Show daemon, extension and pairing status"
+        "status", help=_bh.status().envelope(locale=help_locale)["text"]
     )
     status_browser.add_argument(
         "--repair",
         action="store_true",
-        help="Reconcile advertised state against reality: drop tabs that no longer "
-        "exist and republish a fresh heartbeat. Safe while sessions are live.",
+        help=_bh.status_repair().envelope(locale=help_locale)["text"],
     )
     for action, blurb in (
-        ("tabs", "List durable ownership records and live tabs (read-only)"),
-        ("reconcile", "Alias for 'tabs': inspect ownership without closing anything"),
+        ("tabs", _bh.tabs().envelope(locale=help_locale)["text"]),
+        ("reconcile", _bh.reconcile().envelope(locale=help_locale)["text"]),
     ):
         inventory_browser = browser_subparsers.add_parser(action, help=blurb)
         inventory_browser.add_argument(
-            "--json", action="store_true", help="machine-readable output"
+            "--json", action="store_true", help=_bh.json().envelope(locale=help_locale)["text"]
         )
     cleanup_browser = browser_subparsers.add_parser(
-        "cleanup", help="Close one proven-terminal browser owner after revalidation"
+        "cleanup", help=_bh.cleanup().envelope(locale=help_locale)["text"]
     )
     cleanup_browser.add_argument("session_id")
     cleanup_browser.add_argument("--generation", required=True)
-    cleanup_browser.add_argument("--yes", action="store_true", help="Approve this exact cleanup")
+    cleanup_browser.add_argument(
+        "--yes", action="store_true", help=_bh.cleanup_yes().envelope(locale=help_locale)["text"]
+    )
     for action in ("start", "stop", "restart"):
-        browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
-    pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
+        browser_subparsers.add_parser(
+            action, help=_bh.daemon_action(action=action).envelope(locale=help_locale)["text"]
+        )
+    pair_browser = browser_subparsers.add_parser(
+        "pair", help=_bh.pair().envelope(locale=help_locale)["text"]
+    )
     pair_browser.add_argument(
-        "--reset", action="store_true", help="Revoke the paired browser first"
+        "--reset", action="store_true", help=_bh.pair_reset().envelope(locale=help_locale)["text"]
     )
     pair_browser.add_argument(
         "--list",
         action="store_true",
-        help="List the authorised browser extensions, and which one is driving",
+        help=_bh.pair_list().envelope(locale=help_locale)["text"],
     )
     pair_browser.add_argument(
         "--revoke",
         metavar="ID-OR-LABEL",
         default=None,
-        help="Revoke ONE authorised extension (its id, an unambiguous id prefix, "
-        "or part of its label), leaving every other one paired",
+        help=_bh.pair_revoke().envelope(locale=help_locale)["text"],
     )
     drive_browser = browser_subparsers.add_parser(
-        "drive", help="Choose which authorised extension drives the browser"
+        "drive", help=_bh.drive().envelope(locale=help_locale)["text"]
     )
     drive_browser.add_argument(
-        "target", help="Extension id (or an unambiguous prefix), or part of its label"
+        "target", help=_bh.drive_target().envelope(locale=help_locale)["text"]
     )
-    logs_browser = browser_subparsers.add_parser("logs", help="Tail the daemon log")
+    logs_browser = browser_subparsers.add_parser(
+        "logs", help=_bh.logs().envelope(locale=help_locale)["text"]
+    )
     logs_browser.add_argument("--lines", type=int, default=100)
     logs_browser.add_argument("--follow", "-f", action="store_true")
-    uninstall_browser = browser_subparsers.add_parser("uninstall", help="Remove the bridge daemon")
-    uninstall_browser.add_argument("--purge", action="store_true", help="Also delete pairing state")
+    uninstall_browser = browser_subparsers.add_parser(
+        "uninstall", help=_bh.uninstall().envelope(locale=help_locale)["text"]
+    )
+    uninstall_browser.add_argument(
+        "--purge",
+        action="store_true",
+        help=_bh.uninstall_purge().envelope(locale=help_locale)["text"],
+    )
     serve_browser = browser_subparsers.add_parser(
-        "serve", help="Run the bridge daemon (foreground)"
+        "serve", help=_bh.serve().envelope(locale=help_locale)["text"]
     )
     serve_browser.add_argument("--port", type=int, default=4099)
 
@@ -982,7 +998,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # trust boundary). See guides/peer-messaging.
     send_parser = subparsers.add_parser(
         "send",
-        help="Send a message to another local lop session (no cmux needed)",
+        help=_se.send().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
         # The exit codes ARE the contract now that one call settles four honest
         # ways (send/wake delivery design A.1, A.4), so they are stated where a
@@ -1000,38 +1016,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
     send_parser.add_argument(
         "target",
         nargs="?",
-        help=(
-            "conversation-name / session-id / cwd substring (case-insensitive). "
-            "Omit when addressing with --pid/--session; passing both is refused."
-        ),
+        help=(_se.target().envelope(locale=help_locale)["text"]),
     )
     send_parser.add_argument(
         "message",
         nargs="?",
-        help=(
-            "message text; omit to read the body from stdin. With --pid/--session "
-            "a single positional IS the message, and typing one while also piping "
-            "a body is refused."
-        ),
+        help=(_se.message().envelope(locale=help_locale)["text"]),
     )
     # Mutually exclusive because they name DIFFERENT recipients: argparse rejects
     # the pair natively ("argument --session: not allowed with argument --pid"),
     # which is a better error than anything hand-written here, and it removes a
     # whole branch from _bind_send_positionals below.
     send_selector = send_parser.add_mutually_exclusive_group()
-    send_selector.add_argument("--pid", type=int, help="target by exact pid")
-    send_selector.add_argument("--session", dest="session", help="target by exact session id")
+    send_selector.add_argument(
+        "--pid", type=int, help=_se.pid().envelope(locale=help_locale)["text"]
+    )
+    send_selector.add_argument(
+        "--session", dest="session", help=_se.session().envelope(locale=help_locale)["text"]
+    )
     send_parser.add_argument(
         "--now",
         "--steer",
         dest="steer",
         action="store_true",
-        help="inject mid-turn (steer) instead of the default mailbox",
+        help=_se.steer().envelope(locale=help_locale)["text"],
     )
     send_parser.add_argument(
         "--wake",
         action="store_true",
-        help="if the target is idle, drive a turn now (mailbox mode only)",
+        help=_se.wake().envelope(locale=help_locale)["text"],
     )
 
     # `lop model`: switch ANOTHER live session's model (design D4). Its own
@@ -1040,59 +1053,48 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # one of its rules. Same selector flags and the same resolver as `lop send`.
     model_parser = subparsers.add_parser(
         "model",
-        help="Switch another running lop session's model (like /model there)",
+        help=_mo.model().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     model_parser.add_argument(
         "target",
         nargs="?",
-        help=(
-            "conversation-name / session-id / cwd substring (case-insensitive). "
-            "Omit when addressing with --pid/--session."
-        ),
+        help=(_mo.target().envelope(locale=help_locale)["text"]),
     )
     model_parser.add_argument(
         "selector",
         nargs="?",
         metavar="provider/model",
-        help="the model to switch to, e.g. deepseek/deepseek-flash",
+        help=_mo.selector().envelope(locale=help_locale)["text"],
     )
     model_selector = model_parser.add_mutually_exclusive_group()
-    model_selector.add_argument("--pid", type=int, help="target by exact pid")
-    model_selector.add_argument("--session", dest="session", help="target by exact session id")
+    model_selector.add_argument(
+        "--pid", type=int, help=_mo.pid().envelope(locale=help_locale)["text"]
+    )
+    model_selector.add_argument(
+        "--session", dest="session", help=_mo.session().envelope(locale=help_locale)["text"]
+    )
 
     sessions_parser = subparsers.add_parser(
         "sessions",
-        help=(
-            "List active lop sessions and their resource usage; "
-            "`sessions resume` reopens a set of stored sessions (paused/failed/all) "
-            "in one bounded batch; "
-            "`sessions cleanup` previews or runs the session cleanup policy; "
-            "`sessions reclaim` previews or ends runtimes nothing can reach"
-        ),
-        description=(
-            "List active lop sessions and their resource usage; "
-            "`sessions resume` reopens a set of stored sessions in one command; "
-            "`sessions cleanup` previews or runs the session cleanup policy; "
-            "`sessions reclaim` previews or ends runtimes nothing can reach."
-        ),
+        help=(_sh.sessions().envelope(locale=help_locale)["text"]),
+        description=(_sh.sessions_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sessions_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
     sessions_parser.add_argument(
         "--all",
         action="store_true",
-        help=(
-            "also list stored sessions that are not running (RSS/UPTIME/etc. are "
-            "shown as — for these; sorted newest-first by last activity)"
-        ),
+        help=(_sh.all().envelope(locale=help_locale)["text"]),
     )
     sessions_parser.add_argument(
         "--limit",
         type=_positive_int,
         default=None,
         metavar="N",
-        help="with --all (or a set filter), cap the stored rows listed; positive (default: 50)",
+        help=_sh.limit().envelope(locale=help_locale)["text"],
     )
     # THE TWO SET FILTERS (bulk resume, 2026-10-01). They are plain booleans
     # with NO argument-shaped requirement, because the sets are named by the
@@ -1110,20 +1112,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     sessions_parser.add_argument(
         "--paused",
         action="store_true",
-        help=(
-            "list only stored sessions whose last turn was STOPPED rather than "
-            "completed or lost — a deliberate stop or a build retirement "
-            "(the set the bulk-resume path selects; implies --all)"
-        ),
+        help=(_sh.paused().envelope(locale=help_locale)["text"]),
     )
     sessions_parser.add_argument(
         "--failed",
         action="store_true",
-        help=(
-            "list only stored sessions whose last recorded outcome was a failure "
-            "(an involuntary death with no deliberate-stop evidence; implies --all). "
-            "A death whose outcome was never imported is in neither set"
-        ),
+        help=(_sh.failed().envelope(locale=help_locale)["text"]),
     )
     # THE MESH'S TWO LISTING FLAGS (mesh-session-mobility.md §9.3). Both default
     # off, so a client that does not ask gets exactly today's answer — which is
@@ -1132,12 +1126,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--peer",
         default=None,
         metavar="DEVICE",
-        help="list the sessions held by one peer device (its own catalogue, over the mesh)",
+        help=_sh.peer().envelope(locale=help_locale)["text"],
     )
     sessions_parser.add_argument(
         "--all-peers",
         action="store_true",
-        help="also list the sessions other devices in this network are holding",
+        help=_sh.all_peers().envelope(locale=help_locale)["text"],
     )
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
@@ -1156,63 +1150,64 @@ def build_cli_parser() -> argparse.ArgumentParser:
     sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
-        help="Run the session cleanup policy now (use --dry-run to preview)",
-        description=(
-            "Apply session.cleanup.* from config (each limit overridable below) to the "
-            "session store, in two classes: your conversations (needs "
-            "session.cleanup.enabled: true unless --force) and delegated subagent/"
-            "background sessions (session.cleanup.delegated.*, on by default). "
-            "Every removal is recorded in <config>/sessions/.cleanup-log.jsonl."
-        ),
+        help=_sh.cleanup().envelope(locale=help_locale)["text"],
+        description=(_sh.cleanup_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     cleanup_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be removed and why, without removing anything",
+        help=_sh.cleanup_dry_run().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--force",
         action="store_true",
-        help="run even when session.cleanup.enabled is false (lists first, then asks)",
+        help=_sh.cleanup_force().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--yes",
         action="store_true",
-        help="do not ask for confirmation before removing",
+        help=_sh.cleanup_yes().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--max-sessions",
         type=_non_negative_int,
         default=None,
-        help="keep only the N most recently active sessions (overrides config)",
+        help=_sh.cleanup_max_sessions().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--max-inactive-days",
         type=_non_negative_int,
         default=None,
-        help="remove sessions idle longer than N days (overrides config)",
+        help=_sh.cleanup_max_inactive_days().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--max-total-bytes",
         type=_non_negative_int,
         default=None,
-        help="trim the least recently active sessions past this store size (overrides config)",
+        help=_sh.cleanup_max_total_bytes().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--remove-empty",
         action="store_true",
         default=None,
-        help="remove directories that never got a transcript (overrides config)",
+        help=_sh.cleanup_remove_empty().envelope(locale=help_locale)["text"],
     )
     cleanup_parser.add_argument(
         "--delegated-max-age-hours",
         type=_delegated_hours,
         default=None,
         metavar="N",
-        help="remove subagent/background sessions idle over N hours, 2-720 (overrides config)",
+        help=_sh.cleanup_delegated_max_age_hours().envelope(locale=help_locale)["text"],
     )
-    cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    cleanup_parser.add_argument(
+        "--scratchpads-only",
+        action="store_true",
+        help=_sh.cleanup_scratchpads_only().envelope(locale=help_locale)["text"],
+    )
+    cleanup_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # `lop sessions reclaim`: the external door to the residency sweep — the
     # same pass the wake supervisor runs on its own cadence, for the case where
@@ -1229,40 +1224,30 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # table question the sweep asks twice before it signals anything.
     reclaim_parser = sessions_subparsers.add_parser(
         "reclaim",
-        help="End session runtimes nothing can reach (dry run; --yes to act)",
-        description=(
-            "Find live session runtimes that no discovery record, no viewer, no "
-            "attach and no existing config root can reach, and ask them to leave "
-            "with SIGTERM. The runtime finishes any turn in flight first (its own "
-            "signal drain, bounded by SIGNAL_DRAIN_S) — this command never sends "
-            "SIGKILL. Any runtime with a record, an attached interface, a live root "
-            "it does not own, or CPU spent inside the confirm window is refused."
-        ),
+        help=_sh.reclaim().envelope(locale=help_locale)["text"],
+        description=(_sh.reclaim_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     reclaim_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="list what would be reclaimed, without signalling anything",
+        help=_sh.reclaim_dry_run().envelope(locale=help_locale)["text"],
     )
     reclaim_parser.add_argument(
         "--yes",
         action="store_true",
-        help="do not ask for confirmation before signalling",
+        help=_sh.reclaim_yes().envelope(locale=help_locale)["text"],
     )
     reclaim_parser.add_argument(
         "--confirm-s",
         type=_confirm_window,
         default=None,
         metavar="SECONDS",
-        help=(
-            "how long to watch before signalling (default: 60, minimum: 50). The "
-            "window is the safety property: a runtime that gains a record, an attach "
-            "or CPU inside it is dropped from the pass, and a window too short to "
-            "measure CPU would drop one of the four refusals"
-        ),
+        help=(_sh.reclaim_confirm_s().envelope(locale=help_locale)["text"]),
     )
-    reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    reclaim_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # `lop sessions resume`: the BULK door — resume a set of stored sessions in
     # one command. The operator escalation (2026-10-01): resuming 15+ paused/
@@ -1291,63 +1276,43 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # cap is named in the output whenever it truncated a set.
     resume_parser = sessions_subparsers.add_parser(
         "resume",
-        help="Resume a set of stored sessions in one command (bulk)",
-        description=(
-            "Resume stored sessions without a shell loop: `--paused` (the "
-            "interrupted/retired pair), `--failed` (error), or `--all` (every "
-            "stored, non-live session — the widest reading, so given with the "
-            "other selectors it wins). Newest first, capped at 20 unless "
-            "--limit is given. Each session is reopened headlessly as `lop exec "
-            "--resume <id> --background` with --message (default: a continuation). "
-            "Children run with bounded concurrency (6 at a time) and print one "
-            "line per session as it resolves. Exit codes: 0 = every selected "
-            "session resumed; 1 = at least one failed or was unresolved at the "
-            "bound; 2 = misuse (no set selected)."
-        ),
+        help=_sh.resume().envelope(locale=help_locale)["text"],
+        description=(_sh.resume_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     resume_parser.add_argument(
         "--paused",
         action="store_true",
-        help=(
-            "select stored sessions whose last outcome was interrupted/retired "
-            "(the 'Unseen interruption' pair; implies the store scope)"
-        ),
+        help=(_sh.resume_paused().envelope(locale=help_locale)["text"]),
     )
     resume_parser.add_argument(
         "--failed",
         action="store_true",
-        help="select stored sessions whose last outcome was error (implies the store scope)",
+        help=_sh.resume_failed().envelope(locale=help_locale)["text"],
     )
     resume_parser.add_argument(
         "--all",
         action="store_true",
         dest="all_sessions",
-        help=(
-            "select every stored, non-live session (newest first, capped); the "
-            "widest reading — given with --paused/--failed it wins"
-        ),
+        help=(_sh.resume_all().envelope(locale=help_locale)["text"]),
     )
     resume_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the selected set (newest first) and resume nothing",
+        help=_sh.resume_dry_run().envelope(locale=help_locale)["text"],
     )
     resume_parser.add_argument(
         "--limit",
         type=_positive_int,
         default=None,
         metavar="N",
-        help="cap the set at the N newest matches (default: 20)",
+        help=_sh.resume_limit().envelope(locale=help_locale)["text"],
     )
     resume_parser.add_argument(
         "--message",
         default=None,
         metavar="TEXT",
-        help=(
-            "the message each resumed session runs (default: a continuation — "
-            "'Continue the task from where it left off.')"
-        ),
+        help=(_sh.resume_message().envelope(locale=help_locale)["text"]),
     )
 
     # `lop sessions move`: hand a conversation to another device, or bring one
@@ -1361,32 +1326,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # push verb, and adding one would be a second copy path with its own bugs.
     move_parser = sessions_subparsers.add_parser(
         "move",
-        help="Move a conversation to another device, or bring one home",
-        description=(
-            "Hand a conversation to another device (`--to build-box`), or bring one "
-            "that lives elsewhere back here (`--to local`). The conversation keeps "
-            "its id and the copy on the device it left is deleted, unless `--keep` "
-            "is given, which leaves the original running and mints a NEW id for the "
-            "copy. A session with a turn in flight is refused, not interrupted."
-        ),
+        help=_sh.move().envelope(locale=help_locale)["text"],
+        description=(_sh.move_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     move_parser.add_argument(
         "session",
         nargs="?",
         default="",
-        help="the conversation id to move (with --cancel-queued, the id is that flag's value)",
+        help=_sh.move_session().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--to",
         metavar="DEVICE",
         default="",
-        help="a peer device (id or name), or `local` to bring the conversation here",
+        help=_sh.move_to().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--keep",
         action="store_true",
-        help="copy and leave the original running; the copy gets a new id and a fork marker",
+        help=_sh.move_keep().envelope(locale=help_locale)["text"],
     )
     move_parser.add_argument(
         "--wait",
@@ -1400,7 +1359,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         const=-1,
         default=0,
         metavar="SECONDS",
-        help="re-check a busy conversation every 5s, up to SECONDS (bare: up to 30 min)",
+        help=_sh.move_wait().envelope(locale=help_locale)["text"],
     )
     # THE QUEUED MOVE (design note §5.4): today's answer to a busy source is a
     # refusal plus `--wait`; this is the explicit alternative — accept now, run at
@@ -1411,29 +1370,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
     move_parser.add_argument(
         "--queue",
         action="store_true",
-        help=(
-            "wait for the next safe point instead of refusing a busy conversation: the "
-            "move is queued durably on the conversation's device and runs when its "
-            "turn ends (attached clients there are announced and given a window to "
-            "follow or detach). Ignored with --keep"
-        ),
+        help=(_sh.move_queue().envelope(locale=help_locale)["text"]),
     )
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
         default="",
-        help=(
-            "cancel a queued move that has not started yet; takes the conversation id "
-            "and nothing else"
-        ),
+        help=(_sh.move_cancel_queued().envelope(locale=help_locale)["text"]),
     )
     move_parser.add_argument(
         "--from-replica",
         action="store_true",
-        help=(
-            "recover the last copy this device synced as a NEW session, for when the "
-            "device that held it is gone"
-        ),
+        help=(_sh.move_from_replica().envelope(locale=help_locale)["text"]),
     )
     # THE ONE OPT-IN ON THIS VERB. A move leaves a conversation COLD on purpose
     # (mesh-session-mobility.md §6.3 step 17: "It does not auto-engage a runtime"),
@@ -1455,36 +1403,33 @@ def build_cli_parser() -> argparse.ArgumentParser:
     move_parser.add_argument(
         "--engage-on-arrival",
         action="store_true",
-        help=(
-            "start the conversation on the destination as soon as it lands, so it is "
-            "live there without a first prompt; a conversation whose turn is in "
-            "flight is still refused rather than drained, and a failure to start it "
-            "does not affect the move — so the exit status is the MOVE's: a script "
-            "reads `engagement.engaged` in --json, and on a move to a peer that "
-            "device's own log is where the outcome shows"
-        ),
+        help=(_sh.move_engage_on_arrival().envelope(locale=help_locale)["text"]),
     )
-    move_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    move_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # `lop sessions sync`: pull the latest cut of a conversation another device
     # owns into this device's replica store. Explicit because the automatic cadence
     # (debounced pushes, a pull on attach) is not something a person can wait for.
     sync_parser = sessions_subparsers.add_parser(
         "sync",
-        help="Pull a copy of a conversation another device owns",
-        description=(
-            "Bring this device's copy of a conversation it does not own up to date. "
-            "The copy is stored outside the session store and is never opened as a "
-            "session; `lop sessions move <id> --to local --from-replica` recovers it "
-            "as a new one."
-        ),
+        help=_sh.sync().envelope(locale=help_locale)["text"],
+        description=(_sh.sync_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    sync_parser.add_argument("session", help="the conversation id to pull")
     sync_parser.add_argument(
-        "--owner", default="", metavar="DEVICE", help="the peer that holds it (default: ask)"
+        "session", help=_sh.sync_session().envelope(locale=help_locale)["text"]
     )
-    sync_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sync_parser.add_argument(
+        "--owner",
+        default="",
+        metavar="DEVICE",
+        help=_sh.sync_owner().envelope(locale=help_locale)["text"],
+    )
+    sync_parser.add_argument(
+        "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
+    )
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -1506,53 +1451,53 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # (round 3, B5). Omitting the kwarg is what keeps it off the list.
         parents=[parent_parser],
     )
-    resume_click_parser.add_argument("session", help="session id to reopen")
+    resume_click_parser.add_argument(
+        "session", help=_rc.session().envelope(locale=help_locale)["text"]
+    )
 
+    # Render help per parser build: pre-startup locale selection must not activate
+    # process-wide state or touch the live runtime just to display these flags.
     stop_parser = subparsers.add_parser(
         "stop",
-        help="Stop a running lop session (graceful, then signals)",
+        help=_st.stop().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     stop_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+        help=_st.target().envelope(locale=help_locale)["text"],
     )
-    stop_parser.add_argument("--pid", type=int, help="target by exact pid")
-    stop_parser.add_argument("--session", dest="session", help="target by exact session id")
+    stop_parser.add_argument("--pid", type=int, help=_st.pid().envelope(locale=help_locale)["text"])
+    stop_parser.add_argument(
+        "--session", dest="session", help=_st.session().envelope(locale=help_locale)["text"]
+    )
     stop_parser.add_argument(
         "--all",
         dest="stop_all",
         action="store_true",
-        help="stop every session on this machine (prompts on a TTY; --yes to skip)",
+        help=_st.all().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--yes",
         action="store_true",
-        help="skip the --all confirmation (required when stdin is not a TTY)",
+        help=_st.yes().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--json",
         action="store_true",
-        help="machine-readable outcome per target",
+        help=_st.json().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="graceful-op wait per session before escalating (default 10)",
+        help=_st.timeout().envelope(locale=help_locale)["text"],
     )
     stop_parser.add_argument(
         "--force",
         action="store_true",
-        help=(
-            "escalate past a refusal or a skip: signal a target whose socket "
-            "cannot confirm identity, one that reports a turn in flight, or one "
-            "already leaving after a signal — each of those can cut the turn it "
-            "is in. Not needed for a cooperative mid-turn runtime: the plain "
-            "stop ends that one promptly, through its socket"
-        ),
+        help=(_st.force().envelope(locale=help_locale)["text"]),
     )
 
     # The rotation path (`lop refresh`): ask every live runtime to move to the
@@ -1563,34 +1508,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # that destroyed 32 turns on 2026-09-14: an ad-hoc signal sweep.
     refresh_parser = subparsers.add_parser(
         "refresh",
-        help=(
-            "Ask running sessions to move to the build on disk at their next "
-            "boundary (no signals)"
-        ),
+        help=(_re.refresh().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     refresh_parser.add_argument(
         "target",
         nargs="?",
-        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+        help=_re.target().envelope(locale=help_locale)["text"],
     )
-    refresh_parser.add_argument("--pid", type=int, help="target by exact pid")
-    refresh_parser.add_argument("--session", dest="session", help="target by exact session id")
+    refresh_parser.add_argument(
+        "--pid", type=int, help=_re.pid().envelope(locale=help_locale)["text"]
+    )
+    refresh_parser.add_argument(
+        "--session", dest="session", help=_re.session().envelope(locale=help_locale)["text"]
+    )
     refresh_parser.add_argument(
         "--all",
         dest="refresh_all",
         action="store_true",
-        help="ask every live session on this machine (no confirmation: nothing is ended)",
+        help=_re.all().envelope(locale=help_locale)["text"],
     )
     refresh_parser.add_argument(
-        "--json", action="store_true", help="machine-readable outcome per target"
+        "--json", action="store_true", help=_re.json().envelope(locale=help_locale)["text"]
     )
     refresh_parser.add_argument(
         "--timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="wait per session for its answer (default 10)",
+        help=_re.timeout().envelope(locale=help_locale)["text"],
     )
 
     # Scheduled wakes, and the process that fires them for sessions nobody is
@@ -1599,7 +1545,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # which is a question about this machine rather than about one session.
     wake_parser = subparsers.add_parser(
         "wake",
-        help="Inspect scheduled wakes and the supervisor that fires them",
+        help=_wh.wake().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # DEFAULTS ON THE PARENT, so every route into `wake_command` carries the
@@ -1613,19 +1559,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     wake_sub = wake_parser.add_subparsers(dest="wake_command")
     wake_status = wake_sub.add_parser(
         "status",
-        help="whether a supervisor is installed, and what it would fire next",
+        help=_wh.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    wake_status.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_status.add_argument(
+        "--json", action="store_true", help=_wh.json().envelope(locale=help_locale)["text"]
+    )
     wake_status.add_argument(
         "--install",
         action="store_true",
-        help="install the supervisor now rather than waiting for the next schedule",
+        help=_wh.status_install().envelope(locale=help_locale)["text"],
     )
     wake_status.add_argument(
         "--uninstall",
         action="store_true",
-        help="remove the supervisor; scheduled wakes then fire only when a session is open",
+        help=_wh.status_uninstall().envelope(locale=help_locale)["text"],
     )
     # THE ROLLOUT PATH, and the reason this is a subcommand rather than only a
     # flag on `status`. Repair-on-demand lives in the install hook, which runs
@@ -1636,28 +1584,32 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # persist. This command makes the repair reachable directly.
     wake_sub.add_parser(
         "install",
-        help="install or repair the supervisor now (restarts a stale or stopped one)",
+        help=_wh.install().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     wake_list = wake_sub.add_parser(
         "list",
-        help="every scheduled wake on this machine, soonest first",
+        help=_wh.list().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    wake_list.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_list.add_argument(
+        "--json", action="store_true", help=_wh.json().envelope(locale=help_locale)["text"]
+    )
     # `create` completes the surface: `status` says whether wakes fire,
     # `list` says what is scheduled, and this is how a wake gets scheduled
     # from outside a session — which is also what makes install-on-demand
     # testable without driving a TUI.
     wake_create = wake_sub.add_parser(
         "create",
-        help="schedule a wake for a session (installs the supervisor on demand)",
+        help=_wh.create().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    wake_create.add_argument("session", help="session id to wake")
+    wake_create.add_argument(
+        "session", help=_wh.create_session().envelope(locale=help_locale)["text"]
+    )
     wake_create.add_argument(
         "when",
-        help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
+        help=_wh.create_when().envelope(locale=help_locale)["text"],
     )
     # From ``harness.wake_types``, NOT ``harness.wake``. The help names the SHARED
     # cap rather than a second number that could drift from it — but the parser is
@@ -1676,8 +1628,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # directly so it had no cap at all. Said here rather than leaving the
         # limit to be discovered by being refused (review round 1, R5).
         help=(
-            "the self-prompt delivered when it fires "
-            f"(at most {MAX_WAKE_MESSAGE_CHARS} characters)"
+            _wh.create_message(max=str(MAX_WAKE_MESSAGE_CHARS)).envelope(locale=help_locale)["text"]
         ),
     )
     wake_create.add_argument(
@@ -1691,7 +1642,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # tool path uses, so `40s` / `8h30m` mean the same thing from either
         # entry point — including its deliberate rejection of a bare number
         # and of a zero interval, both of which are runaway loops.
-        help='repeat every DURATION after the first fire ("5m", "1h", "8h30m")',
+        help=_wh.create_every().envelope(locale=help_locale)["text"],
     )
     wake_create.add_argument(
         "--until",
@@ -1701,33 +1652,32 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # `advance_wake_schedule`'s `retired: until` have always honoured it;
         # only the CLI could not express it, so a scheduled automation could
         # only ever be unbounded (round 4, R4).
-        help='stop repeating after this time ("in 7d", "at 09:30")',
+        help=_wh.create_until().envelope(locale=help_locale)["text"],
     )
     wake_create.add_argument(
         "--limit",
         type=int,
         default=None,
         metavar="N",
-        help="stop repeating after N fires",
+        help=_wh.create_limit().envelope(locale=help_locale)["text"],
     )
     wake_create.add_argument(
         "--notify",
         action="store_true",
-        help=(
-            "notify on completion of the wake's turn (default quiet: scripted "
-            "arms match the contract; errored turns notify regardless)"
-        ),
+        help=(_wh.create_notify().envelope(locale=help_locale)["text"]),
     )
-    wake_create.add_argument("--json", action="store_true", help="machine-readable output")
+    wake_create.add_argument(
+        "--json", action="store_true", help=_wh.json().envelope(locale=help_locale)["text"]
+    )
     wake_serve = wake_sub.add_parser(
         "serve",
-        help="run the supervisor in the foreground (what the LaunchAgent runs)",
+        help=_wh.serve().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     wake_serve.add_argument(
         "--once",
         action="store_true",
-        help="fire whatever is due right now, then exit",
+        help=_wh.serve_once().envelope(locale=help_locale)["text"],
     )
 
     # Standing monitors — the wake family's read-only sibling. Top-level beside
@@ -1737,7 +1687,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # design statement rather than an omission.
     monitor_parser = subparsers.add_parser(
         "monitor",
-        help="Inspect standing monitors and cancel one on a closed session",
+        help=_mn.monitor().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # DEFAULTS ON THE PARENT, the `wake_parser` discipline: `monitor_command`
@@ -1748,37 +1698,37 @@ def build_cli_parser() -> argparse.ArgumentParser:
     monitor_sub = monitor_parser.add_subparsers(dest="monitor_command")
     monitor_status = monitor_sub.add_parser(
         "status",
-        help="every monitor on this machine, soonest first",
+        help=_mn.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    monitor_status.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_status.add_argument(
+        "--json", action="store_true", help=_mn.json().envelope(locale=help_locale)["text"]
+    )
     monitor_cancel = monitor_sub.add_parser(
         "cancel",
-        help=(
-            "cancel a monitor on a session with no runtime open (a live session changes "
-            "its own monitors from inside)"
-        ),
+        help=(_mn.cancel().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
-    monitor_cancel.add_argument("session", help="session id the monitor belongs to")
-    monitor_cancel.add_argument("monitor_id", metavar="id", help="monitor id (m1, m2, …)")
-    monitor_cancel.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_cancel.add_argument("session", help=_mn.session().envelope(locale=help_locale)["text"])
+    monitor_cancel.add_argument(
+        "monitor_id", metavar="id", help=_mn.monitor_id().envelope(locale=help_locale)["text"]
+    )
+    monitor_cancel.add_argument(
+        "--json", action="store_true", help=_mn.json().envelope(locale=help_locale)["text"]
+    )
 
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
     update_parser = subparsers.add_parser(
         "update",
-        help=(
-            "Upgrade this install from PyPI. Not the lop-update script, "
-            "which rebuilds the global runtime from a local git checkout."
-        ),
+        help=(_up.update().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     update_parser.add_argument(
         "--check",
         action="store_true",
-        help="Print installed vs PyPI; do not install",
+        help=_up.check().envelope(locale=help_locale)["text"],
     )
     # Hidden (``SUPPRESS``): nobody types this, and it is not an upgrade — it is
     # the repair step ``lop update`` runs in a CHILD process from the newly
@@ -1829,12 +1779,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="from_snapshot",
         metavar="DIR_OR_REF",
         default=None,
-        help=(
-            "Install a local source tree (a directory, or a git ref of the current "
-            "repository) into its own install generation. On macOS, a ref that is exactly a "
-            "published release installs the published wheel from PyPI — the only build "
-            "carrying the macOS key agent — and every other ref is built from source."
-        ),
+        help=(_up.from_snapshot().envelope(locale=help_locale)["text"]),
     )
     # The deliberate-downgrade override for --from-snapshot: without it a target
     # STRICTLY OLDER than the install the pointer names is refused before any
@@ -1847,12 +1792,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--allow-downgrade",
         dest="allow_downgrade",
         action="store_true",
-        help=(
-            "Allow --from-snapshot to install a build OLDER than the current install "
-            "(a deliberate rollback; recorded in the install marker). Without "
-            "--from-snapshot it is refused on the PyPI path, which only installs "
-            "newer versions; the refresh flags take precedence."
-        ),
+        help=(_up.allow_downgrade().envelope(locale=help_locale)["text"]),
     )
     # The isolated verified controller has UNKNOWN/PIP kind. These explicit
     # destination arguments authorize ONLY its canonical immutable protocol;
@@ -1863,11 +1803,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--no-services",
         dest="no_services",
         action="store_true",
-        help=(
-            "Do not bring the `lop serve` daemons onto the new build; the supervised "
-            "daemons are still repaired. Use this only when something else will "
-            "start the serves, e.g. a script that owns their launch."
-        ),
+        help=(_up.no_services().envelope(locale=help_locale)["text"]),
     )
     # S3b's per-run override of the mesh-roll switch (note §5): the roll is
     # otherwise queued when this update moves to a newer version and
@@ -1878,10 +1814,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--no-roll",
         dest="no_roll",
         action="store_true",
-        help=(
-            "Do not queue a mesh rollout for this update, whatever "
-            "`network.rollout_on_update` says; `lop network update` still rolls by hand."
-        ),
+        help=(_up.no_roll().envelope(locale=help_locale)["text"]),
     )
 
     # The NON-RUNTIME SERVICES, as one verb group. A service is a long-lived
@@ -1892,56 +1825,39 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # prints can name a command that exists.
     services_parser = subparsers.add_parser(
         "services",
-        help=(
-            "Bring this machine's non-runtime services (serve daemons and the "
-            "supervised daemons) onto the current build, without stopping any "
-            "running conversation"
-        ),
+        help=(_sr.services().envelope(locale=help_locale)["text"]),
         # A reader who opens this page is asking what a "service" IS, and the verb
         # group defined nothing (design review D9). The distinction it draws is the
         # one the whole feature rests on: a RUNTIME is a conversation and is never
         # touched; everything else that serves this machine can be brought along.
-        description=(
-            "Everything local_operator runs for this machine that is not a conversation. "
-            "A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the "
-            "mobile relay, the browser bridge, the tunnel and the wakes agent. "
-            "Runtimes — the processes holding your conversations — are never stopped: "
-            "'restart' reloads a serve daemon in place, keeping its pid and socket."
-        ),
+        description=(_sr.services_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_subparsers = services_parser.add_subparsers(dest="services_command")
     services_subparsers.add_parser(
         "status",
-        help=(
-            "Report each non-runtime service, the build it is serving, and the build "
-            "the install is on"
-        ),
+        help=(_sr.status().envelope(locale=help_locale)["text"]),
         # D9 put the distinction on the GROUP page; a reader who runs `services status
         # --help` directly was still shown no prose at all (design review D10).
-        description=(
-            "Read-only. Names the build the install is on and, for each `lop serve` "
-            "daemon, the build it is SERVING — both sides of every comparison, because "
-            "the ordinary drift on this machine is a same-version rebuild where the "
-            "version alone cannot show that a daemon is behind."
-        ),
+        description=(_sr.status_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_restart = services_subparsers.add_parser(
         "restart",
-        help="Move every service onto the current build (never stops a runtime)",
+        help=_sr.restart().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
+    # Format the code-owned constant exactly as before; the message owns the
+    # surrounding prose and can translate it without freezing the default.
     services_restart.add_argument(
         "--wait",
         type=_positive_seconds,
         default=None,
         metavar="SECONDS",
         help=(
-            "How long to wait for an asked daemon to come back on the new build "
-            f"(default: {DEFAULT_SERVICES_WAIT_S:g}s; must be positive). A daemon that does "
-            "not make it is reported, left serving the build it loaded, and retried by "
-            "the next `lop services restart`."
+            _sr.wait(wait_seconds=f"{DEFAULT_SERVICES_WAIT_S:g}").envelope(locale=help_locale)[
+                "text"
+            ]
         ),
     )
     # The RECOVERY verb, and the only destructive one in this group. It exists
@@ -1953,24 +1869,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # only way out, and the pid to kill discoverable only by `lsof`.
     services_reclaim = services_subparsers.add_parser(
         "reclaim",
-        help=(
-            "End a `lop serve` daemon that is recorded but not serving its address "
-            "(never one that is serving)"
-        ),
-        description=(
-            "Ask ONE serve daemon, named by pid, to leave, escalating from SIGTERM to "
-            "SIGKILL at a bound, after proving the process is this product's serve "
-            "daemon and that it is not the one serving the address its record names. "
-            "`lop services status` lists the daemons this is for. It is never "
-            "automatic: the daemon may be supervising session runtimes, and no reader "
-            "of a record can prove a successor is ready to take its place."
-        ),
+        help=(_sr.reclaim().envelope(locale=help_locale)["text"]),
+        description=(_sr.reclaim_description().envelope(locale=help_locale)["text"]),
         parents=[parent_parser],
     )
     services_reclaim.add_argument(
         "pid",
         type=int,
-        help="The daemon's pid, exactly as `lop services status` prints it",
+        help=_sr.pid().envelope(locale=help_locale)["text"],
     )
 
     # The install LAYOUT's own commands. One verb group rather than flags on
@@ -2020,13 +1926,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser(
         "install",
-        help="Manage the local install generations (layout for the stable `lop` runtime)",
+        help=_in.install().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     install_subparsers = install_parser.add_subparsers(dest="install_command")
     prune_parser = install_subparsers.add_parser(
         "prune",
-        help="Delete install generations nothing is running from",
+        help=_in.prune().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     prune_parser.add_argument(
@@ -2034,20 +1940,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=_generation_count,
         default=DEFAULT_KEEP_GENERATIONS,
         metavar="N",
-        help=(
-            "How many unreferenced generations to keep (default: %(default)s; 0 or "
-            "more). A generation named by a live or saved session, and the one "
-            "`current` points at, are never removed"
-        ),
+        help=(_in.keep().envelope(locale=help_locale)["text"]),
     )
     install_subparsers.add_parser(
         "migrate",
-        help="Copy this install into the generation layout and point `current` at it",
+        help=_in.migrate().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     install_subparsers.add_parser(
         "status",
-        help="Show the install layout: pointer, generations and what a new `lop` would load",
+        help=_in.status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
@@ -2116,7 +2018,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
         "login",
-        help="Log in to a provider (OAuth or API key)",
+        help=_li.login().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     login_parser.add_argument(
@@ -2124,111 +2026,125 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="?",
         default=None,
-        help="Provider to log in to (e.g., openai, anthropic, kimi, xai). "
-        "Omit to list login-capable providers.",
+        help=_li.provider().envelope(locale=help_locale)["text"],
     )
     logout_parser = subparsers.add_parser(
         "logout",
-        help="Log out of a provider (removes stored credentials)",
+        help=_lo.logout().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     logout_parser.add_argument(
         "provider",
         type=str,
-        help="Provider to log out of",
+        help=_lo.provider().envelope(locale=help_locale)["text"],
     )
     subparsers.add_parser(
         "login-status",
-        help="List stored provider credentials and their status",
+        help=_ls.login_status().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     # Alias matching the docs/REWRITE.md section B spelling (`status`).
     subparsers.add_parser(
         "status",
-        help="Alias for login-status: list stored provider credentials",
+        help=_ls.status_alias().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
 
     # --- Additive MCP subcommands (rewrite) --------------------------------
-    mcp_parser = subparsers.add_parser("mcp", help="Manage MCP servers", parents=[parent_parser])
+    mcp_parser = subparsers.add_parser(
+        "mcp", help=_mh.mcp().envelope(locale=help_locale)["text"], parents=[parent_parser]
+    )
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
     mcp_subparsers.add_parser(
         "list",
-        help="List configured MCP servers (all sources merged)",
+        help=_mh.list().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     mcp_add_parser = mcp_subparsers.add_parser(
         "add",
-        help="Add an MCP server (stdio command or http/sse URL)",
+        help=_mh.add().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_add_parser.add_argument("name", type=str, help="Server name")
     mcp_add_parser.add_argument(
-        "--command", type=str, default=None, help="Stdio command to launch the server"
+        "name", type=str, help=_mh.add_name().envelope(locale=help_locale)["text"]
+    )
+    mcp_add_parser.add_argument(
+        "--command",
+        type=str,
+        default=None,
+        help=_mh.add_command().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--arg",
         action="append",
         default=None,
         dest="server_args",
-        help="Stdio command argument (repeatable)",
+        help=_mh.add_arg().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--env",
         action="append",
         default=None,
         dest="server_env",
-        help="Environment variable KEY=VALUE for the stdio server (repeatable)",
+        help=_mh.add_env().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--url",
         type=str,
         default=None,
-        help="HTTP/SSE server URL (alternative to --command)",
+        help=_mh.add_url().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--scope",
         type=str,
         choices=["global", "project"],
         default="global",
-        help="Config scope to write (default: global ~/.local-operator/mcp.json)",
+        help=_mh.add_scope().envelope(locale=help_locale)["text"],
     )
     mcp_add_parser.add_argument(
         "--oauth",
         action="store_true",
-        help="Enable OAuth for a remote HTTP server",
+        help=_mh.add_oauth().envelope(locale=help_locale)["text"],
     )
     mcp_remove_parser = mcp_subparsers.add_parser(
         "remove",
-        help="Remove an MCP server from a config scope",
+        help=_mh.remove_server().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_remove_parser.add_argument("name", type=str, help="Server name to remove")
+    mcp_remove_parser.add_argument(
+        "name", type=str, help=_mh.remove_name().envelope(locale=help_locale)["text"]
+    )
     mcp_remove_parser.add_argument(
         "--scope",
         type=str,
         choices=["global", "project"],
         default="global",
-        help="Config scope to remove from (default: global)",
+        help=_mh.remove_scope().envelope(locale=help_locale)["text"],
     )
     mcp_login_parser = mcp_subparsers.add_parser(
         "login",
-        help="Authenticate one OAuth-enabled MCP server",
+        help=_mh.login().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_login_parser.add_argument("name", type=str, help="Server name to authenticate")
+    mcp_login_parser.add_argument(
+        "name", type=str, help=_mh.login_name().envelope(locale=help_locale)["text"]
+    )
     mcp_logout_parser = mcp_subparsers.add_parser(
         "logout",
-        help="Remove the stored OAuth credential for one MCP server",
+        help=_mh.logout().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_logout_parser.add_argument("name", type=str, help="Server name to log out")
+    mcp_logout_parser.add_argument(
+        "name", type=str, help=_mh.logout_name().envelope(locale=help_locale)["text"]
+    )
     mcp_reauth_parser = mcp_subparsers.add_parser(
         "reauth",
-        help="Log out of one OAuth MCP server and run a fresh authorization",
+        help=_mh.reauth().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
-    mcp_reauth_parser.add_argument("name", type=str, help="Server name to re-authenticate")
+    mcp_reauth_parser.add_argument(
+        "name", type=str, help=_mh.reauth_name().envelope(locale=help_locale)["text"]
+    )
 
     # Built separately so provider transports stay off the CLI import path.
     from local_operator.web_fetch.cli import add_fetch_subparser
@@ -2242,7 +2158,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # inside a subcommand NEVER clobbers a root-level ``--yolo`` (the
     # argparse re-default quirk that already applies to the legacy parent
     # flags must not swallow this one — ``--yolo exec "task"`` is documented).
-    _propagate_global_flags(parser)
+    _propagate_global_flags(parser, help_locale=help_locale)
 
     return parser
 
@@ -2265,7 +2181,9 @@ def _add_global_flag(parser: argparse.ArgumentParser, flag: str, **kwargs: Any) 
     parser.add_argument(flag, **kwargs)
 
 
-def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
+def _propagate_global_flags(
+    parser: argparse.ArgumentParser, *, help_locale: str | None = None
+) -> None:
     """Re-declare the position-independent global options on every subparser.
 
     Not routed through ``parent_parser``: a shared parent action with a SUPPRESS
@@ -2283,6 +2201,13 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
     the clobber: `--resume bogus config list` exited 0 in silence while
     `config list --resume bogus` exited 1 with the recovery listing.
     """
+
+    # A build owns one snapshot, including every recursive child. Direct
+    # standalone callers still resolve freshly; never cache locale globally.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
     for action in parser._actions:
         if not isinstance(action, argparse._SubParsersAction):
             continue
@@ -2303,12 +2228,9 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                     # ``unattended`` (design §2 OQ4 — the target decides), so the
                     # global sentence would promise the flag something the product
                     # makes conditional. The verb marks itself; see ``network.cli``.
-                    "Conditional for this verb's peer create: the session starts "
-                    "unattended only when the target device grants this one the "
-                    "`unattended` capability"
+                    _gh.yolo_conditional().envelope(locale=help_locale)["text"]
                     if getattr(subparser, "yolo_needs_grant", False)
-                    else "Auto-approve all tool executions (read/write/exec tiers)"
-                    " without prompting"
+                    else _gh.yolo().envelope(locale=help_locale)["text"]
                 ),
             )
             _add_global_flag(
@@ -2319,7 +2241,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 default=argparse.SUPPRESS,
                 metavar="SESSION_ID",
                 dest="resume",
-                help="Resume a previous session by id. Pass with no id for the most recent.",
+                help=_gh.propagated_resume().envelope(locale=help_locale)["text"],
             )
             # The run-shaping trio, for the same reason and by the same
             # mechanism. An external supervisor driving `lop exec` composes its
@@ -2336,7 +2258,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="hosting",
-                help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
+                help=_gh.propagated_hosting().envelope(locale=help_locale)["text"],
             )
             _add_global_flag(
                 subparser,
@@ -2344,7 +2266,7 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="model",
-                help="Model to use for this run",
+                help=_gh.propagated_model().envelope(locale=help_locale)["text"],
             )
             _add_global_flag(
                 subparser,
@@ -2352,9 +2274,9 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="run_in",
-                help="Working directory to run the operator in",
+                help=_gh.propagated_run_in().envelope(locale=help_locale)["text"],
             )
-            _propagate_global_flags(subparser)
+            _propagate_global_flags(subparser, help_locale=help_locale)
 
 
 def _credential_git_helper_command(args: argparse.Namespace) -> int:
@@ -2605,7 +2527,11 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
-        elif setting.kind in (settings_io.Kind.CASCADE, settings_io.Kind.LIST):
+        elif setting.kind in (settings_io.Kind.CASCADE, settings_io.Kind.LIST) or (
+            # A ``{model, effort}`` subagent tier (#2428) is JSON too.
+            setting.validate_value is settings_io.validate_tier_value
+            and value.strip().startswith("{")
+        ):
             # The guessing ladder below knows int/float/bool/null and nothing
             # structured in EITHER sense:
             #
@@ -3321,10 +3247,10 @@ def browser_command(args: argparse.Namespace) -> int:
         sessions = config_dir() / "sessions"
         if command == "cleanup":
             if not args.yes:
-                print("No changes. Repeat with --yes to approve this exact session and generation.")
+                print(_bt(_b.no_changes()))
                 return 1
             if Path(args.session_id).name != args.session_id or args.session_id in (".", ".."):
-                print("Invalid session id; no action taken.")
+                print(_bt(_b.invalid_session()))
                 return 1
             try:
                 # THE CONFIG ROOT TRAVELS WITH THE CALL (review round 3, NIT 1): the
@@ -3344,22 +3270,22 @@ def browser_command(args: argparse.Namespace) -> int:
                 # class name instead threw that away and read as a truncated
                 # message. Keep the class name only for genuinely unexpected types.
                 detail = str(exc) or type(exc).__name__
-                print(f"Cleanup blocked: {detail} Nothing was closed.")
+                print(_bt(_b.cleanup_blocked(detail=detail)))
                 return 1
             if result.state == "closed":
-                message = "Browser cleanup: closed. The tab was closed and its record settled."
+                message = _bt(_b.cleanup_closed())
             elif result.state == "retained":
-                message = f"Browser cleanup: retained — {result.detail or 'the tab is held open'}."
+                message = _bt(
+                    _b.cleanup_retained(
+                        detail=str(result.detail or _bt(_b.cleanup_tab_held_open()))
+                    )
+                )
             elif result.state == "pending":
                 # The generation is deliberately NOT rotated by a failed attempt
                 # any more, so the value they already copied stays correct.
-                message = (
-                    f"Browser cleanup: pending — nothing was closed ({result.detail}). "
-                    "Retry the same command once the bridge answers; "
-                    "the generation you copied is still current."
-                )
+                message = _bt(_b.cleanup_pending(detail=str(result.detail)))
             else:
-                message = f"Browser cleanup: no action taken — {result.detail}."
+                message = _bt(_b.cleanup_no_action(detail=str(result.detail)))
             print(textwrap.fill(message, width=78, subsequent_indent="  "))
             return 0 if result.state in ("closed", "retained") else 1
         rows = read_inventory(sessions)
@@ -3415,14 +3341,9 @@ def browser_command(args: argparse.Namespace) -> int:
             return 0
         if not rows and not live_tabs:
             print(
-                "No browser tabs and no ownership records."
+                _bt(_b.no_tabs_known())
                 if live_known
-                else textwrap.fill(
-                    "No ownership records. The bridge did not answer, so open "
-                    "tabs are unknown — run 'lop browser status' to check the "
-                    "daemon.",
-                    width=78,
-                )
+                else textwrap.fill(_bt(_b.no_tabs_unknown()), width=78)
             )
             return 0
         if rows:
@@ -3437,7 +3358,9 @@ def browser_command(args: argparse.Namespace) -> int:
                 mark = "  <- cleanup candidate" if row.get("cleanup_candidate") else ""
                 # rstrip so an unmarked row carries no trailing padding.
                 print(f"{row['session_id']}  {str(row.get('state', '')):<{width}}{mark}".rstrip())
-                print(f"  generation={row.get('generation', '')}")
+                print(
+                    f"  generation={row.get('generation', '')}"
+                )  # i18n: ignore token line: `generation=` names the --generation flag; data
                 # Wrapped on the same discipline as the reason below it: a
                 # retention reason is free text (it can quote a whole approval
                 # URL), so an unwrapped line here ran to 141 columns beside
@@ -3490,13 +3413,10 @@ def browser_command(args: argparse.Namespace) -> int:
                         width=78,
                     )
                 )
-            print(f"\nlive tabs ({len(unowned)}, not selectable for cleanup):")
+            print(_bt(_b.live_tabs(count=str(len(unowned)))))
             for tab in unowned:
                 print(f"  - {tab.get('url', '')}")
-            print(
-                "  Handles are redacted, so these cannot be attributed to a record above."
-                "\n  Close an unwanted tab by hand; provenance is unproven."
-            )
+            print(_bt(_b.handles_redacted()))
         elif not live_known and rows:
             # The records rendered above are only half the answer, and silence
             # here would read as "the browser is empty" beside them.
@@ -3509,9 +3429,9 @@ def browser_command(args: argparse.Namespace) -> int:
                     width=78,
                 )
             )
-        print("\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.")
+        print(_bt(_b.read_only()))
         if any(row.get("cleanup_candidate") for row in rows):
-            print("Exact cleanup: lop browser cleanup SESSION --generation GENERATION --yes")
+            print(_bt(_b.exact_cleanup()))
         return 0
     if command == "serve":
         from local_operator.browser_bridge.daemon import main as serve_main
@@ -3532,10 +3452,12 @@ def browser_command(args: argparse.Namespace) -> int:
         for step in steps:
             print(f"  {step}")
         if not result.get("ok"):
-            print(f"\n\033[1;31m{result.get('error', 'install failed')}\033[0m")
+            print(
+                f"\n\033[1;31m{result.get('error', _bt(_b.install_failed()))}\033[0m"
+            )  # i18n: ignore ANSI-styled wrapper; install-layer error text; fallback extracted
             return 1
-        print("\nbrowser bridge installed and healthy.")
-        print("  load the Local Operator extension, then run `lop browser pair`.")
+        print(_bt(_b.bridge_installed()))
+        print(_bt(_b.load_extension()))
         return 0
     if command == "status":
         if getattr(args, "repair", False):
@@ -3543,15 +3465,29 @@ def browser_command(args: argparse.Namespace) -> int:
             for line in repair["steps"]:
                 print(f"  {line}")
             if not repair["ok"]:
-                print(f"\n\033[1;31m{repair['error']}\033[0m")
+                print(
+                    f"\n\033[1;31m{repair['error']}\033[0m"
+                )  # i18n: ignore ANSI-styled passthrough; bridge/install text; escapes formatting
                 return 1
-            print("\nbrowser bridge state reconciled.")
+            print(_bt(_b.bridge_reconciled()))
             return 0
         result = browser_install.status()
         health = result.get("health") or {}
         assert isinstance(health, dict)
-        print(f"installed:           {'yes' if result['installed'] else 'no'}")
-        print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
+        print(
+            _bt(
+                _b.installed_line(
+                    value=_bt(_b.status_yes()) if result["installed"] else _bt(_b.status_no())
+                )
+            )
+        )
+        print(
+            _bt(
+                _b.daemon_healthy(
+                    value=_bt(_b.status_yes()) if result["healthy"] else _bt(_b.status_no())
+                )
+            )
+        )
         # A daemon that predates capability advertisement cannot be told apart
         # from an extension that advertised nothing by its own record, so the
         # harness refuses the new actions with "restart the bridge" — and this is
@@ -3561,13 +3497,16 @@ def browser_command(args: argparse.Namespace) -> int:
         # than the field it is being asked about, whatever its heartbeat says.
         record = result.get("state")
         if isinstance(record, dict) and not record.get("capabilities_known"):
-            print(
-                "bridge:              predates the file-transfer actions — "
-                "run 'lop browser restart'"
-            )
+            print(_bt(_b.bridge_predates()))
         connected = bool(health.get("extension_connected"))
         unresponsive = bool(health.get("extension_unresponsive"))
-        print(f"extension connected: {'yes' if connected else 'no'}")
+        print(
+            _bt(
+                _b.extension_connected(
+                    value=_bt(_b.status_yes()) if connected else _bt(_b.status_no())
+                )
+            )
+        )
         # The extension-update advisory, immediately under the line it is about.
         # Deliberately a NOTE and not a fault: nothing is refused for an older
         # extension any more (see MIN_SUPPORTED_PROTO), and the extension line
@@ -3584,8 +3523,14 @@ def browser_command(args: argparse.Namespace) -> int:
                 str(health.get("extension_version", "")),
                 str(health.get("extension_expected_version") or EXPECTED_EXTENSION_VERSION),
             )
-            print(f"                     {note} (fixes and security patches)")
-        print(f"paired:              {'yes' if result['paired'] else 'no'}")
+            print(_bt(_b.extension_update_note(note=note)))
+        print(
+            _bt(
+                _b.paired_line(
+                    value=_bt(_b.status_yes()) if result["paired"] else _bt(_b.status_no())
+                )
+            )
+        )
         # A paired-but-not-connected browser is the normal closed/backgrounded
         # state, not a fault; say so rather than leaving a user to guess (N2).
         # `extension_unresponsive` is the OTHER way to be paired-but-not-
@@ -3646,15 +3591,15 @@ def browser_command(args: argparse.Namespace) -> int:
             if isinstance(driven_tabs, list):
                 if driven_tabs:
                     label = f"{len(driven_tabs)} tab{'s' if len(driven_tabs) != 1 else ''}"
-                    print(f"driving:             {label}")
+                    print(_bt(_b.driving_tabs(label=label)))
                     for entry in driven_tabs:
                         if isinstance(entry, dict):
                             print(f"                     - {entry.get('url', '')}")
                 else:
-                    print("driving:             no tabs driven")
+                    print(_bt(_b.driving_none()))
             elif health.get("current_url"):
                 # Older daemon still running under a newer CLI.
-                print(f"driving:             {health.get('current_url')}")
+                print(_bt(_b.driving_url(url=str(health.get("current_url")))))
         # A stale heartbeat is THE thing to surface here. status reads the live
         # /health socket while every session reads the discovery file, so when
         # the two disagree status looks authoritative and sessions silently
@@ -3662,17 +3607,11 @@ def browser_command(args: argparse.Namespace) -> int:
         # and names the fix instead of leaving both parties to guess.
         stale_age = browser_install.stale_heartbeat_age()
         if stale_age is not None:
-            print(
-                f"\n\033[1;33mheartbeat:           STALE by {stale_age:.0f}s "
-                "(discovery file is not being refreshed)\033[0m"
-            )
-            print(
-                "                     sessions will fall back to cmux despite the daemon "
-                "being healthy."
-            )
-            print("                     run 'lop browser status --repair' to reconcile.")
-        print(f"port:                {result['port']}")
-        print(f"log:                 {result['log']}")
+            print(_bt(_b.heartbeat_stale(age=f"{stale_age:.0f}")))
+            print(_bt(_b.heartbeat_fallback()))
+            print(_bt(_b.heartbeat_repair()))
+        print(_bt(_b.port_line(port=str(result["port"]))))
+        print(_bt(_b.log_line(log=str(result["log"]))))
         # Where `download` puts files, and how much is already there. Computed
         # HERE rather than read from /health: the user asking "where did my
         # download go" needs the real path and the real size, and both cost a
@@ -3680,41 +3619,37 @@ def browser_command(args: argparse.Namespace) -> int:
         from local_operator import browser_files
 
         downloads = browser_files.downloads_root()
-        print(f"downloads:           {downloads}")
+        print(_bt(_b.downloads_line(path=str(downloads))))
         if downloads.is_dir():
             size = browser_files.dir_size(downloads)
-            print(
-                f"                     {size} bytes, one audit row per decision in "
-                f"{browser_files.AUDIT_FILENAME}"
-            )
+            print(_bt(_b.downloads_detail(size=str(size), audit=browser_files.AUDIT_FILENAME)))
         # Only when this is NOT the default install: the common case should not
         # grow a line, but an isolated run (a redirected HOME or
         # LOCAL_OPERATOR_CONFIG_DIR) is otherwise indistinguishable from the
         # real one in this output.
         supervisor = result.get("supervisor")
         if supervisor not in (browser_install.LABEL, browser_install.SYSTEMD_UNIT):
-            print(f"supervisor:          {supervisor}")
-            print(f"config root:         {result.get('config_root')}")
+            print(_bt(_b.supervisor_line(name=str(supervisor))))
+            print(_bt(_b.config_root_line(path=str(result.get("config_root")))))
         # An inherited registration explains a daemon running under a name this
         # build would not otherwise mention, so name the file to act on.
         legacy = result.get("legacy_registration")
         if legacy:
-            print(f"legacy install:      {legacy}")
-            print("                     (written by an older build under the shared name;")
-            print("                      'lop browser uninstall' removes it)")
+            print(_bt(_b.legacy_install(path=str(legacy))))
+            print(_bt(_b.legacy_note()))
         # A registration this root found but may not manage. Named explicitly,
         # because otherwise a user sees "installed: no" beside a daemon that is
         # plainly running and has nothing to act on.
         ambiguous = result.get("legacy_ambiguity")
         if ambiguous:
-            print(f"\n\033[1;33munclaimed registration:\033[0m {ambiguous}")
+            print(_bt(_b.unclaimed_registration(detail=str(ambiguous))))
         return 0 if result["healthy"] else 1
     if command == "pair":
         if getattr(args, "list", False):
             result = browser_install.status()
             pairing = pairing_status()
             if not pairing.get("identities"):
-                print("no browser extension is paired. Run 'lop browser pair' to pair one.")
+                print(_bt(_b.pair_no_extension()))
                 return 0
             live_health = result.get("health")
             # /health is a plain dict when the daemon answered and None when it
@@ -3729,7 +3664,7 @@ def browser_command(args: argparse.Namespace) -> int:
                 # under the identity rows the waiting codes read as part of the
                 # `note:` above them, which is a different subject.
                 print("")
-                print("waiting:             these installs have asked to pair")
+                print(_bt(_b.waiting_header()))
                 for item in pending:
                     print(f"                     {item.get('code')}  {_waiting_label(item)}")
             return 0
@@ -3738,16 +3673,14 @@ def browser_command(args: argparse.Namespace) -> int:
             identities = pairing.get("identities") or []
             target = _resolve_pairing_target(args.revoke, identities)
             if target is None:
-                print(
-                    f"\033[1;31mno single authorised extension matches " f"'{args.revoke}'.\033[0m"
-                )
+                print(_bt(_b.revoke_no_match(target=args.revoke)))
                 for entry in identities:
                     print(
                         f"  {_short_extension_id(str(entry.get('extension_id', '')))}"
                         f"  {entry.get('label', '') or 'unnamed install'}"
                     )
                 if not identities:
-                    print("  (nothing is paired)")
+                    print(_bt(_b.nothing_paired()))
                 return 1
             # File-level, exactly like --reset: the daemon's revocation watcher
             # then severs THIS identity's live socket within a few seconds and
@@ -3764,7 +3697,7 @@ def browser_command(args: argparse.Namespace) -> int:
             label = str(target.get("label", "")) or _short_extension_id(
                 str(target.get("extension_id", ""))
             )
-            print(f"revoked {label}; any live connection for it is dropped within a few seconds.")
+            print(_bt(_b.revoked(label=label)))
             return 0
         if args.reset:
             # File unlink here; the running daemon's revocation watcher (and
@@ -3772,18 +3705,16 @@ def browser_command(args: argparse.Namespace) -> int:
             # few seconds, so a revoked browser loses drive authority now, not
             # only at its next reconnect (findings A5/U1).
             reset_pairing()
-            print(
-                "revoked the paired browser; any live connection is dropped within a few seconds."
-            )
+            print(_bt(_b.revoked_browser()))
             # A successful revoke must not report failure to a wrapping script
             # even when no extension is currently waiting to pair (UX-N1).
             pair = pairing_status()
             code = pair.get("pending_code")
             if code:
-                print(f"pairing code: {code}")
-                print("enter this 6-digit code in the Local Operator extension popup.")
+                print(_bt(_b.pairing_code(code=code)))
+                print(_bt(_b.enter_code()))
             else:
-                print("open the extension popup to pair a browser again.")
+                print(_bt(_b.open_popup()))
             return 0
         pair = pairing_status()
         pending = pair.get("pending") or []
@@ -3796,13 +3727,15 @@ def browser_command(args: argparse.Namespace) -> int:
             # (copy review C6), which is precisely when "the matching popup" has
             # no referent and the id prefix is the only token that resolves.
             for item in pending:
-                print(f"pairing code: {item.get('code')}   {_waiting_label(item)}")
-            print("enter each code in the matching Local Operator extension popup.")
+                print(
+                    _bt(_b.pairing_code_labeled(code=item.get("code"), label=_waiting_label(item)))
+                )
+            print(_bt(_b.enter_each_code()))
             return 0
         code = pair.get("pending_code")
         if code:
-            print(f"pairing code: {code}")
-            print("enter this 6-digit code in the Local Operator extension popup.")
+            print(_bt(_b.pairing_code(code=code)))
+            print(_bt(_b.enter_code()))
             return 0
         if pair.get("paired"):
             # Names BOTH routes, because the old wording offered only `--reset`
@@ -3812,14 +3745,9 @@ def browser_command(args: argparse.Namespace) -> int:
             # code for that install appears here once it connects, so the honest
             # line points at its popup first. "Connects" rather than "its worker
             # dials" (copy review C9): a compliance analyst has no worker.
-            print(
-                "a browser is already paired. To pair another, open ITS popup and enter the"
-                " code that appears here (the code appears once that install's extension"
-                " connects). 'lop browser pair --list' lists every authorised install;"
-                " '--reset' revokes them all."
-            )
+            print(_bt(_b.already_paired()))
             return 0
-        print("no extension is waiting to pair. Open the extension popup, then retry.")
+        print(_bt(_b.no_extension_waiting()))
         return 1
     if command == "drive":
         result = browser_install.pin_driver(args.target)
@@ -3830,17 +3758,19 @@ def browser_command(args: argparse.Namespace) -> int:
             # "matches" and two unrelated installs under it. `matches` is absent
             # on a daemon predating this field, and the old sentence stands.
             matches = result.get("matches")
-            message = str(result.get("error", "could not pin the driver"))
+            message = str(result.get("error", _bt(_b.could_not_pin_driver())))
             if isinstance(matches, int):
                 # Echo the target AS TYPED, not the normalised form (review round 5,
                 # NIT 5): `drive 'ohcmfhja…'` used to answer "…matches 'ohcmfhja'.",
                 # editing the very token the user is looking at.
                 message = (
-                    f"no connected extension matches '{args.target}'."
+                    _bt(_b.drive_no_connected(target=args.target))
                     if matches == 0
-                    else f"no single connected extension matches '{args.target}'."
+                    else _bt(_b.drive_no_single(target=args.target))
                 )
-            print(f"\033[1;31m{message}\033[0m")
+            print(
+                f"\033[1;31m{message}\033[0m"
+            )  # i18n: ignore ANSI-styled wrapper; message text assembled above and extracted
             # Candidates arrive as ids; the LABEL is what makes a list of ids
             # actionable when two installs share one (copy review C1), and it is
             # the string `status` itself printed a moment earlier. Read from the
@@ -3850,7 +3780,7 @@ def browser_command(args: argparse.Namespace) -> int:
                 # A lead-in that is true whether or not anything matched, because
                 # these rows are the AUTHORISED set rather than the matches (copy
                 # review C8).
-                print("authorised installs:")
+                print(_bt(_b.authorised_installs()))
             labels = {
                 str(entry.get("extension_id", "")): str(entry.get("label", ""))
                 for entry in (pairing_status().get("identities") or [])
@@ -3860,14 +3790,18 @@ def browser_command(args: argparse.Namespace) -> int:
                 suffix = f"  {label}" if label else ""
                 print(f"  {_short_extension_id(str(extension_id))}{suffix}")
             return 1
-        print("now driving: " f"{_short_extension_id(str(result.get('driver_extension_id', '')))}")
+        print(
+            _bt(_b.now_driving(id=_short_extension_id(str(result.get("driver_extension_id", "")))))
+        )
         return 0
     if command in ("start", "stop", "restart"):
         result = browser_install.service_action(command)
         if not result["ok"]:
-            print(f"\033[1;31m{result['error']}\033[0m")
+            print(
+                f"\033[1;31m{result['error']}\033[0m"
+            )  # i18n: ignore ANSI-styled passthrough of service-layer text; escapes formatting
             return 1
-        print(f"browser bridge {command} ok")
+        print(_bt(_b.service_ok(command=command)))
         return 0
     if command == "logs":
         import subprocess
@@ -3886,20 +3820,13 @@ def browser_command(args: argparse.Namespace) -> int:
         # journal instead, and the Windows arm's command is PowerShell's
         # Get-Content, not a tail.
         if browser_install.logs_read_the_log_file() and not browser_install.log_path().exists():
-            print(
-                f"no daemon log at {browser_install.log_path()}.\n"
-                "The bridge has not run under a service supervisor on this machine. "
-                "Run `lop browser install`, or `lop browser serve` to run it in the "
-                "foreground."
-            )
+            print(_bt(_b.logs_missing(path=str(browser_install.log_path()))))
             return 1
         try:
             return subprocess.call(command_line)
         except FileNotFoundError:
             print(
-                f"\033[1;31mcannot run `{command_line[0]}`: not installed on this "
-                f"system.\033[0m\nThe daemon's output is at "
-                f"{browser_install.log_location()}."
+                _bt(_b.cannot_run(command=command_line[0], location=browser_install.log_location()))
             )
             return 1
     if command == "uninstall":
@@ -3913,16 +3840,16 @@ def browser_command(args: argparse.Namespace) -> int:
         # the user got a bare non-zero exit with no explanation.
         error = result.get("error")
         if not result.get("ok") and error:
-            print(f"\033[1;31m{error}\033[0m")
+            print(
+                f"\033[1;31m{error}\033[0m"
+            )  # i18n: ignore ANSI-styled passthrough of uninstall-layer text; escapes formatting
         # What was found and deliberately left behind, so "uninstalled" never
         # silently means "and something of yours is still registered".
         warning = result.get("warning")
         if warning:
-            print(f"\033[1;33mnote:\033[0m {warning}")
+            print(_bt(_b.note_prefix(warning=str(warning))))
         return 0 if result.get("ok") else 1
-    print(
-        "usage: lop browser " "{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
-    )
+    print(_bt(_b.usage()))
     return 1
 
 
@@ -4747,7 +4674,16 @@ def _print_kept(protected: list[tuple[str, str]]) -> None:
     for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
         print(f"  kept         {name}  ({guard})")
     if len(protected) > _CLEANUP_TEXT_ROWS:
-        print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
+        # The pass caps each kept group at WINDOW_NAMES_CAP while still counting
+        # every member into its total, so ``--json`` carries the same capped
+        # list, not every row. The old text promised the full listing and was
+        # false past the cap; say what the JSON actually holds.
+        from local_operator.session.delegated_retention import WINDOW_NAMES_CAP
+
+        print(
+            f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept "
+            f"(list capped at {WINDOW_NAMES_CAP} per group; --json carries the same capped list)"
+        )
 
 
 def _content_class_counts(rows: list[Any]) -> dict[str, int]:
@@ -4781,7 +4717,51 @@ def _content_row_text(row: Any, verb: str) -> str:
     return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
 
 
-def _print_content(delegated: Any, verb: str) -> None:
+def _confirmation_answer(prompt: str, *, json_mode: bool) -> str:
+    """Read one typed confirmation; in ``--json`` mode the PROMPT goes to stderr.
+
+    ``input()`` writes its prompt to stdout, which put a human sentence in front
+    of the JSON document on the one path that both asks and emits (QA Q2's
+    ``confirmed``). The answer is read the same way either way; only the prompt's
+    stream moves, so a script that parsed before still parses.
+    """
+    if json_mode:
+        print(prompt, end="", file=sys.stderr)
+        try:
+            return sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def _content_switches_off(policy: Any) -> str:
+    """The switch(es) actually keeping the content phase off (QA Q1).
+
+    The gate is ``delegated.enabled AND delegated.scratchpad.enabled``, and the
+    previous sentence named the scratchpad switch unconditionally — wrong when
+    the master delegated switch was the one turned off. Naming what is actually
+    off is the difference between an actionable refusal and a hunt through
+    settings for a row that is already on.
+    """
+    off = [
+        name
+        for name, enabled in (
+            ("session.cleanup.delegated.enabled", policy.delegated_enabled),
+            ("session.cleanup.delegated.scratchpad.enabled", policy.delegated_scratchpad_enabled),
+        )
+        if not enabled
+    ]
+    if not off:
+        return "the delegated content policy"
+    if len(off) == 1:
+        return f"{off[0]} is off"
+    return f"{off[0]} and {off[1]} are both off"
+
+
+def _print_content(delegated: Any, verb: str, policy: Any | None = None) -> None:
     """The scratchpad-content block under the delegated section.
 
     The summary names the pads, the bytes and the per-class counts; the rows
@@ -4792,9 +4772,13 @@ def _print_content(delegated: Any, verb: str) -> None:
     """
     skipped = getattr(delegated, "content_skipped", None)
     if skipped == "disabled":
+        switch = (
+            _content_switches_off(policy) if policy is not None else "the content switch is off"
+        )
         print(
-            "  scratchpad content: off (session.cleanup.delegated.scratchpad.enabled "
-            "is off; --force runs it once)"
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"  scratchpad content: off ({switch}; --force runs it once)"
         )
         return
     if skipped == "disabled during the pass":
@@ -4818,6 +4802,126 @@ def _print_content(delegated: Any, verb: str) -> None:
         print(
             f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
             "(--json lists every row)"
+        )
+
+
+def _scratchpad_shape_summary(pad: Any, limit: int = 4) -> str:
+    """The compact one-line shape summary for an audit row.
+
+    The largest entries first (the audit sorts them), because the question the
+    section answers is "what is holding the bytes". A link keeps its target and
+    shows the link's own allocation — normally 0 B — rather than the tree it
+    points at: a pad that symlinks ``node_modules`` to a shared store holds no
+    copy, and the whole point of the row is to say which case this is.
+    """
+    parts: list[str] = []
+    for shape in pad.shapes[:limit]:
+        name = shape.path.rsplit("/", 1)[-1]
+        if shape.kind == "link":
+            target = shape.target or "(unresolved)"
+            parts.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"{name} link → {target} ({_format_bytes(shape.bytes)})"
+            )
+        else:
+            parts.append(f"{name} {_format_bytes(shape.bytes)}")
+    remaining = len(pad.shapes) - limit
+    if remaining > 0:
+        parts.append(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"+{remaining} more"
+        )
+    return "; ".join(parts)
+
+
+def _print_scratchpads(audit: Any) -> None:
+    """The ``== Scratchpads ==`` section: every pad, largest first, capped.
+
+    Read-only by construction (``session/scratchpad_audit.py``), so this is
+    safe on any run and prints even when BOTH cleanup switches are off: the
+    class split is exactly what an operator needs to see before deciding which
+    switch to turn on. Rows are capped like every other listing; ``--json``
+    carries every pad, every shape and the worktree pointers.
+    """
+    from local_operator.session.scratchpad_audit import pointer_display
+
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        "== Scratchpads =="
+    )
+    truncated = (
+        f"; {audit.truncated} walk(s) truncated at the depth/entry cap" if audit.truncated else ""
+    )
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
+        f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
+    )
+    for pad in audit.pads[:_CLEANUP_TEXT_ROWS]:
+        tags: list[str] = []
+        if pad.over_cap:
+            tags.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "OVER CAP"
+            )
+        if not pad.user_visible:
+            tags.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "delegated"
+            )
+        tag = f"  [{', '.join(tags)}]" if tags else ""
+        print(f"  {pad.session}  {pad.origin or 'user'}  {_format_bytes(pad.bytes)}{tag}")
+        summary = _scratchpad_shape_summary(pad)
+        if summary:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"    shapes: {summary}"
+            )
+        if pad.over_cap:
+            # UX U1: the shapes are a NAME vocabulary, not an accounting of the
+            # pad. Say where the rest is and how to inspect it from the totals
+            # already measured — a second walk here would double the section's
+            # cost, and implying shape cleanup always brings a pad under cap
+            # would be false.
+            shape_bytes = sum(shape.bytes for shape in pad.shapes)
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"    other content: inspect {pad.path} with du; shapes account for "
+                f"{_format_bytes(shape_bytes)} of {_format_bytes(pad.bytes)}"
+            )
+        for marker in pad.git_markers:
+            if marker.kind == "worktree":
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git worktree → {pointer_display(marker)}  ({marker.path})"
+                )
+            elif marker.kind == "repository":
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git repository  ({marker.path})"
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git link → {pointer_display(marker)}  ({marker.path})"
+                )
+    if len(audit.pads) > _CLEANUP_TEXT_ROWS:
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"  ... and {len(audit.pads) - _CLEANUP_TEXT_ROWS} more "
+            "(--json lists every pad)"
         )
 
 
@@ -4846,14 +4950,27 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     confirmation — with its own confirmation sentence.
 
     A class runs when its switch is on (or ``--force``); the parent class also
-    needs a limit. A dry run lists both whatever the switches say and notes it.
+    needs a limit. A dry run lists both whatever the switches say and notes it,
+    and then prints the read-only ``== Scratchpads ==`` audit for every pad in
+    the store (parent and delegated) — that section is the one piece that runs
+    with BOTH switches off, because it changes nothing.
+
+    ``--scratchpads-only`` narrows the command to the content layer. With
+    ``--dry-run`` it prints the audit and the reclaim plan and removes nothing;
+    without, it reclaims content from non-live delegated pads and NEVER runs
+    the record pass or touches the parent class — so cache-shaped data can go
+    without deleting one transcript. ``--force`` still overrides the delegated
+    switches for that one run; the confirmation says "reclaim scratchpad
+    content" and nothing else.
 
     Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
     delegated cleanup off); 2 refused (parent switch off without ``--force`` and
     nothing else to run, or confirmation declined); 3 ran with errors. ``--json``
     always emits a JSON object on stdout, whatever the outcome; its pre-existing
     keys now cover BOTH classes (rows carry ``origin``) and ``parent`` /
-    ``delegated`` hold the per-class detail.
+    ``delegated`` hold the per-class detail. A dry run and
+    ``--scratchpads-only`` add ``scratchpads``, and the latter adds
+    ``scratchpads_only: true``.
     """
     import dataclasses
     import json as _json
@@ -4870,6 +4987,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         DelegatedResult,
         run_delegated_pass,
     )
+    from local_operator.session.scratchpad_audit import audit_scratchpads
 
     root = config_dir()
     policy = policy_from_config(ConfigManager(root))
@@ -4891,6 +5009,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         "or pass --force to run once"
     )
     force = bool(args.force)
+    # A flag, not a mode switch on the policy: the content layer's own gates
+    # (delegated origin, live claim/lease, armed wake/monitor, current session)
+    # still run inside ``run_delegated_pass``. This only skips the RECORD and
+    # PARENT halves of the command.
+    scratchpads_only = bool(getattr(args, "scratchpads_only", False))
     parent_runs = policy.has_any_limit and (policy.enabled or force)
     delegated_runs = policy.delegated_enabled or force
 
@@ -4900,6 +5023,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         *,
         outcome: str,
         confirmed: bool | None = None,
+        scratchpads: Any | None = None,
+        scratchpads_only: bool = False,
     ) -> None:
         both = [parent] + ([delegated] if delegated is not None else [])
 
@@ -4947,6 +5072,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 enabled=policy.delegated_enabled,
                 max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
                 within_window=getattr(delegated, "within_window", 0),
+                kept_by_origin=getattr(delegated, "kept_by_origin", 0),
+                kept_by_origin_names=getattr(delegated, "kept_by_origin_names", []),
                 remaining=getattr(delegated, "remaining", 0),
                 scratchpad_enabled=policy.delegated_scratchpad_enabled,
                 scratchpad={
@@ -4965,7 +5092,183 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 },
             )
             payload["delegated"] = detail
+        if scratchpads is not None:
+            payload["scratchpads"] = scratchpads.as_dict()
+        if scratchpads_only:
+            payload["scratchpads_only"] = True
         print(_json.dumps(payload, indent=2))
+
+    if scratchpads_only and args.dry_run:
+        # ONLY the audit and the content plan: the record halves are not part of
+        # this mode, and printing them would offer rows it will never apply.
+        moment = time.time()
+        with file_logging():
+            preview = run_delegated_pass(
+                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+            )
+        audit = audit_scratchpads(root / "sessions")
+        if args.json:
+            emit_json(
+                CleanupResult(dry_run=True, skipped="not run (--scratchpads-only)"),
+                preview,
+                outcome="dry-run",
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 0
+        _print_scratchpads(audit)
+        print()
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            "== Scratchpad content =="
+        )
+        _print_content(preview, "would reclaim", policy)
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"nothing was removed (dry run); the record of real removals is {record_path}"
+        )
+        return 0
+
+    if scratchpads_only and not args.dry_run:
+        # CONTENT ONLY. The parent class and the record pass are not called at
+        # all, which is the whole point: an operator can reclaim cache-shaped
+        # data without deleting one transcript. ``only=()`` empties the record
+        # candidate list; ``content_only`` re-applies exactly the pads the
+        # preview named, so a pad that became eligible between preview and
+        # confirmation is not taken unseen.
+        content_allowed = force or (
+            policy.delegated_enabled and policy.delegated_scratchpad_enabled
+        )
+        if not content_allowed:
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="not run (--scratchpads-only)"),
+                    None,
+                    outcome="refused",
+                    scratchpads_only=True,
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"refusing to reclaim scratchpad content: "
+                    f"{_content_switches_off(policy)}; turn it on or pass --force to "
+                    "run once",
+                    file=sys.stderr,
+                )
+            return 2
+        moment = time.time()
+        with file_logging():
+            preview = run_delegated_pass(
+                root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment, only=()
+            )
+        audit = audit_scratchpads(root / "sessions")
+        if not args.json:
+            _print_scratchpads(audit)
+            print()
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "== Scratchpad content =="
+            )
+            _print_content(preview, "would reclaim", policy)
+        if not preview.content:
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="not run (--scratchpads-only)"),
+                    preview,
+                    outcome="nothing-to-do",
+                    scratchpads=audit,
+                    scratchpads_only=True,
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    "nothing to reclaim"
+                )
+            return 0
+        # ``--yes`` IS a confirmation of the shown plan, not an absence of one
+        # (QA Q2): the JSON says so, so a script can tell "applied after a typed
+        # yes" from "applied without any confirmation".
+        confirmed: bool | None = True if args.yes else None
+        prompt = (
+            f"Reclaim build/cache content from {len(preview.content)} session(s)? "
+            "Transcripts and conversation records will be kept. Type 'yes' to confirm: "
+        )
+        if not args.yes:
+            if not sys.stdin.isatty():
+                if args.json:
+                    emit_json(
+                        CleanupResult(skipped="not run (--scratchpads-only)"),
+                        preview,
+                        outcome="refused",
+                        confirmed=False,
+                        scratchpads=audit,
+                        scratchpads_only=True,
+                    )
+                else:
+                    print(
+                        # i18n: ignore operator CLI output, English-only; owned by the
+                        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                        "refusing: not a terminal and --yes was not given, so nothing "
+                        "was removed",
+                        file=sys.stderr,
+                    )
+                return 2
+            answer = _confirmation_answer(prompt, json_mode=bool(args.json))
+            confirmed = answer.strip().lower() == "yes"
+            if not confirmed:
+                if args.json:
+                    emit_json(
+                        CleanupResult(skipped="not run (--scratchpads-only)"),
+                        preview,
+                        outcome="refused",
+                        confirmed=False,
+                        scratchpads=audit,
+                        scratchpads_only=True,
+                    )
+                else:
+                    print("not confirmed; nothing was removed")
+                return 2
+        with file_logging():
+            result = run_delegated_pass(
+                root,
+                lambda: policy,
+                force=force,
+                actor="cli",
+                now=moment,
+                budget_s=UNBOUNDED,
+                only=(),
+                content_only=[row.session for row in preview.content],
+            )
+        if args.json:
+            emit_json(
+                CleanupResult(skipped="not run (--scratchpads-only)"),
+                result,
+                outcome="removed",
+                confirmed=confirmed,
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 3 if result.errors else 0
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"Reclaimed scratchpad content from {len(result.content)} session(s); "
+            "no transcripts or conversation records were deleted."
+        )
+        if result.errors:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"  {result.errors} error(s); see the log",
+                file=sys.stderr,
+            )
+        print(f"record: {record_path}")
+        return 3 if result.errors else 0
 
     if not parent_runs and not delegated_runs:
         if not policy.has_any_limit:
@@ -5056,21 +5359,43 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
-                f"newer than {delegated.hours}h (kept); {delegated_verb} {len(delegated.removed)}"
+                f"kept inside {delegated.hours}h or with no usable clock; "
+                f"{delegated.kept_by_origin} kept by origin; "
+                f"{delegated_verb} {len(delegated.removed)}"
             )
             _print_cleanup_rows(delegated.removed, delegated_verb)
+            # UX U4: on a store with thousands of kept rows the size view is
+            # buried below them. Name the narrower command BEFORE the kept list
+            # so it is discoverable from the top of the section.
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "  size by pad: lop sessions cleanup --scratchpads-only --dry-run "
+                "(Scratchpads section below)"
+            )
             _print_kept(delegated.protected)
             if delegated_runs:
                 content_verb = (
                     "would reclaim" if delegated_verb == "would remove" else "will reclaim"
                 )
-                _print_content(delegated, content_verb)
+                _print_content(delegated, content_verb, policy)
 
     if args.dry_run:
+        # The read-only store audit runs here whatever BOTH switches say: it is
+        # the section an operator turns the switches on FROM. It never opens a
+        # path for writing (``session/scratchpad_audit.py``).
+        audit = audit_scratchpads(root / "sessions")
         if args.json:
-            emit_json(parent_preview, delegated_preview, outcome="dry-run")
+            emit_json(
+                parent_preview,
+                delegated_preview,
+                outcome="dry-run",
+                scratchpads=audit,
+            )
             return 0
         sections("would remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
+        print()
+        _print_scratchpads(audit)
         print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
@@ -5105,7 +5430,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print("nothing to remove")
         return 0
 
-    confirmed: bool | None = None
+    # Same Q2 rule for the full command: ``--yes`` is a confirmation.
+    confirmed: bool | None = True if args.yes else None
     total = parent_rows + delegated_rows
     if total and content_rows:
         prompt = (
@@ -5116,7 +5442,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         prompt = f"remove {total} session(s)? type 'yes' to confirm: "
     else:
         prompt = (
-            f"reclaim scratchpad content from {content_rows} session(s)? " "type 'yes' to confirm: "
+            f"Reclaim build/cache content from {content_rows} session(s)? "
+            "Transcripts and conversation records will be kept. Type 'yes' to confirm: "
         )
     if not args.yes:
         if not sys.stdin.isatty():
@@ -5128,16 +5455,17 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 2
-        try:
-            answer = input(prompt)
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
+        answer = _confirmation_answer(prompt, json_mode=bool(args.json))
         confirmed = answer.strip().lower() == "yes"
         if not confirmed:
             if args.json:
                 emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
-                print("not confirmed; nothing was removed")
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    "not confirmed; nothing was removed"
+                )
             return 2
 
     # The removal WARNINGs go to the rotating file (`local-operator.log`),
@@ -5176,10 +5504,22 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     print(f"removed {len(removed)} session(s)")
     _print_cleanup_rows(removed, "removed")
     if delegated_result.content:
-        print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+        if removed:
+            print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+        else:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"Reclaimed scratchpad content from {len(delegated_result.content)} session(s); "
+                "no transcripts or conversation records were deleted."
+            )
     if errors:
         print(f"  {errors} error(s); see the log", file=sys.stderr)
-    print(f"record: {record_path}")
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        f"record: {record_path}"
+    )
     return 3 if errors else 0
 
 
@@ -10102,7 +10442,9 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     return 0
 
 
-def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
+def _add_hub_publish_flags(
+    parser: argparse.ArgumentParser, *, help_locale: str | None = None
+) -> None:
     """The preview/confirm surface `agents push` and `teams push` share (p2p3 §7.3).
 
     One definition so the two commands cannot drift; the flags only DO anything
@@ -10112,39 +10454,43 @@ def _add_hub_publish_flags(parser: argparse.ArgumentParser) -> None:
     satisfied, so it never needs refusing.
     """
 
+    # A parser build owns one locale snapshot, so reuse its explicit value.
+    # Standalone callers still need a fresh read-only resolution on every call;
+    # None, not a process cache or truthiness, distinguishes those two paths.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
+
     parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
-        help="Skip the confirmation prompts; does not accept unresolved values "
-        "(use --accept-unresolved for those)",
+        help=_hs.publish_yes().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--preview-only",
         action="store_true",
-        help="Run the preview and print the diff without publishing (exit 2 when it "
-        "would generalize something)",
+        help=_hs.publish_preview_only().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Machine-readable preview output; it carries the reference values and the "
-        "single-use commit pin, so treat it as sensitive",
+        help=_hs.publish_json().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--accept-unresolved",
         action="store_true",
-        help="Acknowledge every value the preview could not classify, publishing " "them as-is",
+        help=_hs.publish_accept_unresolved().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--allow-internal-ops",
         action="store_true",
-        help="Consent to the internal-operations allowance for an organization publish "
-        "(requires --org; shows the consent text interactively)",
+        help=_hs.publish_allow_internal_ops().envelope(locale=help_locale)["text"],
     )
 
 
-def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
+def _add_hub_sync_flags(parser: argparse.ArgumentParser, *, help_locale: str | None = None) -> None:
     """The merge flags `agents sync` and `teams sync` share (design B5.3).
 
     One definition so the two commands cannot drift. `--prefer` is a CONFLICT
@@ -10152,30 +10498,44 @@ def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
     a side wholesale, and neither is reachable from auto-update.
     """
 
+    # A parser build owns one locale snapshot, so reuse its explicit value.
+    # Standalone callers still need a fresh read-only resolution on every call;
+    # None, not a process cache or truthiness, distinguishes those two paths.
+    if help_locale is None:
+        from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+        help_locale = resolve_help_locale()
+
     parser.add_argument(
-        "--check", action="store_true", help="Only report what is available; change nothing"
+        "--check", action="store_true", help=_hs.sync_check().envelope(locale=help_locale)["text"]
     )
     parser.add_argument(
         "--prefer",
         choices=("local", "remote"),
         default=None,
-        help="Decide a conflict: keep your side or take the hub's for the sections both changed",
+        help=_hs.sync_prefer().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--accept-unknown-baseline",
         action="store_true",
-        help="Apply when the baseline is unknown: hub additions are taken, nothing of yours goes",
+        help=_hs.sync_accept_unknown_baseline().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--replace",
         action="store_true",
-        help="DISCARD your copy for the hub's (echoes what it discarded; needs --yes)",
+        help=_hs.sync_replace().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--yes", action="store_true", help="Confirm --replace")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Show what would change; write no agent rows"
+        "--yes", action="store_true", help=_hs.sync_yes().envelope(locale=help_locale)["text"]
     )
-    parser.add_argument("--json", action="store_true", help="Emit the report as JSON")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_hs.sync_dry_run().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--json", action="store_true", help=_hs.sync_json().envelope(locale=help_locale)["text"]
+    )
 
 
 def _prepare_sync_flags(args: argparse.Namespace) -> str | None:

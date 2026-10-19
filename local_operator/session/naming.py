@@ -76,6 +76,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, cast
 
+from local_operator.harness.rows import user_row_text
+
 if TYPE_CHECKING:
     # For the fit-check question's annotation only. The RUNTIME import is
     # function-local on purpose: ``local_operator.classification`` costs a
@@ -1568,17 +1570,30 @@ def _theme_turns(turns: Sequence[_Turn], newest: str) -> list[tuple[str, str]]:
     the last one, because the retitle call fires at SUBMIT — before the turn has
     run — so ``session.history()`` does not yet contain it, and the tail is
     exactly where a genuine change of subject shows up.
+
+    A USER turn is read as a ROW (:func:`harness.rows.user_row_text`), not as it
+    was SENT. A ``$skill`` invocation is stored and announced as its expanded
+    payload, so that turn's raw text is the invocation header plus the whole
+    SKILL.md body — and :func:`build_theme_context` bounds each turn
+    (``THEME_TURN_CHARS``), so the budget went on the header and the typed
+    request behind it was cut out of the sample the model titled from. Both
+    callers (the automatic retitle and ``/title --refresh``) sample through
+    here, and the newest message arrives on the same rule for the same reason:
+    at SUBMIT it IS the payload. The typed line rides the payload's own
+    ``invocation`` attribute, so the row is what a theme judgement wants;
+    reading it here is the transcript's decision applied, not a second rule.
     """
     collected: list[tuple[str, str]] = []
     for turn in turns:
         role = getattr(turn, "role", "")
         if role not in ("user", "assistant"):
             continue
-        text = " ".join((getattr(turn, "text", "") or "").split())
+        raw = getattr(turn, "text", "") or ""
+        text = " ".join((user_row_text(raw) if role == "user" else raw).split())
         if not text:
             continue
         collected.append((role, text))
-    newest_clean = " ".join((newest or "").split())
+    newest_clean = " ".join(user_row_text(newest or "").split())
     if newest_clean and (not collected or collected[-1] != ("user", newest_clean)):
         collected.append(("user", newest_clean))
     return collected

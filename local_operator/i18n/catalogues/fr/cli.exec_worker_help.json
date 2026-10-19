@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "Sélecteur de nom d’agent",
+  "cli.exec_worker_help.agent_id": "ID de l’agent",
+  "cli.exec_worker_help.control": "Publier un enregistrement de session et servir la socket de contrôle pour cette exécution",
+  "cli.exec_worker_help.hosting": "Plateforme d’hébergement à forcer",
+  "cli.exec_worker_help.job_id": "ID de tâche du registre ; quand il est défini, le processus ajoute un enregistrement terminal (finished_at + exit_code) au registre JSONL à la sortie",
+  "cli.exec_worker_help.json": "Émettre une ligne JSON par événement d’agent",
+  "cli.exec_worker_help.model": "Modèle à forcer",
+  "cli.exec_worker_help.prompt": "Le prompt à exécuter",
+  "cli.exec_worker_help.resume": "Reprendre une session précédente par id (ou ''@latest'')",
+  "cli.exec_worker_help.train": "Mode entraînement : ajouter la transcription au répertoire de l’agent (ancien --train)",
+  "cli.exec_worker_help.yolo": "Approuver automatiquement tous les niveaux d’outils"
+}

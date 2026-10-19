@@ -118,6 +118,9 @@ class StallRecorder:
         #: Worst wake stretch seen inside the noise window, or None if no
         #: window was measured; see :meth:`begin_noise_window`.
         self.noise_floor_ms: float | None = None
+        #: Loop-thread CPU calibration ratio from :meth:`calibrate_cpu`;
+        #: 1.0 until measured, so uncalibrated callers keep fixed ceilings.
+        self.cpu_calibration_ratio: float = 1.0
         self._noise_open = False
 
     async def _probe(self) -> None:
@@ -155,6 +158,40 @@ class StallRecorder:
         except asyncio.CancelledError:
             pass
         self._task = None
+
+    def calibrate_cpu(self, burn_ms: float = 50.0) -> float:
+        """Measure this loop thread's CPU throughput before the turn.
+
+        WHY a second estimator beside the wake-stretch floor: the floor is
+        measured while the loop is IDLE (pumping pauses), so it names how
+        late a wake can land, not how fast the loop thread executes CPU
+        work while a turn is running — descheduling and slow silicon
+        stretch a CPU sum without any single idle wake being late, which
+        is how a healthy 539 ms reading crossed the 500 ms ceiling the
+        floor had kept at 500. This leg burns a FIXED amount of loop-thread
+        CPU (timed with ``thread_time``, the LoopCpuProbe clock in
+        ``tests/unit/tools/test_loop_liveness.py``) and returns wall/CPU:
+        ~1.0 on an uncontended runner, >1.0 exactly when this thread is
+        not getting the CPU its clock says it used. The burn is a tight
+        allocation-free arithmetic loop, so no GC pause of its own lands
+        in the interval (that probe deducts GC because it samples OTHER
+        work; here there is nothing to deduct). Call BEFORE :meth:`start`
+        so the probe never records the burn itself as a stall. The ratio
+        is clamped to [1.0, 3.0]: it may only widen, never tighten, and
+        the 1500 ms cap in :meth:`assert_no_stall_loaded` still bounds it.
+        """
+        burn_s = burn_ms / 1000.0
+        start_cpu = time.thread_time()
+        start_wall = time.perf_counter()
+        acc = 0
+        while time.thread_time() - start_cpu < burn_s:
+            acc += sum(range(64))  # fixed work; result unused by design
+        cpu_used = time.thread_time() - start_cpu
+        wall_used = time.perf_counter() - start_wall
+        del acc
+        ratio = wall_used / cpu_used if cpu_used > 0 else 1.0
+        self.cpu_calibration_ratio = min(max(ratio, 1.0), 3.0)
+        return self.cpu_calibration_ratio
 
     def begin_noise_window(self) -> None:
         """Start measuring the run's own wake-stretch floor.
@@ -250,10 +287,18 @@ class StallRecorder:
         bound_wall = wall_ceiling_ms
         context = ""
         if noise_floor_ms is not None:
-            bound_cpu = min(max(NOISE_K * noise_floor_ms, cpu_ceiling_ms), NOISE_CPU_CAP_MS)
+            # The calibrated ceiling scales the fixed bar by the loop
+            # thread's own measured throughput (see :meth:`calibrate_cpu`)
+            # instead of raising the constant: the file's history above is
+            # the warning that the next slower runner beats any new fixed
+            # number. The NOISE_CPU_CAP_MS cap is unchanged, so a genuinely
+            # long CPU burst still reds on every runner.
+            calibrated_cpu = cpu_ceiling_ms * self.cpu_calibration_ratio
+            bound_cpu = min(max(NOISE_K * noise_floor_ms, calibrated_cpu), NOISE_CPU_CAP_MS)
             bound_wall = min(max(NOISE_K * noise_floor_ms, wall_ceiling_ms), NOISE_WALL_CAP_MS)
             context = (
-                f"noise floor {noise_floor_ms:.0f} ms -> CPU bound {bound_cpu:.0f} ms, "
+                f"noise floor {noise_floor_ms:.0f} ms, CPU calibration "
+                f"x{self.cpu_calibration_ratio:.2f} -> CPU bound {bound_cpu:.0f} ms, "
                 f"wall bound {bound_wall:.0f} ms "
                 f"(K={NOISE_K:g}, caps {NOISE_CPU_CAP_MS:.0f}/{NOISE_WALL_CAP_MS:.0f}, "
                 f"fixed {cpu_ceiling_ms:.0f}/{wall_ceiling_ms:.0f})"
@@ -1189,7 +1234,10 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     scales with the run's own measured noise floor (the idle leg below; the
     constants and the CI dataset behind them sit beside NOISE_K): on a quiet
     machine it is the calibrated 500 ms, on a loaded runner the bound rides
-    the runner's own wake noise."""
+    the runner's own wake noise and its measured loop-thread CPU throughput
+    (the calibration leg below — the idle floor alone cannot see a slow or
+    descheduled loop thread, which is the estimator flaw behind the healthy
+    539 ms reading that crossed the unscaled 500 ms ceiling)."""
     from local_operator.harness.types import (
         AgentEndEvent,
         AgentStartEvent,
@@ -1216,6 +1264,9 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         recorder = StallRecorder()
+        # CPU calibration BEFORE start(): the probe must not record its own
+        # burn, and the ratio must describe this thread before the turn.
+        recorder.calibrate_cpu()
         await recorder.start()
         # The run's own noise floor, measured before the turn: pump the idle
         # app for a spell — timers, paints, the same pump the turn will use —

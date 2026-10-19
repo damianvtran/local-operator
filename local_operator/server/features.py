@@ -113,6 +113,9 @@ def feature_flags() -> dict[str, Any]:
         # and pays the cold engage on its first send, exactly as
         # before. Gating nothing, it needs no key of its own.
         "session_catalogue": 3,
+        # Own key: release-skewed clients must fail closed without hiding the
+        # catalogue itself when durable tags are unavailable.
+        "session_tags": 1,
         # A catalogue that can be asked for ONE scope at a time, resumed
         # by an opaque cursor, and counted per group: the
         # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
@@ -144,6 +147,19 @@ def feature_flags() -> dict[str, Any]:
         # `session_pins` are untouched: no row changes shape, and the
         # pin's own promise is unchanged.
         "session_catalogue_page": 1,
+        # An ORDER the chats list can be read in, named by the `sort`
+        # parameter on GET /v1/desktop/sessions: `sort=activity` is the
+        # sidebar's own head order (rows that need the reader first, then
+        # everything else newest-activity-first), which keeps a reader's
+        # recent conversations inside the first page on a store whose cold
+        # population a wake band would otherwise fill.
+        #
+        # ITS OWN KEY, the same rule `session_catalogue_page` states above:
+        # a client that does not see it sends no `sort` and reads the rank
+        # order byte-for-byte as today, and a backend that lacks it refuses
+        # the parameter BY NAME (`sort must be one of activity.`) rather
+        # than silently answering a different ordering.
+        "session_catalogue_sort": 1,
         # Searching past conversations by their CONTENT (name, id, exact
         # body, bounded soft match) rather than by the page a client
         # already holds. Its own key rather than a bump of
@@ -735,6 +751,12 @@ def feature_flags() -> dict[str, Any]:
         # command surface changes shape — an older renderer simply
         # never hears of this word.
         "aida": 1,
+        # THE LIBRARIAN: the Library header's status/"Organize now" row and the
+        # `/v1/desktop/librarian` pair. ONE key for both halves by the same rule
+        # `projects` states — a row that opened a route an older backend does
+        # not serve is a dead end, and a served route with no row is an orphan.
+        # `1` is the feature's first version; the route shape is frozen.
+        "librarian": 1,
         "projects": 2,
         # THE ONBOARDING APPROVAL SURFACE: GET /v1/desktop/approvals plus the two
         # decision posts (POST /v1/desktop/approvals/{id}/approve|deny). ONE key
@@ -875,6 +897,15 @@ def feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # The global, cross-conversation Library: list/detail/metadata/tags/
+        # content. Its OWN key rather than a bump of `session_files`: the
+        # surfaces (desktop sidebar, TUI /library, phone web, Expo) are new
+        # destinations, so an older backend must be recognisable as "no
+        # Library" and the renderer must not offer the destination at all.
+        # Absent means the surface does not exist — not a degraded Files view.
+        # `1` is the first contract revision; row/occurrence fields are
+        # additive and do not bump it.
+        "library": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
@@ -889,5 +920,13 @@ def feature_flags() -> dict[str, Any]:
         # definitive (show nothing, do not retry), because a backend that
         # answers this key yet 404s the route is broken, not slow.
         "quota_notice": 1,
+        # THE QUEUED ASIDE ADOPT (decision D4): `POST .../asides/{id}/adopt` made
+        # while the conversation is mid-turn answers `status: "queued"` and the
+        # pair lands at the turn's safe boundary as a `history_delta`, instead of
+        # the plain-RuntimeError 503 an older backend gives; a state that cannot
+        # defer is a typed 409 `aside_adopt_refused`. The renderer enables its
+        # mid-turn adopt control only when this key is present, so an older
+        # backend keeps today's disabled state.
+        "aside_adopt_queue": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

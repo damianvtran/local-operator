@@ -3,7 +3,7 @@
 // The queued-ask card: the ATOMIC submit (one complete map, every question id
 // present — the queue refuses a partial one), the deliberate skip (sent as an
 // empty list, which is the contract's own spelling for "no answer"), the
-// answerable-after-deadline state, and the rule that a refusal is rendered in
+// read-only lapsed state after a deadline, and the rule that a refusal is rendered in
 // the DAEMON's own words rather than humanised here.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -57,6 +57,12 @@ function renderCard(row: PendingAsk, onSettled?: () => void) {
 	return render(
 		<AskCard row={row} sessionId="s1" nowMs={Date.now()} onSettled={onSettled} />,
 	);
+}
+
+/** Open a lapsed card's collapsed header — the explicit tap D11 requires before
+ *  anything inside a timed-out ask (its Dismiss included) is reachable. */
+function expandLapsed() {
+	fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
 }
 
 afterEach(() => {
@@ -130,10 +136,69 @@ describe("AskCard", () => {
 		expect(screen.getByText(/not shown in the transcript/)).toBeTruthy();
 	});
 
-	it("keeps a timed-out ask answerable, with the deadline stated", () => {
+	it("collapses a timed-out ask behind a Timed out badge until the user expands it", () => {
+		/* Decision D11 (Ben, 2026-10-15): a lapsed ask reads the way a declined one
+		   does on the desktop — one collapsed row with a status badge. Seeing it is
+		   an explicit tap; nothing about it is answerable, so the collapsed header
+		   offers no control but the disclosure itself. */
 		renderCard(ask({ status: "timed_out" }));
-		expect(screen.getByText(/you can still answer/)).toBeTruthy();
+		const header = screen.getByRole("button", { name: /Timed out/ });
+		expect(header.getAttribute("aria-expanded")).toBe("false");
+		expect(header.textContent).toContain("ship the fix?");
+		expect(screen.queryByText(/the agent goes ahead without your answer/)).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		/* Mounting it takes no focus: a lapsed ask never claims the user (D12). */
+		expect(document.activeElement).not.toBe(header);
+	});
+
+	it("expands a timed-out ask to the read-only card: the question, no answer controls, Dismiss kept", () => {
+		/* Ben's report (2026-10-15): the phone offered the options of an ask whose
+		   deadline had passed, as if the agent were still waiting on them. The
+		   agent has gone ahead without the answer, so the expanded card reads that
+		   and offers only the one op the queue accepts on a timeout — dismiss. */
+		renderCard(ask({ status: "timed_out" }));
+		fireEvent.click(screen.getByRole("button", { name: /Timed out/ }));
+		expect(
+			screen.getByRole("button", { name: /Timed out/ }).getAttribute("aria-expanded"),
+		).toBe("true");
+		/* UX round 2, U13: the badge already says "Timed out" one line above, so
+		   the body starts at what that means rather than repeating the word. */
+		expect(screen.getByText("the agent goes ahead without your answer")).toBeTruthy();
+		expect(screen.queryByText(/^Timed out —/)).toBeNull();
+		expect(screen.queryByRole("button", { name: /^yes$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^no$/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /^decline$/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+		/* UX U7: the question is stated once. Expanded, the header carries only
+		   the badge and the body states the question in full. */
+		expect(screen.getAllByText("ship the fix?").length).toBe(1);
+	});
+
+	it("dismisses a timed-out ask from inside its expanded body", async () => {
+		const settled = vi.fn();
+		renderCard(ask({ status: "timed_out" }), settled);
+		expandLapsed();
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
+		);
+		await waitFor(() => expect(settled).toHaveBeenCalled());
+	});
+
+	it("keeps an OPEN ask answerable when only the phone's clock says its deadline passed", () => {
+		/* Review round 1, R3: the phone's clock may run ahead of the runtime's,
+		   and a stale `open` row from a stopped runtime arrives already re-derived
+		   to `timed_out` by the index readers on the runtime's host. So an `open`
+		   row is still live to the agent: the card keeps its controls and says the
+		   deadline has passed locally, without calling it lapsed. */
+		renderCard(ask({ status: "open", expires_at: Date.now() - 60_000 }));
+		expect(screen.getByRole("button", { name: /^yes$/ })).toBeTruthy();
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
+		expect(screen.getByText("Queued — the agent is continuing; deadline passed")).toBeTruthy();
+		expect(screen.queryByText(/^Timed out —/)).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
 	});
 
 	it("offers no controls on a settled ask, and no error register on an expired one", () => {
@@ -163,6 +228,7 @@ describe("AskCard", () => {
 		   used to be rendered on an open ask, where every tap collected a
 		   refusal sentence that was false about the row under it. */
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
@@ -174,6 +240,7 @@ describe("AskCard", () => {
 		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
 		unmount();
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
 	});
 
@@ -300,6 +367,7 @@ describe("AskCard", () => {
 			),
 		);
 		renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		await waitFor(() => expect(screen.getByText(/nothing was sent/)).toBeTruthy());
 		expect(screen.queryByRole("button", { name: /send answer/ })).toBeNull();
@@ -331,6 +399,7 @@ describe("AskCard", () => {
 			new Error("only a timed-out ask can be dismissed; it is still open."),
 		);
 		renderCard(ask({ status: "timed_out" }));
+		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		const sentence = await screen.findByText(/only a timed-out ask/);
 		const dismiss = screen.getByRole("button", { name: /dismiss — send no reply/ });
@@ -339,15 +408,47 @@ describe("AskCard", () => {
 		).toBeTruthy();
 	});
 
-	it("says a COLD dismissal brings the session up, before the tap", () => {
-		/* U3: the label promises "send no reply" and that stays true, but on a cold
-		   conversation the relay also brings it up to RECORD the dismissal — the
-		   conversation surfaces as active, which the copy owed the reader. */
-		const cold = renderCard(ask({ status: "timed_out", runtime_live: false }));
-		expect(screen.getByText(/the conversation is brought up to record it/)).toBeTruthy();
-		cold.unmount();
-		renderCard(ask({ status: "timed_out" }));
-		expect(screen.queryByText(/the conversation is brought up to record it/)).toBeNull();
+	it("keeps the dismiss control's width while the dismissal is in flight", async () => {
+		/* D1 (design round 1): the in-flight mark used to be the bare glyph `…`,
+		   which collapsed the control from 208 px to a 44 px square under the
+		   thumb. The label IS the width, so keeping it — dimmed and disabled by
+		   the `busy` state — is the whole fix, and the assertion is that the
+		   in-flight name is the resting one. The glyph stays on answer/decline,
+		   where D1 called it optional. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise<never>(() => {}),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expandLapsed();
+		const resting = screen.getByRole("button", { name: "dismiss — send no reply" });
+		fireEvent.click(resting);
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		const inFlight = screen.getByRole("button", { name: "dismiss — send no reply" });
+		// The same node, so the same box: nothing remounted and no label changed.
+		expect(inFlight).toBe(resting);
+		expect((inFlight as HTMLButtonElement).disabled).toBe(true);
+		expect(inFlight.getAttribute("aria-busy")).toBe("true");
+	});
+
+	it("promises no engage for a COLD dismissal, before or during the tap", async () => {
+		/* FORK A (2026-10-16): the relay used to ENGAGE the conversation to RECORD the
+		   dismissal, so the card said so in advance (U3) and named the ~30 s while it
+		   ran. A dismissal now takes the no-boot door on every surface, so "dismiss —
+		   send no reply" is the WHOLE truth warm or cold, and the card must claim no
+		   bring-up at either moment. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise<never>(() => {}),
+		);
+		renderCard(ask({ status: "timed_out", runtime_live: false }));
+		expandLapsed();
+		expect(
+			screen.getByRole("button", { name: /dismiss — send no reply/ }),
+		).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		expect(screen.queryByText(/brought up to record it/)).toBeNull();
+		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		expect(screen.queryByText(/~30 s/)).toBeNull();
 	});
 
 	it("stops claiming an engage the moment the outcome is known", async () => {

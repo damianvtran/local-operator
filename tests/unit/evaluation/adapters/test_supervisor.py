@@ -940,6 +940,25 @@ def _adapter_error(phase: str) -> RpcRemoteError:
     )
 
 
+def _invalid_state_error() -> RpcRemoteError:
+    """The wire error a worker answers when it REFUSES before ``_dispatch``.
+
+    Emitted by ``Worker._handle`` when ``_state`` is not live for the method, so
+    no adapter code ran -- a refusal, not an ambiguous mutation.
+    """
+
+    return RpcRemoteError(
+        "invalid_state",
+        "method is invalid in current state",
+        RpcErrorDetail(
+            exception_type="invalid_state",
+            message="method is invalid in current state",
+            method="execute",
+            operation_id="exec-5fdcadffdce7-obs2",
+        ),
+    )
+
+
 def test_declared_observation_phase_failure_keeps_the_session_usable(
     tmp_path: Path,
 ) -> None:
@@ -971,6 +990,426 @@ def test_declared_observation_phase_failure_keeps_the_session_usable(
     # The worker was left ALIVE and no rescue was demanded, which is what makes
     # a subsequent re-read possible at all.
     assert not raw.terminated and rescue_required == []
+
+
+def test_a_predispatch_refusal_keeps_the_session_usable(
+    tmp_path: Path,
+) -> None:
+    """The MIRROR of ``episode._refused_before_dispatch``: an ``invalid_state``
+    refusal must NOT poison either.
+
+    The worker answers ``invalid_state`` before ``_dispatch``, so nothing was
+    applied -- a refusal is provably non-committed and safe to keep alive. If
+    this poisoned instead, the runner's widened re-bind would hit the poison
+    gate and pay a full backoff to die anyway (the mirror-drift the predicates
+    warn about).
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_invalid_state_error()])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+    )
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        # Usable, not poisoned: the very next call must reach the adapter.
+        session._ensure_usable()
+
+    import asyncio
+
+    asyncio.run(run())
+    assert not raw.terminated and rescue_required == []
+
+
+def test_a_predispatch_refusal_on_a_non_execute_method_still_poisons(
+    tmp_path: Path,
+) -> None:
+    """Negative control: the refusal stay-usable rule is scoped to ``execute``.
+
+    Only the bridge's read-only ``observe`` re-bind consumes a refusal; a
+    refusal on any other mutating method must keep the pre-existing
+    poison-on-ambiguous-failure behaviour, or the supervisor widening would be
+    method-agnostic scope drift.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_invalid_state_error()])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError):
+            await session.reset_start(
+                ResetStartParams(
+                    operation_id="reset",
+                    task_id="task",
+                    episode_id="episode",
+                    artifact_root=str(tmp_path),
+                ),
+                timeout=1,
+            )
+        # A refusal here is NOT the bridge's re-bind path: the session is poisoned.
+        with pytest.raises(SupervisionError, match="poisoned"):
+            await session.observe(ObserveParams(episode_id="episode"), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+def _ambiguous_delivery_error(
+    *,
+    method: str = "execute",
+    delivery: str = "ambiguous",
+    message: str | None = None,
+) -> RpcRemoteError:
+    """The delivered shape of a guest-side transport failure on ``execute``.
+
+    The token rides the MESSAGE text because the RPC envelope has no adapter
+    field for it -- see the sibling helper in ``test_session_arm.py`` and
+    ``GuestExecutionError``'s own note that "across the worker boundary only
+    the message text travels (the ``delivery=`` token in it)".
+    """
+
+    text = (
+        message
+        if message is not None
+        else (f"guest action 1 outcome is unknown; batch not retried; delivery={delivery}")
+    )
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="GuestExecutionError",
+            message=text,
+            method=method,  # pyright: ignore[reportArgumentType]
+            operation_id="exec-330-b14d1b7bcfdd",
+        ),
+    )
+
+
+class _RecordingAmbiguousSupervisor(RawSupervisor):
+    """RawSupervisor that keeps every call's kwargs, for deadline pins."""
+
+    def __init__(self, responses: list[Any]) -> None:
+        super().__init__(responses)
+        self.kwargs: list[dict[str, Any]] = []
+
+    async def _call_raw(self, *args: Any, **kwargs: Any) -> Any:
+        self.kwargs.append(dict(kwargs))
+        return await super()._call_raw(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (_ambiguous_delivery_error(), True),
+        # The OTHER delivery verdict: "not_sent" is provably un-delivered and
+        # deliberately has no re-bind (the adapter's own note: a retry could
+        # only lengthen the dead time) -- only ``ambiguous`` is admitted.
+        (_ambiguous_delivery_error(delivery="not_sent"), False),
+        # Anchored: a longer value that merely STARTS with the token's text
+        # must not match by prefix (the closed vocabulary has no such value;
+        # the anchor keeps a future one from riding in).
+        (_ambiguous_delivery_error(delivery="ambiguous_suffix"), False),
+        # Prose that merely MENTIONS the words, and a value with no left
+        # boundary at all: the declared shape is a '; '-separated clause of
+        # its own, and neither of these is it (agent review round 1).
+        (_ambiguous_delivery_error(message="the earlier delivery=ambiguous batch was fine"), False),
+        (_ambiguous_delivery_error(message="xdelivery=ambiguous"), False),
+        # The declared token in non-final position still matches: anchored
+        # to its own clause, not to end-of-string.
+        (
+            _ambiguous_delivery_error(
+                message="guest action 1 outcome is unknown; delivery=ambiguous; more"
+            ),
+            True,
+        ),
+        # Scoped to ``execute`` at the DETAIL's own method...
+        (_ambiguous_delivery_error(method="observe"), False),
+        # ...and the structured phase is trusted over the message prose: a
+        # declared committed failure keeps its own (stricter) route.
+        (
+            RpcRemoteError(
+                "adapter_error",
+                "adapter operation failed",
+                RpcErrorDetail(
+                    exception_type="GuestExecutionError",
+                    message="delivery=ambiguous",
+                    method="execute",
+                    operation_id="exec-1",
+                    phase="observation",
+                ),
+            ),
+            False,
+        ),
+        (_adapter_error("observation"), False),
+        (_adapter_error("unknown"), False),
+        (_invalid_state_error(), False),
+        (RpcRemoteError("timeout", "adapter call timed out"), False),
+        (RpcRemoteError("adapter_error", "adapter operation failed"), False),
+        (RuntimeError("an unrelated adapter fault"), False),
+    ],
+)
+def test_only_the_declared_ambiguous_delivery_shape_is_admitted(
+    error: BaseException, expected: bool
+) -> None:
+    """The probe gate keys on ONE declared shape, and the exclusions matter.
+
+    Conservative by construction: an error that does not carry the adapter's
+    own ``delivery=ambiguous`` token on an answered ``execute`` with the
+    default phase stays on the pre-existing poison path.
+    """
+
+    from local_operator.evaluation.adapters.supervisor import (
+        _ambiguous_delivery_failure,
+    )
+
+    assert _ambiguous_delivery_failure(error) is expected
+
+
+def test_a_probed_ambiguous_delivery_keeps_the_session_usable(tmp_path: Path) -> None:
+    """The recovery precondition for the ambiguous class: probe answers, no poison.
+
+    The session reports the clearance as an ``AmbiguousRebindCleared`` carrying
+    the original error and the attempt count; the very next call must still
+    reach the adapter, because the bridge's read-only re-bind runs after this.
+    """
+
+    from local_operator.evaluation.adapters.api import ProbeResult
+    from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    original = _ambiguous_delivery_error()
+    raw = RawSupervisor([original, ProbeResult(reachable=True)])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+
+    async def run() -> None:
+        with pytest.raises(AmbiguousRebindCleared) as raised:
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        assert raised.value.original is original
+        assert raised.value.attempt == 1
+        assert raised.value.attempts == 2
+        session._ensure_usable()
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == ["execute", "probe"]
+    # The guest answered: nothing was terminated and no rescue was demanded.
+    assert not raw.terminated and rescue_required == []
+
+
+@pytest.mark.parametrize(
+    "probe_response",
+    [
+        "unreachable",
+        "refused",
+    ],
+)
+def test_a_failed_probe_poisons_and_reraises_the_original_untouched(
+    tmp_path: Path, probe_response: str
+) -> None:
+    """The conservative rule: no probe answer, no re-bind -- today's ending.
+
+    ``unreachable`` is the guest's control server failing the bounded check;
+    ``refused`` is a worker that does not know the method (the fail-closed
+    default for every adapter built before this contract), answered as an
+    ``invalid_request``. Both must poison exactly as before, and the ORIGINAL
+    error -- not the probe failure -- must be what the caller sees.
+    """
+
+    from local_operator.evaluation.adapters.api import ProbeResult
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    original = _ambiguous_delivery_error()
+    response: Any = (
+        ProbeResult(reachable=False)
+        if probe_response == "unreachable"
+        else RpcRemoteError("invalid_request", "request parameters are invalid")
+    )
+    raw = RawSupervisor([original, response])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError) as raised:
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        assert raised.value is original
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == ["execute", "probe"]
+    assert raw.terminated and rescue_required == [True]
+    with pytest.raises(SupervisionError, match="poisoned"):
+        session._ensure_usable()
+
+
+def test_an_ambiguous_delivery_outside_a_wired_budget_never_probes(tmp_path: Path) -> None:
+    """Default posture: no budget wired, no probe, poison -- exactly as before.
+
+    The re-bind budget is opt-in per session (``ambiguous_rebind_budget=0`` is
+    the default), so an arm that never wired the clearance -- the runner's
+    reply-channel arm today -- must not even SEND a probe.
+    """
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    original = _ambiguous_delivery_error()
+    raw = RawSupervisor([original])
+    session = VerifiedAdapterSession(raw, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(RpcRemoteError) as raised:
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        assert raised.value is original
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == ["execute"]
+    assert raw.terminated
+
+
+def test_the_third_ambiguous_delivery_in_one_episode_does_not_re_bind(
+    tmp_path: Path,
+) -> None:
+    """The episode-level bound: two re-binds, then today's ending.
+
+    Three ambiguous deliveries in one episode: the first two are cleared (each
+    after its own answered probe); the third is NOT probed, poisons, and raises
+    the original error -- the pre-change terminal.
+    """
+
+    from local_operator.evaluation.adapters.api import ProbeResult
+    from local_operator.evaluation.adapters.supervisor import AmbiguousRebindCleared
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    first, second, third = (
+        _ambiguous_delivery_error(),
+        _ambiguous_delivery_error(),
+        _ambiguous_delivery_error(),
+    )
+    raw = RawSupervisor(
+        [first, ProbeResult(reachable=True), second, ProbeResult(reachable=True), third]
+    )
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+
+    async def run() -> None:
+        params = _execute_params(verifier.current_observation)
+        for expected_attempt in (1, 2):
+            with pytest.raises(AmbiguousRebindCleared) as raised:
+                await session.execute(params, timeout=1)
+            assert raised.value.attempt == expected_attempt
+            assert raised.value.attempts == 2
+            session._ensure_usable()
+        with pytest.raises(RpcRemoteError) as raised:
+            await session.execute(params, timeout=1)
+        assert raised.value is third
+
+    import asyncio
+
+    asyncio.run(run())
+    # The third delivery is not even probed -- the budget was already spent.
+    assert raw.calls == ["execute", "probe", "execute", "probe", "execute"]
+    assert raw.terminated and rescue_required == [True]
+
+
+def test_the_probe_carries_the_short_deadline(tmp_path: Path) -> None:
+    """The probe's own deadline is the short one, not a step timeout.
+
+    A dead guest must fail fast: the probe RPC is bounded by
+    ``AMBIGUOUS_PROBE_TIMEOUT_S`` (and the RPC layer's 1 s cancel grace), not
+    by the per-call step budget the other environment calls carry.
+    """
+
+    from local_operator.evaluation.adapters.api import ProbeResult
+    from local_operator.evaluation.adapters.supervisor import (
+        AMBIGUOUS_PROBE_TIMEOUT_S,
+        AmbiguousRebindCleared,
+    )
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = _RecordingAmbiguousSupervisor([_ambiguous_delivery_error(), ProbeResult(reachable=True)])
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        ambiguous_rebind_budget=1,
+    )
+
+    async def run() -> None:
+        with pytest.raises(AmbiguousRebindCleared):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+
+    import asyncio
+
+    asyncio.run(run())
+    assert raw.calls == ["execute", "probe"]
+    assert raw.kwargs[1]["timeout"] == AMBIGUOUS_PROBE_TIMEOUT_S
+    assert AMBIGUOUS_PROBE_TIMEOUT_S == 10.0
+
+
+def test_a_cancelled_probe_still_poisons_before_propagating(tmp_path: Path) -> None:
+    """The probe must not become a hole in the poison guarantee.
+
+    Today's code poisons every non-cleared ending, including a cancellation
+    that arrives on the call itself (the ``except BaseException`` block
+    poisons and re-raises). A cancellation delivered while the probe is in
+    flight is inside the SAME call, so it must end the same way: session
+    poisoned, rescue demanded, CancelledError propagating. (agent review
+    round 1.)
+    """
+
+    import asyncio
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor([_ambiguous_delivery_error(), asyncio.CancelledError()])
+    rescue_required: list[bool] = []
+    session = VerifiedAdapterSession(
+        raw,  # pyright: ignore[reportArgumentType]
+        verifier,
+        rescue_required=lambda: rescue_required.append(True),
+        ambiguous_rebind_budget=2,
+    )
+
+    async def run() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await session.execute(_execute_params(verifier.current_observation), timeout=1)
+        with pytest.raises(SupervisionError, match="poisoned"):
+            session._ensure_usable()
+
+    asyncio.run(run())
+    assert raw.calls == ["execute", "probe"]
+    assert raw.terminated and rescue_required == [True]
 
 
 @pytest.mark.parametrize("phase", ["unknown", "observation"])

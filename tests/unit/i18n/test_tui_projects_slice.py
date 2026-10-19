@@ -1,8 +1,8 @@
-"""The Projects send card's extraction-time English and locale boundaries.
+"""Projects send/view extraction-time English and locale boundaries.
 
-The golden is transcribed from the pre-slice source at 9fbd5c89. This slice owns
-only projects_send.py: other Projects views remain advisory. Rendered-frame
-before/after evidence is a separate allocation, not claimed by these checks.
+Send copy was transcribed at 9fbd5c89; summary/view copy at e24f5d675. Only
+projects_send.py and projects_view.py are activated, not their render/detail/
+form neighbours. These checks prove text bytes, not rendered-frame design.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from textual.widgets import Input
 from local_operator.i18n import catalogues, resolve, runtime, text
 from local_operator.i18n.keys import tui_projects as copy
 from local_operator.tui.widgets import projects_send as send
+from local_operator.tui.widgets import projects_view as view
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tui_projects_en_golden.json"
 GOLDEN = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -27,7 +28,11 @@ def _en(key: str, **params: object) -> str:
 
 def test_catalogue_matches_the_extraction_golden() -> None:
     assert catalogues.load_catalogue("en", "tui.projects") == GOLDEN
-    assert len(GOLDEN) == 18
+    # NINETY-SEVEN: the P2 edit slice added the read-only notice and the form's
+    # done-gate refusal (QA/UX round 1) to this English-only namespace; the
+    # pin keeps the extraction golden and the shipped page vocabulary from
+    # drifting apart silently.
+    assert len(GOLDEN) == 97
     context = json.loads(
         (catalogues.catalogue_root() / "en" / "tui.projects.context.json").read_text()
     )
@@ -81,7 +86,7 @@ def corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         (folder / "tui.projects.json").write_text(json.dumps(values), encoding="utf-8")
     monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
     monkeypatch.setattr(text, "_active_locale", "en")
-    monkeypatch.setattr(text, "_refreshers", [send._reload_copy])
+    monkeypatch.setattr(text, "_refreshers", [send._reload_copy, view._reload_copy])
     monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "fr", "ru"))
     monkeypatch.delenv("LOP_I18N", raising=False)
     text._sources.cache_clear()
@@ -90,6 +95,7 @@ def corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # the real catalogue root, so fixture translations never escape this test.
     text.set_active_locale("en")
     send._reload_copy()
+    view._reload_copy()
     text._sources.cache_clear()
 
 
@@ -172,3 +178,117 @@ def test_disk_only_locale_fails_explicit_eligibility(corpus, monkeypatch) -> Non
     assert text.active_locale() == "en"
     assert send.NO_TARGET_FOOTER == _en("empty")
     assert send._t(copy.send_title()) == _en("title")
+
+
+def test_view_keys_counts_and_binding_grammar_match_source() -> None:
+    assert view.VIEWS == ("list", "board", "timeline")
+    assert view._VIEW_LABELS == {token: token for token in view.VIEWS}
+    for count in (0, 1, 2, 21, 1000):
+        # No hand-rolled plural existed: keep the original ungrouped count,
+        # including 1 tracked, rather than introducing new English grammar.
+        assert view._t(copy.tracked(count=str(count))) == f" · {count} tracked"
+        assert view._t(copy.this_session(count=str(count))) == f" · this session ({count})"
+    edit_catalogue = catalogues.load_catalogue("en", "tui.projects_edit")
+    for binding in view._project_bindings():
+        # LOH-19 P2's three detail keys live in tui.projects_edit: tui.projects'
+        # English hash is pinned by shipped ledger rows, so adding keys there
+        # would un-ship every locale until the next translation wave. Every
+        # OTHER binding is still pinned to the extraction golden byte-for-byte.
+        suffix = f"binding_{binding.action}"
+        if binding.action in view.ProjectsView._DETAIL_ACTIONS:
+            assert binding.description == edit_catalogue[f"tui.projects_edit.{suffix}"]
+        else:
+            assert binding.description == GOLDEN[f"tui.projects.{suffix}"]
+        assert binding.show is False
+
+
+@pytest.mark.asyncio
+async def test_real_view_chrome_bytes_and_live_locale(corpus, monkeypatch) -> None:
+    import time
+
+    from textual.app import App, ComposeResult
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield view.ProjectsView()
+
+    monkeypatch.setattr(
+        time, "localtime", lambda _stamp: time.struct_time((2026, 10, 14, 14, 5, 0, 2, 287, -1))
+    )
+    app = Host()
+    async with app.run_test(size=(200, 40)) as pilot:
+        page = app.query_one(view.ProjectsView)
+        page._views = [{}, {}, {}]
+        page._view = "timeline"
+        page._tier = "month"
+        page._updated_at = 1
+        page._associated = frozenset({"synthetic-project"})
+        page._paint_chrome()
+        assert str(page._title.render()) == (
+            "projects · timeline · this session (1) · 3 tracked · zoom: month · updated 14:05"
+        )
+        for token in view.VIEWS:
+            page._view = token
+            page._paint_chrome()
+            assert str(page._title.render()).startswith(f"projects · {token} · this session (1)")
+        page._view = "timeline"
+        page._cursor = 2
+        text.set_active_locale("fr")
+        await pilot.pause()
+        assert str(page._title.render()) == (
+            "FR projectsFR  · FR timelineFR  · this session (1)FR  · 3 tracked"
+            "FR  · zoom: monthFR  · updated 14:05"
+        )
+        assert (page._view, page._cursor, page._tier) == ("timeline", 2, "month")
+        assert page._bindings.key_to_bindings["1"][0].description == "FR List view"
+        assert view.ProjectsView()._bindings.key_to_bindings["1"][0].description == "FR List view"
+        page._mode = "form"
+        page._paint_form_chrome()
+        assert str(page._title.render()) == "FR projectsFR  · new project"
+        page._mode = "detail"
+        page._paint_detail_chrome()
+        assert (
+            str(page._title.render()) == "FR projects · FR (unnamed) [● active]FR  · updated 14:05"
+        )
+        text.set_active_locale("en")
+        assert page._bindings.key_to_bindings["1"][0].description == "List view"
+        assert str(page._title.render()) == "projects · (unnamed) [● active] · updated 14:05"
+        page._mode = "form"
+        page._paint_form_chrome()
+        assert str(page._title.render()) == "projects · new project"
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        'Static("planted untranslated project title")',
+        'Input(placeholder="planted untranslated project hint")',
+        'title.append("planted untranslated project clause")',
+    ],
+)
+def test_view_activation_rejects_real_source_literals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_check, corpus, planted: str
+) -> None:
+    """Run the real checker against a shadow of this file, never mutate live source."""
+    repo = Path(__file__).resolve().parents[3]
+    relative = "local_operator/tui/widgets/projects_view.py"
+    source = (repo / relative).read_text(encoding="utf-8")
+    shadow = tmp_path / "shadow"
+    target = shadow / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    state = shadow / "i18n"
+    state.mkdir()
+    baseline = json.loads((repo / "i18n/baseline.json").read_text(encoding="utf-8"))
+    assert relative in baseline["enforced"]
+    assert baseline["files"].get(relative, 0) == 0
+    (state / "baseline.json").write_text(json.dumps(baseline), encoding="utf-8")
+    (state / "allowlist.toml").write_text("entries = []\n", encoding="utf-8")
+    monkeypatch.setattr(i18n_check, "REPO", shadow)
+    monkeypatch.setattr(i18n_check, "BASELINE", state / "baseline.json")
+    monkeypatch.setattr(i18n_check, "ALLOWLIST", state / "allowlist.toml")
+    assert i18n_check.main([]) == 0
+    target.write_text(source + "\n" + planted + "\n", encoding="utf-8")
+    assert i18n_check.main([]) != 0
+    target.write_text(source, encoding="utf-8")
+    assert i18n_check.main([]) == 0

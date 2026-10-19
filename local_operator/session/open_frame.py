@@ -215,6 +215,7 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         SupplementDetails,
         SupplementFile,
         SupplementImage,
+        SupplementSound,
     )
 
     details = payload.get("details")
@@ -239,6 +240,7 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         "files": (SupplementFile, 16),
         "components": (SupplementComponent, 3),
         "images": (SupplementImage, 3),
+        "sounds": (SupplementSound, 3),
     }
     for key in SupplementDetails.__annotations__:
         value = details.get(key)

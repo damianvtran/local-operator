@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.73.1"
+version = "0.82.2"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -14,6 +14,7 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 keywords = ["local", "agent", "execution", "operator", "agent-to-agent", "agentic", "local-first", "ai", "proactive"]
 # The default install is deliberately small: the core agent (exec mode,
@@ -71,6 +72,10 @@ dependencies = [
     "starlette",
     "uvicorn",
     "python-multipart",
+    # Generation installs (including lop-update) request the bare package, not
+    # [all]. Sound attachments need their decoder there too; an extra-only
+    # decoder silently leaves persisted artifacts without waveform sidecars.
+    "miniaudio>=1.71",
     # The personal tunnel gateway verifies the edge's RSA proof locally;
     # declare this directly rather than relying on the MCP transitive copy.
     "pyjwt[crypto]>=2.10,<3",
@@ -153,6 +158,9 @@ lsp = ["jedi>=0.19"]
 # stdlib html.parser renderer when this extra is absent, so a bare install stays
 # fully functional — the extra only upgrades render quality.
 fetch = ["markdownify"]
+# Compatibility alias for hosts that already request [audio]. The decoder is
+# now a base dependency: bare generation installs must write sound sidecars too.
+audio = ["miniaudio>=1.71"]
 # `lsp` belongs here for the same reason `fetch` does: jedi is pure Python
 # with no compiled wheel, so it carries none of the Windows sdist-build
 # fragility the other extras are kept lean to avoid. Omitting it meant
@@ -160,7 +168,7 @@ fetch = ["markdownify"]
 # the createIf gate returns None without jedi, so the user saw an absence
 # rather than an error. Found by the context-budget guard, which asserts it
 # measures the FULL tool surface and reported 23 of 24 on CI.
-all = ["local-operator[server,mcp,images,tokenizer,fetch,lsp]"]
+all = ["local-operator[server,mcp,images,tokenizer,fetch,audio,lsp]"]
 dev = [
     "local-operator[all]",
     # PINNED TO THE VERSION CI RUNS (`.github/workflows/ci.yml` lint job). The
@@ -348,6 +356,12 @@ local_operator = [
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
+    # The Library surface's own components: `screens/library.tsx` and
+    # `screens/library-asset.tsx` import them, and the installed source tree
+    # compiles every file under src, so an omitted glob breaks the documented
+    # repair build (the same omission class the fixtures glob above records).
+    "mobile/web/src/components/library/*.tsx",
+    "mobile/web/src/components/library/*.ts",
     "mobile/web/src/lib/*.ts",
     "mobile/web/src/i18n/*.ts",
     # The mandatory build/check/test scanner reads this exact fingerprint state.

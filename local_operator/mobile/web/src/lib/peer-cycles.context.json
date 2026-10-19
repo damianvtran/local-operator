@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "session_id": "sanitized-peer-context",
+  "cases": [
+    {"name": "mixed", "actions": 1, "members": ["peer", "direct-send", "eval-quiet"], "rows": [
+      {"id":"peer","kind":"peer_message"},
+      {"id":"direct-send","kind":"tool","tool_call_id":"direct-send","tool_name":"send"},
+      {"id":"eval-quiet","kind":"tool","tool_call_id":"eval-quiet","tool_name":"eval"},
+      {"id":"public-final","kind":"assistant","text":"A genuine answer remains outside."}
+    ]},
+    {"name": "full-eval", "actions": 1, "members": ["peer", "eval-send", "nested-send", "eval-quiet"], "rows": [
+      {"id":"peer","kind":"peer_message"},
+      {"id":"eval-send","kind":"tool","tool_call_id":"eval-send","tool_name":"eval"},
+      {"id":"nested-send","kind":"tool","tool_call_id":"nested-send","tool_name":"send"},
+      {"id":"eval-quiet","kind":"tool","tool_call_id":"eval-quiet","tool_name":"eval"},
+      {"id":"public-final","kind":"assistant","text":"A genuine answer remains outside."}
+    ]},
+    {"name": "wrapped-no-send", "actions": 0, "members": ["peer", "eval-quiet"], "rows": [
+      {"id":"peer","kind":"peer_message"},
+      {"id":"eval-quiet","kind":"tool","tool_call_id":"eval-quiet","tool_name":"eval"},
+      {"id":"public-final","kind":"assistant","text":"A genuine answer remains outside."}
+    ]}
+  ]
+}

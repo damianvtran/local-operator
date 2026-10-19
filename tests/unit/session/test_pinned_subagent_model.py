@@ -1087,3 +1087,160 @@ def test_an_unreadable_registry_refuses_the_launch_instead_of_silently_inheritin
         with pytest.raises(SubagentModelUnavailable):
             session._launch_subagent(label="review", prompt="review it", agent="reviewer")
         assert not session.jobs.list()
+
+
+# ---------------------------------------------------------------------------
+# per-tier reasoning effort (#2428)
+# ---------------------------------------------------------------------------
+
+
+def test_a_bare_tier_still_runs_at_the_models_own_default(tmp_path, monkeypatch):
+    """The unchanged half: a bare ``provider/model`` tier carries no effort, so
+    the child keeps whatever ``build_model_spec`` seeds (Opus 5.5 documents
+    ``medium``). Pinned so the mapping form below is visibly additive."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5-5")
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None
+    assert spec.reasoning_effort == "medium"
+
+
+def test_a_tier_mapping_carries_its_reasoning_effort(tmp_path, monkeypatch):
+    """#2428: ``hi: {model, effort}`` resolves the same model as the bare
+    selector and runs it at the configured depth rather than the model default."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-5-5", "effort": "xhigh"})
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5-5")
+    assert spec.reasoning_effort == "xhigh"
+
+
+def test_a_tier_effort_is_clamped_to_the_target_ladder(tmp_path, monkeypatch):
+    """A level the model does not offer is clamped to its nearest rung, as a
+    fallback-chain hop's effort is, never sent blind (a 400 at the first call)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    # Opus 4.5's ladder stops at ``high``.
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-4-5", "effort": "max"})
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None
+    assert spec.reasoning_effort == "high"
+
+
+def test_an_auto_tier_effort_runs_at_the_models_own_default(tmp_path, monkeypatch):
+    """R1-3: ``effort: auto`` is the explicit spelling of "no override" (the
+    word a chain hop uses), so it resolves exactly like an omitted effort:
+    Opus 5.5's own documented default, ``medium``."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-5-5", "effort": "auto"})
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5-5")
+    assert spec.reasoning_effort == "medium"
+
+
+def test_a_caller_may_borrow_a_tiers_model_without_its_effort(tmp_path, monkeypatch):
+    """R1-2: the supplement renderer reads ``hi`` for its MODEL; it is not a
+    delegated role and its token cap counts reasoning, so it asks for the model
+    at its own default. Every other caller still gets the tier's effort."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-5-5", "effort": "max"})
+    session = make_session(tmp_path)
+
+    bare = session._resolve_subagent_model("task", "hi", apply_tier_effort=False)
+    assert bare is not None
+    assert (bare.provider, bare.model_id) == ("anthropic", "claude-opus-5-5")
+    assert bare.reasoning_effort == "medium"
+    tiered = session._resolve_subagent_model("task", "hi")
+    assert tiered is not None
+    assert tiered.reasoning_effort == "max"
+
+
+def test_a_sentinel_tier_mapping_runs_the_session_model_at_its_effort(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", lo={"model": "default", "effort": "low"})
+    opus = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5-5",
+        context_window=200_000,
+        max_output_tokens=4_096,
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        reasoning_effort="high",
+        reasoning_default_effort="medium",
+    )
+    session = Session(
+        model=opus,
+        stream_fn=OneShotStream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+
+    spec = session._resolve_subagent_model("task", "lo", strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5-5")
+    assert spec.reasoning_effort == "low"
+    # The parent's own spec is untouched.
+    assert session.model.reasoning_effort == "high"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"model": "anthropic/claude-opus-5-5", "effort": "extreme"},
+        {"model": "anthropic/claude-opus-5-5", "effort": 3},
+        {"model": "anthropic/claude-opus-5-5", "effort": "high", "temperature": 0.2},
+        {"effort": "high"},
+    ],
+)
+def test_a_malformed_tier_mapping_is_a_named_refusal(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi=value)
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+    assert "subagents.models.hi=" in caught.value.reason
+    assert not session.jobs.list()
+
+
+@pytest.mark.asyncio
+async def test_a_role_pinned_to_an_effort_tier_sends_that_effort(tmp_path, monkeypatch):
+    """The real launch path end to end: a ROLE pinned to ``hi`` launches, and
+    the child's own provider request carries the tier's effort."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi={"model": "anthropic/claude-opus-5-5", "effort": "high"})
+    registry = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        registry,
+        AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="hi",
+        ),
+        creating=True,
+    )
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+    stream = session._stream_fn
+    assert isinstance(stream, OneShotStream)
+
+    session._launch_subagent(label="review", prompt="review it", agent="reviewer")
+    await wait_for(lambda: bool(stream.requests))
+    [request] = stream.requests
+    assert request.model.model_id == "claude-opus-5-5"
+    assert request.model.reasoning_effort == "high"
+    await session.dispose()

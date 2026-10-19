@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import json
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -843,9 +844,25 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
     assert hours["default"] == 48 and hours["gated_by"] == "session.cleanup.delegated.enabled"
     assert hours["section"] == rows["session.cleanup.delegated.enabled"]["section"]
     assert rows["session.cleanup.delegated.enabled"]["default"] is True
+    # The scratchpad cap is the second bounded row whose unit a renderer needs.
+    # Pin it explicitly rather than only tolerating it: the projection must carry
+    # bytes and the reader's own 16 MiB–8 GiB bounds.
+    scratchpad = rows["session.scratchpad.max_bytes"]
+    assert (
+        scratchpad["kind"],
+        scratchpad["minimum"],
+        scratchpad["maximum"],
+        scratchpad["unit"],
+    ) == (
+        "int",
+        16 * 1024 * 1024,
+        8 * 1024 * 1024 * 1024,
+        "bytes",
+    )
+    unit_rows = {hours["key"], scratchpad["key"]}
     assert all(
-        row["unit"] == "" for key, row in rows.items() if key != hours["key"]
-    ), "only the hours row declares a unit"
+        row["unit"] == "" for key, row in rows.items() if key not in unit_rows
+    ), "only the hours and scratchpad rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
@@ -870,6 +887,39 @@ async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(deskt
     response = await client.patch("/v1/settings/keymap.quick_send", json={"value": "CMD+SHIFT+N"})
     assert response.status_code == 200, response.text
     assert response.json()["result"]["value"] == "meta+shift+n"
+
+
+async def test_a_tier_mapping_round_trips_through_the_settings_route(desktop):
+    """#2428 R1-1: ``PATCH`` hands its value to ``write_setting`` WITHOUT
+    ``coerce``, and ``GET`` serves a mapping tier as JSON text. The desktop
+    sends back exactly what it was served, so that string must be stored as
+    the mapping again — not refused, and never stored as a selector."""
+    client, app = desktop
+    manager = app.state.config_manager
+    key = "subagents.models.hi"
+    setting = settings_io.resolve_key(key)
+    assert setting is not None
+
+    typed = '{"model": " anthropic/claude-opus-5-5 ", "effort": " MAX "}'
+    response = await client.patch(f"/v1/settings/{key}", json={"value": typed})
+    assert response.status_code == 200, response.text
+    stored = {"model": "anthropic/claude-opus-5-5", "effort": "max"}
+    fresh = ConfigManager(manager.config_dir)
+    assert fresh.get_config_value("subagents", None)["models"]["hi"] == stored
+
+    served = response.json()["result"]["value"]
+    assert json.loads(served) == stored
+    again = await client.patch(f"/v1/settings/{key}", json={"value": served})
+    assert again.status_code == 200, again.text
+    assert again.json()["result"]["value"] == served
+    fresh.reload()
+    assert fresh.get_config_value("subagents", None)["models"]["hi"] == stored
+
+    before = manager.config_file.read_bytes()
+    broken = await client.patch(f"/v1/settings/{key}", json={"value": '{"model": "a/b",'})
+    assert broken.status_code == 422
+    assert "expected JSON" in broken.text
+    assert manager.config_file.read_bytes() == before
 
 
 async def test_settings_cascade_preserves_concurrent_siblings(desktop):

@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from local_operator import settings_io
+from local_operator import scratchpad, settings_io
 from local_operator.compaction.thresholds import CompactionSettings
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests, process_watcher
@@ -45,6 +45,7 @@ from local_operator.model.configure import (
     _openai_api_mode,
     _openai_use_max_context_window,
     _openrouter_provider_preferences,
+    _openrouter_retire_below_tps,
 )
 from local_operator.projects import stale_after_s
 from local_operator.providers.failover import RetrySettings
@@ -87,7 +88,12 @@ class FakeAuthStore:
     """
 
     def __init__(self) -> None:
-        self._usage_aware_pick = True  # the real store defaults ON
+        self._usage_aware_pick = False
+        self._account_selection_policy = "reset-soonest"
+
+    def configure_account_selection_policy(self, policy: str) -> None:
+        self._account_selection_policy = policy
+        self._usage_aware_pick = policy == "headroom"
 
     def configure_usage_aware_pick(self, enabled: bool) -> None:
         self._usage_aware_pick = bool(enabled)
@@ -100,6 +106,18 @@ class RebindableStream:
         self._settings: Any = settings
         self.applied: list[Any] = []
         self.auth_store = FakeAuthStore()
+        # Production pushes settings at construction AND hot apply. Leaving
+        # this at a historical True invents a change on every unrelated rebind.
+        self._push_account_policy(settings)
+
+    def _push_account_policy(self, values) -> None:
+        from local_operator.providers.account_policy import (
+            effective_account_selection_policy,
+        )
+
+        self.auth_store.configure_account_selection_policy(
+            effective_account_selection_policy(values)
+        )
 
     @property
     def routing_settings(self):
@@ -108,13 +126,7 @@ class RebindableStream:
     def apply_settings(self, values) -> None:
         self.applied.append(values)
         self._settings = values
-        # Mirrors the real ``SessionStreamFn.apply_settings``, which re-pushes
-        # this one key rather than relying on the rebind.
-        from local_operator.providers.failover import RetrySettings
-
-        self.auth_store.configure_usage_aware_pick(
-            RetrySettings.from_settings(values).usage_aware_account_pick
-        )
+        self._push_account_policy(values)
 
     def __call__(self, request: ChatRequest, signal: AbortSignal | None):
         async def gen():
@@ -241,6 +253,15 @@ def _bridge_settings() -> Any:
     watcher = process_watcher(config_dir())
     watcher.poll_now()
     return TeamBridgeSettings.from_values(watcher.values)
+
+
+def _lapsed_choice(watcher: ConfigWatcher) -> str:
+    """The ``asks.lapsed_visible_for`` choice the reader resolves, by its window."""
+    from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
+    from local_operator.asks.visibility import lapsed_visible_ms
+
+    window_s = lapsed_visible_ms(watcher.config_dir) // 1000
+    return next(choice for choice, seconds in LAPSED_VISIBLE_FOR_S.items() if seconds == window_s)
 
 
 def _bash_shell(watcher: ConfigWatcher) -> str:
@@ -396,6 +417,19 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+def _librarian_policy(watcher: Any):
+    """The engine's resolved policy, read from the watcher's own directory."""
+    from local_operator.librarian import proactive
+
+    return proactive.policy(watcher.config_dir)
+
+
+def _librarian_name(watcher: Any) -> str:
+    from local_operator.librarian import bootstrap
+
+    return bootstrap.display_name(watcher.config_dir)
+
+
 # What a non-default value for each LIVE key looks like, and how to observe it
 # ---------------------------------------------------------------------------
 
@@ -405,6 +439,15 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    # -- scratchpad: re-read from config on every pad-addressed call -----------
+    # Not a session attribute: `scratchpad_budget_bytes()` resolves
+    # `session.scratchpad.max_bytes` through `config_dir()` at call time, which
+    # is exactly why the row is LIVE. The probe observes that function, and
+    # 32 MiB is a non-default value inside the reader's 16 MiB–8 GiB range.
+    "session.scratchpad.max_bytes": (
+        32 * 1024 * 1024,
+        lambda s, w: scratchpad.scratchpad_budget_bytes(),
+    ),
     # -- compaction: the session's typed settings object -----------------------
     "compaction.enabled": (False, lambda s, w: compaction_of(s).enabled),
     "compaction.strategy": ("snapcompact", lambda s, w: compaction_of(s).strategy),
@@ -547,6 +590,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
             "preferred_max_latency"
         ),
     ),
+    # The harness-side decode-rate floor: probed through the resolver that
+    # `SessionStreamFn._score_host_decode_rate` reads it with, over the session's
+    # LIVE routing mapping. 40.0 differs from the 0.0 default, so the probe
+    # observes a CHANGE reaching the running session.
+    "providers.openrouter.retire_below_tps": (
+        40.0,
+        lambda s, w: _openrouter_retire_below_tps(s.routing_settings),
+    ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on
     # the auth STORE, not the mapping, because the store holds its own copy.
@@ -598,6 +649,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # per call; this one is pushed into the store, which then owns the value.
     # Probing the mapping here would have passed while the cascade kept using
     # the stale flag — the exact false-green the finding described.
+    "retry.accountSelectionPolicy": (
+        "headroom",
+        lambda s, w: s._stream_fn.auth_store._account_selection_policy,
+    ),
     "retry.usageAwareAccountPick": (
         False,
         lambda s, w: s._stream_fn.auth_store._usage_aware_pick,
@@ -743,6 +798,28 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,
     ),
+    # -- asks: the lapsed-ask display window (decisions D8/D9) -----------------
+    # Observed through the ONE reader every surface calls per publish/request
+    # (``asks.visibility``), on the watcher's directory. That the RUNNING
+    # session's wire moves on the change (``_apply_config_change`` republishes)
+    # is proven end to end in ``tests/unit/asks/test_ask_wire.py``
+    # (``test_a_running_session_republishes_when_the_window_changes``).
+    "asks.lapsed_visible_for": ("1h", lambda s, w: _lapsed_choice(w)),
+    # -- librarian: the cadence engine's own readers ---------------------------
+    # The pause/at/budget keys are read by ``proactive.policy`` at the next
+    # reconcile; ``librarian.name`` by the receipts' display reader. The
+    # session half is ``_aida_reconcile_now`` dispatching to her engine on the
+    # same watcher tick (proven end to end in
+    # ``tests/unit/librarian/test_librarian_proactive.py``).
+    "librarian.enabled": (False, lambda s, w: _librarian_policy(w).enabled),
+    "librarian.name": ("Archivist", lambda s, w: _librarian_name(w)),
+    "librarian.cadence.at": ("05:00", lambda s, w: _librarian_policy(w).at),
+    "librarian.cadence.paused": (True, lambda s, w: _librarian_policy(w).paused),
+    "librarian.cadence.max_extra_per_day": (
+        3,
+        lambda s, w: _librarian_policy(w).max_extra_per_day,
+    ),
+    "librarian.cadence.min_gap_minutes": (30, lambda s, w: _librarian_policy(w).min_gap_minutes),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns
@@ -918,6 +995,16 @@ async def test_a_write_from_another_process_reaches_the_running_session(
     # the common case — a bare ``model_name`` edit with ``hosting`` unchanged —
     # and resolves to a provider that needs no network.
     ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
+    if key == "retry.usageAwareAccountPick":
+        # This row proves an actually legacy configuration. An explicit
+        # canonical policy must win over legacy edits, so do not accidentally
+        # test the old flag underneath a freshly materialized canonical value.
+        manager = ConfigManager(config_dir)
+        retry = dict(manager.get_config_value("retry"))
+        retry.pop("accountSelectionPolicy", None)
+        retry.pop("account_selection_policy", None)
+        retry["usageAwareAccountPick"] = True
+        manager.set_config_value("retry", retry)
 
     stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))
     session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())
@@ -1035,6 +1122,7 @@ async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_pa
             _openai_api_mode(session.routing_settings),
             _anthropic_cache_ttl_1h_min_context_tokens(session.routing_settings),
             stream.auth_store._usage_aware_pick,
+            stream.auth_store._account_selection_policy,
         )
 
     try:

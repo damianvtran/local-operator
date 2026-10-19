@@ -294,6 +294,9 @@ AUTH_FIELDS: tuple[str, ...] = (
     "display_window",
     "display_history_audit",
     "display_history_entry_times",
+    # Optional display proof is a viewer capability, not credential authority.
+    # Dropping it here silently makes an updated mesh viewer a legacy reader.
+    "display_history_peer_cycle_records",
     # The owner's capability AND viewer declaration gate order metadata. This
     # relay must forward the latter, not silently make a capable peer legacy.
     "journal_order",

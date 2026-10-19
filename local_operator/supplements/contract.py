@@ -110,6 +110,15 @@ class SupplementComponent(TypedDict):
     height_hint: int
 
 
+class SupplementSound(TypedDict):
+    """Stored audio facts consumed directly by Highlights, never a provider URL."""
+
+    attachment: str
+    mime: str
+    title: str
+    duration_s: float
+
+
 class SupplementImage(TypedDict):
     attachment: str
     mime: str
@@ -155,6 +164,7 @@ class SupplementDetails(TypedDict):
     files_more: NotRequired[int]
     more: NotRequired[list[str]]
     images: NotRequired[list[SupplementImage]]
+    sounds: NotRequired[list[SupplementSound]]
     decision: NotRequired[SupplementDecision]
     instruction: NotRequired[str]
     model: NotRequired[str]
@@ -166,6 +176,12 @@ class SupplementDetails(TypedDict):
     cost_usd: NotRequired[float]
     cost_known: NotRequired[bool]
     error: NotRequired[str]
+    #: The typed CAUSE of a provider-terminal failure, from the allowlisted vocabulary
+    #: (``generator.failure_kind``): ``provider_auth|quota|transient|timeout|request``
+    #: ``|content|context|unknown``. Written only when the failure that ENDED the job was
+    #: the provider's own (``error`` keeps the pinned spelling); absent on success, on
+    #: non-provider failures, and on rows from builds that predate it.
+    cause: NotRequired[str]
     #: The generator's own notes on the row: one line per bound that touched the job and per
     #: adjustment it made (turn/component caps, the cost cap reached before a repair). A
     #: bound that fired after blocks had passed is recorded HERE, never in ``error``, because
@@ -240,7 +256,7 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
         # (the block never draws a header — memo §2.8, 2026-10-10 amendment).
         return (
             "block"
-            if (row.get("files") or row.get("components") or row.get("images"))
+            if (row.get("files") or row.get("components") or row.get("images") or row.get("sounds"))
             else "nothing"
         )
     if state == "failed":
@@ -251,7 +267,7 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
         line = "preparing" if job_live else "cancelled_retry"
     else:
         return "nothing"
-    return _WITH_FILES[line] if row.get("files") else line
+    return _WITH_FILES[line] if (row.get("files") or row.get("sounds")) else line
 
 
 def newest_per_anchor(rows: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:

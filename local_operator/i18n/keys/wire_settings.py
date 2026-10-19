@@ -138,6 +138,54 @@ def approvals_title() -> Msg:
     return Msg("wire.settings.approvals.title", {})
 
 
+def asks_description() -> Msg:
+    return Msg("wire.settings.asks.description", {})
+
+
+def asks_title() -> Msg:
+    return Msg("wire.settings.asks.title", {})
+
+
+def asks_lapsed_visible_for_choice_1h_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.1h.description", {})
+
+
+def asks_lapsed_visible_for_choice_1h_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.1h.label", {})
+
+
+def asks_lapsed_visible_for_choice_24h_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.24h.description", {})
+
+
+def asks_lapsed_visible_for_choice_24h_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.24h.label", {})
+
+
+def asks_lapsed_visible_for_choice_7d_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.7d.description", {})
+
+
+def asks_lapsed_visible_for_choice_7d_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.7d.label", {})
+
+
+def asks_lapsed_visible_for_choice_at_expiry_description() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.at_expiry.description", {})
+
+
+def asks_lapsed_visible_for_choice_at_expiry_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.choice.at_expiry.label", {})
+
+
+def asks_lapsed_visible_for_help() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.help", {})
+
+
+def asks_lapsed_visible_for_label() -> Msg:
+    return Msg("wire.settings.asks_lapsed_visible_for.label", {})
+
+
 def auto_save_conversation_choice_false_description() -> Msg:
     return Msg("wire.settings.auto_save_conversation.choice.false.description", {})
 
@@ -1122,18 +1170,6 @@ def hub_check_interval_min_label() -> Msg:
     return Msg("wire.settings.hub_check_interval_min.label", {})
 
 
-def hub_merge_model_help() -> Msg:
-    return Msg("wire.settings.hub_merge_model.help", {})
-
-
-def hub_merge_model_label() -> Msg:
-    return Msg("wire.settings.hub_merge_model.label", {})
-
-
-def hub_merge_model_placeholder() -> Msg:
-    return Msg("wire.settings.hub_merge_model.placeholder", {})
-
-
 def keymap_description() -> Msg:
     return Msg("wire.settings.keymap.description", {})
 
@@ -1148,6 +1184,86 @@ def language_help() -> Msg:
 
 def language_label() -> Msg:
     return Msg("wire.settings.language.label", {})
+
+
+def librarian_description() -> Msg:
+    return Msg("wire.settings.librarian.description", {})
+
+
+def librarian_title() -> Msg:
+    return Msg("wire.settings.librarian.title", {})
+
+
+def librarian_cadence_at_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.help", {})
+
+
+def librarian_cadence_at_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.label", {})
+
+
+def librarian_cadence_at_placeholder() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.placeholder", {})
+
+
+def librarian_cadence_max_extra_per_day_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_max_extra_per_day.help", {})
+
+
+def librarian_cadence_max_extra_per_day_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_max_extra_per_day.label", {})
+
+
+def librarian_cadence_min_gap_minutes_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_min_gap_minutes.help", {})
+
+
+def librarian_cadence_min_gap_minutes_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_min_gap_minutes.label", {})
+
+
+def librarian_cadence_paused_choice_false_description() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.choice.false.description", {})
+
+
+def librarian_cadence_paused_choice_true_description() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.choice.true.description", {})
+
+
+def librarian_cadence_paused_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.help", {})
+
+
+def librarian_cadence_paused_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.label", {})
+
+
+def librarian_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.librarian_enabled.choice.false.description", {})
+
+
+def librarian_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.librarian_enabled.choice.true.description", {})
+
+
+def librarian_enabled_help() -> Msg:
+    return Msg("wire.settings.librarian_enabled.help", {})
+
+
+def librarian_enabled_label() -> Msg:
+    return Msg("wire.settings.librarian_enabled.label", {})
+
+
+def librarian_name_help() -> Msg:
+    return Msg("wire.settings.librarian_name.help", {})
+
+
+def librarian_name_label() -> Msg:
+    return Msg("wire.settings.librarian_name.label", {})
+
+
+def librarian_name_placeholder() -> Msg:
+    return Msg("wire.settings.librarian_name.placeholder", {})
 
 
 def local_providers_base_url_help() -> Msg:
@@ -2176,6 +2292,22 @@ def session_delegated_title() -> Msg:
     return Msg("wire.settings.session_delegated.title", {})
 
 
+def session_scratchpad_description() -> Msg:
+    return Msg("wire.settings.session_scratchpad.description", {})
+
+
+def session_scratchpad_title() -> Msg:
+    return Msg("wire.settings.session_scratchpad.title", {})
+
+
+def session_scratchpad_max_bytes_help() -> Msg:
+    return Msg("wire.settings.session_scratchpad_max_bytes.help", {})
+
+
+def session_scratchpad_max_bytes_label() -> Msg:
+    return Msg("wire.settings.session_scratchpad_max_bytes.label", {})
+
+
 def shell_environment_description() -> Msg:
     return Msg("wire.settings.shell_environment.description", {})
 
@@ -2238,6 +2370,46 @@ def speech_description() -> Msg:
 
 def speech_title() -> Msg:
     return Msg("wire.settings.speech.title", {})
+
+
+def speech_transcription_cleanup_choice_auto_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.auto.description", {})
+
+
+def speech_transcription_cleanup_choice_auto_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.auto.label", {})
+
+
+def speech_transcription_cleanup_choice_client_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.client.description", {})
+
+
+def speech_transcription_cleanup_choice_client_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.client.label", {})
+
+
+def speech_transcription_cleanup_choice_off_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.off.description", {})
+
+
+def speech_transcription_cleanup_choice_off_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.off.label", {})
+
+
+def speech_transcription_cleanup_choice_provider_description() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.provider.description", {})
+
+
+def speech_transcription_cleanup_choice_provider_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.choice.provider.label", {})
+
+
+def speech_transcription_cleanup_help() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.help", {})
+
+
+def speech_transcription_cleanup_label() -> Msg:
+    return Msg("wire.settings.speech_transcription_cleanup.label", {})
 
 
 def speech_voice_accent_help() -> Msg:

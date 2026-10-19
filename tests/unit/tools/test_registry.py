@@ -168,6 +168,15 @@ def _force_browser_available(monkeypatch):
     )
     monkeypatch.setattr(code_requests_tool, "code_requests_available", lambda context: True)
     monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+    # The audio pair's gates are per DIRECTION (the frozen contract has no
+    # OpenAI sound-effect path), so both predicates are forced here — the
+    # whole-table assertions describe the fully-capable surface.
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
+    )
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -281,16 +290,23 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     tables — and wave 4 slice A's ``setting`` (the unconditionally published
     settings write path) appended after the pair, so THE PIN MOVES WITH THE
     NEWEST APPEND, which is this test's contract. H5d's ``bridge`` (the Team
-    Bridge CoS tool, createIf-gated on the session's bridge runtime) is the
-    newest append and now ends both tables."""
-    assert DEFAULT_TOOL_NAMES[-2:] == ["setting", "bridge"]
-    assert list(TOOL_BUILDERS)[-2:] == ["setting", "bridge"]
-    assert DEFAULT_TOOL_NAMES[-3] == "video_status"
-    assert list(TOOL_BUILDERS)[-3] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-4] == "generate_video"
-    assert list(TOOL_BUILDERS)[-4] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-5] == "no_reply"
-    assert list(TOOL_BUILDERS)[-5] == "no_reply"
+    Bridge CoS tool, createIf-gated on the session's bridge runtime) appended
+    after it, and the sound-generation wave's audio pair
+    (``generate_voiceover``/``generate_sound_effect``, each createIf-gated on
+    a per-direction credential) is the newest append and now ends both
+    tables."""
+    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_voiceover", "generate_sound_effect"]
+    assert list(TOOL_BUILDERS)[-2:] == ["generate_voiceover", "generate_sound_effect"]
+    assert DEFAULT_TOOL_NAMES[-3] == "bridge"
+    assert list(TOOL_BUILDERS)[-3] == "bridge"
+    assert DEFAULT_TOOL_NAMES[-4] == "setting"
+    assert list(TOOL_BUILDERS)[-4] == "setting"
+    assert DEFAULT_TOOL_NAMES[-5] == "video_status"
+    assert list(TOOL_BUILDERS)[-5] == "video_status"
+    assert DEFAULT_TOOL_NAMES[-6] == "generate_video"
+    assert list(TOOL_BUILDERS)[-6] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-7] == "no_reply"
+    assert list(TOOL_BUILDERS)[-7] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:
@@ -477,6 +493,45 @@ def test_the_bridge_tool_is_absent_without_a_runtime() -> None:
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "bridge"]
 
 
+def test_the_audio_pair_is_absent_without_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """createIf per direction: no reachable credential, no audio tool.
+
+    The gates read the machine's credentials (``audiogen.availability``), so
+    the autouse forcing above is UNDONE here deliberately — this is the test
+    of the gate itself. A session with no audio credential must pay no schema
+    for the pair (the D9 footprint rule).
+    """
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: False
+    )
+    names = [tool.name for tool in create_tools(_engine_context())]
+    assert "generate_voiceover" not in names
+    assert "generate_sound_effect" not in names
+
+
+def test_the_sound_effect_tool_is_absent_on_an_openai_only_machine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two gates DIFFER: sound effects have no OpenAI path (frozen contract).
+
+    An OpenAI-only machine gets the voiceover tool and must NOT get a
+    sound-effect tool whose every call could only end in "no provider for
+    this request shape".
+    """
+    from local_operator.tools import audio_tool
+
+    monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: False
+    )
+    names = [tool.name for tool in create_tools(_engine_context())]
+    assert "generate_voiceover" in names
+    assert "generate_sound_effect" not in names
+
+
 def test_the_console_tool_is_not_hidden(monkeypatch) -> None:
     """A concealed tool cannot be discouraged, only missing (design §14.2).
 
@@ -529,6 +584,216 @@ def test_diff_details_carries_a_rendered_diff_and_honours_the_cap() -> None:
     # The cap bounds the stored list even for a pathological write.
     big = builtin._diff_details("f.txt", "\n".join(f"line{i}" for i in range(500)), "")
     assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+
+
+def _pem_block(line: str, *, prefix: str = "") -> str:
+    """A synthetic PRIVATE KEY armour block built from a repeated body line."""
+    return (
+        prefix + "-----BEGIN " + "PRIV"
+        "ATE KEY-----\n" + line + "\n" + line + "\n-----END " + "PRIV"
+        "ATE KEY-----\n"
+    )
+
+
+class TestDiffDetailsKeepsPemBlocksWhole:
+    """The producer must not hand the publication seam a view that splits a block.
+
+    ``unified_diff``'s default context can place body rows inside a hunk while
+    the BEGIN/END armour sits outside it. No single view then holds a credential,
+    and the seam's span rule cannot fire, so body rows would be judged as
+    ordinary prose and published. Widening happens HERE because the framing is
+    only knowable from the file, not from the rows.
+    """
+
+    LINE = "M7qA9zKd3PxW8sVn" * 4
+
+    def _details(self, before: str, after: str) -> list[str]:
+        from local_operator.tools import builtin
+
+        return builtin._diff_details("synthetic.md", before, after)["diff"]
+
+    def _classes(self, rows: list[str]) -> str:
+        return "".join(
+            (
+                "@"
+                if row[:1] == "@"
+                else (
+                    "H"
+                    if row[1:].startswith("-----BEGIN")
+                    else (
+                        "E"
+                        if row[1:].startswith("-----END")
+                        else "B" if row[1:].startswith(self.LINE[:8]) else "o"
+                    )
+                )
+            )
+            for row in rows
+        )
+
+    def test_edit_between_two_pems_keeps_both_blocks_whole(self) -> None:
+        middle = "Middle guidance "
+        before = _pem_block(self.LINE) + middle + "111.\n" + _pem_block(self.LINE)
+        after = _pem_block(self.LINE) + middle + "222.\n" + _pem_block(self.LINE)
+        rows = self._details(before, after)
+        classes = self._classes(rows)
+        # Both complete blocks are present as ROWS, not split at a hunk edge.
+        assert classes.count("H") >= 2 and classes.count("E") >= 2
+        assert classes.count("B") == 4
+        # The edit itself is untouched: one added and one removed guidance line.
+        assert sum(1 for r in rows if r[:1] == "+" and middle in r) == 1
+        assert sum(1 for r in rows if r[:1] == "-" and middle in r) == 1
+
+    def test_deep_body_edit_whose_framing_falls_outside_the_context(self) -> None:
+        body = "\n".join([self.LINE] * 12)
+        before = (
+            "-----BEGIN " + "PRIV" "ATE KEY-----\n" + body + "\n-----END " + "PRIV" "ATE KEY-----\n"
+        )
+        six = "\n".join([self.LINE] * 6)
+        replacement = self.LINE * 4
+        after = before.replace(six, six[: -len(self.LINE)] + replacement, 1)
+        rows = self._details(before, after)
+        classes = self._classes(rows)
+        assert classes.count("H") == 1 and classes.count("E") == 1
+        assert classes.startswith("oo@")
+
+    def test_benign_diff_without_framing_is_untouched(self) -> None:
+        import difflib
+
+        before = "alpha\nbeta\ngamma\ndelta\nepsilon\n"
+        after = "alpha\nBETA\ngamma\ndelta\nEPSILON\nzeta\n"
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert self._details(before, after) == expected
+
+    def test_public_armour_is_not_widened(self) -> None:
+        import difflib
+
+        block = (
+            "-----BEGIN "
+            + "PUBLIC KEY-----\n"
+            + self.LINE
+            + "\n"
+            + self.LINE
+            + "\n-----END "
+            + "PUBLIC KEY-----\n"
+        )
+        before = block + "Middle guidance 111.\n" + block
+        after = block + "Middle guidance 222.\n" + block
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert self._details(before, after) == expected
+
+    def test_truncated_header_without_end_is_not_widened(self) -> None:
+        import difflib
+
+        before = "-----BEGIN " + "PRIV" "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 111.\n"
+        after = "-----BEGIN " + "PRIV" "ATE KEY-----\n" + self.LINE + "\nMiddle guidance 222.\n"
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert self._details(before, after) == expected
+
+    def test_counters_and_cap_are_unchanged_by_widening(self) -> None:
+        from local_operator.tools import builtin
+
+        middle = "Middle guidance "
+        before = _pem_block(self.LINE) + middle + "111.\n" + _pem_block(self.LINE)
+        after = _pem_block(self.LINE) + middle + "222.\n" + _pem_block(self.LINE)
+        details = builtin._diff_details("synthetic.md", before, after)
+        assert (details["added"], details["removed"]) == (1, 1)
+        # A pathological block cannot escape the stored cap: widening happens
+        # BEFORE the cap, and the truncation marker is what the seam refuses on.
+        huge_before = (
+            "-----BEGIN " + "PRIV"
+            "ATE KEY-----\n" + "\n".join([self.LINE] * 400) + "\n-----END " + "PRIV"
+            "ATE KEY-----\n"
+        )
+        huge_after = huge_before.replace(
+            self.LINE + "\n" + self.LINE, self.LINE + "\n" + self.LINE * 2, 1
+        )
+        capped = builtin._diff_details("synthetic.md", huge_before, huge_after)
+        assert len(capped["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+        assert capped["diff"][-1] == "…"
+
+    def test_more_than_two_hundred_lines_with_a_long_repeated_run_still_publishes(self) -> None:
+        """Review round 2, R2-1: a credential-free diff must never be withheld.
+
+        Two equal runs of the same line are not distinguishable, so a verifier
+        that re-matched a hunk SLICE could align them differently from the
+        matcher that produced the whole-file diff, report a change that never
+        existed and withhold a diff containing no credential at all. This pins
+        the published result with the exact comparison that regressed: the
+        producer's rows must equal ``unified_diff``'s OWN rows, so the benign
+        edit is published rather than withheld.
+        """
+        import difflib
+
+        repeated = "setting = enabled"
+        lines = [repeated] * 205
+        lines[100] = "config head"
+        before = "\n".join(lines) + "\n"
+        after = before.replace(repeated + "\n" + repeated, repeated + "\nchanged\n", 1)
+        rows = self._details(before, after)
+        expected = list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
+        assert rows == expected, "no-credential diff diverged from unified_diff"
+        assert rows[-1] != "…", "a credential-free diff was withheld"
+        assert any(line == "+changed" for line in rows), "the benign edit is published"
+
+    def test_over_cap_widening_fails_closed_towards_hiding(self) -> None:
+        """R2-1 follow-up: the over-cap path must HIDE, never publish a split block.
+
+        A block larger than the stored cap cannot be kept whole, so the producer
+        ends its payload with the truncation marker; the publication seam refuses
+        that marker and withholds the WHOLE field (pinned at the seam in the
+        harness feedback suite). This asserts the producer half: the marker is
+        emitted and the stored list is still bounded.
+        """
+        from local_operator.tools import builtin
+
+        body = "\n".join([self.LINE] * 400)
+        big = (
+            "-----BEGIN " + "PRIV" "ATE KEY-----\n" + body + "\n-----END " + "PRIV" "ATE KEY-----\n"
+        )
+        before = big + "Middle guidance 111.\n" + big
+        after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)
+        rows = self._details(before, after)
+        assert rows[-1] == "…", "the over-cap payload must advertise truncation"
+        assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+
+    def test_new_file_create_header_matches_difflib_byte_for_byte(self) -> None:
+        """A zero-length side prints the line BEFORE it, as difflib does (R3-1).
+
+        ``difflib._format_range_unified`` spells an empty range as ``0,0`` — the
+        line just before the range — so a new file is ``@@ -0,0 +1,2 @@`` and a
+        truncation to empty is ``@@ -1,2 +0,0 @@``. Printing ``1,0`` instead put
+        a wrong start line into the transcript and the expanded tool card.
+        """
+        import difflib
+
+        created = self._details("", "a\nb\n")
+        assert created == list(difflib.unified_diff([], ["a", "b"], lineterm="", n=2))
+        assert created[2] == "@@ -0,0 +1,2 @@"
+
+    def test_truncate_to_empty_header_matches_difflib_byte_for_byte(self) -> None:
+        import difflib
+
+        truncated = self._details("a\nb\n", "")
+        assert truncated == list(difflib.unified_diff(["a", "b"], [], lineterm="", n=2))
+        assert truncated[2] == "@@ -1,2 +0,0 @@"
+
+    def test_mixed_one_sided_hunks_match_difflib_byte_for_byte(self) -> None:
+        """Beyond parity on the two empty cases: ran 500 fuzz cases, zero mismatches."""
+        import difflib
+
+        before = "p\nq\nr\ns\nt\nu\n"
+        after = "p\nq\nX\ns\nt\nu\nv\nw\n"
+        assert self._details(before, after) == list(
+            difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
+        )
 
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:

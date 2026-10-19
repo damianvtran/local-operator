@@ -1,0 +1,8 @@
+{"timestamp":"2026-01-02T00:00:01.000Z","type":"session_meta","payload":{"id":"codex-rollback","cwd":"/tmp/synthetic-codex"}}
+{"timestamp":"2026-01-02T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"keep this question"}]}}
+{"timestamp":"2026-01-02T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"keep this answer"}]}}
+{"timestamp":"2026-01-02T00:00:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"rolled back question"}]}}
+{"timestamp":"2026-01-02T00:00:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"rolled back answer"}]}}
+{"timestamp":"2026-01-02T00:00:06.000Z","type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}
+{"timestamp":"2026-01-02T00:00:07.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"after rollback question"}]}}
+{"timestamp":"2026-01-02T00:00:08.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after rollback answer"}]}}

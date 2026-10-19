@@ -59,6 +59,7 @@ import {
 	COPY_SHOW_FEWER,
 	MORE_MAX,
 	STEER_TEXT_MAX_CHARS,
+	causePhrase,
 	displayText,
 	fileRowParts,
 	filesSummaryOf,
@@ -209,6 +210,10 @@ export const SupplementBlock = memo(function SupplementBlock({
 	const cancelled =
 		disposition === "cancelled_retry" || disposition === "files_cancelled_retry";
 	const failed = disposition === "failed_retry" || disposition === "files_failed_retry";
+	// The typed cause names the wall the retry would meet (identical words to
+	// the TUI, memo §2.8's one word list); rows without one — or with a token
+	// this build does not know — keep the bare sentence.
+	const causeLine = failed ? causePhrase(beat.cause) : "";
 	const stateLine = preparing || cancelled || failed ? (
 		<div
 			className="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta"
@@ -226,7 +231,12 @@ export const SupplementBlock = memo(function SupplementBlock({
 				</>
 			)}
 			{cancelled && <span className="text-ink-muted">{COPY_CANCELLED}</span>}
-			{failed && <span className="text-ink-muted">{COPY_FAILED}</span>}
+			{failed && (
+				<span className="text-ink-muted">
+					{COPY_FAILED}
+					{causeLine ? ` — ${causeLine}` : ""}
+				</span>
+			)}
 			{/* The action pair is drawn TOGETHER or not at all (D10), both
 			    visible, each a ≥ 44 px target: a phone has no hover, so a
 			    control that only appears on hover would not exist. */}

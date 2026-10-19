@@ -1007,12 +1007,25 @@ def _birth_title(config_dir: Path, session_id: str, text: str | None, user_set: 
 
     Never fails the request: a title is decoration, and ``write_session_title``
     is documented as best-effort for the same reason.
+
+    Only the PROMPT-derived half is read as a user row. The fallback is the
+    wake's own prompt, which for a ``$skill`` invocation is the EXPANDED payload
+    (expansion is the client's duty), so stored raw it reads "The user invoked
+    the `x` skill…" with the whole SKILL.md body behind it — the naming defect
+    ``docs/design/history-fold-convergence.md`` row D8 describes. An explicit
+    name the user typed is stored verbatim, which is the ``not user_set``
+    branch below and the only place this transform runs.
     """
+    from local_operator.harness.rows import user_row_text
     from local_operator.resume import write_session_title
 
     text = (text or "").strip()
     if not text:
         return
+    if not user_set:
+        text = user_row_text(text)
+        if not text:
+            return
     try:
         write_session_title(
             Path(config_dir) / "sessions" / session_id,

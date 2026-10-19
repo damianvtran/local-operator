@@ -34,8 +34,16 @@ from textual.containers import Container
 from textual.widgets import Static
 
 from local_operator.harness.wake import format_duration
+
+# i18n: the band's section headers and monitor-count clauses are user-facing
+# copy, extracted so a locale can carry them; `_t` is bound BELOW the whole
+# import block so no later import reads as not-at-top (E402).
+from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.wakes.display import format_age, format_wake_time
+
+_t = tr("tui.small")
 
 #: The most wake rows the band will spend. ``MAX_WAKE_SCHEDULES`` is 16, far
 #: more than the band can afford; the cap plus an overflow marker keeps a
@@ -111,8 +119,32 @@ class WakePanel(Container):
         ) = None
         #: ``(config root, deliveries dir mtime_ns, ledger)`` — see :meth:`_owed`.
         self._owed_cache: tuple[str, int, dict[str, dict[str, Any]]] | None = None
+        #: Set while a full-page surface owns the screen and this duplicate list
+        #: must not compete with it (see :meth:`set_suppressed`).
+        self._suppressed = False
         # Hidden until the first schedule exists: an empty panel is not content.
         self.display = False
+
+    def set_suppressed(self, suppressed: bool) -> None:
+        """Hide the band while a page that manages the SAME wakes owns the screen.
+
+        A bare ``display = False`` at the call site would not hold: :meth:`sync`
+        runs on the app's 1 Hz poll and re-decides ``display`` from the
+        scheduler's contents on every tick, so the band would come back a second
+        later and reflow a page the user was already reading (round-1 design D1
+        measured the 60x24 list collapsing from a 56x7 viewport to 56x1 when the
+        band arrived late). The flag outlives those ticks; clearing it lets the
+        next :meth:`sync` paint the band again.
+        """
+        self._suppressed = suppressed
+        if suppressed:
+            self.display = False
+        else:
+            # Forget the last paint. `sync` returns early when the contents and
+            # budgets are unchanged, so without this the restore tick would see
+            # the same rows, return, and leave a panel that was hidden by the
+            # flag hidden for good.
+            self._shown = None
 
     def compose(self):  # type: ignore[override]
         yield self._body
@@ -129,6 +161,10 @@ class WakePanel(Container):
         the next tick without either surface polling harder. Never raises: a
         status surface must not be able to take the app down.
         """
+        if self._suppressed:
+            # A page is showing these rows in full; see :meth:`set_suppressed`.
+            self.display = False
+            return
         try:
             scheduler = getattr(session, "wake_scheduler", None)
             # HIDDEN rows (patience waits) never paint: the panel is a human
@@ -450,9 +486,12 @@ class WakePanel(Container):
     ) -> list[Text]:
         """The wake half of the band. ``room`` counts its header too."""
         header = Text(no_wrap=True, overflow="ellipsis")
-        header.append("Wakes", style=muted)
+        header.append(_t(_x.wake_panel_wakes_title()), style=muted)
         header.append(" · ", style=dim)
-        header.append(f"{len(rows)} scheduled" if len(rows) != 1 else "1 scheduled", style=muted)
+        header.append(
+            _t(_x.wake_panel_scheduled_count(count=len(rows), shown=str(len(rows)))),
+            style=muted,
+        )
 
         cap, marker = self._row_window(len(rows), max(1, room) - 1, MAX_WAKE_ROWS)
         visible = rows[:cap]
@@ -492,7 +531,7 @@ class WakePanel(Container):
         §11.3).
         """
         header = Text(no_wrap=True, overflow="ellipsis")
-        header.append("Monitors", style=muted)
+        header.append(_t(_x.wake_panel_monitors_title()), style=muted)
         header.append(" · ", style=dim)
         # The count names what is ARMED, and calls out the broken rows: a header
         # reading "1 watching" directly above a row reading "disabled" says
@@ -503,11 +542,23 @@ class WakePanel(Container):
             # attention": the hidden-row marker below counts its own threes, and
             # two bare threes in one block read as one number (design round 2,
             # D12).
-            verb = "needs" if broken == 1 else "need"
-            header.append(f"{broken} of {len(rows)} {verb} attention", style=muted)
+            # ICU plurals on a separate `count` reproduce the hand-written
+            # needs/need and monitor/monitors choices exactly, while the
+            # rendered numbers stay RAW digit strings ({shown}/{total}),
+            # never grouped — the pre-extraction f-strings printed str().
+            header.append(
+                _t(
+                    _x.wake_panel_monitors_need_attention(
+                        count=broken, shown=str(broken), total=str(len(rows))
+                    )
+                ),
+                style=muted,
+            )
         else:
-            count = f"{len(rows)} monitor" if len(rows) == 1 else f"{len(rows)} monitors"
-            header.append(f"{count} armed", style=muted)
+            header.append(
+                _t(_x.wake_panel_monitors_armed(count=len(rows), shown=str(len(rows)))),
+                style=muted,
+            )
 
         # WORST FIRST, then the cap: with two visible rows the ones behind the
         # marker may not be the ones carrying the news (D5).

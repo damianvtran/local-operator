@@ -14,7 +14,7 @@ from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Final
 
 import yaml
 
@@ -30,6 +30,11 @@ from local_operator.web_defaults import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Configuration is imported by the lightweight CLI. Keep the scalar default
+# here; importing even a provider-policy module would load the engine namespace
+# on `lop --help`. Runtime policy code imports this SAME default, not a copy.
+DEFAULT_ACCOUNT_SELECTION_POLICY: Final = "reset-soonest"
 
 
 def _version_tuple(raw: str) -> tuple[int, ...]:
@@ -569,6 +574,13 @@ DEFAULT_CONFIG = Config(
                     "max_price": "",
                     "preferred_min_throughput": 0.0,
                     "preferred_max_latency": 0.0,
+                    # HARNESS-side, like `provider_affinity`: the decode rate
+                    # (output tokens/sec) under which a host that keeps serving
+                    # the conversation is dropped from the cache pin. 0 = off.
+                    # Opt-in: one measured run motivates experimenting with 25,
+                    # not imposing it across every OpenRouter model. Mirrors
+                    # `OPENROUTER_RETIRE_BELOW_TPS` in model/configure.py.
+                    "retire_below_tps": 0.0,
                 },
             },
             # One ordered cascade for every text-model call. Entries may be
@@ -582,7 +594,7 @@ DEFAULT_CONFIG = Config(
                 "modelFallback": True,
                 "usageAwareFallback": False,
                 "usageReservePercent": 10,
-                "usageAwareAccountPick": True,
+                "accountSelectionPolicy": DEFAULT_ACCOUNT_SELECTION_POLICY,
                 "fallbackChains": {},
             },
             # Search is useful on first run without a credential: DuckDuckGo
@@ -1218,5 +1230,10 @@ class ConfigManager:
 
         settings_io._reload_before_write(self)
 
-        self.config.set_value(key, value)
-        self._write_config(vars(self.config))
+        # Stage the candidate after the locked disk reload. A rejected atomic
+        # write must not leave the process believing a value it never saved;
+        # restore-by-writing would also clobber another writer's later change.
+        candidate = deepcopy(self.config)
+        candidate.set_value(key, value)
+        self._write_config(vars(candidate))
+        self.config = candidate

@@ -214,7 +214,12 @@ async def test_a_score_answer_is_the_float_the_vendor_reported(manager) -> None:
 
 
 async def test_a_missing_cost_stays_missing(manager) -> None:
-    """No price row exists for a decision model, so the contract's fallback is moot."""
+    """Neither source stated an amount, so the figure is unknown — never 0.
+
+    The body carries no ``usage.cost`` AND no top-level ``cost`` object, which is
+    the only shape that is genuinely unknown now that the Radient route's ``cost``
+    object IS read (see the ``_server_cost_usd`` cases below).
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         return json_response({"answers": {}, "usage": {"input_tokens": 12}})
@@ -264,6 +269,258 @@ async def test_absent_counts_are_none_while_a_reported_zero_is_zero(manager) -> 
     assert reported.input_tokens == 0
     assert reported.output_tokens == 0
     assert reported.cost_usd == pytest.approx(0.000021)
+
+
+async def test_a_radient_top_level_cost_object_is_the_stated_charge(manager) -> None:
+    """The measured Radient wire shape: no ``usage.cost``, a top-level ``cost``.
+
+    Captured read-only from ``api.radienthq.com/v1/decisions`` on 2026-10-16. The
+    route sends ``usage`` with token counts and NO ``cost`` key, and states the
+    exact per-call charge in a versioned top-level object instead — which the
+    parser used to drop, leaving a priced inference row beside a ``$—``
+    classification row tagged "price not stated".
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "model": "jev-1.13",
+                "answers": {},
+                "usage": {"input_tokens": 310, "output_tokens": 16},
+                "cost": {
+                    "v": 1,
+                    "amount_usd": 1.3692e-05,
+                    "basis": "billed",
+                    "units": 326,
+                    "unit": "token",
+                    "unit_price_usd": 4.2e-08,
+                    "provider": "typesafe",
+                    "model": "jev-1.13",
+                    "usage_record_id": "a1b2c3d4e5f60718293a4b5c",
+                    "price_version": "decisions-rate@2026-09-19",
+                },
+            }
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    # Amount: the adapter's integer micro-USD (13.692 -> 14, ROUND_HALF_UP)
+    # divided by 1e6 — the brief's explicit unit rule. NOTE the quantisation:
+    # the ledger's currency is micro-USD, so the USD figure is the MICROS' own
+    # value (1.4e-05), not a bit-exact echo of the wire float (1.3692e-05). The
+    # stored number that matters is the integer 14 (asserted in the unit-pin
+    # test below, at both boundaries); this float only feeds display and
+    # ``Recommendation.cost_usd``, and it is derived, never re-read from the wire.
+    # The brief's two assertions ("equals amount_usd exactly" AND "micro 14")
+    # cannot both hold at 1.3692e-05: the round trip through integer micros is
+    # lossy by construction. The unit pin wins — it is the one that catches a
+    # 1000x slip — and the equivalence is pinned to the micros instead.
+    assert response.cost_usd == 14 / 1_000_000
+    assert response.cost_basis == "billed", "a settled charge is billed, not a guess"
+    # The token counts still come from ``usage``, which this route does send.
+    assert (response.input_tokens, response.output_tokens) == (310, 16)
+
+
+async def test_the_top_level_amount_is_absolute_usd_and_converts_at_one_e6(manager) -> None:
+    """Pin the UNIT: ``amount_usd`` is this call's absolute USD, so micros are x1e6.
+
+    ``1.3692e-05`` USD is 13.692 micro-USD, which the adapter rounds HALF_UP to
+    ``14`` and which must come back as the SAME dollar figure — a 1000x slip
+    (per-1k vs per-1M thinking, or a forgotten ``1e6``) cannot pass silently.
+    The per-1k/per-1M trap belongs to token-RATE rows; this path only mirrors
+    the adapter's own ``amount x 1_000_000``. Asserted at BOTH boundaries: the
+    adapter's integer micros and the parser's float USD.
+    """
+    from local_operator.clients.radient_cost import cost_from_payload
+
+    payload = {"answers": {}, "cost": {"v": 1, "amount_usd": 1.3692e-05, "basis": "billed"}}
+    parsed = cost_from_payload(payload)
+    assert parsed is not None
+    assert parsed.amount_micro == 14, "13.692 micro-USD rounds to 14"
+    # The round trip the parser performs: micros back to USD. 14 micros is
+    # 1.4e-05, whose scale is the measured 1.3692e-05 — not 1.3692e-02 (a
+    # 1000x miss) and not 1.3692e-08 (a missed factor of 1000 the other way).
+    assert 1e-05 < parsed.amount_micro / 1_000_000 < 2e-05
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(payload)
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+    assert response.cost_usd == pytest.approx(1.4e-05)
+    assert response.cost_usd == pytest.approx(14 / 1_000_000)
+
+
+async def test_a_quoted_amount_is_estimated_and_never_a_charge(manager) -> None:
+    """A ``quote`` basis must arrive as ``estimated``, never as a billed charge.
+
+    The operator's rule (``basis_from_wire``, ``channel_spend.BASIS_META``): a
+    figure that has not settled is an estimate, and a surface that printed it as
+    a charge would overstate what was actually billed.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "answers": {},
+                "cost": {
+                    "v": 1,
+                    "amount_usd": 0.00042,
+                    "basis": "quote",
+                    "units": 326,
+                    "unit": "token",
+                    "provider": "typesafe",
+                    "model": "jev-1.13",
+                },
+            }
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd == pytest.approx(0.00042)
+    assert response.cost_basis == "estimated"
+    assert response.cost_basis != "billed"
+
+
+async def test_usage_cost_wins_over_the_top_level_object(manager) -> None:
+    """``usage.cost`` is authoritative and unchanged; it carries no basis.
+
+    It is the request's own inline receipt (OpenRouter and TypeSafe send it), so
+    it wins outright rather than being reconciled against the top-level object.
+    ``cost_basis`` stays ``None`` — the wire's inline figure has no basis field,
+    and inventing one here would move the ledger's documented default into the
+    parser.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "answers": {},
+                "usage": {"input_tokens": 5, "output_tokens": 1, "cost": 0.000021798},
+                "cost": {"v": 1, "amount_usd": 9.99, "basis": "billed"},
+            }
+        )
+
+    response = await OpenRouterVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd == pytest.approx(0.000021798)
+    assert response.cost_basis is None
+
+
+async def test_a_cost_object_with_no_usable_amount_is_unknown(manager) -> None:
+    """An object that states no figure is unknown, not free.
+
+    The adapter's own rule (absence is ``None``, never 0) has to survive the
+    cascade: an object carrying only ``units`` still tells us nothing about money.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "basis": "billed", "units": 326, "unit": "token"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd is None
+    assert response.cost_basis is None
+
+
+async def test_a_negative_server_amount_is_unknown_not_a_credit(manager) -> None:
+    """A malformed receipt reads as unknown; the guard is the ``usage.cost`` one.
+
+    ``-2.5`` does not describe this route's per-request charge: it is a credit or a
+    bug, and neither may reach the operator's cost line as ``$-2.500000``. The
+    top-level path therefore routes through the SAME ``_reported_cost`` guard the
+    inline path uses, and an unusable amount takes its basis with it.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "amount_usd": -2.5, "basis": "billed"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd is None
+    assert response.cost_basis is None
+
+
+async def test_a_server_amount_with_no_basis_yields_no_basis(manager) -> None:
+    """An absent wire ``basis`` is OUR ``not_tracked`` sentinel, which maps to None.
+
+    The wire vocabulary is ``quote``/``billed``/``estimated`` (plus the subscription
+    spelling); ``not_tracked`` is a harness spelling the server never sends, so it
+    means "the server stated no basis". Returning it would be truthy and defeat
+    ``answered_record``'s honest ``billed`` default, dropping a genuinely billed
+    amount into ``not_tracked_micro`` instead of the billed bucket.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response({"answers": {}, "cost": {"v": 1, "amount_usd": 0.000027}})
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd == pytest.approx(0.000027)
+    assert response.cost_basis is None
+
+
+async def test_an_oversized_server_amount_is_unknown_and_does_not_escape(manager) -> None:
+    """A huge wire amount reads as unknown; it must not escape ``_parse_response``.
+
+    ``amount_usd`` of 401 nines parses to a 408-digit integer micro-USD, and the
+    micros -> USD division on it raises ``OverflowError: integer division result too
+    large for a float`` — which, before the range check, escaped the parser entirely
+    (a new escape path: the ``usage.cost`` arm returned ``None`` cleanly). The amount
+    is now range-checked against the same bound ``answered_record`` uses, so it reads
+    as unknown. Driven through the LEG, not by calling the helper, because the escape
+    path is the thing under test.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "amount_usd": int("9" * 401), "basis": "billed"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd is None
+    assert response.cost_basis is None
+
+
+async def test_a_storable_large_server_amount_is_still_stated(manager) -> None:
+    """The range guard must not swallow a large-but-plausible receipt.
+
+    An upper bound that read as unknown too eagerly would hide real money; the bound
+    is SQLite's signed INTEGER range in micro-USD, which is far above any real
+    decision call.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {"answers": {}, "cost": {"v": 1, "amount_usd": 1234.5678, "basis": "billed"}}
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_usd == pytest.approx(1234.5678)
+    assert response.cost_basis == "billed"
 
 
 async def test_an_unanswered_question_is_not_a_failure(manager) -> None:
@@ -1010,3 +1267,56 @@ async def test_a_walk_that_ended_with_no_credential_still_resets(bare_manager) -
     await vendor.decide(request_of(choice_question()), timeout_s=5.0)
     assert bearers[-1] == "fresh-bearer"
     assert vendor._tier == 0
+
+
+# ---------------------------------------------------------------------------
+# The priced-from id (top-level cost.model) is separate from the vendor echo
+# ---------------------------------------------------------------------------
+
+
+async def test_the_cost_objects_model_is_captured_while_the_echo_is_unchanged(manager) -> None:
+    """``model`` is the vendor echo; ``cost.model`` is what the amount was priced from.
+
+    The live Radient body measured 2026-10-19 carries both: ``model:
+    "jev-1.13.0"`` at the top level and ``cost.model: "jev-1.13"``. The ledger
+    row must use the latter, so the parser keeps the two facts apart.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "model": "jev-1.13.0",
+                "answers": {"recommend_skill": {"choice": "none", "confidence": 1.0}},
+                "cost": {
+                    "v": 1,
+                    "amount_usd": 1.1424e-05,
+                    "basis": "billed",
+                    "model": "jev-1.13",
+                },
+            }
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.model == "jev-1.13.0", "the vendor echo stays untouched"
+    assert response.cost_model == "jev-1.13", "the priced-from id is the billing identity"
+
+
+async def test_a_body_without_a_cost_object_has_no_priced_from_id(manager) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "model": "jev-1.13.0",
+                "answers": {"recommend_skill": {"choice": "none"}},
+                "usage": {"cost": 0.000027},
+            }
+        )
+
+    response = await RadientVendor(manager, client=client_for(handler)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+
+    assert response.cost_model is None
+    assert response.model == "jev-1.13.0"

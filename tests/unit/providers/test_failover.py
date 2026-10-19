@@ -1133,10 +1133,12 @@ async def test_the_primary_cooldown_is_a_deadline_not_a_sliding_window(
     def fake_time() -> float:
         return now_ms / 1000
 
-    # `failover.py` does `import time` and calls `time.time()`, so the patch
+    # Failover reads both wall time and monotonic attempt time, so the patch
     # goes on the module's own `time` binding — swapping a stand-in rather
     # than mutating the real `time` module, which every other test shares.
-    monkeypatch.setattr(failover_module, "time", SimpleNamespace(time=fake_time), raising=True)
+    monkeypatch.setattr(
+        failover_module, "time", SimpleNamespace(time=fake_time, monotonic=fake_time), raising=True
+    )
 
     target = FallbackTarget("anthropic/claude-opus-5", "high")
     state = FailoverRouteState()
@@ -1168,7 +1170,10 @@ async def test_exhausted_fallback_is_benched_for_the_next_walk(monkeypatch) -> N
     """
     now_ms = 1_000_000
     monkeypatch.setattr(
-        failover_module, "time", SimpleNamespace(time=lambda: now_ms / 1000), raising=True
+        failover_module,
+        "time",
+        SimpleNamespace(time=lambda: now_ms / 1000, monotonic=lambda: now_ms / 1000),
+        raising=True,
     )
     specs_seen: list[str] = []
 
@@ -1234,7 +1239,10 @@ async def test_bench_never_strands_a_turn_when_every_fallback_is_benched(monkeyp
     """
     now_ms = 1_000_000
     monkeypatch.setattr(
-        failover_module, "time", SimpleNamespace(time=lambda: now_ms / 1000), raising=True
+        failover_module,
+        "time",
+        SimpleNamespace(time=lambda: now_ms / 1000, monotonic=lambda: now_ms / 1000),
+        raising=True,
     )
     specs_seen: list[str] = []
 
@@ -1279,7 +1287,10 @@ async def test_pinned_route_is_exempt_from_its_own_bench(monkeypatch) -> None:
     """
     now_ms = 1_000_000
     monkeypatch.setattr(
-        failover_module, "time", SimpleNamespace(time=lambda: now_ms / 1000), raising=True
+        failover_module,
+        "time",
+        SimpleNamespace(time=lambda: now_ms / 1000, monotonic=lambda: now_ms / 1000),
+        raising=True,
     )
     specs_seen: list[str] = []
 
@@ -3623,11 +3634,16 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         async def client_for(spec: ModelSpec) -> Any:
             return ScriptedClient([StreamEndEvent(stop_reason="stop")])
 
-        def the_turn_is_on_row_a() -> None:
-            store._sticky[("openai", session_id)] = turn_row.id
+        def the_turn_is_on_row_a() -> Any:
+            # The control needs an ACTIVE preflight pick, not an indefinite
+            # warm-account claim from writing a tentative pointer alone.
+            boundary = store.begin_account_request(session_id, _request())
+            store.pin_session_credential("openai", session_id, turn_row.id)
+            return boundary
 
+        boundary = None
         try:
-            the_turn_is_on_row_a()
+            boundary = the_turn_is_on_row_a()
             _ = [
                 event
                 async for event in stream_with_failover(
@@ -3644,7 +3660,8 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
             # CONTROL, on the same store and the same failing refresh: an
             # ordinary request DOES both, so neither assertion above can be
             # passing because this fixture never reaches the path.
-            the_turn_is_on_row_a()
+            store.end_account_request(session_id, boundary)
+            boundary = the_turn_is_on_row_a()
             _ = [
                 event
                 async for event in stream_with_failover(
@@ -3656,6 +3673,7 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
                 store._sticky[("openai", session_id)] == sibling_row.id
             ), "stickiness did not move on an ordinary request"
         finally:
+            store.end_account_request(session_id, boundary)
             store.close()
 
     async def test_the_auth_retry_leaves_the_sticky_pointer_and_block_list_byte_identical(
@@ -4034,6 +4052,7 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
             store, {"throttled-a": ProviderError(status, message, retryable=True)}, wire
         )
 
+        boundary = None
         try:
             store._sticky[("openai", session_id)] = throttled.id
             got = [
@@ -4058,6 +4077,10 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
             # take the routing decision — which is what keeps the session
             # healthy while the errand previously failed.
             wire.clear()
+            # Force THIS turn's explicit pick; the old pointer alone is not
+            # evidence of a successful cache lease.
+            boundary = store.begin_account_request(session_id, _request())
+            store.pin_session_credential("openai", session_id, throttled.id)
             _ = [
                 event
                 async for event in stream_with_failover(
@@ -4069,6 +4092,7 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
                 ("openai", session_id): throttled.id
             }, "the turn took no routing decision, so the contrast proves nothing"
         finally:
+            store.end_account_request(session_id, boundary)
             store.close()
 
     async def test_a_sibling_is_still_preferred_over_refreshing_the_rejected_row(

@@ -10,7 +10,7 @@
   "tui.transcript.sender.pid": "pid {pid}",
   "tui.transcript.sender.unknown": "another session",
   "tui.transcript.group.messages": "messages · {count}",
-  "tui.transcript.group.actions": "{count, plural, one {{label} actions} other {{label} actions}}",
+  "tui.transcript.group.actions": "{count, plural, one {{label} action} other {{label} actions}}",
   "tui.transcript.group.reply_requested": "{count, plural, one {{label} reply requested} other {{label} reply requested}}",
   "tui.transcript.group.steered": "{count, plural, one {{label} steered} other {{label} steered}}",
   "tui.transcript.hub.reply_requested": "Reply requested",

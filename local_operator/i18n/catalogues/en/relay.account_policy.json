@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "Computer settings",
+  "relay.account_policy.back": "Back",
+  "relay.account_policy.loading": "Loading account routing…",
+  "relay.account_policy.save": "Save policy",
+  "relay.account_policy.saving": "Saving…",
+  "relay.account_policy.saved": "Saved on this computer.",
+  "relay.account_policy.retry": "Try again",
+  "relay.account_policy.unavailable": "Account routing settings are unavailable on this relay. Update Local Operator on this computer.",
+  "relay.account_policy.error": "The change could not be confirmed. Check the connection and reload to read the current policy.",
+  "relay.account_policy.scope": "Changes apply only to this computer.",
+  "relay.account_policy.entry": "settings",
+  "relay.account_policy.rejected": "The change was not saved. Check the value or this computer’s settings and try again.",
+  "relay.account_policy.load_error": "Could not load account routing. Check the connection and try again."
+}

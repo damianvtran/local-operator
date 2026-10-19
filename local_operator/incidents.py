@@ -383,7 +383,15 @@ _HINTS: dict[str, str] = {
     # rather than left as a pronoun with two candidate antecedents ("it" could
     # read as the turn or as the thing the turn was mid-way through — UX round 2,
     # U11), and it is true whichever owner the run had.
-    "cut-off": "The runtime was cut off before this turn produced a result. The transcript "
+    # TURN-SCOPED AND CAUSE-NEUTRAL, which the first line is deliberately not:
+    # "The runtime was cut off" is FALSE for this vocabulary's own
+    # ``output-limit`` member — the runtime kept running and the TURN ended at
+    # the model's output limit — and it contradicted the card's own first line
+    # (design review round 3, D1), which names a turn that hit the model's
+    # output limit. The lead now states the one fact every member of
+    # ``CUT_OFF_CAUSES`` shares — the previous turn ended without producing a
+    # result — and leaves the cause to the rendered sentence above it.
+    "cut-off": "The previous turn was cut off before it produced a result. The transcript "
     "holds whatever was written before it stopped and nothing after. Check the "
     "state of anything it was mid-way through before repeating the work; do not "
     "assume that work finished.",
@@ -584,6 +592,22 @@ STALL_BOUND_CAUSE = "runtime-stall-bound"
 #: without being taught a new field.
 CONTINUATION_LIMIT_CAUSE = "continuation-limit"
 
+#: The LOOP's OTHER involuntary bound: a turn hit the model's OUTPUT limit with
+#: nothing visible produced, and the harness could not continue it. Published so
+#: a bare ``AgentEndEvent`` stops reading as a completed answer on every surface.
+#:
+#: WHY IT IS THE SAME SHAPE AS ``CONTINUATION_LIMIT_CAUSE`` RATHER THAN A PRIVATE
+#: STRING: a cut-off child arriving at its parent saying it had finished is the
+#: silent half of the subagent-stall report, and it is measured on this arm too --
+#: 281 ``length`` stops across ~173 fleet sessions, 149 of them silent, 141 on
+#: ``radient/auto``, 138 with ``output_tokens == reasoning_tokens == 8192`` (the
+#: whole budget spent thinking), and 140 of those silent stops inside 91 of 3320
+#: child sessions. A token in this table rather than a private
+#: string is what makes ``is_cut_off_cause`` answer True and every existing
+#: renderer (the attention outcome, the panel's "cut off" row, the roster) name it
+#: without being taught a new field.
+OUTPUT_LIMIT_CAUSE = "output-limit"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
@@ -597,6 +621,23 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # actor — there is no reaper and no process to go looking for.
     CONTINUATION_LIMIT_CAUSE: (
         "the turn kept being asked to continue, so it was stopped and the pending message dropped"
+    ),
+    # Bounded like the continuation arm above and for the same reason: the loop
+    # chose to spend the budget, so the sentence says what ran out rather than
+    # naming an actor outside the victim. It names the loop's half of the story
+    # ("could not continue it") deliberately -- the model DID produce a turn, so
+    # the fact a reader needs is not "the model failed" but "this end is not the
+    # end of the work".
+    #
+    # "before it could finish", NOT "with nothing produced": the arm this cause
+    # names covers TWO shapes -- a silent turn that produced nothing AND a prose
+    # answer that arrived cut off mid-report (the child continuation's exhausted
+    # budget). The old sentence was true only of the first, and a reader of the
+    # second was told a turn that visibly produced two partial answers had
+    # produced nothing (QA round 1, Q-1).
+    OUTPUT_LIMIT_CAUSE: (
+        "the turn hit the model's output limit before it could finish, and the harness could not "
+        "continue it"
     ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
@@ -1183,8 +1224,11 @@ class Incident:
         head = f"[session incident{source}] {self.category}:"
         lines = [f"{head} {self.raw.strip()[:500]}"]
         if self.hint:
-            lines.append(f"suggested action: {self.hint}")
+            lines.append(
+                f"suggested action: {self.hint}"
+            )  # i18n: ignore model-facing incident block
         lines.append(
+            # i18n: ignore model-facing incident block
             "This is why the previous turn ended. Take it into account before "
             "repeating the same request."
         )
@@ -1448,8 +1492,9 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     """
     lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
     if reason.strip():
-        lines.append(f"Reason: {reason.strip()[:200]}")
+        lines.append(f"Reason: {reason.strip()[:200]}")  # i18n: ignore model-facing incident block
     lines.append(
+        # i18n: ignore model-facing incident block
         "Its tools are not callable until the user restores it, and the agent "
         "should not retry them in a loop."
     )
@@ -1533,8 +1578,9 @@ def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str
     # for five of nine — the incident's own shape. The list is reference material
     # on its own line, not part of the sentence a reader skims.
     if named:
-        lines.append(f"Jobs: {', '.join(named)}")
+        lines.append(f"Jobs: {', '.join(named)}")  # i18n: ignore model-facing incident block
     lines.append(
+        # i18n: ignore model-facing incident block
         # No present-tense claim about who has read these (review round 3,
         # MINOR-3): the row is durable and re-rendered forever, so "nothing has
         # read it" would become false the moment a later turn did read it — the
@@ -1548,6 +1594,51 @@ def format_held_delivery_message(jobs: Sequence[tuple[str, str]], *, reason: str
         "is dropped on the next read after that, or sooner when the sweep runs on a "
         "settle, a cancel or a delivery sink's exit, so by the time this row is read that "
         "row is usually gone."
+    )
+    return "\n".join(lines)
+
+
+def format_unlanded_records_message(adoption_ids: Sequence[str], receipt_ids: Sequence[str]) -> str:
+    """Render the row for queued records a closing runtime could not write.
+
+    The durable twin of the dispose ``NoticeEvent`` (aside queue D7, review R6):
+    the live notice reaches only a frontend still connected during teardown, and
+    a desktop that reconnects later reads the journal, so the fact is recorded
+    here as well. Authored in this file for the reason
+    :func:`format_held_delivery_message` gives — the incident head and the
+    ``suggested action:`` slot are what mark it as a system record.
+
+    No turn failed, so no "This is why the previous turn ended" tail: the
+    runtime closed while an aside it had queued (held back by an open tool
+    batch) or a bang-command receipt (whose write failed) was still waiting.
+    """
+    parts: list[str] = []
+    if adoption_ids:
+        parts.append(
+            f"{len(adoption_ids)} aside exchange(s) the user added"
+        )  # i18n: ignore model-facing incident block
+    if receipt_ids:
+        parts.append(
+            f"{len(receipt_ids)} shell command receipt(s)"
+        )  # i18n: ignore model-facing incident block
+    lines = [
+        "[session incident] unsaved records: "
+        + " and ".join(parts or ["queued records"])
+        + " were still queued when this session's runtime closed, and were not written "
+        "into this conversation."
+    ]
+    if adoption_ids:
+        lines.append(
+            f"Asides (last message id): {', '.join(adoption_ids)}"
+        )  # i18n: ignore model-facing incident block
+    if receipt_ids:
+        lines.append(
+            f"Shell receipts (call id): {', '.join(receipt_ids)}"
+        )  # i18n: ignore model-facing incident block
+    lines.append(
+        # i18n: ignore model-facing incident block
+        "suggested action: an aside is still in its panel while the desktop keeps it "
+        "(about an hour) and can be added again; a shell command can be run again."
     )
     return "\n".join(lines)
 
@@ -1639,15 +1730,17 @@ def format_model_switch_message(
         head = f"[model switch] You are now running as {new_label}."
     lines = [head]
     if reason.strip():
-        lines.append(f"Reason: {reason.strip()[:200]}")
+        lines.append(f"Reason: {reason.strip()[:200]}")  # i18n: ignore model-facing incident block
     if transient:
         lines.append(
+            # i18n: ignore model-facing incident block
             "This is a temporary fallback for the current request; the session "
             "may return to its primary model at a later turn. Capabilities and "
             "context window may differ from the primary."
         )
     else:
         lines.append(
+            # i18n: ignore model-facing incident block
             "This applies from now on. Capabilities, context window, and tone "
             "may differ from the previous model; act as the model you now are."
         )

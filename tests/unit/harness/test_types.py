@@ -243,13 +243,31 @@ def test_a_smaller_published_ceiling_wins_over_the_policy() -> None:
 def test_a_spec_with_no_published_ceiling_is_still_bounded() -> None:
     """``0`` is "no data", not "unlimited", so the policy fills it.
 
-    This is NOT the case that produced the 97k-token response -- that call ran on
-    a model advertising 943,718, and it carried that figure on the wire. Keep the
-    two apart: a genuinely cap-less spec is a shape production does not reach
-    (unknown models resolve to 8,192, local ones to 1,024), which is why this arm
-    is pinned as a contract property rather than as a reproduced incident.
+    THIS IS PRODUCTION'S SHAPE NOW, and that reversal is the fix. The docstring
+    here used to say the arm was a contract property rather than a reproduced
+    incident, on the grounds that "unknown models resolve to 8,192, local ones to
+    1,024" -- and both of those statements were true and the conclusion was still
+    wrong, because the path nobody listed was the AGGREGATOR ROUTER. Its registry
+    row carries the legacy ``max_tokens = -1`` sentinel (the selected model's cap
+    is unknown; a router dispatches per request), and the builder seeded that as
+    ``UNKNOWN_MAX_OUTPUT`` -- 8192, a NUMBER -- so every ``radient/auto``,
+    ``radient-key/auto`` and ``openrouter/auto`` request went out clamped to it.
+    A reasoning-heavy turn spent the whole budget thinking and returned empty at
+    ``stop_reason='length'``: 281 such stops across ~173 fleet sessions, 149 of
+    them silent, 138 with ``output_tokens == reasoning_tokens == 8192``, and 140
+    of the silent stops inside child sessions. The builder now carries ``0``
+    for a no-data route (``model.configure.build_model_spec``), so this arm is
+    the router route's real behaviour and is pinned both on the budget and on the
+    request the harness actually builds.
+
+    Still NOT the case that produced the 97k-token response -- that call ran on a
+    model advertising 943,718 and carried that figure on the wire.
     """
     assert ChatRequest(model=_spec(0), messages=[]).max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+    assert turn_output_budget(_spec(0)) == DEFAULT_TURN_OUTPUT_TOKENS
+    # The control, from the same builder: when a route DOES state a smaller cap,
+    # the narrowing arm above keeps it. ``0`` must not become "always the policy".
+    assert turn_output_budget(_spec(8_192)) == 8_192
 
 
 def test_an_explicit_ask_is_never_overridden() -> None:
@@ -386,6 +404,33 @@ def test_message_user_orders_text_then_images_then_audio() -> None:
         "ImageContent",
         "AudioContent",
     ]
+
+
+def test_message_user_omits_the_text_block_when_there_is_no_text() -> None:
+    """#2460: empty text must yield NO text block, the rule ``assistant``
+    already follows.
+
+    It used to emit ``TextContent(text="")`` unconditionally. An image-only
+    send then persisted ``content: [{}, {attachment...}]``, and because that
+    row is in history it was resent on every later turn, where Anthropic
+    rejected the whole request with "text content blocks must be non-empty" —
+    a permanently broken session from one screenshot. The ``{}`` on the row is
+    the empty block: the encoder dumps with ``exclude_defaults``, so a
+    defaulted ``text`` is dropped and nothing is left but the braces.
+    """
+    image = ImageContent(data="aGk=", mime_type="image/png")
+    assert Message.user("", images=[image]).content == [image]
+    assert Message.user("").content == []
+
+
+def test_message_user_keeps_text_that_is_present() -> None:
+    """The drop is surgical: real text, and whitespace a user typed, are
+    theirs. Only absent text is omitted — this is a shape rule at the
+    constructor, not the whitespace normalization the WIRE does separately
+    (``AnthropicClient._message_blocks``, which drops blank blocks because a
+    provider refuses them)."""
+    assert Message.user("hi").content == [TextContent(text="hi")]
+    assert Message.user(" ").content == [TextContent(text=" ")]
 
 
 def test_a_spec_does_not_take_audio_unless_it_is_stated() -> None:

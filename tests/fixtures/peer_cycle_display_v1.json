@@ -1,0 +1,17 @@
+{
+  "schema": "peer-cycle-display-context-v1",
+  "cases": [
+    {"mutation": "wrong-version"},
+    {"mutation": "boolean-version"},
+    {"mutation": "foreign-session"},
+    {"mutation": "missing-result"},
+    {"mutation": "changed-outcome"},
+    {"mutation": "genuine-user"},
+    {"mutation": "empty-final"},
+    {"mutation": "held-peer"},
+    {"mutation": "attachment-peer"},
+    {"mutation": "bad-child-namespace"},
+    {"mutation": "duplicate-member"},
+    {"mutation": "record-byte-overflow"}
+  ]
+}

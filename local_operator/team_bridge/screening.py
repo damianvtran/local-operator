@@ -4,7 +4,8 @@ WHAT LIVES HERE. Deterministic pieces testable without a provider, and the
 ONE pipeline that turns a fetched message into a metadata-only outcome:
 
 1. :func:`render_prompt` — single-pass placeholder substitution over the
-   FROZEN embedded template (``bridge-screen-v1``). A fresh cryptographic
+   FROZEN embedded template (``bridge-screen-v1``/``v2``, selected by the served
+   version). A fresh cryptographic
    nonce delimits the submission; substituted values are never re-scanned,
    so text inserted from the (hostile) message cannot forge a closing tag or
    grow a new placeholder. The rendered text is a PRIVATE carrier: it is not
@@ -53,13 +54,14 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from local_operator.team_bridge.client import (
-    SCREENING_TEMPLATE_V1,
-    SCREENING_TEMPLATE_V1_SHA256,
+    SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
+    screening_template_sha256,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import (
     DELIVERY_STATES,
+    SCREENING_CATEGORIES,
     OwnerSnapshot,
     ScreeningReceipt,
 )
@@ -76,15 +78,8 @@ __all__ = [
     "validate_envelope",
 ]
 
-#: The closed category enum (frozen §8). Bounce receipts carry ONLY these,
-#: de-duplicated; a bounce without one unambiguous known token holds.
-SCREENING_CATEGORIES = (
-    "prompt_injection",
-    "social_engineering",
-    "harassment",
-    "malicious_link",
-    "spam",
-)
+#: The closed category enum (frozen §8) is imported from :mod:`....types`, so the
+#: persisted-proof validator uses the same vocabulary.
 
 #: The closed hold-code set. Every non-admission is ONE of these; none of
 #: them ever carries model/vendor prose.
@@ -464,8 +459,14 @@ def render_prompt(
     organization: str,
     msg_type: str,
     nonce: str | None = None,
+    version: str = SCREENING_VERSION_V1,
 ) -> RenderedPrompt:
-    """Single-pass substitution over the frozen template — the ONLY renderer.
+    """Single-pass substitution over an EMBEDDED template — the ONLY renderer.
+
+    ``version`` selects the bytes from :data:`SCREENING_TEMPLATES`; a version
+    this client does not embed is refused. The served status value is only a
+    selector (``_screening_is_trusted``), never content, so a compromised status
+    response cannot rewrite the screener.
 
     The nonce must be absent from every substituted value and every value is
     inserted ONCE, left-to-right, without re-scanning: a message body that
@@ -474,6 +475,9 @@ def render_prompt(
     edit cannot silently change the delimiter contract.
     """
 
+    template = SCREENING_TEMPLATES.get(version)
+    if template is None:
+        raise ValueError(f"no embedded screening template for version {version!r}")
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
     values = {
         "sender": sender,
@@ -487,7 +491,6 @@ def render_prompt(
             # submission frame itself; regenerate is the caller's job, so
             # this renderer refuses outright (fail closed, never sanitize).
             raise ValueError(f"nonce literal present in substituted {name!r}")
-    template = SCREENING_TEMPLATE_V1
     if template.count("{{nonce}}") != 3 or template.count("{{body}}") != 1:
         raise ValueError("embedded template delimiter contract changed")
     # SINGLE pass: scan the TEMPLATE only; inserted values are appended
@@ -503,9 +506,12 @@ def render_prompt(
     text = "".join(parts)
     if text.count(token) != 3:
         raise ValueError("rendered prompt lost its nonce delimiters")
+    template_sha256 = screening_template_sha256(version)
+    if template_sha256 is None:  # unreachable: the template map selected it
+        raise ValueError(f"no trusted hash for screening version {version!r}")
     rendered = RenderedPrompt(
         nonce=token,
-        template_sha256=SCREENING_TEMPLATE_V1_SHA256,
+        template_sha256=template_sha256,
         body_sha256=_body_sha256_bytes(body_text.encode("utf-8")),
         screened_bytes=len(body_text.encode("utf-8")),
     )
@@ -789,13 +795,13 @@ async def _screen_core(
             return ScreenResult("hold", hold_code="schema_damaged")
         return ScreenResult("hold", hold_code="owner_mismatch")
 
-    # 2. Template authority: byte-equal frozen v1 only, checked against an
-    #    IMMUTABLE snapshot so nothing mutated later can launder in.
+    # 2. Template authority: an EMBEDDED version and its byte-equal hash,
+    #    checked against an IMMUTABLE snapshot so nothing mutated later can
+    #    launder in. v2 adds the scope categories; v1 stays accepted so a
+    #    deployment still serving it keeps working.
     snapshot = PolicySnapshot.capture(policy)
-    if (
-        snapshot.screening_version != SCREENING_VERSION_V1
-        or snapshot.template_sha256 != SCREENING_TEMPLATE_V1_SHA256
-    ):
+    trusted_hash = screening_template_sha256(snapshot.screening_version)
+    if trusted_hash is None or snapshot.template_sha256 != trusted_hash:
         # The owner resolved live, so this early refusal becomes a durable
         # hold during the message's lifetime (H3-Q8), separate from the
         # inbox projection's own state.
@@ -1053,6 +1059,7 @@ async def _screen_core(
                 organization=envelope.organization,
                 msg_type=envelope.type_label,
                 nonce=nonce,
+                version=snapshot.screening_version,
             )
             break
         except ValueError:
@@ -1172,7 +1179,7 @@ async def _screen_core(
     receipt = ScreeningReceipt(
         verdict="allow" if disposition == "deliver" else "reject",
         model=actual_model,
-        prompt_version=SCREENING_VERSION_V1,
+        prompt_version=snapshot.screening_version,
         template_sha256=rendered.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,

@@ -1,0 +1,27 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "QwenCloud is a product name; /usage a command token"
+  },
+  "cli.qwencloud_help.set": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "STDIN/argv are tokens"
+  },
+  "cli.qwencloud_help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'status' argument; flag/command tokens stay in situ"
+  },
+  "cli.qwencloud_help.rm": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'rm' argument; flag/command tokens stay in situ"
+  },
+  "cli.qwencloud_help.migrate": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for the 'migrate' argument; flag/command tokens stay in situ"
+  }
+}

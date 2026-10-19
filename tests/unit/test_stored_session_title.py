@@ -123,12 +123,72 @@ def test_the_newest_title_wins(tmp_path: Path):
     assert stored_session_title(session) == "What The User Renamed It To"
 
 
+def _skill_payload(typed: str) -> str:
+    """A ``$skill`` invocation in its PERSISTED form.
+
+    The real ``Skill`` and the real renderer, because the payload written to the
+    transcript is what this fallback reads — a hand-spelled tag would pin a
+    shape the product never produces.
+    """
+    from local_operator.skills.discovery import Skill
+    from local_operator.skills.invoke import parse_invocation, render_invocation
+
+    skill = Skill(
+        name="research",
+        description="research things",
+        file_path=Path("/skills/research/SKILL.md"),
+        base_dir=Path("/skills/research"),
+        source="user",
+    )
+    invocation = parse_invocation(typed, {"research": skill})
+    assert invocation is not None
+    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+
+
 def test_a_session_with_no_stored_title_falls_back_to_its_opener(tmp_path: Path):
     """Every transcript written before titles were journalled is in this
     state, and must still get a recognisable row."""
     session = _session(tmp_path, "the thing I typed first")
     assert stored_session_title(session) == ""
     assert session_name(session) == "the thing I typed first"
+
+
+def test_a_skill_payload_opener_falls_back_to_the_typed_line(tmp_path: Path):
+    """D8 for the PICKER, not just the row.
+
+    A ``$skill`` invocation persists as its EXPANDED payload, so this fallback —
+    which is also the name the desktop sidebar serves, its row being
+    ``session_name``'s answer (``chat-title.ts``) — labelled the conversation
+    "The user invoked the `research` skill…" with the whole SKILL.md body
+    behind it.
+    """
+    session = _session(tmp_path, _skill_payload("$research the widget market"))
+
+    assert stored_session_title(session) == ""
+    assert session_name(session) == "$research the widget market"
+
+
+def test_an_expanded_reference_opener_falls_back_to_the_prose(tmp_path: Path):
+    """The same rule closes the ``@path`` half of the class.
+
+    A reference expansion is APPENDED to the opener, and the surface that names
+    a live conversation is handed the text BEFORE that happens (the TUI's
+    ``_submit_prompt`` titles from the typed line, ``Session.prompt`` expands
+    afterwards). Unread, the expansion made one conversation wear two names: the
+    bare token while it ran, the whole file body in the picker afterwards.
+    """
+    (tmp_path / "auth.py").write_text("MARKER_FILE_BODY = 1\n", encoding="utf-8")
+
+    async def expand() -> str:
+        from local_operator.references import expand_references
+
+        return (await expand_references("what does @auth.py do?", str(tmp_path))).sent
+
+    expanded = asyncio.run(expand())
+    assert "MARKER_FILE_BODY" in expanded, "the fixture never built a block"
+
+    session = _session(tmp_path, expanded)
+    assert session_name(session) == "what does @auth.py do?"
 
 
 def test_a_title_with_json_escapes_reads_back_as_the_user_saw_it(tmp_path: Path):

@@ -107,24 +107,33 @@ STATUS_EXPIRED = "expired"
 #: delivery (else ``reconcile`` loops forever on a row it can never write).
 INJECTING_STATUSES = frozenset({STATUS_ANSWERED, STATUS_DECLINED, STATUS_TIMED_OUT, STATUS_LATE})
 
-#: THE OUTSTANDING SET — the asks the user can still act on, and so the asks
-#: every surface must agree are still live. ``open`` (nothing has happened to
-#: it yet) and ``timed_out`` (its deadline fired, but a LATE answer is still
-#: accepted and attributed — design §2.2, the spec's item 3: "a late answer is
-#: still attributable and the agent still receives it"). It stops being
-#: outstanding the moment it is SETTLED: ``answered``/``declined`` (the user
-#: responded), ``dismissed`` (the user put a timed-out ask away), ``withdrawn``
-#: (the asker retracted the question — design §12) and ``expired`` (an answer or
-#: deadline past the 7-day window that injects nothing).
+#: THE OUTSTANDING SET — the asks still waiting on the user, and so the asks
+#: every surface must agree are live: ``open`` alone (nothing has happened to it
+#: yet). An ask SETTLES the moment the AGENT is told something, not only when
+#: the user acts (#2388): ``timed_out`` (its deadline fired and the agent got the
+#: notice and moved on), ``answered``/``declined``/``late`` (the user responded),
+#: ``dismissed`` (the user put a timed-out ask away), ``withdrawn`` (the asker
+#: retracted the question — design §12) and ``expired`` (past the 7-day window,
+#: injects nothing). A timed-out ask stays SHOWN as a settled receipt and the
+#: queue still attributes a late answer (``respond`` → ``late``), but no surface
+#: offers one (D10) and none counts it as owed.
 #:
-#: ONE AUTHORITY, deliberately. Before this constant the same two-status rule
-#: was spelled in four places — ``ask_wire``'s tally (open-only, which dropped a
-#: timed-out-but-answerable ask from the count while it stayed on the bar),
-#: ``AskQueue.projection``'s ordering, the TUI's ``_ANSWERABLE`` and the TUI
-#: app's ``_open_ask_rows`` — and the one that was wrong was the count the
-#: surfaces published. Anything that needs "is this ask still outstanding" reads
-#: THIS set (or :func:`is_outstanding`); nothing re-lists the statuses.
-OUTSTANDING_STATUSES = frozenset({STATUS_OPEN, STATUS_TIMED_OUT})
+#: ONE AUTHORITY, deliberately. Before this constant the same rule was spelled
+#: in four places — ``ask_wire``'s tally, ``AskQueue.projection``'s ordering,
+#: the TUI's ``_ANSWERABLE`` and the TUI app's ``_open_ask_rows`` — and they
+#: drifted apart, which is how the surfaces published a count the bar did not
+#: show. Anything that needs "is this ask still outstanding" reads THIS set (or
+#: :func:`is_outstanding`); nothing re-lists the statuses.
+OUTSTANDING_STATUSES = frozenset({STATUS_OPEN})
+
+#: THE LAPSED SET — asks SETTLED BY THEIR DEADLINE. Still shown and still
+#: dismissible, and the queue still takes a late answer (through chat), but no
+#: surface offers one (decision D10), and ``asks.lapsed_visible_for`` decides how
+#: long such a row stays shown (D6). DISJOINT from :data:`OUTSTANDING_STATUSES`
+#: (#2388): a lapsed ask is never in the wire tally ``asks_open``. An index row
+#: still written ``open`` past ``expires_at`` is re-derived to ``timed_out`` by
+#: the readers before this is asked.
+LAPSED_STATUSES = frozenset({STATUS_TIMED_OUT})
 
 #: Row-id prefixes. The transcript row id IS the delivery marker (per
 #: ``(ask_id, kind)``), so idempotence is structural rather than a boolean that
@@ -138,6 +147,26 @@ TIMEOUT_ROW_PREFIX = "ask-timeout-"
 #: so callers have one import for the policy and this module keeps an empty
 #: local-import closure (module docstring; pinned by test_import_graph).
 LATE_WINDOW_S = 7 * 24 * 3600
+
+#: ``asks.lapsed_visible_for`` (decisions D6/D7): how long a LAPSED ask stays
+#: SHOWN once its deadline passes, by choice, in seconds measured from
+#: ``expires_at``. DISPLAY ONLY: the fold's late window above and the index's
+#: sweep (:func:`entry_is_stale`) stay at 7 d, because they decide what the
+#: agent is told and whether a stopped session's row still exists — and a
+#: display preference must change neither. Settled rows (answered, declined,
+#: late, withdrawn) keep the 7 d horizon whatever this says; an answered ask's
+#: ``expires_at`` is its old deadline, so "at expiry" would otherwise delete
+#: answer receipts. The registry (``settings_io``) carries the default as a
+#: literal and ``tests/unit/test_settings_io.py`` pins it to this constant.
+DEFAULT_LAPSED_VISIBLE_FOR = "7d"
+LAPSED_VISIBLE_FOR_S: dict[str, int] = {
+    "at_expiry": 0,
+    "1h": 3600,
+    "24h": 24 * 3600,
+    # The 7 d choice IS the late window, not a second number that could drift.
+    "7d": LATE_WINDOW_S,
+}
+DEFAULT_LAPSED_VISIBLE_MS = LAPSED_VISIBLE_FOR_S[DEFAULT_LAPSED_VISIBLE_FOR] * 1000
 
 _MILLIS = 1000
 
@@ -360,6 +389,12 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     as ``timed_out`` first, and its answer then arrived as a second reconcile's
     response row — the lead on that response is what tells the model the window had
     closed.
+
+    ``dismissed`` is the ONE settled status that can still require a row, and only
+    when the fold says so (``notice_owed``, fork A §14): a dismissal is a view
+    action, so an ask put away before its deadline notice was delivered still owes
+    that notice. Every other dismissed/withdrawn/expired record needs nothing —
+    those are the statuses whose meaning IS "nothing more to deliver".
     """
     ask_id = str(record.get("ask_id") or "")
     status = record.get("status")
@@ -368,6 +403,8 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     if status in (STATUS_ANSWERED, STATUS_DECLINED, STATUS_LATE):
         return [response_row_id(ask_id)]
     if status == STATUS_TIMED_OUT:
+        return [timeout_row_id(ask_id)]
+    if status == STATUS_DISMISSED and record.get("notice_owed"):
         return [timeout_row_id(ask_id)]
     return []
 
@@ -504,6 +541,7 @@ def fold(
         expires_at = int(queued.get("expires_at") or 0)
         created_at = int(queued.get("at") or 0)
         answered_at = int(answered.get("at") or 0) if answered else 0
+        dismissed_at = int(dismissed.get("at") or 0) if dismissed else 0
         window_end = expires_at + LATE_WINDOW_S * _MILLIS
 
         # A BRIDGE carriage (any question carrying a ``question_id``) is a
@@ -562,6 +600,36 @@ def fold(
             "status": status,
             "delivered": delivered_hint(ask_id, present_ids, status),
         }
+        if dismissed is not None:
+            # A DISMISSAL DOES NOT CANCEL A NOTICE THE MODEL NEVER GOT (fork A,
+            # §14). The dismissal is the USER's act on a settled row; the notice is
+            # the AGENT's fact ("you have no answer — proceed"), so an ask put away
+            # after its deadline, whose deadline row was never written, still owes
+            # it. The window is the notice's own: past 7 d the row is as stale as an
+            # unanswered deadline's, so a dismissal there owes nothing.
+            #
+            # ``dismissed_at >= expires_at`` is the rule that makes removing the
+            # deadline WAKE row safe (``asks/dismiss.py``): a dismissal is only ever
+            # accepted on a lapsed ask, so this can only fail for a hand-written
+            # log — and then the dismissal really did arrive before anything was
+            # owed, and inventing a notice would be the lie.
+            #
+            # AND THE FIELD SAYS "A ROW IS STILL OWED", so a notice already durable
+            # in the transcript clears it (agent review round 1, MINOR-2): read off
+            # the dates alone, ``notice_owed`` stayed True the moment the row landed,
+            # while ``expected_row_ids``, the queue's reconcile and every future
+            # reader take the field at its word. ``delivered`` is the any-row form
+            # (``delivered_hint``): a settled row a dismissal arrived AFTER is the
+            # answer the model already has, which the notice's own N8 rule lets
+            # stand.
+            record["dismissed_at"] = dismissed_at
+            record["notice_owed"] = bool(
+                dismissed_at
+                and expires_at
+                and dismissed_at >= expires_at
+                and now <= window_end
+                and not record["delivered"]
+            )
         if answered is not None:
             answers = answered.get("answers")
             record["answers"] = {
@@ -613,8 +681,34 @@ def is_outstanding(status: Any) -> bool:
     return str(status or "") in OUTSTANDING_STATUSES
 
 
+def is_lapsed(status: Any) -> bool:
+    """Whether a folded ask status is past its deadline with no answer, so
+    settled by the deadline alone (see :data:`LAPSED_STATUSES`). Takes the
+    status VALUE, for the reason :func:`is_outstanding` gives."""
+    return str(status or "") in LAPSED_STATUSES
+
+
+def lapsed_hidden(
+    status: Any, expires_at: int, now: int, lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS
+) -> bool:
+    """Whether a row is past the ``asks.lapsed_visible_for`` window and so is
+    no longer SHOWN (decision D6).
+
+    The ONE rule, shared by the index readers (:func:`_shown_rows`) and the
+    live projection (``AskQueue.projection``), so the phone's sheet, the
+    desktop fleet and a running session's own bar hide a lapsed row at the
+    same instant. Strictly past the window, like the 7 d horizon beside it:
+    ``now - expires_at > window``. Only a lapsed status qualifies — an open
+    ask has not reached its deadline, and a settled one keeps the 7 d horizon.
+    """
+    if not is_lapsed(status) or not expires_at:
+        return False
+    return now - int(expires_at) > max(0, int(lapsed_visible_ms))
+
+
 def outstanding_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Records the user can still act on: ``open`` or ``timed_out``.
+    """Records still waiting on the user: ``open`` only (a ``timed_out`` ask
+    is settled, #2388).
 
     The row-list half of :func:`is_outstanding`; a surface that draws "asks
     waiting on you" (the TUI's bar/answerable set, a sidebar mark) uses this
@@ -627,29 +721,14 @@ def open_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Records still expecting an answer (``open`` only — a timed-out ask is
     past its deadline and no longer counts against the open cap).
 
-    NARROWER THAN :func:`outstanding_asks` ON PURPOSE, and the difference is the
-    CAP's, not a surface's: ``OPEN_ASK_CAP`` bounds how many questions the agent
-    may have in flight, and a timed-out ask is one the agent has already walked
-    past — it must not keep a slot that a fresh question needs. A display that
-    counted this instead of the outstanding set would drop a timed-out ask the
-    user can still answer, which is the defect this module's constant exists to
-    prevent.
+    The CAP's own name: ``OPEN_ASK_CAP`` bounds how many questions the agent may
+    have in flight, and a timed-out ask is one the agent has already walked past
+    — it must not keep a slot that a fresh question needs. Since #2388 it selects
+    the same rows as :func:`outstanding_asks`; it is kept separate because the
+    cap's rule is "in flight", not "shown as owed", and the two need not move
+    together.
     """
     return [dict(r) for r in records if r.get("status") == STATUS_OPEN]
-
-
-def pending_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Records whose timeout notice is still OWED.
-
-    Delegates to :func:`outstanding_asks`, and the two coincide BY
-    CONSTRUCTION rather than by accident: an ask owes its timeout notice exactly
-    while it is outstanding — ``open`` (the notice is still ahead of it) or
-    ``timed_out`` (the notice is owed now); a ``late`` ask's notice is
-    suppressed (its response replaces it) and a settled one has none. If a
-    future status ever makes the two diverge, SPLIT them here and say why rather
-    than letting a second spelling of either rule appear.
-    """
-    return outstanding_asks(records)
 
 
 def ask_ids(events: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -829,7 +908,12 @@ def read_index(config_dir: Path | str, *, now: int | None = None) -> dict[str, d
     return index
 
 
-def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[str, Any]]:
+def index_asks(
+    config_dir: Path | str,
+    *,
+    now: int | None = None,
+    lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+) -> list[dict[str, Any]]:
     """Every ask worth showing across sessions, newest-first within each status.
 
     The AGGREGATE view (design §4: ``GET /api/asks`` on the relay and
@@ -843,9 +927,14 @@ def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[s
     staleness sweep is applied HERE too, so a reader of this function cannot
     disagree with the writer about whether a week-old settled ask is still worth
     showing: one horizon, three readers.
+
+    ``lapsed_visible_ms`` is the ``asks.lapsed_visible_for`` window, passed IN
+    by the caller (``asks/visibility.py`` reads it) so this module stays
+    stdlib-only. Applied here at READ time rather than by the index writer, so
+    a changed setting moves every reader at once — a stopped session never
+    writes again, and a writer-side filter could not bring its rows back.
     """
     stamp = now if now is not None else now_ms()
-    horizon_ms = LATE_WINDOW_S * _MILLIS
     #: NO CROSS-SESSION CAP, deliberately (review round 1, NIT 9). The population
     #: is (sessions with ask activity) × (rows the fold already caps at
     #: ``PROJECTION_CAP``), and the reader is an on-demand HTTP route rather than
@@ -856,17 +945,83 @@ def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[s
     #: each caller.
     rows: list[dict[str, Any]] = []
     for session_id, entry in (read_index(config_dir, now=stamp) or {}).items():
-        for ask in _entry_asks(entry):
-            status = str(ask.get("status") or "")
-            if status in (STATUS_EXPIRED, STATUS_DISMISSED):
-                continue
-            expires_at = int(ask.get("expires_at") or 0)
-            if expires_at and stamp - expires_at > horizon_ms:
-                continue
-            row = dict(ask)
-            row["session_id"] = session_id
-            row["cwd"] = str(entry.get("cwd") or "")
-            rows.append(row)
+        rows.extend(_shown_rows(session_id, entry, stamp, lapsed_visible_ms))
+    rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
+    return rows
+
+
+def _shown_rows(
+    session_id: str,
+    entry: Mapping[str, Any],
+    stamp: int,
+    lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+) -> list[dict[str, Any]]:
+    """One entry's asks worth showing, stamped with the session they belong to.
+
+    The ONE per-entry rule, shared by the aggregate (:func:`index_asks`) and the
+    per-session read (:func:`session_asks`), so the phone's sheet and a stopped
+    conversation's own screen cannot disagree about which of its asks exist.
+    """
+    horizon_ms = LATE_WINDOW_S * _MILLIS
+    rows: list[dict[str, Any]] = []
+    for ask in _entry_asks(entry):
+        status = str(ask.get("status") or "")
+        if status in (STATUS_EXPIRED, STATUS_DISMISSED):
+            continue
+        expires_at = int(ask.get("expires_at") or 0)
+        if expires_at and stamp - expires_at > horizon_ms:
+            continue
+        row = dict(ask)
+        # THE DEADLINE IS JUDGED HERE, NOT TAKEN FROM THE FILE. The index holds
+        # each ask's status as the runtime last WROTE it, and a runtime stopped
+        # before the deadline never writes again, so its row keeps saying
+        # ``open`` long after ``expires_at``. The queue itself would fold that
+        # log to ``timed_out`` (rule 6 of :func:`fold`) and accept a dismiss, so
+        # a reader that repeated the stale word showed a lapsed ask as live: the
+        # legacy mirror painted it as waiting, every count called it waiting,
+        # and the phone withheld the dismiss the queue would take. Re-deriving on
+        # the COPY, against the reader's ``now``, makes this agree with the
+        # fold; no clock skew is involved, because every reader of this index
+        # (the relay, the desktop plane, the TUI) runs on the runtime's own host.
+        # ``delivered`` is left as written: it is a fact about the response
+        # rows, which a deadline does not change.
+        if status == STATUS_OPEN and expires_at and expires_at <= stamp:
+            row["status"] = STATUS_TIMED_OUT
+        # After the re-derivation, so a stale ``open`` past its deadline is
+        # judged as the lapsed row it is.
+        if lapsed_hidden(row["status"], expires_at, stamp, lapsed_visible_ms):
+            continue
+        row["session_id"] = session_id
+        row["cwd"] = str(entry.get("cwd") or "")
+        rows.append(row)
+    return rows
+
+
+def session_asks(
+    config_dir: Path | str,
+    session_id: str,
+    *,
+    now: int | None = None,
+    lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+) -> list[dict[str, Any]]:
+    """One session's asks worth showing, from its index entry, open first.
+
+    The per-session twin of :func:`index_asks`, for a reader that needs ONE
+    conversation's asks with no runtime to ask: the relay's durable projection
+    of a stopped conversation, which is the only screen that conversation's
+    asks can appear on once the phone's sheet lists its own conversation only.
+
+    Empty when the session has no entry (never queued, or swept) or nothing on
+    it is still worth showing. Reads the entry directly rather than the whole
+    index, so it neither scans other sessions nor runs their TTL sweep; the
+    staleness rule is not re-applied either, because a caller with a durable
+    session in hand has the very directory that rule checks for.
+    """
+    entry = read_entry(config_dir, session_id)
+    if entry is None:
+        return []
+    stamp = now if now is not None else now_ms()
+    rows = _shown_rows(session_id, entry, stamp, lapsed_visible_ms)
     rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
     return rows
 
@@ -934,6 +1089,10 @@ __all__ = [
     "EVENT_QUEUED",
     "EVENT_WITHDRAWN",
     "INJECTING_STATUSES",
+    "DEFAULT_LAPSED_VISIBLE_FOR",
+    "DEFAULT_LAPSED_VISIBLE_MS",
+    "LAPSED_STATUSES",
+    "LAPSED_VISIBLE_FOR_S",
     "LATE_WINDOW_S",
     "OUTSTANDING_STATUSES",
     "STATUS_ANSWERED",
@@ -953,12 +1112,13 @@ __all__ = [
     "entry_path",
     "expected_row_ids",
     "fold",
+    "is_lapsed",
     "is_outstanding",
+    "lapsed_hidden",
     "new_ask_id",
     "now_ms",
     "open_asks",
     "outstanding_asks",
-    "pending_asks",
     "pending_row",
     "read_entry",
     "read_events",

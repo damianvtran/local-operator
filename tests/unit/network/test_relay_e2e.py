@@ -992,7 +992,7 @@ def test_a_cap_drop_names_itself_in_the_local_audit(
     four records, because an unauthenticated stranger may not churn the log an
     incident is reconstructed from.
     """
-    import select
+    import selectors
     import socket
 
     root_a = root / "cap-audit"
@@ -1022,11 +1022,23 @@ def test_a_cap_drop_names_itself_in_the_local_audit(
         # read once the four are down sees everything the flood had to say. The two
         # sockets that did get slots stay open: a silent peer holds its slot for
         # ``handshake_timeout_s`` (10 s), well past this wait.
+        # WAIT WITH A SELECTOR, NOT ``select.select`` — the fd NUMBER is the
+        # trap. ``select.select`` indexes a bit set by the raw fd number, so any
+        # descriptor at or above ``FD_SETSIZE`` (1024) makes it raise
+        # ``ValueError: filedescriptor out of range in select()`` before it
+        # waits at all, and a loaded worker's socket table reaches that (the
+        # same conversion this suite's pty harnesses already carry).
+        # ``selectors.DefaultSelector`` is epoll on Linux and kqueue on macOS,
+        # neither of which has the limit, and it reports the same readability on
+        # the same sockets with the same 0.05 s budget and 10 s deadline.
         refused = 0
         deadline = time.time() + 10.0
-        while refused < 4 and time.time() < deadline:
-            ready, _, _ = select.select(held, [], [], 0.05)
-            refused = sum(1 for sock in ready if _refusal_was_delivered(sock))
+        with selectors.DefaultSelector() as watcher:
+            for sock in held:
+                watcher.register(sock, selectors.EVENT_READ)
+            while refused < 4 and time.time() < deadline:
+                ready = [key.fileobj for key, _events in watcher.select(0.05)]
+                refused = sum(1 for sock in ready if _refusal_was_delivered(sock))
         # A BACKSTOP, NOT THE ASSERTION: a relay that never delivered the four drops
         # in ten seconds is wedged, and a wedged flood must not be read as a coalescer
         # that behaved.

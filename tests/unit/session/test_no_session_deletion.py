@@ -72,6 +72,20 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # Dedicated credential-root cache, never a transcript path: path_for hashes
+    # the opaque session id under account-affinity/<auth-db namespace>/*.json.
+    # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
+    # that mkstemp file. Neither operation accepts a session directory/name.
+    (
+        "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
+        "os.replace",
+        "Atomic local cache JSON only; credential-root namespace + hashed id, not sessions/ paths.",
+    ),
+    (
+        "local_operator/providers/account_affinity.py::AccountAffinityStore._save",
+        "os.unlink",
+        "Only the failed sibling mkstemp regular file; never a session or transcript.",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -438,6 +452,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tui/sidebar_pins.py::_write_pins",
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    (
+        "local_operator/session/session_tags.py::_write",
+        "os.replace",
+        "Atomic replacement of a sibling mkstemp REGULAR FILE under <config>/tags "
+        "(registry) or <config>/tags/<entity_type>/ (assignment); both paths are "
+        "under the tags store, never sessions/ and never a session directory.",
+    ),
+    (
+        "local_operator/session/session_tags.py::_write",
+        "<path>.unlink",
+        "Cleanup of that same sibling mkstemp REGULAR FILE after failure; "
+        "never a session or transcript.",
+    ),
+    (
+        "local_operator/session/session_tags.py::_bump_revision",
+        "<path>.unlink",
+        "Removes the fixed-basename <config>/tags/revision marker after both marker "
+        "writes fail, so readers fall back to the stats fingerprint; the path is never "
+        "a session directory or transcript.",
     ),
     # -- the archive index: the pins store's row, for the pins store's reasons --
     # One file at the config root with a FIXED basename (`archived-sessions.json`
@@ -1643,6 +1677,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "dir_fd-bound FILE unlink",
     ),
+    # The orphan sweep (failure-diagnostic recovery). Both calls unlink a name
+    # that `os.listdir(artifacts_fd)` returned, resolved with
+    # `dir_fd=self._artifacts_fd`: the bundle's OWN `artifacts/` directory,
+    # opened with `_DIR_FLAGS` under the bundle root and confined by openat
+    # semantics. The two admissible shapes are this writer's staging file
+    # (`.artifact.<32 hex>.tmp`) and a 64-hex artifact digest; neither is a
+    # session directory or a transcript, both live one level under
+    # `artifacts/`, and `unlink` cannot remove a directory at all (EISDIR).
+    (
+        "local_operator/evaluation/evidence/store.py"
+        "::EvidenceWriter.discard_unreferenced_artifacts",
+        "os.unlink",
+        "dir_fd-confined to the bundle's artifacts/ dir; names are this writer's "
+        ".artifact.*.tmp staging file or 64-hex artifact digests, never a session "
+        "path, and unlink cannot remove a directory",
+        2,
+    ),
     (
         "local_operator/fork.py::consume_boot_prompt",
         "<path>.unlink",
@@ -2196,6 +2247,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "list.remove",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_import_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
+        "local_operator/harness_import/service.py::HarnessImportService._create",
+        "shutil.rmtree",
+        "only a target this call created, with no transcript row committed",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_org_chart_view",
         "<path>.remove",
         "widget.remove()",
@@ -2204,6 +2265,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tui/app.py::OperatorApp._close_projects_view",
         "<path>.remove",
         "widget.remove()",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_agent_form",
+        "<path>.remove",
+        "Textual AgentFormPage.remove unmounts the page; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_team_form",
+        "<path>.remove",
+        "Textual TeamFormPage.remove unmounts the page; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_review_view",
+        "<path>.remove",
+        "Textual ReviewView.remove unmounts the page; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_schedule_view",
+        "<path>.remove",
+        "Textual ScheduleView.remove unmounts the page; no filesystem path",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._close_settings_view",
@@ -2606,6 +2687,94 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
     ),
+    # The Librarian's small stores and her create-failure cleanup: the same
+    # shapes, the same arguments as Aida's block above.
+    (
+        "local_operator/librarian/state.py::write_json",
+        "os.replace",
+        "tmp FILE -> <config_dir>/librarian/*.json FILE; librarian-derived, never sessions/",
+    ),
+    (
+        "local_operator/librarian/state.py::write_json",
+        "os.unlink",
+        "clears the mkstemp FILE this call just wrote, on the failure path",
+    ),
+    (
+        "local_operator/librarian/state.py::clear_extras",
+        "<path>.unlink",
+        "removes the <config_dir>/librarian/extras.json tray FILE after processing it",
+    ),
+    (
+        "local_operator/librarian/bootstrap.py::_discard_failed_create",
+        "shutil.rmtree",
+        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
+    ),
+    (
+        "local_operator/librarian/proactive.py::reconcile",
+        "<path>.remove",
+        "list.remove on the IN-MEMORY schedule list when it exceeds the cap; no path",
+    ),
+    # The sidebar's deliberate-unpin ledger: a FILE beside the pin index under
+    # the config root. Emptying the set removes that file; the replace is the
+    # same tmp-file->file atomic write its sibling ``_write_pins`` is allowed.
+    (
+        "local_operator/tui/sidebar_pins.py::_write_unpinned",
+        "<path>.unlink",
+        "removes <config>/sidebar-pins.unpinned.json when empty, and its failed mkstemp FILE",
+        2,
+    ),
+    (
+        "local_operator/tui/sidebar_pins.py::_write_unpinned",
+        "os.replace",
+        "tmp FILE -> <config>/sidebar-pins.unpinned.json FILE; config-root, never sessions/",
+    ),
+    # The Library packages (backend core) write only under <config>/cache/library:
+    # the derived index's atomic replace and a thumbnail cache temp file. Neither
+    # builds a path from a session id or a caller-supplied directory.
+    (
+        "local_operator/library/index.py::_write",
+        "os.replace",
+        "tmp FILE -> <config>/cache/library/index.json FILE; cache-derived, never sessions/",
+    ),
+    (
+        "local_operator/library/service.py::thumbnail",
+        "os.replace",
+        "tmp FILE -> a thumbnail cache FILE under <config>/cache/library/; never sessions/",
+    ),
+    # The Library VIEW's flagged calls are heap/Textual operations, not
+    # filesystem ones: the viewport cursor is an in-memory integer, the
+    # metadata row's ``remove`` is a list.remove, and closing the view removes
+    # a mounted Textual widget. None receives a Path or a config/session dir.
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_down",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_page_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_down",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView.action_cursor_up",
+        "<path>.move",
+        "In-memory viewport cursor (self.state.move); no filesystem path",
+    ),
+    (
+        "local_operator/tui/widgets/library_view.py::LibraryView._row_meta",
+        "<path>.remove",
+        "list.remove of a metadata part; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_library_view",
+        "<path>.remove",
+        "Textual widget.remove() of the mounted library view; not a filesystem removal",
+    ),
     (
         "local_operator/evaluation/session_arm.py::declare_action_server",
         "<path>.replace",
@@ -2917,6 +3086,53 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
     ),
+    # -- harness_import: private import bookkeeping under <config>/imports ----
+    # These writers are called only with `<config>/imports/{snapshots,...}`,
+    # `<config>/imports/.lock`, and the target session's OWN sidecars
+    # (`harness-import.json`, `title.json`, `created_at.json`). None accepts a
+    # session ID or a caller-supplied path, so none can name a directory or
+    # transcript under `sessions/`.
+    (
+        "local_operator/harness_import/store.py::atomic_write_text",
+        "os.replace",
+        "Atomic temp->target replace for import manifests/index/instruction review only",
+    ),
+    (
+        "local_operator/harness_import/store.py::atomic_write_text",
+        "os.unlink",
+        "Cleans its own same-directory temp file after replace or on failure",
+    ),
+    (
+        "local_operator/harness_import/store.py::sqlite_snapshot",
+        "shutil.rmtree",
+        "Deletes only the private <config>/imports/snapshots/<hash>/ copy it created",
+    ),
+    (
+        "local_operator/harness_import/store.py::ImportLock.acquire",
+        "<path>.unlink",
+        "Removes the stale <config>/imports/.lock file before re-creating it",
+    ),
+    (
+        "local_operator/harness_import/store.py::ImportLock.release",
+        "<path>.unlink",
+        "Removes the same <config>/imports/.lock file this process created",
+    ),
+    # -- memory move: a verb, not a filesystem call ---------------------------
+    # `store.move(...)` relocates a FACT between memory scopes. The receiver is
+    # a MemoryStore, not a Path, and the method takes `(targets, destination,
+    # scope, expected_version)` — no path, no directory, and no session id that
+    # could be mistaken for one. The AST guard matches the NAME on any receiver
+    # by design (see the module docstring), so the shape lands here.
+    (
+        "local_operator/memory_cli.py::execute",
+        "<path>.move",
+        "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
+    (
+        "local_operator/tools/memory_tools.py::_run",
+        "<path>.move",
+        "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
@@ -3105,6 +3321,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> tags/<type>/<id>.json under config_dir()/tags, never sessions/
+        "local_operator/session/session_tags.py::_write",
         # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
         "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)

@@ -445,6 +445,22 @@ _DSN_SCHEMES = (
     r"clickhouse|jdbc:[a-z][a-z0-9]*|https?|ftp|sftp|ssh|ldaps?"
 )
 
+#: The schemes the TRUNCATED-connection-string rule accepts, which is the list
+#: above MINUS ``http(s)``.
+#:
+#: **The exclusion is the whole false-positive boundary of that rule.** A
+#: truncated value carries no host, so the rule has to decide from the userinfo
+#: alone whether it is looking at a credential or at a host and port — and the
+#: only in-band signal is that a PORT IS ALWAYS DIGITS (see
+#: :data:`_DSN_TRUNCATED_PATTERN`). A local development URL is exactly the
+#: spelling where a non-numeric reading would be wrong, and it is the scheme those
+#: URLs use, so leaning on the scheme list as well as the digit test keeps the two
+#: signals independent rather than making one carry both.
+_DSN_TRUNCATED_SCHEMES = (
+    r"mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|rediss?|amqps?|mssql|"
+    r"clickhouse|jdbc:[a-z][a-z0-9]*|ftp|sftp|ssh|ldaps?"
+)
+
 #: Triple-grouped so the password can be masked with the user and host kept:
 #: ``(scheme://user:)(password)(@)``. ``[^\s:/@"']*`` allows an EMPTY user,
 #: which is how ``redis://:password@host`` is spelled.
@@ -466,7 +482,85 @@ _DSN_PATTERN = re.compile(
     r"([^\s]*?)@(?=[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+(?:[/:?#]|$))"
 )
 
+#: A connection string CUT BEFORE ITS HOST — the userinfo is complete and the
+#: ``@host`` tail is missing (the shape a line-wrapped log, a truncated read or a
+#: ``head -c`` produces).
+#:
+#: **Why the rules above cannot see it.** :data:`_DSN_PATTERN` and
+#: :data:`_DSN_PATTERN_PLAIN` both REQUIRE the literal ``@`` plus a host
+#: lookahead, and the named-URL fallback decides through
+#: :func:`_url_contains_credential`, whose two userinfo patterns also start at
+#: ``://`` and END at ``@``. The at-sign is the match condition at both layers, so
+#: a cut value is proposed to no rule at all and is published in full.
+#:
+#: **Why this fires only on the PROVABLE subset.** The value must already carry
+#: (1) a KNOWN credential scheme, (2) an explicit userinfo with the ``SEP``
+#: separator below, and (3) a password run that is NOT all digits. Signal (3) is
+#: the line between a credential and a port: in a URL authority a port is always
+#: digits, so a scheme whose userinfo separator is followed by digits then a path
+#: is a host and port and stays readable, while a NON-numeric run after a
+#: scheme's userinfo separator is a password. That is the same distinction the
+#: existing rules make structurally (they only accept a host after the tail
+#: separator), extended to the case where the host is gone.
+#:
+#: **A host tail DISQUALIFIES a value, and that is not a heuristic.** This rule is
+#: for a value that was CUT, so a completed ``userinfo`` followed by the tail
+#: separator is a whole connection string, which the rules above already own. The
+#: pattern therefore refuses a match followed by the separator — the same test
+#: that keeps this module's own prose (which documents the complete spelling)
+#: from matching itself.
+#:
+#: **The run takes the WHOLE remainder, and that is load-bearing.** A password is
+#: a token, not a word: stopping the run at the first space published the tail of
+#: a multi-word passphrase (``correct horse battery staple`` became ``[redacted]
+#: horse battery staple`` — a leak with an incident row claiming the credential
+#: was masked) and, worse, CLIPPED a whitespace-bearing placeholder
+#: (``<your password here>``, ``[[fixture name]]``, ``${CI TOKEN}``) so the guard
+#: saw a broken prefix it could neither recognise nor back out, publishing
+#: ``[redacted] password here>``. So the class admits whitespace (but not a
+#: newline, the one boundary a line-oriented sink needs) and is POSSESSIVE
+#: (``{4,}+``): it cannot give characters back, so the separator check below
+#: refuses a whole connection string rather than allowing the engine to shorten
+#: the run to slip past it, and a whole ``<…>``/``[[…]]``/``${…}`` reference is
+#: handed INTACT to the guard, which correctly leaves it unmasked.
+#:
+#: **The whitespace run over-masks same-line PROSE, and that is accepted.** The
+#: run cannot tell a multi-word passphrase from a credential followed by running
+#: text, so a userinfo password that continues into a sentence masks that
+#: trailing text too. It fails toward masking -- no credential is published -- and
+#: the alternative (stopping at the first space) is the R2-1 leak, so the bound is
+#: the whole line and this is the recorded residual. (The example is DESCRIBED,
+#: not spelled, because this file documents the shapes and a literal spelling in
+#: its own prose would be a live match -- see
+#: ``test_the_shape_table_never_matches_its_own_source``.)
+#:
+#: **What it deliberately does NOT decide.** A bare ``x:y`` with no scheme — a
+#: host and port and a user and password are the same spelling with no in-band
+#: signal between them — is left alone, as is an all-digit password
+#: (indistinguishable from a port), and a value cut exactly AT the separator
+#: (``…:pass@``), which the rules above already own. All are recorded residuals,
+#: not oversights.
+_DSN_TRUNCATED_PATTERN = re.compile(
+    rf"(?i)\b((?:{_DSN_TRUNCATED_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
+    r"((?![0-9]+(?:[/:?#]|\s|$))[^\n:/@\"'`]{4,}+)(?!@)"
+)
 
+#: Triple-grouped so the password can be masked with the user and host kept:
+#: ``(scheme://user:)(password)(@)``. ``[^\s:/@"']*`` allows an EMPTY user,
+#: which is how ``redis://:password@host`` is spelled.
+#: ``scheme://user:password@host``.
+#:
+#: The password class admits ``@`` and ``/`` and is GREEDY, so it takes the run
+#: that ends at the LAST ``@`` of the authority rather than the first: a password
+#: containing either character (``p@ssw0rd``, ``p/ssw0rd`` — both ordinary in
+#: base64 and generated secrets) was masked up to the first one and the REST WAS
+#: PUBLISHED, with an incident row then telling the model the credential had been
+#: masked. Measured before the fix: a ``mongodb+srv://`` DSN whose userinfo
+#: password contains ``@`` was masked up to that first ``@`` while the rest was
+#: published, and a ``postgres://`` DSN whose name is not credential-shaped — so
+#: the assignment rule cannot rescue it — was not masked at all, with ZERO incidents.
+#: The class still refuses whitespace, quotes and ``:``, so an unterminated line cannot
+#: run away, and the authority part (``user``) still cannot contain ``:``/``@``.
 #: The words a NAME may end in, and the qualifiers that may precede one inside a
 #: run-together name (``apiKey``, ``authToken``). Kept as data rather than as a
 #: regex so the check runs on a MATCH instead of at every character position —
@@ -1041,15 +1135,20 @@ def is_strong_credential_name(name: str) -> bool:
 #: model needs to fix the command, and registering it contains nothing. Detection is
 #: still COUNTED for these (the notice is the signal for a bare value), so this is a
 #: predicate over masking and registration alone.
-_PLACEHOLDER_SHAPES = re.compile(
-    r"^(?:"
+# Keep the structural alternatives shared with the existing placeholder policy,
+# but separate them from repeated characters and generic words. A DSN or CLI
+# password can genuinely be one of those words/repetitions; releasing them there
+# would weaken an existing credential shape rather than fix reference syntax.
+_PLACEHOLDER_REFERENCE_BODY = (
     r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|"  # ${CI_JOB_TOKEN}, $GITLAB_TOKEN
     r"<[^<>]{1,40}>|"  # <password>
     r"%s|%\([a-z_]+\)s|"  # printf-style
     r"\{\{[^{}]{1,80}\}\}|"  # {{ … }}
-    r"\[\[.*?\]\]|"
-    r"(.)\1{2,}"  # ***, xxx, ...
-    r")$"
+    r"\[\[.*?\]\]"
+)
+_PLACEHOLDER_REFERENCE_SHAPES = re.compile(r"(?:" + _PLACEHOLDER_REFERENCE_BODY + r")")
+_PLACEHOLDER_SHAPES = re.compile(
+    r"^(?:" + _PLACEHOLDER_REFERENCE_BODY + r"|(.)\1{2,})$"  # ***, xxx, ...
 )
 
 _PLACEHOLDER_WORDS = frozenset(
@@ -1094,6 +1193,57 @@ def is_placeholder_component(value: str) -> bool:
     if _PLACEHOLDER_SHAPES.match(stripped):
         return True
     return stripped.lower() in _PLACEHOLDER_WORDS
+
+
+def _is_structural_placeholder_reference(value: str) -> bool:
+    """A whole reference/usage token, never prose or a guessed encoded value.
+
+    Assignment rules already preserve this syntax; unconditional DSN masking and
+    the CLI guard previously destroyed it, so even a documented reference became
+    a mask in the published copy. Known-value masking still runs first and wins
+    if this exact spelling was independently registered as a real secret.
+
+    No partial match, percent decoding, repeated-character or placeholder-word
+    release belongs here. An unknown password byte-identical to admitted syntax
+    remains indistinguishable from a reference under this existing contract.
+    """
+    if _PLACEHOLDER_REFERENCE_SHAPES.fullmatch(value) is None:
+        return False
+    # The older general policy tolerates incomplete shell-reference braces.
+    # This narrower release needs a complete token: partial references can be
+    # actual credentials and must retain their original DSN/CLI mask.
+    return not value.startswith("$") or value.startswith("${") == value.endswith("}")
+
+
+def _is_complete_brace_reference(value: str) -> bool:
+    """A WHOLE ``${...}`` token, whitespace inside its braces included.
+
+    The DSN rules must hand a COMPLETE reference to the release path rather than
+    mask a prefix of it (agent review round 2, R2-1). The general predicate above
+    spells the braced form as a bare identifier, so a reference written with a
+    space inside -- ``${CI TOKEN}`` -- fails it and would be masked. The
+    assignment rule already releases that exact string, so refusing it in the DSN
+    shapes would be STRICTER than the policy they sit beside; this helper only
+    makes the two agree.
+
+    **Blast radius (stated because an earlier comment here claimed "this shape
+    only" and was wrong).** It is OR'd into the guard of EVERY DSN drawing the
+    userinfo value from group 2: :data:`dsn-password`,
+    :data:`dsn-password-plain` and :data:`dsn-password-truncated`. Only the
+    values those shapes were ALREADY going to mask can be affected, and only the
+    whitespace/empty brace forms are newly released (``${CI TOKEN}``, ``${ }``,
+    ``${}``); ``${ident}``, ``<…>`` and ``[[…]]`` were already released by the
+    general predicate, and a nested or unterminated brace still is not. The
+    helper is deliberately narrow for that reason: a single balanced ``${...}``
+    with no nested brace.
+    """
+    return (
+        value.startswith("${")
+        and value.endswith("}")
+        and value.count("${") == 1
+        and "{".join(value.split("{")[1:]).count("{") == 0
+        and value.count("}") == 1
+    )
 
 
 def _repeats_its_own_name(value: str, name: str) -> bool:
@@ -1620,12 +1770,7 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # auth"`` is a claim NAME; the value proves itself the same way a ``*_URL``
     # name's does — userinfo password or credential-shaped query parameter.
     if _URL_LIKE.match(value):
-        return not (
-            _URL_USERINFO_PASSWORD.search(value)
-            or _URL_USERINFO_PASSWORD_PLAIN.search(value)
-            or _URL_CRED_QUERY.search(value)
-            or _URL_KEY_USERINFO.search(value)
-        )
+        return not _url_contains_credential(value)
     # A dotted attribute path is a REFERENCE to a credential, not one:
     # ``key="providers.anthropic.cache_ttl_1h_min_context_tokens"``. Digits in a
     # path are ordinary (``cache_ttl_1h``), so this clause does not depend on
@@ -2271,7 +2416,12 @@ def _flag_value_guard(match: Match[str]) -> bool:
     :func:`_value_is_a_reference_to_a_credential` for the judgement that replaces it,
     for the value-side cases it keeps masked, and for the residual it accepts.
     """
-    value = match.group(2)
+    # Group 3 is the VALUE. Group 2 is the optional opening quote the quoted
+    # carrier added, so the guard judges the inner value and never the quote
+    # bytes (both the placeholder clause and the NAME clause read this value).
+    value = match.group(3)
+    if _is_structural_placeholder_reference(value):
+        return False
     if any(char in value for char in _EXPRESSION_CHARS):
         return False
     if _value_is_a_reference_to_a_credential(value):
@@ -2554,6 +2704,25 @@ def _assignment_guard_quoted(match: Match[str]) -> bool:
     return _assignment_value_guard(match)
 
 
+def _url_contains_credential(value: str) -> bool:
+    """Keep URL guards consistent with the DSN's structural-reference decision.
+
+    Releasing only the DSN component is insufficient: the named-URL rule and
+    assignment fallback would immediately mask the same example again. Judge
+    only the exact userinfo component recognized by their existing patterns;
+    query credentials and opaque userinfo keys retain their independent proof.
+    Do not URL-decode a percent-encoded password into apparent reference syntax.
+    """
+    for pattern in (_URL_USERINFO_PASSWORD, _URL_USERINFO_PASSWORD_PLAIN):
+        for match in pattern.finditer(value):
+            # Both existing patterns start at :// and end at @. Split on the
+            # first colon only: later colons are part of a genuine password.
+            password = match.group(0)[3:-1].partition(":")[2]
+            if not _is_structural_placeholder_reference(password):
+                return True
+    return bool(_URL_CRED_QUERY.search(value) or _URL_KEY_USERINFO.search(value))
+
+
 def _url_value_guard(match: Match[str]) -> bool:
     """A ``*_URL``/``*_URI``/``*_DSN`` name whose VALUE carries a credential.
 
@@ -2563,13 +2732,7 @@ def _url_value_guard(match: Match[str]) -> bool:
     name = match.group(1).lower()
     if not any(hint in name for hint in _URL_NAME_HINTS):
         return False
-    value = match.group(4)
-    return bool(
-        _URL_USERINFO_PASSWORD.search(value)
-        or _URL_USERINFO_PASSWORD_PLAIN.search(value)
-        or _URL_CRED_QUERY.search(value)
-        or _URL_KEY_USERINFO.search(value)
-    )
+    return _url_contains_credential(match.group(4))
 
 
 #: The query-parameter names whose VALUE gets the ambiguous-name value proof,
@@ -3602,14 +3765,38 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "dsn-password",
         _DSN_PATTERN,
-        lambda m: m.group(1) + REDACTION_MARKER + "@",
+        None,  # guarded path preserves the user/host and masks only group 2
         2,
+        guard=lambda match: not (
+            _is_structural_placeholder_reference(match.group(2))
+            or _is_complete_brace_reference(match.group(2))
+        ),
     ),
     Shape(
         "dsn-password-plain",
         _DSN_PATTERN_PLAIN,
-        lambda m: m.group(1) + REDACTION_MARKER + "@",
+        None,  # guarded path preserves the user/host and masks only group 2
         2,
+        guard=lambda match: not (
+            _is_structural_placeholder_reference(match.group(2))
+            or _is_complete_brace_reference(match.group(2))
+        ),
+    ),
+    # A connection string CUT BEFORE ITS HOST: the userinfo is complete and the
+    # ``@host`` tail the rules above require is simply gone. Same guarded path as
+    # its neighbours — the scheme and userinfo stay, only the password goes.
+    # The pattern's own docstring carries the false-positive boundary (a port is
+    # digits, so a numeric tail is a host:port and not a credential) and the
+    # ambiguous ``x:y`` class this rule deliberately leaves undecided.
+    Shape(
+        "dsn-password-truncated",
+        _DSN_TRUNCATED_PATTERN,
+        None,  # guarded path preserves the scheme/user and masks only group 2
+        2,
+        guard=lambda match: not (
+            _is_structural_placeholder_reference(match.group(2))
+            or _is_complete_brace_reference(match.group(2))
+        ),
     ),
     # A named URL/URI/endpoint value that CARRIES a credential: a userinfo
     # password, or a credential-shaped query parameter.
@@ -3834,9 +4021,51 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # flag is the NAME of a stored secret rather than a value. See
         # ``_flag_value_guard`` and ``_value_is_a_reference_to_a_credential`` for the
         # production incident that measured it.
-        re.compile(r"(?i)(--" + _CREDENTIAL_FLAG_WORDS + r"(?:=|\s+))([^\s\"']{3,})"),
+        #
+        # **The quoted carrier admits the OTHER quote, and an UNTERMINATED run is
+        # bounded to a single token** (R1/R2 follow-on, narrowed by QA round 1).
+        # ``[^"'\n]`` refused both quote bytes, so a quoted value whose own bytes
+        # carry the opposite quote ended the run there and matched nothing — an
+        # interior ``"`` in a shell- or JSON-recorded command line whose value
+        # contains a ``'`` (and the mirror) was published in full with no hit and no
+        # notice. And the closer was a REQUIRED conditional, so an unterminated run —
+        # a truncated echo or a cut-off log tail — failed it and was published too.
+        #
+        # The value group is an alternation that keeps the two halves' bounds
+        # separate, because they have different referents:
+        #   * CLOSED (a matching closer is present): the run is temperated by that
+        #     closer alone (``(?!\1)`` over ``[^\n]``), so it carries the OTHER
+        #     quote and spaces freely and stops at the first matching closer, which
+        #     is then consumed.
+        #   * UNTERMINATED (no closer): the run is bounded to a SINGLE
+        #     non-whitespace token of >=3 chars. There is no closer, so there is no
+        #     knowable end to a value — bounding to end of line masked ordinary
+        #     PROSE whenever a credential flag was followed by an opening quote and
+        #     no value was ever opened (``usage: tool --token "  the api token to
+        #     send``): QA round 1 measured that as a MAJOR over-mask, the "a mask
+        #     the operator learns to distrust" class, and it is worse than the
+        #     residual it closed. **A multi-word UNTERMINATED value is a DOCUMENTED
+        #     RESIDUAL** — left readable rather than chased, because no rule can
+        #     know where such a value ends without a delimiter.
+        # Both runs are ATOMIC (``{3,}`` inside ``(?>...)``): a greedy class with a
+        # trailing optional backreference is exactly the shape that let the engine
+        # backtrack to a shorter run and re-cut the mask (the Q2 class), and an
+        # atomic run removes that path entirely. The quote bytes still sit OUTSIDE
+        # group 3, so ``--token "[redacted]"`` keeps its quotes. The floors are
+        # untouched: the quoted branches still need three characters each, so
+        # ``""`` and ``'Zx'`` stay unmasked.
+        re.compile(
+            r"(?i)(--"
+            + _CREDENTIAL_FLAG_WORDS
+            + r"(?:=|\s+)(?P<q>\"|')?)"
+            + r"(?P<v>(?(q)(?:"
+            + r"(?>(?:(?!(?P=q))[^\n]){3,})(?=(?P=q))"
+            + r"|(?>(?:(?!(?P=q))[^\s]){3,})"
+            + r")|[^\s\"']{3,}))"
+            + r"(?P=q)?"
+        ),
         None,
-        2,
+        3,
         guard=_flag_value_guard,
     ),
     # ``mysql``/``psql`` with an inline password on ``-p``. Anchored on the client binary
@@ -3844,11 +4073,60 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # 8080:80``, ``ssh -p 2222``) and masking a port would be both unhelpful and
     # wrong. The binary name is the only thing that distinguishes the two, which
     # is why this rule exists at all rather than a bare ``-p`` pattern.
+    #
+    # **The anchor must be an INVOCATION, not a filename stem** (operator-reported
+    # 2026-10-16). ``\b`` treats the dot in a Rust module path as a boundary, so the
+    # old anchor fired on a SOURCE-FILE NAME — the prose of a coder session's own
+    # reasoning — and then masked whatever package-style flag sat within 200
+    # characters of it. Measured (session ``19b15d6e369d``): one such line masked
+    # the crate NAME and REGISTERED it, after which crate paths, ``cargo test -p
+    # <crate>``, ``git add`` pathspecs and a later ``project`` tool ``name:``
+    # argument all came back as the marker. The reported symptom was a cargo
+    # command whose package argument had become the marker and which failed with
+    # "package pattern(s) … not found in workspace".
+    #
+    # The invocation reading is what the rule always MEANT (see "the client
+    # binary" above): the name must not be a FRAGMENT of a longer token, and it
+    # must be followed by whitespace. The negative lookbehind states the first
+    # half — the name may not be preceded by a word character, a dot or a hyphen,
+    # which is what "a NAME" means here — and the `(?=[ \t])` lookahead states the
+    # second, which is what "being INVOKED" means: `<name>.rs`, `<name>/main.rs`,
+    # `<name>-driver` and `login-<name>` are all fragments, and none of them can
+    # anchor the rule any more.
+    #
+    # The lookbehind replaces an ENUMERATED leading class (`^`, space, tab, and
+    # the shell separators) that leaked, twice, in review round 1: a client at the
+    # start of a line inside a multi-line result (`\n` missing) and one inside a
+    # BACKTICK substitution both stopped masking, each measured as a true positive
+    # the old anchor caught. Enumerating the ways a command can be reached is a
+    # losing game — the separators are unbounded — so the class is now stated as
+    # the NEGATIVE space instead (everything that is not a fragment continues to
+    # work: `$(`, `|`, `&&`, `;`, a backtick, `--`, `exec(`, a quote, an absolute
+    # path, and the string start).
+    #
+    # Every true positive keeps its mask: the inline-password spellings pinned in
+    # the corpus for each client (mysql, mysqldump, psql, pg_dump, mongosh,
+    # redis-cli, clickhouse-client, influx) match the anchored form, and the
+    # published-port negatives (``docker run -p``, ``ssh -p``) were never in this
+    # alternation.
+    #
+    # RESIDUAL (QA round 1, Q1 — deliberately NOT closed here). The flag still has
+    # to belong to the CLIENT, and a bare client WORD in ordinary prose satisfies
+    # this anchor: `the <client> driver … <another tool> -p <token>` inside 200
+    # characters still masks the token and registers it, which reaches the same
+    # operator-visible failure through a prose trigger. Closing it needs the
+    # flag's OWNER to be decided (candidate measured by the manager: refuse a gap
+    # that names a build/test tool — closes the class at zero true-positive cost,
+    # 0 lost / 0 new corpus negatives, but it ENUMERATES tool names, which is the
+    # losing bet this rule's own review round already made twice). That is its own
+    # change with its own round, not a widening of this one.
     Shape(
         "client-inline-password",
         re.compile(
-            r"(?i)(\b(?:mysql|mysqldump|psql|pg_dump|pg_restore|mongo|mongosh|"
-            r"clickhouse-client|redis-cli|influx)\b[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
+            r"(?i)((?<![A-Za-z0-9_.\-])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
+            r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
+            r"(?=[ \t])"
+            r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
         ),
         r"\1" + REDACTION_MARKER,
         2,
@@ -4947,7 +5225,7 @@ def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit
 
     The mask itself is rendered exactly as ``sub`` rendered it before: a template goes
     through ``match.expand`` (the same expansion ``sub`` applies to a string
-    replacement), and the five rules whose replacement is a CALLABLE keep calling it.
+    replacement), and rules whose replacement is a CALLABLE keep calling it.
     """
     value = _hit_value(shape, match)
     if value:

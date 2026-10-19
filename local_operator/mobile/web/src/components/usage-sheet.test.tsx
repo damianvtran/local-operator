@@ -3,9 +3,16 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { getUsage } from "../api";
 import { UsageSheet } from "./usage-sheet";
+import { messageRuntime } from "../store";
+import { BUNDLED_OWNED } from "../i18n/bundled.gen";
 
 vi.mock("../api", () => ({ getUsage: vi.fn() }));
-afterEach(() => { cleanup(); vi.resetAllMocks(); });
+afterEach(() => {
+	cleanup();
+	vi.resetAllMocks();
+	// Synthetic row copy must not leak into later English identity assertions.
+	messageRuntime.registerBundle("relay.shell", "en", BUNDLED_OWNED["relay.shell"]);
+});
 
 it("an empty cache is not a measured zero credit balance", async () => {
 	vi.mocked(getUsage).mockResolvedValue({ reports: [], source: "cached" });
@@ -26,6 +33,45 @@ it("a blocked wallet keeps its actual amount and does not promise continuation",
 	expect(await screen.findByText(/123.5 credits left/)).toBeTruthy();
 	expect(screen.getByText("Spend unavailable")).toBeTruthy();
 	expect(screen.queryByText(/credits will continue/)).toBeNull();
+});
+
+it("keeps exact English row punctuation for every window and optional family", async () => {
+	const base = { amount: { used: null, limit: null, remaining: 123.5, used_fraction: null, unit: "credits" },
+		paid_fallback: false, available: null, unlimited: false, supersedes_tiers: false,
+		family_cap: true, shared: false, family: "opus" as const,
+		resets_at_ms: null, payable: false, exhausted: false };
+	const windows = ["5h", "7d", "1mo", "lifetime", "unknown"] as const;
+	vi.mocked(getUsage).mockResolvedValue({ source: "cached", reports: [{ provider: "synthetic",
+		unavailable: false, fetched_at: 1, limits: [
+			...windows.map((window) => ({ ...base, window })),
+			{ ...base, window: "unknown", family: "unknown" },
+			{ ...base, window: "5h", family_cap: false },
+		] }] });
+	render(<UsageSheet open onClose={() => undefined} />);
+	for (const window of ["5-hour", "7-day", "Monthly", "Lifetime", "Unknown window"]) {
+		expect(await screen.findByText(`Model-family allowance (opus) · ${window}: 123.5 credits left`)).toBeTruthy();
+	}
+	expect(screen.getByText("Model-family allowance · Unknown window: 123.5 credits left")).toBeTruthy();
+	expect(screen.getByText("Included allowance · 5-hour: 123.5 credits left")).toBeTruthy();
+});
+
+it("lets catalogue row messages reorder all fields and own punctuation", async () => {
+	// Use synthetic English-bundle overrides, not an unaudited locale pretending
+	// to be shipped: this probes the real render/runtime path's composition freedom.
+	messageRuntime.registerBundle("relay.shell", "en", {
+		...BUNDLED_OWNED["relay.shell"],
+		"relay.shell.usage.row": "{value} — {window} / {label}",
+		"relay.shell.usage.row_family": "{value} — {family} / {window} / {label}",
+	});
+	const base = { amount: { used: null, limit: null, remaining: 123.5, used_fraction: null, unit: "credits" },
+		paid_fallback: false, available: null, unlimited: false, supersedes_tiers: false,
+		family_cap: false, shared: false, window: "5h" as const, family: "unknown" as const,
+		resets_at_ms: null, payable: false, exhausted: false };
+	vi.mocked(getUsage).mockResolvedValue({ source: "cached", reports: [{ provider: "synthetic",
+		unavailable: false, fetched_at: 1, limits: [base, { ...base, family_cap: true, family: "opus" }] }] });
+	render(<UsageSheet open onClose={() => undefined} />);
+	expect(await screen.findByText("123.5 credits left — 5-hour / Included allowance")).toBeTruthy();
+	expect(screen.getByText("123.5 credits left — opus / 5-hour / Model-family allowance")).toBeTruthy();
 });
 
 it("loading and failed cached reads remain distinct from empty", async () => {

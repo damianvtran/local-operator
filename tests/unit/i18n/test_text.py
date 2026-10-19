@@ -42,7 +42,7 @@ def _fresh_cache() -> Iterator[None]:
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 3, 1_000_000])
-def test_hub_group_english_clauses_keep_existing_decimal_bytes(count: int) -> None:
+def test_hub_group_english_clauses_keep_decimal_labels_and_pluralize_actions(count: int) -> None:
     from local_operator.i18n.keys import tui_transcript
 
     text.set_active_locale("en")
@@ -50,7 +50,10 @@ def test_hub_group_english_clauses_keep_existing_decimal_bytes(count: int) -> No
     # Numeric selectors make translated noun forms correct. Their separately
     # rendered label must not acquire grouping separators in existing EN frames.
     for message, suffix in (
-        (tui_transcript.group_actions(count=count, label=str(count)), "actions"),
+        (
+            tui_transcript.group_actions(count=count, label=str(count)),
+            "action" if count == 1 else "actions",
+        ),
         (
             tui_transcript.group_reply_requested(count=count, label=str(count)),
             "reply requested",

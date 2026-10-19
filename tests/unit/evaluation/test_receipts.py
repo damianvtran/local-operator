@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from pydantic import ValidationError
@@ -301,6 +303,64 @@ def test_secret_reference_names_serialize_but_resolved_values_never_seal() -> No
     with pytest.raises(ValueError, match="secret canary survived"):
         seal_preflight(plan, (unsafe,), RedactionSet.from_resolved_values((secret,)))
     assert secret not in repr(RedactionSet.from_resolved_values((secret,)))
+
+
+def test_short_nonsecret_values_do_not_reject_ordinary_evidence() -> None:
+    # Non-secret infra constants transported through the sealed store (a
+    # volume size, a proxy flag, a TTL) are routinely folded into the
+    # redaction set by callers. Below the canary floor they are
+    # indistinguishable from ordinary evidence, so canarying them would
+    # refuse the first bundle write that merely mentions them.
+    redactions = RedactionSet.from_resolved_values(("120", "false", "18900"))
+    redactions.assert_clear('{"ok": false, "n": 120, "ttl": 18900}')
+    redactions.assert_clear({"enabled": False, "labels": ["false", "120"]})
+
+
+@pytest.mark.parametrize(
+    ("value", "canaried"),
+    [
+        pytest.param("\u00e9\u00e9\u00e9", False, id="3-multibyte-6-bytes"),
+        pytest.param("\u00e9\u00e9\u00e9\u00e9", True, id="4-multibyte-8-bytes"),
+        pytest.param("1234567", False, id="7-ascii-7-bytes"),
+        pytest.param("12345678", True, id="8-ascii-8-bytes"),
+    ],
+)
+def test_canary_floor_counts_utf8_bytes_not_characters(value: str, canaried: bool) -> None:
+    # Pins the byte semantics, not the character count: the three-character
+    # "\u00e9\u00e9\u00e9" is six UTF-8 bytes (below the floor), and a future
+    # refactor to len(value) would canary it and fail here.
+    redactions = RedactionSet.from_resolved_values((value,))
+    if canaried:
+        assert len(value.encode("utf-8")) == 8
+        with pytest.raises(ValueError, match="secret canary survived"):
+            redactions.assert_clear({"leaked": value})
+    else:
+        assert len(value.encode("utf-8")) < 8
+        redactions.assert_clear({"ok": value})
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(lambda secret: secret, id="plaintext"),
+        pytest.param(lambda secret: base64.b64encode(secret.encode()).decode(), id="base64"),
+        pytest.param(
+            lambda secret: base64.urlsafe_b64encode(secret.encode()).decode(),
+            id="base64-urlsafe",
+        ),
+        pytest.param(lambda secret: quote(secret, safe=""), id="percent"),
+        pytest.param(lambda secret: secret.encode().hex(), id="hex"),
+    ],
+)
+def test_long_secret_still_rejects_in_plaintext_and_every_encoded_variant(
+    render: Any,
+) -> None:
+    # Proving the floor does not weaken real redaction: a credential at or
+    # above the floor is refused however it is rendered in evidence.
+    secret = "p@ss w0rd!42-long"
+    redactions = RedactionSet.from_resolved_values((secret,))
+    with pytest.raises(ValueError, match="secret canary survived"):
+        redactions.assert_clear({"leaked": render(secret)})
 
 
 def test_capped_zero_and_explicit_uncapped_are_distinct_closed_union() -> None:

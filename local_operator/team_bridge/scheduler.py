@@ -413,8 +413,11 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     spend.
     """
 
-    from local_operator.team_bridge.client import _api_supported, _screening_is_trusted
-    from local_operator.team_bridge.screening import SCREENING_TEMPLATE_V1_SHA256
+    from local_operator.team_bridge.client import (
+        _api_supported,
+        _screening_is_trusted,
+        screening_template_sha256,
+    )
     from local_operator.team_bridge.store import StoreRefused
 
     if not isinstance(status, Mapping):
@@ -475,7 +478,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     import hashlib as _hashlib
 
     digest = _hashlib.sha256(str(template).encode("utf-8")).hexdigest()
-    if digest != SCREENING_TEMPLATE_V1_SHA256:
+    if digest != screening_template_sha256(version):
         raise StoreRefused(
             "policy_stale", "screening template bytes do not match the local selector"
         )
@@ -688,10 +691,7 @@ async def run_screening_cycle(
     # source, unknown version, mismatched bytes, disabled/ineligible
     # tenant/endpoint, or an unprovenanced cache is a TYPED REFUSAL — never
     # a default, never an arbitrary flat mapping, never a dispatch.
-    from local_operator.team_bridge.screening import (
-        SCREENING_TEMPLATE_V1_SHA256,
-        SCREENING_VERSION_V1,
-    )
+    from local_operator.team_bridge.client import screening_template_sha256
 
     store = Store(config_dir)
     capture = accepted_capture
@@ -719,8 +719,8 @@ async def run_screening_cycle(
             or capture.account_id != owner.account_id
             or capture.hub != owner.canonical_base_url
             or capture.owner_generation != owner.enrollment_generation
-            or capture.version != SCREENING_VERSION_V1
-            or capture.template_hash != SCREENING_TEMPLATE_V1_SHA256
+            or screening_template_sha256(capture.version) is None
+            or capture.template_hash != screening_template_sha256(capture.version)
         )
         if not stale:
             receipt_now = store.owner_consent_receipt(owner)

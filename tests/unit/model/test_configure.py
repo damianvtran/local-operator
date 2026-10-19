@@ -103,10 +103,23 @@ def test_configure_model_openai(mock_credential_manager, monkeypatch):
 
 
 def test_configure_model_openai_unknown_model_uses_defaults(mock_credential_manager):
-    """Unknown models get sensible ModelSpec defaults, not a KeyError."""
+    """Unknown models get sensible ModelSpec defaults, not a KeyError.
+
+    ``max_output_tokens`` is ``0``, and the assertion was ``> 0`` until the
+    no-data-is-not-a-cap fix (see ``build_model_spec``): the old seed was
+    ``UNKNOWN_MAX_OUTPUT`` (8192), a NUMBER in a field whose contract is "the
+    ceiling the PROVIDER publishes". A spec built from that placeholder was
+    indistinguishable from a model really stating an 8k cap, and
+    ``turn_output_budget`` clamped every router route to it -- a reasoning-heavy
+    turn spent all 8192 thinking and returned empty at ``stop_reason='length'``.
+    ``0`` is the codebase's no-data value: the budget routes it to the 131072
+    policy ceiling, and the picker renders it as "output unknown". The context
+    window keeps a positive default, because a window is what compaction needs
+    and 0 there would disable it.
+    """
     config = configure_model("openai", "gpt-9-turbo-invented", mock_credential_manager)
     assert config.spec.context_window > 0
-    assert config.spec.max_output_tokens > 0
+    assert config.spec.max_output_tokens == 0
 
 
 def test_configure_model_ollama(mock_credential_manager):
@@ -852,6 +865,58 @@ async def test_usage_preflight_demotes_rather_than_blocks_a_reserve_account(tmp_
         store.close()
 
 
+def _quota_request(model: ModelSpec) -> ChatRequest:
+    return ChatRequest(
+        model=model,
+        system_blocks=["Synthetic quota fixture prefix"],
+        messages=[Message.user("Synthetic quota fixture")],
+    )
+
+
+async def _successful_cache_boundary(
+    store: AuthStore, session_id: str, model: ModelSpec, row: Any
+) -> Any:
+    """A warm fixture needs completed wire success, not a handwritten pointer."""
+    from local_operator.providers.clients import AnthropicClient
+    from local_operator.providers.failover import stream_with_failover
+
+    request = _quota_request(model)
+    initial = store.begin_account_request(session_id, request)
+    store.pin_session_credential("anthropic", session_id, row.id)
+    events = [
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "synthetic"},
+        },
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    ]
+    payload = "".join("data: " + json.dumps(event) + "\n\n" for event in events).encode()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda wire: httpx.Response(
+                    200, content=payload, headers={"Content-Type": "text/event-stream"}
+                )
+            )
+        ) as http:
+            client = AnthropicClient(http_client=http)
+            result = [
+                event
+                async for event in stream_with_failover(
+                    request,
+                    store,
+                    {"retry": {"maxRetries": 0, "modelFallback": False}},
+                    lambda spec: client,
+                    session_id=session_id,
+                )
+            ]
+            assert result[-1].type == "end"
+    finally:
+        store.end_account_request(session_id, initial)
+    return store.begin_account_request(session_id, request)
+
+
 @pytest.mark.asyncio
 async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -> None:
     """A reserve verdict is a preference for NEW picks, never an eviction.
@@ -875,7 +940,7 @@ async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -
     stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
     model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
     # The session has been transacting on A: that is where its cache is warm.
-    store.pin_session_credential("anthropic", "session-a", warm.id)
+    account_boundary = None
 
     async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
         return _anthropic_usage(92.0 if access_token == "oauth-a" else 40.0)
@@ -885,11 +950,14 @@ async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -
         stream._usage_checked_at = 0.0
 
     try:
+        account_boundary = await _successful_cache_boundary(store, "session-a", model, warm)
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await boundary()
             await stream.preflight_usage(model)
 
-            selected = await store.get_oauth_access("anthropic", "session-a")
+            selected = await store.get_oauth_access(
+                "anthropic", "session-a", model_id=model.model_id
+            )
             assert selected is not None and selected.credential_id == warm.id
             assert not store.is_blocked(warm.id, "anthropic")
             # Not demoted either: the mark is for a fresh pick the walk is
@@ -904,7 +972,9 @@ async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -
             # Steady state is silent, and the session still does not move.
             await boundary()
             await stream.preflight_usage(model)
-            selected = await store.get_oauth_access("anthropic", "session-a")
+            selected = await store.get_oauth_access(
+                "anthropic", "session-a", model_id=model.model_id
+            )
             assert selected is not None and selected.credential_id == warm.id
             assert len(notices) == 1
 
@@ -918,11 +988,14 @@ async def test_reserve_on_the_sticky_account_keeps_the_session_there(tmp_path) -
         try:
             with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
                 await fresh.preflight_usage(model)
-            picked = await store.get_oauth_access("anthropic", fresh._session_id)
+            picked = await store.get_oauth_access(
+                "anthropic", fresh._session_id, model_id=model.model_id
+            )
             assert picked is not None and picked.credential_id == cold.id
         finally:
             await fresh.close()
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -1026,7 +1099,7 @@ async def test_reserve_on_the_sticky_account_is_silent_after_the_walk_settles(
         session_id="session-a",
     )
     model = ModelSpec(provider="anthropic", model_id="claude-opus-5")
-    store.pin_session_credential("anthropic", "session-a", warm.id)
+    account_boundary = None
     probed: list[str] = []
 
     async def usage_for_access(_client, _provider, *, access_token="", **_kwargs):
@@ -1034,14 +1107,16 @@ async def test_reserve_on_the_sticky_account_is_silent_after_the_walk_settles(
         return _anthropic_usage(94.0 if access_token == "oauth-c" else 20.0)
 
     try:
+        account_boundary = await _successful_cache_boundary(store, "session-a", model, warm)
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await stream.preflight_usage(model)
 
         assert probed == ["oauth-c"]
-        selected = await store.get_oauth_access("anthropic", "session-a")
+        selected = await store.get_oauth_access("anthropic", "session-a", model_id=model.model_id)
         assert selected is not None and selected.credential_id == warm.id
         assert store._active_demotions("anthropic") == set()
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -1146,16 +1221,17 @@ async def test_a_warm_stay_keeps_the_current_effort(tmp_path) -> None:
         reasoning=True,
         reasoning_effort="high",
     )
-    store.pin_session_credential("anthropic", "session-a", warm.id)
+    account_boundary = None
 
     async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
         return _anthropic_usage(95.0 if access_token == "oauth-a" else 20.0)
 
     try:
+        account_boundary = await _successful_cache_boundary(store, "session-a", model, warm)
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await stream.preflight_usage(model)
 
-        selected = await store.get_oauth_access("anthropic", "session-a")
+        selected = await store.get_oauth_access("anthropic", "session-a", model_id=model.model_id)
         assert selected is not None and selected.credential_id == warm.id
         # No effort route activated: the request goes out at the effort the
         # conversation is cached under.
@@ -1165,6 +1241,7 @@ async def test_a_warm_stay_keeps_the_current_effort(tmp_path) -> None:
             "the prompt cache warm"
         ]
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -1186,16 +1263,17 @@ async def test_model_tier_reserve_on_the_sticky_account_keeps_the_session_there(
     notices: list[str] = []
     stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
     model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
-    store.pin_session_credential("anthropic", "session-a", warm.id)
+    account_boundary = None
 
     async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
         return _anthropic_fable_usage(95.0 if access_token == "oauth-a" else 20.0)
 
     try:
+        account_boundary = await _successful_cache_boundary(store, "session-a", model, warm)
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await stream.preflight_usage(model)
 
-        selected = await store.get_oauth_access("anthropic", "session-a")
+        selected = await store.get_oauth_access("anthropic", "session-a", model_id=model.model_id)
         assert selected is not None and selected.credential_id == warm.id
         assert store._active_demotions("anthropic") == set()
         assert not store.is_blocked(warm.id, "anthropic")
@@ -1211,11 +1289,14 @@ async def test_model_tier_reserve_on_the_sticky_account_keeps_the_session_there(
         try:
             with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
                 await fresh.preflight_usage(model)
-            picked = await store.get_oauth_access("anthropic", fresh._session_id)
+            picked = await store.get_oauth_access(
+                "anthropic", fresh._session_id, model_id=model.model_id
+            )
             assert picked is not None and picked.credential_id == cold.id
         finally:
             await fresh.close()
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -1393,6 +1474,7 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
             return _kimi_usage(90.0)
         return _anthropic_fable_usage(100.0 if access_token == "oauth-a" else 16.0)
 
+    account_boundary = store.begin_account_request(session, _quota_request(model))
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
             await stream.preflight_usage(model)
@@ -1406,7 +1488,7 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
         assert not store.is_blocked(first.id, "anthropic")
         assert not store.is_blocked_for_model(first.id, "anthropic", "claude-opus-4-8")
         assert not store.is_blocked(second.id, "anthropic")
-        selected = await store.get_oauth_access("anthropic", session)
+        selected = await store.get_oauth_access("anthropic", session, model_id=model.model_id)
         assert selected is not None and selected.credential_id == second.id
         opus = await store.get_oauth_access("anthropic", session, model_id="claude-opus-4-8")
         assert opus is not None  # the family-blocked account still serves opus
@@ -1414,6 +1496,7 @@ async def test_model_tier_cap_rotates_siblings_before_leaving_the_provider(tmp_p
         # Sibling rotation is silent now — an internal detail, not a transcript event.
         assert not any("trying another anthropic account" in notice for notice in notices)
     finally:
+        store.end_account_request(session, account_boundary)
         await stream.close()
         store.close()
 
@@ -1655,7 +1738,11 @@ async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) 
 
     tier_spent_line = "continuing until shared windows are exhausted"
     model_reserve_line = "for claude-opus-5 — staying on this account to keep the prompt cache warm"
+    account_boundary = None
     try:
+        account_boundary = await _successful_cache_boundary(
+            store, "session-a", model, store.list_credentials("anthropic")[0]
+        )
         with patch("local_operator.providers.usage.fetch_usage", side_effect=report_for_phase):
             # 1) The account-scope (tier-spent) reserve condition announces once
             #    and stays quiet across a second identical boundary.
@@ -1677,6 +1764,7 @@ async def test_distinct_quota_conditions_on_one_selector_do_not_alias(tmp_path) 
             # The earlier condition's single announcement is untouched.
             assert sum(tier_spent_line in n for n in notices) == 1
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -3159,9 +3247,11 @@ async def test_preflight_recovers_a_blocked_sibling_holding_model_quota(tmp_path
         assert access_token is not None
         return reports[access_token]
 
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+    account_boundary = store.begin_account_request("session-a", _quota_request(model))
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
-            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+            await stream.preflight_usage(model)
 
         # No provider failover: a blocked account recovered with Fable quota.
         assert stream._route_state.active is None
@@ -3169,10 +3259,11 @@ async def test_preflight_recovers_a_blocked_sibling_holding_model_quota(tmp_path
         # it; the other blocked row keeps its block (its verdict was never read).
         assert not store.is_blocked(blocked_a.id, "anthropic")
         assert store.is_blocked(blocked_b.id, "anthropic")
-        selected = await store.get_oauth_access("anthropic", "session-a")
+        selected = await store.get_oauth_access("anthropic", "session-a", model_id=model.model_id)
         assert selected is not None and selected.credential_id == blocked_a.id
         assert any("recovered" in notice for notice in notices)
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -3253,17 +3344,20 @@ async def test_recovery_walks_past_a_depleted_blocked_row_to_one_with_quota(
         assert access_token is not None
         return reports[access_token]
 
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+    account_boundary = store.begin_account_request("session-a", _quota_request(model))
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
-            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+            await stream.preflight_usage(model)
 
         # No provider hop: the second blocked row held quota and serves.
         assert stream._route_state.active is None
         assert store.is_blocked(blocked_a.id, "anthropic")
         assert not store.is_blocked(blocked_b.id, "anthropic")
-        selected = await store.get_oauth_access("anthropic", "session-a")
+        selected = await store.get_oauth_access("anthropic", "session-a", model_id=model.model_id)
         assert selected is not None and selected.credential_id == blocked_b.id
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -3321,14 +3415,16 @@ async def test_two_depleted_blocked_rows_do_not_ping_pong_the_recovery_walk(
         probed.append(access_token)
         return reports[access_token]
 
+    model = ModelSpec(provider="anthropic", model_id="claude-fable-5")
+    account_boundary = store.begin_account_request("session-a", _quota_request(model))
     try:
         with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
-            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-fable-5"))
+            await stream.preflight_usage(model)
 
         # Terminated, and on the right account: no provider hop while an
         # Anthropic login still holds quota for this model.
         assert stream._route_state.active is None
-        selected = await store.get_oauth_access("anthropic", "session-a")
+        selected = await store.get_oauth_access("anthropic", "session-a", model_id=model.model_id)
         assert selected is not None and selected.credential_id == healthy.id
         assert not store.is_blocked(healthy.id, "anthropic")
         assert store.is_blocked(spent_a.id, "anthropic")
@@ -3339,6 +3435,7 @@ async def test_two_depleted_blocked_rows_do_not_ping_pong_the_recovery_walk(
         # by luck of ordering while spending a network round trip per frame.
         assert sorted(probed) == ["oauth-a", "oauth-b", "oauth-c", "oauth-live"]
     finally:
+        store.end_account_request("session-a", account_boundary)
         await stream.close()
         store.close()
 
@@ -5397,6 +5494,59 @@ def test_the_router_ladder_is_scoped_to_the_router_route_not_the_hosting() -> No
     local_auto = build_model_spec("ollama", "auto")
     assert local_auto.reasoning_efforts == ()
     assert local_auto.reasoning_effort is None
+
+
+def test_a_no_data_route_publishes_no_output_cap() -> None:
+    """The router routes are the measured case: no data is NOT an 8k cap.
+
+    The registry's ``aggregator_router_model_info`` carries the legacy sentinel
+    ``max_tokens = -1`` -- "the SELECTED model's cap is unknown" -- because a
+    router dispatches per request and none of its routes is fixed. That fact has
+    to survive into the spec, and it did not: the builder seeded
+    ``UNKNOWN_MAX_OUTPUT`` (8192), so ``turn_output_budget``
+    (``min(131072, advertised)``) put 8192 on the wire for EVERY router request.
+    A reasoning-heavy turn spent the whole budget thinking, emitted no text and
+    no calls, and returned ``stop_reason='length'`` -- measured across the fleet
+    at 138 stops with ``output_tokens == reasoning_tokens == 8192``, 141 of those
+    stops on ``radient/auto``, and 140 of the 149 silent ones inside child
+    sessions. So this is
+    not a rendering nit: the number decided whether a delegated child produced
+    anything at all.
+
+    ``0`` then means "no data" to the budget, which routes it to the 131072
+    policy ceiling rather than to a stand-in.
+    """
+    from local_operator.model.registry import get_model_info
+
+    # The sentinel itself, first: the spec assertion below is only meaningful if
+    # the row really is a no-data row rather than one this test happens to know.
+    assert get_model_info("radient", "auto").max_tokens == -1
+    for hosting in ("radient", "radient-key", "openrouter"):
+        spec = build_model_spec(hosting, "auto")
+        assert spec.max_output_tokens == 0, (hosting, spec.max_output_tokens)
+
+    # The CONTROL that makes the change a no-data rule and not a blanket zero: a
+    # shipped row that STATES a cap keeps its number, so a real provider limit is
+    # still honoured (and still lowers the ask -- that is the narrowing arm the
+    # budget is built on).
+    stated = build_model_spec("anthropic", "claude-opus-5-5")
+    assert stated.max_output_tokens == 128_000
+
+
+def test_a_no_data_route_is_not_clamped_by_the_policy_budget() -> None:
+    """End to end, across the two modules: the no-data spec gets the POLICY.
+
+    The unit pins in ``tests/unit/harness/test_types.py`` state the budget rule;
+    this one states that the rule and the builder now agree, which is the actual
+    defect -- either half alone passed before the fix.
+    """
+    from local_operator.harness.types import (
+        DEFAULT_TURN_OUTPUT_TOKENS,
+        turn_output_budget,
+    )
+
+    router = build_model_spec("radient", "auto")
+    assert turn_output_budget(router) == DEFAULT_TURN_OUTPUT_TOKENS
 
 
 def test_the_router_seed_is_the_routes_own_default_per_provider() -> None:

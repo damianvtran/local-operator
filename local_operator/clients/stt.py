@@ -35,6 +35,15 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
+from local_operator.stt import RemovedSpan
+from local_operator.stt.cleanup import (
+    CLIENT_RULES_PROVENANCE,
+    apply_client_rules,
+    choose_cleanup_language,
+    normalize_language_hint,
+    resolve_cleanup,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,12 +58,23 @@ class SttOutcome:
     Field names are deliberately the ones the cascade's ``SttOutcome`` carries
     (``text``/``provider``/``model``) so the daemon route reads either object
     the same way; see :func:`_adopt_outcome`.
+
+    The cleanup fields mirror the cascade's exactly (and are copied by
+    ``_adopt_outcome``): ``raw_text`` is the text before OUR rules, ``None``
+    only when ``raw_unavailable`` names why no raw copy exists, ``removed`` is
+    what our layer deleted, and ``cleanup`` is the provenance token. A caller
+    must not present an "original" view when ``raw_unavailable`` is set.
     """
 
     text: str
     provider: str
     model: Optional[str] = None
     path: str = ""
+    raw_text: Optional[str] = None
+    raw_unavailable: str = ""
+    language: Optional[str] = None
+    cleanup: str = "none"
+    removed: tuple[RemovedSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -256,6 +276,8 @@ def _transcribe_radient_sync(
     language: Optional[str],
     prompt: Optional[str],
     model: Optional[str],
+    cleanup: Optional[str] = None,
+    caller_language: Optional[str] = None,
 ) -> SttOutcome:
     """Blocking Radient leg: temp file in, ``create_transcription`` out.
 
@@ -286,11 +308,28 @@ def _transcribe_radient_sync(
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+    raw_text = str(getattr(result, "text", "") or "")
+    detected = getattr(result, "language", None) or getattr(result, "language_code", None)
+    probability = getattr(result, "language_probability", None)
+    cleaned = None
+    if resolve_cleanup(cleanup) in ("auto", "client"):
+        cleaned = apply_client_rules(
+            raw_text,
+            language=choose_cleanup_language(
+                caller_language if caller_language is not None else language,
+                detected if isinstance(detected, str) else None,
+                float(probability) if isinstance(probability, (int, float)) else None,
+            ),
+        )
     return SttOutcome(
-        text=str(getattr(result, "text", "") or ""),
+        text=cleaned.text if cleaned else raw_text,
         provider=str(getattr(result, "provider", "") or "radient"),
         model=getattr(result, "model", None) or model,
         path="provider_stt_radient",
+        raw_text=raw_text,
+        language=detected if isinstance(detected, str) else None,
+        cleanup=(CLIENT_RULES_PROVENANCE if cleaned else "none"),
+        removed=cleaned.removed if cleaned else (),
     )
 
 
@@ -301,6 +340,7 @@ async def _transcribe_radient(
     language: Optional[str],
     prompt: Optional[str],
     model: Optional[str],
+    cleanup: Optional[str],
     config_root: Any,
     store: Any,
 ) -> SttOutcome:
@@ -334,9 +374,11 @@ async def _transcribe_radient(
         mime,
         api_key=api_key,
         base_url=base_url,
-        language=language,
+        language=normalize_language_hint(language),
         prompt=prompt,
         model=model,
+        cleanup=cleanup,
+        caller_language=language,
     )
 
 
@@ -366,6 +408,11 @@ def _adopt_outcome(raw: Any, path: str) -> SttOutcome:
         provider=provider,
         model=getattr(raw, "model", None),
         path=str(getattr(raw, "path", "") or path),
+        raw_text=getattr(raw, "raw_text", None),
+        raw_unavailable=str(getattr(raw, "raw_unavailable", "") or ""),
+        language=getattr(raw, "language", None),
+        cleanup=str(getattr(raw, "cleanup", "none") or "none"),
+        removed=tuple(getattr(raw, "removed", ()) or ()),
     )
 
 
@@ -376,6 +423,7 @@ async def _transcribe_via_cascade(
     *,
     language: Optional[str],
     prompt: Optional[str],
+    cleanup: Optional[str] = None,
     config_root: Any,
     store: Any,
 ) -> SttOutcome:
@@ -422,6 +470,7 @@ async def _transcribe_via_cascade(
             store=store,
             language=language,
             prompt=prompt,
+            cleanup=cleanup,
         )
         if inspect.isawaitable(result):
             result = await result
@@ -438,6 +487,7 @@ async def transcribe_with_backend(
     language: Optional[str] = None,
     prompt: Optional[str] = None,
     model: Optional[str] = None,
+    cleanup: Optional[str] = None,
     config_root: Any = None,
     store: Any = None,
 ) -> SttOutcome:
@@ -448,6 +498,9 @@ async def transcribe_with_backend(
     clients raise their own typed errors (:class:`APIError` for Radient) and
     pass through for the route to classify.
     """
+    # Validate before the token lookup so a direct caller of this seam gets the
+    # same 422 sentence as the daemon route, including on the Radient branch.
+    resolve_cleanup(cleanup)
     key = resolve_backend_key(path)
     if key is None:
         raise SttBackendUnavailable(f"Unknown voice path '{path}'.", path=str(path))
@@ -463,6 +516,7 @@ async def transcribe_with_backend(
             language=language,
             prompt=prompt,
             model=model,
+            cleanup=cleanup,
             config_root=config_root,
             store=store,
         )
@@ -473,6 +527,7 @@ async def transcribe_with_backend(
             mime,
             language=language,
             prompt=prompt,
+            cleanup=cleanup,
             config_root=config_root,
             store=store,
         )

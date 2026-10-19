@@ -47,6 +47,7 @@ import asyncio
 import contextlib
 import contextvars
 import logging
+import math
 import os
 import sys
 import threading
@@ -95,6 +96,15 @@ logger = logging.getLogger(__name__)
 AUTHORIZATION_OBSERVER: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "mcp_authorization_observer", default=None
 )
+
+# Only the SDK's successful authorization-code response may attribute a new
+# native grant. set_tokens is also a public import/seed seam, and interactive=True
+# alone does not distinguish a refresh from a new authorization. The task-local
+# receipt is URL-bound and never contains token material or account assertions.
+_NATIVE_GRANT_RESPONSE: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "mcp_native_grant_response", default=None
+)
+GRANT_PROVENANCE_KEY = "grant_provenance"
 
 # Logical credential id prefix for managed MCP OAuth credentials (URL-keyed).
 MCP_OAUTH_CREDENTIAL_PREFIX = "mcp_oauth:"
@@ -1281,6 +1291,17 @@ class McpTokenStorage:
         # to the ``tokens_obtained_at`` written above, which is this chain's own
         # stamp.
         creds.pop(GRANT_CHAIN_KEY, None)
+        # Replacement, not merge: a fresh grant must not inherit old account
+        # evidence. Use the existing chain timestamp as its event, not a second
+        # login identity. Unattributed imports remain unknown even after refresh.
+        creds[GRANT_PROVENANCE_KEY] = {"kind": "unknown"}
+        receipt = _NATIVE_GRANT_RESPONSE.get()
+        if receipt is not None and receipt.get("resource_url") == self.server_url:
+            creds[GRANT_PROVENANCE_KEY] = {
+                **receipt,
+                "native_event_at": creds[TOKENS_OBTAINED_AT_KEY],
+            }
+            creds.pop("mesh_origin", None)
         self._write(creds)
 
     def store_refresh_result(self, tokens: OAuthToken, *, presented_refresh_token: str) -> bool:
@@ -1534,14 +1555,7 @@ class McpTokenStorage:
         if target is None:
             stored = creds.get("tokens")
             target = stored.get("refresh_token") if isinstance(stored, dict) else None
-        at = marker.get("at")
-        digest = marker.get("digest")
-        live = (
-            isinstance(at, (int, float))
-            and not isinstance(at, bool)
-            and 0 <= time.time() - at <= UNCONFIRMED_SEND_TTL_S
-        )
-        if live and isinstance(target, str) and target and digest == _refresh_token_digest(target):
+        if _live_unconfirmed_send(marker, target):
             return True
         self.clear_send_unconfirmed()
         return False
@@ -1982,6 +1996,131 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
     return payload_carries_grant(payload)
+
+
+def _live_unconfirmed_send(marker: Any, target: Any) -> bool:
+    """Read-only half of send_unconfirmed, also used by grant diagnostics."""
+    if not isinstance(marker, dict):
+        return False
+    at = marker.get("at")
+    live = (
+        isinstance(at, (int, float))
+        and not isinstance(at, bool)
+        and 0 <= time.time() - at <= UNCONFIRMED_SEND_TTL_S
+    )
+    return bool(
+        live
+        and isinstance(target, str)
+        and target
+        and marker.get("digest") == _refresh_token_digest(target)
+    )
+
+
+def mcp_grant_diagnostics(
+    server_url: str, store: StructuralAuthStore | None, *, unreadable: bool = False
+) -> dict[str, Any]:
+    """One URL-row snapshot, with no material, network request or authority claim.
+
+    finite_only names the EXISTING explicit URL placement/broker path, not
+    permission to share or a new lifetime bound on that placement: existing URL
+    holders may persist through reauthentication. A short-lived minted access
+    grant is not the holder permission's TTL. Identity has no authoritative
+    producer in this slice, so even native provenance cannot assert automatic
+    account-scoped inheritance.
+    Missing timing is UNKNOWN, never inferred from JWTs or mutable updated_at.
+    refresh_presence is stored refresh-credential presence, NOT a promise that
+    the issuer supports refresh or that it will succeed. access_state=present
+    means material exists without a known expiry/fence, NOT request-verified
+    usability. scopes_known requires a server-returned scope on the native
+    response; the SDK's fallback to requested scopes cannot establish it. No
+    identity, token, digest or account label is exported by this observation.
+    """
+    unknown: dict[str, Any] = {
+        "has_row": None,
+        "provenance": "unknown",
+        "identity_verified": False,
+        "identity_state": "scope_unknown",
+        "sharing_mode": "unavailable",
+        "refresh_presence": "unknown",
+        "expiry_known": False,
+        "scopes_known": False,
+        "access_state": "unknown",
+    }
+    if unreadable:
+        return unknown
+    try:
+        row = (
+            next(
+                (
+                    r
+                    for r in store.list_credentials(MCP_OAUTH_PROVIDER)
+                    if r.identity_key == server_url
+                ),
+                None,
+            )
+            if store is not None
+            else None
+        )
+        payload = getattr(row, "data", None)
+        data = payload if isinstance(payload, dict) else {}
+    except Exception:  # noqa: BLE001 — unreadable is not a missing user login
+        return unknown
+    tokens = data.get("tokens")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    has_grant = payload_carries_grant(data)
+    refresh = bool(tokens.get("refresh_token"))
+    obtained = _as_float(data.get(TOKENS_OBTAINED_AT_KEY))
+    lifetime = _as_float(tokens.get("expires_in"))
+    expiry = (
+        obtained + lifetime
+        if obtained is not None
+        and math.isfinite(obtained)
+        and obtained > 0
+        and lifetime is not None
+        and math.isfinite(lifetime)
+        and lifetime >= 0
+        else None
+    )
+    metadata = data.get(GRANT_PROVENANCE_KEY)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    bound_native = (
+        metadata.get("kind") == "native"
+        and metadata.get("resource_url") == server_url
+        and metadata.get("native_event_at") == _chain_stamp_of(data)
+    )
+    provenance = (
+        "copied"
+        if "mesh_origin" in data
+        else "native" if bound_native else "legacy" if has_grant and not metadata else "unknown"
+    )
+    # Share the runtime's marker predicate without its stale-marker cleanup:
+    # diagnostics must not write, and a stale send is not an unavailable grant.
+    fenced = (_as_float(data.get(GRANT_DEAD_AT_KEY)) or 0) > 0 or _live_unconfirmed_send(
+        data.get(GRANT_UNCONFIRMED_SEND_KEY), tokens.get("refresh_token")
+    )
+    access = (
+        "dead"
+        if fenced
+        else (
+            "absent"
+            if not tokens.get("access_token")
+            else "expired" if expiry is not None and expiry <= time.time() else "present"
+        )
+    )
+    return {
+        **unknown,
+        "has_row": row is not None,
+        "provenance": provenance,
+        "sharing_mode": (
+            "finite_only"
+            if has_grant and not fenced and (access == "present" or refresh)
+            else "unavailable"
+        ),
+        "refresh_presence": "present" if refresh else "absent",
+        "expiry_known": expiry is not None,
+        "scopes_known": bound_native and metadata.get("scopes_known") is True,
+        "access_state": access,
+    }
 
 
 def payload_carries_grant(payload: dict[str, Any] | None) -> bool:
@@ -4947,6 +5086,39 @@ def _make_refresh_coordinating_provider(
         #: uses the ``httpx`` it imports for itself. See ``_CHATTY_WIRE_CLIENTS``
         #: in ``local_operator/logger.py``, which pins both for the same reason.
         _refresh_coord_leaving: "Callable[[], bool] | None"
+
+        async def _handle_token_response(self, response: Any) -> None:
+            # This SDK method is the authorization-code token response, NOT its
+            # _refresh_token path. Let the SDK validate status/body before its
+            # normal storage callback can persist a receipt. Read raw scope
+            # first: the SDK fills omitted scope from requested scopes, which is
+            # not independent evidence of a server-returned grant scope.
+            await response.aread()
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            scope = body.get("scope") if isinstance(body, dict) else None
+            # Fence by the actual exchange too: if a future SDK routes another
+            # grant type here, or loses the request binding, attribution stays
+            # unknown rather than guessing from a private method's name.
+            try:
+                grant_type = parse_qs(response.request.content.decode()).get("grant_type", [])
+            except (AttributeError, RuntimeError, UnicodeDecodeError, ValueError):
+                grant_type = []
+            receipt = _NATIVE_GRANT_RESPONSE.set(
+                {
+                    "resource_url": server_url,
+                    "kind": "native",
+                    "scopes_known": isinstance(scope, str),
+                }
+                if grant_type == ["authorization_code"]
+                else None
+            )
+            try:
+                await super()._handle_token_response(response)
+            finally:
+                _NATIVE_GRANT_RESPONSE.reset(receipt)
 
         def _is_leaving(self) -> bool:
             """Whether the owner of this provider is tearing down.

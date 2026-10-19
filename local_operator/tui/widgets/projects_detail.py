@@ -4,6 +4,10 @@ The detail shows the record a reader asked about — overview, description,
 milestones (``↵`` toggles completion), todos and sessions — inside the same
 mode as the canvases, so the mode's invariants (focus restore, greyed dock,
 one page per screen, ``r`` recomposition) hold here too (spec §1/§10.1).
+LOH-19 P2 adds `e` (edit the project), `a` (add a milestone) and `x` (remove
+the selected one behind an inline y/n question) as the VIEW's keys; this page
+owns only the confirm's key discipline, so the question can swallow `y`/`n`
+before any row action or view binding reads them.
 
 Why a WIDGET TREE and not a painted canvas like the canvases are: the
 description is rendered through the transcript's own rich-``Markdown`` path,
@@ -32,6 +36,10 @@ from textual.containers import VerticalScroll
 from textual.geometry import Region
 from textual.widgets import Static
 
+# i18n: the empty-state placeholders below are user-facing detail-page
+# copy; they live in tui.projects with the rest of the projects surface.
+from local_operator.i18n.keys import tui_projects as _x
+from local_operator.i18n.text import tr
 from local_operator.logger import get_logger
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.projects_render import (
@@ -53,6 +61,8 @@ from local_operator.tui.projects_render import (
     update_stamp_text,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+
+_t = tr("tui.projects")
 
 logger = get_logger(__name__)
 
@@ -236,7 +246,7 @@ class DetailUpdateBodyRow(DetailRow):
         if self._shown:
             self.update(Markdown(autolink_bare_urls(self._shown)))
         else:
-            self.update(Text("(no text in this entry)", style=style_for("dim"), no_wrap=True))
+            self.update(Text(_t(_x.detail_no_text()), style=style_for("dim"), no_wrap=True))
 
     def readback(self) -> str | None:
         """The body's source, for ``painted_rows`` (the prose row's reason)."""
@@ -532,7 +542,7 @@ class DetailProseRow(DetailRow):
         if description.strip():
             self.update(Markdown(autolink_bare_urls(description)))
         else:
-            self.update(Text("no description yet", style=style_for("dim"), no_wrap=True))
+            self.update(Text(_t(_x.detail_no_description()), style=style_for("dim"), no_wrap=True))
 
     def readback(self) -> str | None:
         """The description's source text for ``painted_rows`` (UX round 1, U6).
@@ -588,6 +598,11 @@ class DetailMilestoneRow(DetailRow):
 
     def activate(self) -> None:
         self._on_action("milestone", self._row)
+
+    @property
+    def milestone_payload(self) -> dict[str, Any]:
+        """The row's payload, for the remove key's confirm (LOH-19 P2)."""
+        return self._row
 
 
 class DetailSessionRow(DetailRow):
@@ -676,11 +691,19 @@ class ProjectDetailPage(VerticalScroll):
         style_for: StyleFor,
         on_nav: Callable[[int], None] | None = None,
         on_state_change: Callable[[], None] | None = None,
+        on_confirm: Callable[[bool, str], None] | None = None,
     ) -> None:
         super().__init__(classes="projects-detail")
         self._on_action = on_action
         self._style_for = style_for
         self._on_nav = on_nav
+        #: The remove-milestone y/n answer, relayed to the host (LOH-19 P2).
+        #: The page owns the KEYBOARD discipline (y/n/esc while the question is
+        #: up); the VIEW owns the question row, because the page is the scroll
+        #: container and a child row would scroll away from the reader.
+        self._on_confirm = on_confirm
+        #: The milestone name the confirm is about, or ``None`` when it is down.
+        self._confirm_name: str | None = None
         self._view: dict[str, Any] | None = None
         self._own_session: str | None = None
         self._project_id: str | None = None
@@ -781,6 +804,9 @@ class ProjectDetailPage(VerticalScroll):
         if self._project_id != self._expanded_project:
             self._expanded.clear()
             self._expanded_project = self._project_id
+            # A question about one project's milestone must never outlive the
+            # page it was asked on.
+            self._confirm_name = None
         # Previews are per-project view state on the same rule: the payloads
         # are the previous project's files, and a row that outlived them would
         # paint a picture under a heading it no longer belongs to.
@@ -1279,6 +1305,78 @@ class ProjectDetailPage(VerticalScroll):
         row = self._current()
         payload = getattr(row, "session_payload", None)
         return payload if isinstance(payload, dict) else None
+
+    def selected_milestone(self) -> dict[str, Any] | None:
+        """The selected row's MILESTONE payload, when a milestone row has the cursor.
+
+        ``x`` removes only what the cursor is on: a heading or a session row
+        has no milestone to remove, and guessing the neighbour's would be the
+        same class of write the page's provenance rule forbids.
+        """
+        row = self._current()
+        payload = getattr(row, "milestone_payload", None)
+        return payload if isinstance(payload, dict) else None
+
+    # -- the remove confirm (LOH-19 P2) -------------------------------------
+    @property
+    def confirming(self) -> bool:
+        """Whether the inline y/n question is up (and owns the keyboard)."""
+        return self._confirm_name is not None
+
+    @property
+    def confirm_name(self) -> str:
+        """The milestone the question names (``""`` when it is down)."""
+        return self._confirm_name or ""
+
+    def arm_confirm(self, name: str) -> None:
+        """Ask the y/n question about one milestone. The VIEW paints the row."""
+        self._confirm_name = name
+        try:
+            self.focus()
+        except Exception:  # noqa: BLE001 — focus is a nicety
+            pass
+        if self._on_state_change is not None:
+            self._on_state_change()
+
+    def disarm_confirm(self) -> None:
+        """Put the question away without answering it (``n``/esc)."""
+        if self._confirm_name is None:
+            return
+        self._confirm_name = None
+        if self._on_state_change is not None:
+            self._on_state_change()
+
+    def on_key(self, event: Any) -> None:
+        """The confirm row OWNS the keyboard while it is up.
+
+        Same rule as the form's discard confirm: ``y`` answers yes, ``n`` /
+        ``esc`` / ``enter`` answer no (the honest outcome a reader reaches for
+        must not be swallowed in silence), and every other printable key is
+        swallowed rather than left to bubble — with the question up the reader
+        is answering it, not editing the page. Without the swallow, ``y`` would
+        also fire the view's attachment-copy binding on a milestone row and the
+        other letters would be interpreted as meanings.
+        """
+        if self._confirm_name is None:
+            return
+        name = self._confirm_name
+        if event.key == "y":
+            event.stop()
+            event.prevent_default()
+            self.disarm_confirm()
+            if self._on_confirm is not None:
+                self._on_confirm(True, name)
+            return
+        if event.key in ("n", "escape", "enter"):
+            event.stop()
+            event.prevent_default()
+            self.disarm_confirm()
+            if self._on_confirm is not None:
+                self._on_confirm(False, name)
+            return
+        if event.is_printable:
+            event.stop()
+            event.prevent_default()
 
     def selected_action_label(self) -> str | None:
         row = self._current()

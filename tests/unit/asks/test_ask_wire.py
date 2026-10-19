@@ -272,16 +272,15 @@ def test_the_real_publish_path_carries_a_live_empty_tally(
     assert payload["asks_open"] == 0
 
 
-def test_a_timed_out_but_unanswered_ask_still_counts_as_outstanding(
+def test_a_timed_out_ask_leaves_the_tally_and_still_takes_a_late_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The flip precondition: ``asks_open`` counts OUTSTANDING asks.
+    """#2388: a timed-out ask is SETTLED — the agent was told and moved on.
 
-    An ask that timed out and was never answered used to drop out of the tally
-    (0, and with no other row present the queue read as absent everywhere but
-    the live bar) while the bar still offered it and a late answer still reached
-    the agent (design §2.2, the spec's item 3). It is outstanding while the user
-    can still act on it; answering it late settles it and the tally falls.
+    The row stays on the wire (a settled receipt the user can dismiss) with its
+    timeout notice delivered, but ``asks_open`` no longer counts it, so no
+    surface says a question is waiting. The queue still takes a late answer and
+    attributes it (``late``); no surface offers one (D10, #2481).
     """
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
     clock = {"now": BASE}
@@ -291,10 +290,17 @@ def test_a_timed_out_but_unanswered_ask_still_counts_as_outstanding(
     ask_id = queue.enqueue(_questions(), 600)["details"]["ask_id"]
 
     clock["now"] += 600_001  # past the deadline, inside the 7-day late window
+    # Settling it must not cost the agent its notice: reconcile still writes the
+    # deadline row, and that row is the only one the status requires.
+    assert asyncio.run(queue.reconcile(clock["now"])) == [store.timeout_row_id(ask_id)]
+    record = queue.find(ask_id)
+    assert record is not None
+    assert store.expected_row_ids(record) == [store.timeout_row_id(ask_id)]
     rows, outstanding = ask_wire(session)
     assert rows is not None
     assert [row["status"] for row in rows] == ["timed_out"]
-    assert outstanding == 1, "a timed-out ask the user can still answer is outstanding"
+    assert rows[0]["delivered"] is True
+    assert outstanding == 0, "a timed-out ask is settled, not waiting on the user"
 
     assert queue.respond(ask_id, {"q0": ["late answer"]}, by="phone")["ok"] is True
     rows, outstanding = ask_wire(session)
@@ -1004,39 +1010,101 @@ def _ask_row(index: int, *, questions: int = 1, text: str = "Which one?") -> dic
     }
 
 
-def test_the_bound_caps_counts_and_never_cuts_text() -> None:
-    """The counts bound how much rides; they must not touch the strings.
+def test_the_bound_keeps_a_row_whole_and_never_cuts_text() -> None:
+    """A shipped row carries every question, every option and every string.
 
     The first revision clipped every question to 200 characters, each option
     label to 60 and each description to 80. A label is the ANSWER the surface
     submits verbatim, so that cap corrupted answers (see
-    ``test_a_long_option_label_reaches_the_ledger_whole``); the fix bounds the
-    NUMBER of things carried and leaves every string the model wrote intact.
+    ``test_a_long_option_label_reaches_the_ledger_whole``). The next revision
+    capped question and option COUNTS instead, which corrupted the answer a
+    different way: ``AskQueue.respond`` refuses a partial answer, so a card
+    shown 12 of 16 questions could never submit (see
+    ``test_a_sixteen_question_ask_is_answerable_from_the_wire``). A bound may
+    drop whole ROWS; it never trims part of one.
     """
-    from local_operator.session.frontend_state import (
-        ASK_WIRE_OPTIONS_MAX,
-        ASK_WIRE_QUESTIONS_MAX,
-        bound_ask_rows,
-    )
+    from local_operator.session.frontend_state import bound_ask_rows
 
     row = _ask_row(0, questions=400, text="x" * 500)
     row["questions"][0]["options"] = [
         {"label": "y" * 300, "description": "z" * 300} for _ in range(200)
     ]
     kept, dropped = bound_ask_rows([row])
-    assert dropped is True
     questions = kept[0]["questions"]
-    assert len(questions) <= ASK_WIRE_QUESTIONS_MAX
+    assert len(questions) == 400
+    assert [question["id"] for question in questions] == [f"q{index}" for index in range(400)]
     for question in questions:
-        # Whole, not clipped: the text is exactly what ``_ask_row`` wrote — the
-        # 400-question source is the only reason a question is missing.
+        # Whole, not clipped: the text is exactly what ``_ask_row`` wrote.
         assert question["question"] == f"{'x' * 500} {int(question['id'][1:])}"
         assert not question["question"].endswith("…")
-        assert len(question["options"]) <= ASK_WIRE_OPTIONS_MAX
-    # Every option that rides keeps its FULL label and description.
+    assert len(questions[0]["options"]) == 200
+    # Every option keeps its FULL label and description.
     for option in questions[0]["options"]:
         assert option["label"] == "y" * 300
         assert option["description"] == "z" * 300
+    assert dropped is False, "the head row rides whole, so nothing was left out"
+
+
+def test_a_sixteen_question_head_row_rides_with_every_question_and_option() -> None:
+    """The live failure's shape: 16 questions, the first with 14 options.
+
+    The count caps shipped 12 questions and 10 options, and the card answered
+    the 12 it was shown — which ``AskQueue.respond`` refuses atomically.
+    """
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    row = _ask_row(0, questions=16)
+    row["questions"][0]["options"] = [
+        {"label": f"option {index}", "description": ""} for index in range(14)
+    ]
+    kept, dropped = bound_ask_rows([row])
+    questions = kept[0]["questions"]
+    assert [question["id"] for question in questions] == [f"q{index}" for index in range(16)]
+    assert [option["label"] for option in questions[0]["options"]] == [
+        f"option {index}" for index in range(14)
+    ]
+    assert dropped is False
+
+
+def test_a_sixteen_question_ask_is_answerable_from_the_wire(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """enqueue → ``ask_wire`` → ``bound_ask_rows`` → answer what rode → ``respond``.
+
+    The surface can only answer the questions the wire carried, and the queue
+    refuses an answer that leaves any question out. Seen live on a 16-question
+    ask: "every question must be answered at once: … has no entry".
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session, queue = _live_session(tmp_path)
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    questions = _questions(16)
+    questions[0]["options"] = [{"label": f"option {index}"} for index in range(14)]
+    outcome = queue.enqueue(questions, None)
+    assert outcome["ok"] is True, outcome
+    ask_id = outcome["details"]["ask_id"]
+
+    rows, _outstanding = ask_wire(session)
+    assert rows, "a live session publishes its queued ask"
+    kept, dropped = bound_ask_rows(rows)
+    # Checked before ``respond`` so a reintroduced cap fails here, at the bound,
+    # rather than as the queue's refusal string further down.
+    assert dropped is False
+    shown = kept[0]["questions"]
+    # The card answers every question it was shown, with the LAST option it was
+    # shown — so a clipped option list would surface as a wrong answer too.
+    answers = {question["id"]: [question["options"][-1]["label"]] for question in shown}
+    result = queue.respond(ask_id, answers)
+    assert result.get("ok") is True, result
+    answered = [
+        event
+        for event in store.read_events(queue.session_dir)
+        if event["kind"] == store.EVENT_ANSWERED
+    ]
+    assert len(answered) == 1
+    assert answered[0]["answers"]["q0"] == ["option 13"]
+    assert sorted(answered[0]["answers"]) == sorted(f"q{index}" for index in range(16))
 
 
 def test_the_first_row_rides_whole_when_it_exceeds_the_budget() -> None:
@@ -1282,3 +1350,87 @@ def test_the_wire_row_omits_attachments_while_none_and_publishes_refs_once_prese
     assert "attachments" not in PendingAskWire(**open_row).to_json()
     # NEVER the bytes: the whole published row is small however large the image was.
     assert len(json.dumps(answered_row)) < 1500
+
+
+# ---------------------------------------------------------------------------
+# `asks.lapsed_visible_for` on the wire (decisions D8/D9)
+# ---------------------------------------------------------------------------
+
+
+def _write_config(config_dir: Path, choice: str) -> None:
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io._store(
+        ConfigManager(config_dir), settings_io.BY_KEY["asks.lapsed_visible_for"].path, choice
+    )
+
+
+def test_ask_wire_drops_a_hidden_lapsed_row_from_rows_and_tally(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The setting reaches the live wire: under ``1h`` a timed-out ask is gone
+    from BOTH the rows and ``asks_open`` once its window passes, so no surface
+    counts a question it no longer shows."""
+    from local_operator.config_watch import process_watcher
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    # The queue's own config directory is where its window is read from.
+    config_dir = tmp_path
+    session, queue = _live_session(tmp_path)
+    clock = getattr(queue, "_test_clock")
+    queue.enqueue(_questions(), 600)
+    clock["now"] = BASE + 600_000 + 3_600_000 + 1  # 1 h + 1 ms past the deadline
+
+    rows, outstanding = ask_wire(session)
+    assert rows is not None and [r["status"] for r in rows] == ["timed_out"]
+    # #2388: shown under the 7 d default, but settled — the tally never counted it.
+    assert outstanding == 0
+
+    _write_config(config_dir, "1h")
+    process_watcher(config_dir).poll_now()
+    rows, outstanding = ask_wire(session)
+    assert rows is None and outstanding == 0
+
+
+def test_a_running_session_republishes_when_the_window_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D9 (i): a ``config.yml`` edit from ANOTHER process hides a lapsed row on
+    a running session's wire at once, through the real
+    ``Session._apply_config_change`` listener — no new turn."""
+    from local_operator.config_watch import process_watcher
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_aside import RecordingStream, make_session
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = make_session(tmp_path, RecordingStream())
+    session.set_ask_handler(_noop_hook)  # type: ignore[arg-type]
+
+    async def _drive() -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            queue = session.ask_queue()
+            assert queue is not None
+            root = config_dir()
+            watcher = process_watcher(root)
+            session.add_dispose_hook(watcher.subscribe(session._apply_config_change))
+            # A real ask whose deadline passed 2 h ago (the log is written with
+            # the queue's clock, then the clock moves on).
+            queue._now = lambda: store.now_ms() - 2 * 3_600_000 - 120_000
+            queue.enqueue(_questions(), 120)
+            queue._now = store.now_ms
+            session.publish_ask_state()
+            before = session.frontend_state.model_dump(mode="json")
+            _write_config(root, "1h")
+            change = watcher.poll_now()
+            assert change is not None and "asks.lapsed_visible_for" in change.changed_keys
+            after = session.frontend_state.model_dump(mode="json")
+            return before, after
+        finally:
+            await session.dispose()
+
+    before, after = asyncio.run(_drive())
+    assert [row["status"] for row in before["asks"]] == ["timed_out"]
+    assert before["asks_open"] == 0  # #2388: shown, but settled
+    assert "asks" not in after
+    assert after["asks_open"] == 0

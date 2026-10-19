@@ -6,7 +6,11 @@ import pytest
 
 from local_operator.harness.types import ToolContext
 from local_operator.memory import MemoryIdentity, MemoryStore
-from local_operator.tools.memory_tools import build_memory_tool, execute_fact_memory
+from local_operator.tools.memory_tools import (
+    build_memory_tool,
+    execute_fact_memory,
+    execute_memory,
+)
 from local_operator.tools.registry import create_tools
 
 
@@ -368,3 +372,218 @@ async def test_existing_session_rows_are_never_promoted_or_rewritten_by_personal
             tuple(row) for row in db.execute("SELECT op_id,data FROM ops WHERE scope='session'")
         ]
     assert before == after and owner.show("session", old["id"])["status"] == "active"
+
+
+#: A device id (network.identity.device_id_for: ``d_`` + sha256 hex[:32]) whose hex
+#: tail satisfies the IBAN shape + mod-97 check by chance. Held verbatim from the
+#: refusal that the read-path exemption fixes.
+DEVICE_ID = "d_ef73a4312e5c4686196b30c035c8a05a"
+
+
+@pytest.fixture
+def recall_context(tmp_path):
+    return ToolContext(session_id="s", memory_config_dir=str(tmp_path / "cfg"))
+
+
+async def _seeded(context: ToolContext) -> None:
+    written = await execute_memory(
+        "w",
+        "write",
+        {
+            "path": "memory://global",
+            "content": json.dumps({"title": "Host", "body": "staging host is stage-2"}),
+        },
+        context,
+    )
+    assert not written.is_error, written.content
+
+
+@pytest.mark.asyncio
+async def test_a_structural_id_recall_query_is_not_refused_by_the_read_path(recall_context):
+    """The agent twin of the store refusal, on the same value.
+
+    ``_run`` guards the WHOLE argument dict before the store sees it, so a benign
+    identifier lookup failed here even with the store path fixed.
+    """
+    await _seeded(recall_context)
+    recalled = await execute_memory(
+        "r", "read", {"path": f"memory://global?q={DEVICE_ID}"}, recall_context
+    )
+    assert not recalled.is_error, str(recalled.content)
+    assert json.loads(str(getattr(recalled.content[0], "text", ""))) == []
+    # The same call with prose still answers: the exemption changed no other query.
+    prose = await execute_memory(
+        "p", "read", {"path": "memory://global?q=staging host"}, recall_context
+    )
+    assert not prose.is_error
+    assert json.loads(str(getattr(prose.content[0], "text", "")))[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_a_structural_reference_recall_value_is_not_refused_by_the_fact_tool(recall_context):
+    """The THIRD site, on the same value: the plain-text tool guards its own args first.
+
+    ``execute_fact_memory`` runs its own ``guard_encoded(args)`` over the whole dict
+    before it delegates to the read path, so ``recall(<device id>)`` still failed with
+    the store-oriented message after the two layers below it were exempted.
+
+    The recall answers ``[]`` anyway: no stored fact can carry the token, because the
+    write side refuses ``d_<hex32>`` anywhere in fact text. Removing a WRONG refusal is
+    the whole goal — this does not make a device id a lookup key.
+    """
+    await _seeded(recall_context)
+    recalled = await execute_fact_memory(
+        "r", {"op": "recall", "text": DEVICE_ID}, context=recall_context
+    )
+    assert not recalled.is_error, str(recalled.content)
+    assert json.loads(str(getattr(recalled.content[0], "text", ""))) == {
+        "bank": "global/across sessions",
+        "items": [],
+    }
+    # The same call with prose still answers, so the exemption moved no other query.
+    prose = await execute_fact_memory(
+        "p", {"op": "recall", "text": "staging host"}, context=recall_context
+    )
+    assert not prose.is_error
+    assert json.loads(str(getattr(prose.content[0], "text", "")))["items"][0]["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        # A real card/IBAN/SSN spelling stays refused on the recall branch too.
+        {"op": "recall", "text": "card 4111 1111 1111 1111"},
+        {"op": "recall", "text": "IBAN GB82WEST12345698765432"},
+        {"op": "recall", "text": "SSN 123-45-6789"},
+        # A reference inside prose is prose: the exemption is a FULL match.
+        {"op": "recall", "text": DEVICE_ID + " extra"},
+        # A WRITE carrying the same id-shaped value: storing a value is not the same
+        # act as looking one up, so the store branch keeps the guard it has today.
+        {"op": "store", "text": DEVICE_ID},
+        # ...and an op this tool does not have is not a recall either, so it reaches
+        # the guard (and then the contract) exactly as it did before.
+        {"op": "write", "text": DEVICE_ID},
+        # The exemption is that one VALUE of that one op: a secret-shaped SIBLING
+        # argument of the SAME recall call is still inspected and refused.
+        {"op": "recall", "text": DEVICE_ID, "i": "card 4111 1111 1111 1111"},
+    ],
+)
+async def test_the_fact_tool_exemption_covers_only_a_recalls_text_value(recall_context, args):
+    result = await execute_fact_memory("c", dict(args), context=recall_context)
+    assert result.is_error and "Sensitive value refused" in str(result.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "4111111111111111",
+        "GB82WEST12345698765432",
+        "123-45-6789",
+        "the SSN is 123-45-6789",
+        f"{DEVICE_ID} extra",
+    ],
+)
+async def test_a_secret_shaped_recall_query_is_still_refused(recall_context, query):
+    refused = await execute_memory(
+        "r", "read", {"path": f"memory://global?q={query}"}, recall_context
+    )
+    assert refused.is_error
+    assert "Sensitive value refused" in str(refused.content)
+
+
+@pytest.mark.asyncio
+async def test_the_recall_exemption_covers_the_read_query_value_alone(recall_context):
+    """A sibling argument, and the same value on a write, keep today's refusal."""
+    sibling = await execute_memory(
+        "r",
+        "read",
+        {"path": f"memory://global?q={DEVICE_ID}", "raw": "GB82WEST12345698765432"},
+        recall_context,
+    )
+    assert sibling.is_error and "Sensitive value refused" in str(sibling.content)
+    written = await execute_memory(
+        "w", "write", {"path": f"memory://global?q={DEVICE_ID}", "content": "{}"}, recall_context
+    )
+    assert written.is_error and "Sensitive value refused" in str(written.content)
+    payload = await execute_memory(
+        "s",
+        "write",
+        {
+            "path": "memory://global",
+            "content": json.dumps({"title": "Payout", "body": "IBAN GB82WEST12345698765432"}),
+        },
+        recall_context,
+    )
+    assert payload.is_error and "Sensitive value refused" in str(payload.content)
+
+
+@pytest.mark.asyncio
+async def test_a_read_path_whose_query_does_not_parse_keeps_the_letter_of_its_refusal(
+    recall_context,
+):
+    """Classifying the q value must not change WHICH refusal a read reports.
+
+    ``parse_url`` parses its query with ``strict_parsing=True``, which raises
+    ``ValueError`` for a field with no "=" (a trailing ``&``). Treating that as "not a
+    reference" leaves the caller's own guard — which refuses an id-shaped path — to
+    speak first, so the message and its order are the ones this input produced before
+    the recall exemption existed. ``execute_memory`` maps a bare ``ValueError`` to a
+    generic request error instead, which would have moved the guard behind it.
+    """
+    id_shaped = await execute_memory(
+        "r", "read", {"path": f"memory://global?q={DEVICE_ID}&"}, recall_context
+    )
+    assert id_shaped.is_error and "Sensitive value refused" in str(id_shaped.content)
+    # Not id-shaped: the guard admits it and parse_url still owns the refusal.
+    prose = await execute_memory(
+        "p", "read", {"path": "memory://global?q=staging host&"}, recall_context
+    )
+    assert prose.is_error
+    assert "Invalid memory request or unavailable store" in str(prose.content)
+
+
+@pytest.mark.asyncio
+async def test_a_tokens_parameter_is_refused_by_a_rule_that_predates_this_change(
+    recall_context,
+):
+    """Documents PRE-EXISTING behaviour; this is not the recall fix's [redacted].
+
+    A whitespace-free path carrying ``tokens=`` is refused by the path-like-token arm
+    (``memory.py`` extracts path-like tokens and asks ``is_sensitive``; the name match
+    answers ``token-or-secret-name``), and it refuses a non-id query identically — on
+    the base too, before any exemption. The exemption removes one value and stops at
+    ``&``, so it never reaches this parameter; ``limit=`` is unaffected. Pinned so the
+    residual cannot drift silently.
+    """
+    limited = await execute_memory(
+        "l", "read", {"path": f"memory://global?q={DEVICE_ID}&limit=5"}, recall_context
+    )
+    assert not limited.is_error, str(limited.content)
+    for query in (DEVICE_ID, "stage2"):
+        refused = await execute_memory(
+            "t", "read", {"path": f"memory://global?q={query}&tokens=50"}, recall_context
+        )
+        assert refused.is_error and "Sensitive path refused" in str(refused.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        "recall",
+        {"op": "recall"},
+        {"op": "recall", "text": 12345},
+    ],
+)
+async def test_a_malformed_call_still_fails_the_contract_not_the_exemption(recall_context, args):
+    """The exemption reads ``args`` BEFORE validation, so its defensive branch is pinned.
+
+    None of these is a recall whose text IS a reference, so the guard and the contract
+    answer in the same order and with the same message as they did before it existed:
+    a non-dict must not reach the exemption's ``args.get`` at all.
+    """
+    result = await execute_fact_memory("c", args, context=recall_context)
+    assert result.is_error and "Invalid memory contract" in str(result.content)

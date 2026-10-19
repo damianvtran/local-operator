@@ -21,8 +21,14 @@ from local_operator.network.tool import build_network_tool
 from local_operator.team_bridge.tool import build_bridge_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
+from local_operator.tools.audio_tool import (
+    build_generate_sound_effect_tool,
+    build_generate_voiceover_tool,
+)
 from local_operator.tools.eval import build_eval_tool
+from local_operator.tools.harness_import_tool import build_harness_import_tool
 from local_operator.tools.image_tool import build_generate_image_tool
+from local_operator.tools.library_tool import build_library_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
 from local_operator.tools.project_tool import (
@@ -96,6 +102,9 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # provider-visible array prefix, which is what the prompt cache keys on.
     "project": lambda context: build_project_tool(context),
     "project_delete": lambda context: build_project_delete_tool(context),
+    # Agent-usable import surface over the same core service. Read-only
+    # discovery needs no store; import itself is write-tier and preview-gated.
+    "harness_import": lambda context: build_harness_import_tool(context),
     # createIf: returns None without a monitor scheduler, so a session that
     # cannot arm a monitor pays no schema for it (footprint rung 3, like
     # `wake`). Appended at the end of both tables for the same cache-prefix
@@ -110,6 +119,10 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # tables on purpose: appending never shifts a provider-visible array
     # prefix, which is what the prompt cache keys on.
     "sessions": lambda context: builtin.build_sessions_tool(context),
+    # Unconditional: the Library is the user's OWN catalog, and a session that
+    # cannot read it has no way to name what it already produced. Appended at
+    # the END of both tables for the prompt-cache-prefix rule above.
+    "library": lambda _context: build_library_tool(),
     # createIf: rung 3 — the agent-side settle exists only where the queued
     # engine does (`context.withdraw_ask`), so the blocking arm, headless hosts
     # and subagents pay zero schema for it (design ask-nonblocking.md §12).
@@ -168,6 +181,17 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # both tables on purpose: appending never shifts a provider-visible
     # array prefix, which is what the prompt cache keys on (H5d).
     "bridge": lambda context: build_bridge_tool(context),
+    # createIf: rung 3 — the audio pair exists only where a credential for the
+    # direction is reachable (``audiogen.availability``: persisted rows / store
+    # rows / env; sync and socket-free), so a session that cannot generate
+    # audio pays no schema for it. The gates DIFFER per tool: sound effects
+    # have no OpenAI BYOK path (the frozen server contract), so an OpenAI-only
+    # machine gets the voiceover tool and not a sound-effect tool that could
+    # only fail. Appended at the END of both tables on purpose: appending
+    # never shifts a provider-visible array prefix, which is what the prompt
+    # cache keys on.
+    "generate_voiceover": lambda context: build_generate_voiceover_tool(context),
+    "generate_sound_effect": lambda context: build_generate_sound_effect_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -207,7 +231,9 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "network",
     "project",
     "project_delete",
+    "harness_import",
     "monitor",
+    "library",
     "sessions",
     "ask_withdraw",
     "generate_image",
@@ -217,6 +243,11 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "video_status",
     "setting",
     "bridge",
+    # The audio pair (see the table comments): createIf-gated per direction.
+    # The newest appends, so they end both tables (the pin test moves with
+    # the newest append).
+    "generate_voiceover",
+    "generate_sound_effect",
 ]
 
 

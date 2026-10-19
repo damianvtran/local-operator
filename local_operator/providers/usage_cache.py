@@ -359,26 +359,40 @@ def account_preflight_key(storage_id: str, account_identity: str) -> str:
 class UsageCacheStore:
     """SQLite-backed shared usage cache; every method is exception-safe."""
 
-    def __init__(self, db_path: str | Path | None = None, *, read_only: bool = False) -> None:
+    def __init__(
+        self, db_path: str | Path | None = None, *, read_only: bool = False, wal_aware: bool = False
+    ) -> None:
+        if wal_aware and not read_only:
+            raise ValueError("wal_aware requires read_only=True")
         self._db_path = Path(db_path) if db_path is not None else default_cache_path()
         #: Identity of this process in lease rows, so a release only frees a
         #: lease THIS process took.
         self._holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._conn: sqlite3.Connection | None = None
-        #: True for the paired-phone seam: every open is ``mode=ro`` over an
-        #: existing file, and construction itself touches nothing on disk. A
-        #: read-only caller must never be the reason a directory, database file
-        #: or WAL sidecar appears under the operator's config root.
+        #: SQL-read-only: construction touches nothing and no database/schema
+        #: is created. The default paired-phone display branch additionally uses
+        #: immutable to avoid sidecars; wal_aware routing does NOT promise that
+        #: stronger filesystem-write-free property (coordination may be needed).
         self._read_only = read_only
+        # Display readers keep their immutable/no-sidecar contract. Routing
+        # explicitly opts into SQL-read-only, committed-WAL visibility instead:
+        # SQLite MAY create coordination sidecars, but never DB contents here.
+        self._wal_aware = wal_aware
+        self._routing_read_unavailable = False
 
     # -- connection ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection | None:
         """Open (once) and return the connection, or None when unavailable.
 
-        A cache that cannot open is a permanent miss, not an error: the caller
-        fetches live. The alternative — raising — would make a read-only home
-        directory or a locked file take ``/usage`` down entirely.
+        A cache that cannot open is a miss, not an application failure. Display
+        consumers may refresh elsewhere; routing treats missing evidence as
+        unknown and never starts a quota/network probe from this seam.
         """
+        if self._wal_aware:
+            if self._routing_read_unavailable:
+                return None
+            if self._conn is None:
+                return self._connect_routing_reader()
         if self._conn is not None:
             return self._conn
         if self._read_only:
@@ -395,8 +409,8 @@ class UsageCacheStore:
             # so it SKIPS an uncheckpointed WAL — a live writer's newest commits
             # can be invisible. For best-effort display that reads as a slightly
             # older cached value (never a wrong one), which is the right failure
-            # direction for a phone route; correctness of routing is unaffected
-            # because this seam serves no routing decision.
+            # direction for a phone route. This immutable branch must NEVER
+            # supply routing evidence; that explicit opt-in returned above.
             if not self._db_path.exists():
                 return None
             try:
@@ -440,10 +454,59 @@ class UsageCacheStore:
             logger.debug("usage cache: cannot open %s", self._db_path, exc_info=True)
             return None
 
+    def _connect_routing_reader(self) -> sqlite3.Connection | None:
+        """Read committed quota evidence without borrowing display immutability.
+
+        mode=ro prevents database creation/content writes, NOT all filesystem
+        writes: SQLite may need WAL/SHM coordination files. No mkdir, schema,
+        chmod, checkpoint, journal-mode change, immutable or nolock fallback is
+        allowed. An unavailable cache means UNKNOWN, never an older main-file
+        verdict; abandon failed reads until the ranking owner calls close().
+        """
+        conn: sqlite3.Connection | None = None
+        try:
+            if not self._db_path.is_file():
+                self._routing_read_unavailable = True
+                return None
+            # Escape ?/#/spaces before appending URI flags. The routing path
+            # must not reinterpret a legitimate explicit root as SQLite options.
+            uri = self._db_path.absolute().as_uri() + "?mode=ro"
+            # This is synchronous optional ranking evidence, not a UI fetch:
+            # never inherit the writer/display's multi-second busy allowance.
+            conn = sqlite3.connect(uri, timeout=0.05, uri=True)
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            self._conn = conn
+            return conn
+        except Exception:  # noqa: BLE001 — optional routing evidence stays unknown
+            self._routing_read_unavailable = True
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    logger.debug("usage cache: failed routing reader close", exc_info=True)
+            logger.debug("usage cache: routing read-only open unavailable", exc_info=True)
+            return None
+
+    def _abandon_routing_reader(self) -> None:
+        """One failed query must not retry once for every account in a ranking."""
+        if not self._wal_aware:
+            return
+        self._routing_read_unavailable = True
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                logger.debug("usage cache: failed routing reader close", exc_info=True)
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+        # AuthStore closes its optional reader after each ranking. Retry a
+        # temporary availability failure on the NEXT ranking, never per account.
+        self._routing_read_unavailable = False
 
     @property
     def db_path(self) -> Path:
@@ -483,6 +546,8 @@ class UsageCacheStore:
         on a live writer that had checkpointed) holds no frames and is NOT
         staleness.
         """
+        if self._wal_aware:
+            return False  # Not the immutable display snapshot's staleness signal.
         try:
             wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
             return wal.exists() and wal.stat().st_size > 0
@@ -496,6 +561,8 @@ class UsageCacheStore:
         file as of its mtime, so that timestamp is the honest "as of" for the
         payload this seam returns.
         """
+        if self._wal_aware:
+            return None  # Main-file mtime is not a WAL-aware snapshot timestamp.
         try:
             return int(self._db_path.stat().st_mtime * 1000)
         except OSError:
@@ -556,6 +623,7 @@ class UsageCacheStore:
             ).fetchone()
         except Exception:  # noqa: BLE001
             logger.debug("usage cache: read failed", exc_info=True)
+            self._abandon_routing_reader()
             return None
         if row is None:
             return None
@@ -613,6 +681,7 @@ class UsageCacheStore:
             ).fetchall()
         except Exception:  # noqa: BLE001
             logger.debug("usage cache: account scan failed", exc_info=True)
+            self._abandon_routing_reader()
             return None
         newest: UsageReport | None = None
         for key, payload in rows:

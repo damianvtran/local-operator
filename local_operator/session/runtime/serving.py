@@ -61,6 +61,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
+from local_operator.harness.rows import user_row_text
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -1274,7 +1275,7 @@ class ServingSessionHandle(SessionHandle):
         Called by ``Session.publish_ask_state`` (which the queue drives on every
         enqueue/answer/decline/dismiss/reconcile) so the phone projection carries
         the new asks WITHOUT waiting for the next unrelated refresh. The count is
-        the session's OUTSTANDING tally (open + timed-out-and-answerable), passed
+        the session's OUTSTANDING tally (open asks; timed-out ones are settled), passed
         through rather than re-derived here. The legacy card is re-fronted by the
         same call, because ``_publish_pending_gate``
         reads the fold's ``pending`` — which now falls back to the head open
@@ -3366,7 +3367,17 @@ class ServingSessionHandle(SessionHandle):
                 # the pipeline to settle before it does anything (memo §2.1).
                 self._maybe_supplement(event)
 
-        unsubscribe = self._session.subscribe(handler)
+        from local_operator.mobile.peer_cycles import bind_owner_peer_cycles
+
+        unsubscribe_peer_source = bind_owner_peer_cycles(
+            self._fold, self._session, self._notify, self._loop
+        )
+        unsubscribe_events = self._session.subscribe(handler)
+
+        def unsubscribe() -> None:
+            unsubscribe_peer_source()
+            unsubscribe_events()
+
         try:
             self._fold.fold_history(self._session.history())
         except Exception:  # noqa: BLE001 — history is a convenience, not a gate
@@ -4154,9 +4165,29 @@ class ServingSessionHandle(SessionHandle):
         would leave the session named after the greeting), fire at most once,
         and run the call as a background task so the title arrives ALONGSIDE
         the turn rather than after it.
+
+        ``text`` is the SENT message, and for a ``$skill`` invocation that is
+        the EXPANDED payload rather than the line the user typed: expansion is
+        the CLIENT's duty (a desktop renders ``skills.invoke.render_invocation``'s
+        payload itself, in ``local-operator-ui``'s ``skill-invocation.ts``), so
+        the harness never sees the typed line on its own. Naming from the
+        payload titles the conversation "The user invoked the `research`
+        skill…" and puts the whole SKILL.md body in the list row — the defect
+        ``docs/design/history-fold-convergence.md`` row D8 calls out.
+
+        Collapsed HERE rather than at the one call site today, because this is
+        the gate every naming path on this handle passes through: the
+        provisional label below, the opener stashed for a route-edge retry and
+        the generation prompt then cannot disagree about what the user said.
+        It is the same rule the TUI applies by handing its own submit the typed
+        line (``tui/app.py`` ``named = typed or text``), read back out of the
+        payload's own ``invocation`` attribute rather than out of a second
+        store, so the two surfaces title the same conversation the same way.
+        A message that is not a payload comes back unchanged.
         """
         from local_operator.session import naming
 
+        text = user_row_text(text)
         if self._name_requested or naming.is_low_signal(text):
             return
         if getattr(self._session, "conversation_name", ""):
@@ -4764,7 +4795,11 @@ class ServingSessionHandle(SessionHandle):
         if bridge_meta and receives_bridge_meta(self._session):
             peer_kwargs["bridge_meta"] = bridge_meta
         result = await self._session.receive_peer_message(text, **peer_kwargs)
-        self._fold.note_peer_message(text, sender=sender or {})
+        # Updated folds receive the actual delivery event with its canonical
+        # message ID. Never create an unrelated optimistic alias which cannot
+        # join the source proof. Old owners retain the prior echo behavior.
+        if self._projection.peer_cycles != 1:
+            self._fold.note_peer_message(text, sender=sender or {}, message_id=message_id)
         self._notify()
         return AckDetail(
             str(result),
@@ -5051,7 +5086,10 @@ class ServingSessionHandle(SessionHandle):
         seeds the model's own default level and a pair-only switch would
         therefore silently replace the chosen one — ``Session.set_model``
         assigns the new spec before its same-pair early return, so nothing else
-        would restore it. ``None`` is byte-for-byte the old behaviour.
+        would restore it. ``None`` now means "no level was chosen by the
+        caller": the session's existing level is carried across instead of the
+        model seed (see the ``elif`` below), because a re-pick of the model
+        already in force used to erase the user's choice.
 
         CLAMPED with ``resolve_effort_in`` against THIS spec's ladder rather than
         refused: the level comes from a durable record the catalogue can move
@@ -5108,6 +5146,45 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
+        elif (
+            current is not None
+            and current.reasoning_effort
+            and current.reasoning_effort != current.reasoning_default_effort
+        ):
+            # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
+            #
+            # ``build_model_spec`` seeds the model's OWN default, and
+            # ``Session.set_model`` assigns the spec BEFORE its same-pair early
+            # return. So every level-less switch -- including a re-pick of the
+            # row already in force, which is what the composer's model chip
+            # sends whenever the user opens it and picks the current model --
+            # silently rewrote the session's chosen depth to the seed. That is
+            # the reported "I set Max and it went back to High": the model did
+            # not change, so nothing on screen explained the revert, and every
+            # later turn ran (and the selection journal stored) the seed.
+            #
+            # What carries is a CHOICE, not the current value: the level must
+            # differ from the model's own default, which is the same
+            # discriminator the terminal uses (``_spec_with_chosen_effort``).
+            # Carrying an unchanged seed would promote it to a decision -- on a
+            # switch it would be journalled as one, and the birth path (which
+            # sends pair-only exactly when its resolved level is empty, see
+            # ``attached._consume_model_override``) would store a level nobody
+            # picked, against the documented "a seed, not a choice: it is never
+            # STORED". A seed-level session therefore keeps this method's
+            # historical behaviour.
+            #
+            # The level is carried through ``resolve_effort_in`` so a new
+            # model that cannot express it lands on its nearest rung instead
+            # of one it rejects -- the same stale-level clamp the ``if effort``
+            # arm above applies.
+            carried = resolve_effort_in(
+                spec.reasoning_efforts,
+                spec.reasoning_default_effort,
+                current.reasoning_effort,
+            )
+            if carried is not None:
+                spec = spec.model_copy(update={"reasoning_effort": carried})
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
@@ -5435,8 +5512,10 @@ class ServingSessionHandle(SessionHandle):
         validate against THIS runtime's config and credentials (off the loop —
         the catalogue and the credential store are blocking reads), apply
         through :meth:`set_model_effort` — the same switch the phone's model
-        sheet uses, so effort falls to the model's own default (effort is not on
-        the wire in v1) — read back the model actually in force, and record a
+        sheet uses, so the conversation keeps the reasoning level it already
+        chose (effort is not on the wire in v1, and an absent level is carried
+        across rather than reset to the model's seed — see ``set_model_effort``)
+        — read back the model actually in force, and record a
         record-only peer card naming the sender, the old model and the new one.
 
         A refusal raises ``ValueError`` BEFORE anything is mutated, so it cannot
@@ -5768,7 +5847,12 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
-        """Dismiss a timed-out ask from the view. Injects nothing, ever."""
+        """Dismiss a timed-out ask from the view. Asks the model nothing, ever.
+
+        The dismissal's own act injects nothing; the deadline notice the ask had
+        not delivered is a separate, still-owed row (fork A, 2026-10-16, design
+        §14), and ``dismiss_ask``'s ``_settled`` reconcile is what delivers it.
+        """
         outcome = self._session.dismiss_ask(ask_id, by=by or "remote")
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
@@ -6811,14 +6895,23 @@ class ServingSessionHandle(SessionHandle):
         return await complete(messages, **fields)
 
     @_on_session_loop
-    async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
-        """Fork a viewer's aside exchange into the durable conversation."""
+    async def adopt_aside(self, messages: list[dict[str, Any]]) -> AckDetail:
+        """Fork a viewer's aside exchange into the durable conversation.
+
+        ``adopt_state`` rides the ack (decision D4) so the caller can tell a
+        pair written now from one QUEUED for the turn's safe boundary; a
+        session that answers ``None`` (an older one, a test double) applied it.
+        """
         from local_operator.harness.types import Message
 
         parsed = [Message.model_validate(message) for message in messages]
-        await self._session.adopt_aside(parsed)
+        state = await self._session.adopt_aside(parsed) or "applied"
         self._notify()
-        return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+        if state == "queued":
+            detail = f"queued {len(parsed) // 2} aside exchange(s) for the end of this turn"
+        else:
+            detail = f"forked {len(parsed) // 2} aside exchange(s) into the chat"
+        return AckDetail(detail, {}, {"adopt_state": state})
 
     @_on_session_loop
     async def recall_steer(self, command_id: str) -> str:

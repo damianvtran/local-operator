@@ -240,7 +240,9 @@ async def test_transcriptions_200_through_the_real_client(
     test_app_client, store_override, elevenlabs_upstream
 ) -> None:
     store_override(FakeStore({"elevenlabs": "el-key"}))
-    upstream = elevenlabs_upstream(lambda record: (200, {"text": "hello from the fake"}))
+    upstream = elevenlabs_upstream(
+        lambda record: (200, {"text": "hello from the fake", "language_code": "eng"})
+    )
 
     response = await test_app_client.post(
         "/v1/stt/transcriptions",
@@ -263,6 +265,75 @@ async def test_transcriptions_200_through_the_real_client(
     # The sniffed container (wav) governs the multipart, not the declared webm.
     assert b'filename="audio.wav"' in sent["body"]
     assert b"audio/wav" in sent["body"]
+    # The default mode is the provider-native cleanup, and the response says so.
+    assert b'name="no_verbatim"' in sent["body"] and b"\r\n\r\ntrue\r\n" in sent["body"]
+    assert b'name="tag_audio_events"' in sent["body"] and b"\r\n\r\nfalse\r\n" in sent["body"]
+    assert result["cleanup"] == "elevenlabs.no_verbatim"
+    assert result["raw_text"] is None
+    assert result["raw_unavailable"] == "provider_no_verbatim"
+    assert result["language"] == "eng"
+    assert result["removed"] == []
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_cleanup_off_is_verbatim_on_the_wire(
+    test_app_client, store_override, elevenlabs_upstream
+) -> None:
+    """The disabled path sends neither cleanup field and returns a raw copy."""
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(lambda record: (200, {"text": "Um, hello."}))
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "off"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    body = upstream.requests[0]["body"]
+    assert b"no_verbatim" not in body
+    assert b"tag_audio_events" not in body
+    assert result["text"] == "Um, hello."
+    assert result["raw_text"] == "Um, hello."
+    assert result["raw_unavailable"] == ""
+    assert result["cleanup"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_refuses_an_unknown_cleanup_mode(
+    test_app_client, store_override, elevenlabs_upstream
+) -> None:
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    elevenlabs_upstream(lambda record: (200, {"text": "x"}))
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "bogus"},
+    )
+
+    assert response.status_code == 422
+    assert "Unknown transcription cleanup mode" in response.json()["detail"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_refuses_edit_before_its_slice(
+    test_app_client, store_override, elevenlabs_upstream
+) -> None:
+    """A recognized mode this build cannot execute is 422, never a fallback."""
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(lambda record: (200, {"text": "x"}))
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "edit"},
+    )
+
+    assert response.status_code == 422
+    assert "not available yet" in response.json()["detail"]["text"]
+    assert upstream.requests == []
 
 
 @pytest.mark.asyncio
@@ -364,7 +435,7 @@ async def test_transcriptions_forwards_language_and_prompt(
         files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
         data={"language": "en"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert b'name="language_code"' in upstream.requests[0]["body"]
 
 
@@ -471,3 +542,84 @@ async def test_the_cascade_route_records_the_envelope_provider_and_correlates(
     assert sent, "the Radient rung must have run"
     assert sent[0]["session_id"] == "sess-qa-cascade", "Q4: the correlation id rides"
     assert len(sent[0]["client_request_id"]) == 32
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_cleanup_client_cleans_elevenlabs(
+    test_app_client, store_override, elevenlabs_upstream
+) -> None:
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(
+        lambda record: (
+            200,
+            {"text": "Uh, so I think.", "language_code": "eng", "language_probability": 0.99},
+        )
+    )
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "client"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    body = upstream.requests[0]["body"]
+    assert b'name="no_verbatim"' in body and b"\r\n\r\nfalse\r\n" in body
+    assert result["text"] == "So I think."
+    assert result["raw_text"] == "Uh, so I think."
+    assert result["cleanup"] == "client.rules.v1"
+    assert result["removed"] == [{"start": 0, "end": 2, "kind": "filler", "token": "Uh"}]
+
+
+@pytest.mark.asyncio
+async def test_transcriptions_use_the_settings_default_when_no_field_is_sent(
+    test_app_client, store_override, elevenlabs_upstream, mock_config_manager
+) -> None:
+    from local_operator import settings_io
+
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+    settings_io.write_setting(mock_config_manager, setting, "off")
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(lambda record: (200, {"text": "Um, hello."}))
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "Um, hello."
+    assert result["cleanup"] == "none"
+    assert b"no_verbatim" not in upstream.requests[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_cleanup_field_still_wins_over_the_setting(
+    test_app_client, store_override, elevenlabs_upstream, mock_config_manager
+) -> None:
+    from local_operator import settings_io
+
+    setting = settings_io.BY_KEY["speech.transcription.cleanup"]
+    settings_io.write_setting(mock_config_manager, setting, "off")
+    store_override(FakeStore({"elevenlabs": "el-key"}))
+    upstream = elevenlabs_upstream(
+        lambda record: (
+            200,
+            {"text": "Uh, hello.", "language_code": "eng", "language_probability": 0.99},
+        )
+    )
+
+    response = await test_app_client.post(
+        "/v1/stt/transcriptions",
+        files={"file": ("take.wav", _WAV_BYTES, "audio/wav")},
+        data={"cleanup": "client"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["text"] == "Hello."
+    assert result["cleanup"] == "client.rules.v1"
+    assert b'name="no_verbatim"' in upstream.requests[0]["body"]
+    assert b"\r\n\r\nfalse\r\n" in upstream.requests[0]["body"]

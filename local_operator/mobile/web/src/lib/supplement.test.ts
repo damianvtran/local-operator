@@ -10,12 +10,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	COPY_SHOW_FEWER,
+	CAUSE_MAX_CHARS,
 	HEIGHT_HINT_MAX,
 	HEIGHT_HINT_MIN,
 	MORE_MAX,
 	acceptFrameMessage,
 	beatFromWire,
 	beatLive,
+	causePhrase,
 	clampFrameHeight,
 	clampedHeightHint,
 	countClause,
@@ -56,6 +58,7 @@ function beat(over: Partial<SupplementBeat> = {}): SupplementBeat {
 		more: [],
 		components: [],
 		error: "",
+		cause: "",
 		dismissed: false,
 		...over,
 	};
@@ -159,6 +162,25 @@ describe("reading the wire", () => {
 		expect(parsed?.error.length).toBe(300);
 	});
 
+	it("reads the typed cause as a bounded string", () => {
+		const parsed = beatFromWire({
+			anchor: "a",
+			state: "failed",
+			version: 1,
+			cause: "provider_quota",
+		});
+		expect(parsed?.cause).toBe("provider_quota");
+		const absent = beatFromWire({ anchor: "a", state: "failed", version: 1 });
+		expect(absent?.cause).toBe("");
+		const long = beatFromWire({
+			anchor: "a",
+			state: "failed",
+			version: 1,
+			cause: "x".repeat(CAUSE_MAX_CHARS + 10),
+		});
+		expect(long?.cause.length).toBe(CAUSE_MAX_CHARS);
+	});
+
 	it("reads an absent map as no beats", () => {
 		expect(supplementsFromWire(undefined)).toEqual({});
 		expect(supplementsFromWire(null)).toEqual({});
@@ -176,6 +198,21 @@ describe("the display copy and the paint boundary", () => {
 		// The open-state half of the disclosure toggle (desktop parity, U2).
 		expect(COPY_SHOW_FEWER).toBe("Show fewer");
 		expect(countClause(2, "file")).toBe("2 files");
+	});
+
+	it("maps the failed line's typed cause to the memo's one word list", () => {
+		expect(causePhrase("provider_quota")).toBe("provider limit reached");
+		expect(causePhrase("provider_auth")).toBe("provider sign-in needed");
+		expect(causePhrase("provider_transient")).toBe("provider temporarily unavailable");
+		expect(causePhrase("provider_timeout")).toBe("provider timed out");
+		expect(causePhrase("provider_request")).toBe("provider refused the request");
+		expect(causePhrase("provider_content")).toBe("provider blocked the content");
+		expect(causePhrase("provider_context")).toBe("provider context limit");
+		// The catch-all and unknown tokens render nothing (D2); absent/blank too.
+		expect(causePhrase("provider_unknown")).toBe("");
+		expect(causePhrase("provider_from_the_future")).toBe("");
+		expect(causePhrase("")).toBe("");
+		expect(causePhrase(undefined)).toBe("");
 	});
 
 	it("formats sizes with one decimal and drops a trailing .0", () => {

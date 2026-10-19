@@ -1,0 +1,18 @@
+{
+  "tui.small.org_chart_view.team_heading": "team {charted}",
+  "tui.small.org_chart_view.chart_suffix": " · org chart",
+  "tui.small.org_chart_view.zoom_clause": " · zoom: {tier}",
+  "tui.small.org_chart_view.expanded_suffix": " · expanded",
+  "tui.small.org_chart_view.manager_legend": "◆ manager",
+  "tui.small.tool_card.search_fetch_hint": "Ask Operator to web_fetch result N (or `read <url>`) for the full page.",
+  "tui.small.tool_card.http_blocked": "⚠ HTTP {status} {reason} — {clause}.",
+  "tui.small.tool_card.http_error_page": "⚠ HTTP {status} {reason} — error/block page, not page content.",
+  "tui.small.tool_card.rendered_row": "Rendered: {bits}",
+  "tui.small.tool_card.low_quality_hint": "sparse/JS-gated — try `browser` for the full page.",
+  "tui.small.session_picker.all_archived": "all {total} conversation(s) are archived",
+  "tui.small.session_picker.no_match_filter": "no session matches that filter",
+  "tui.small.session_picker.no_session": "no session",
+  "tui.small.session_picker.type_to_filter": "type to filter",
+  "tui.small.session_picker.showing_prefix": "   showing ",
+  "tui.small.session_picker.preview_mode_key": "ctrl+e"
+}

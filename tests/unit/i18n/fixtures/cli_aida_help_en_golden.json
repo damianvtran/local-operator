@@ -1,0 +1,6 @@
+{
+  "cli.aida_help.aida": "Aida's profile notes: record what she should remember",
+  "cli.aida_help.note": "Append a note under 'About the operator' in system_prompt.md",
+  "cli.aida_help.note_text": "The note to record; omit to read it from STDIN",
+  "cli.aida_help.note_description": "Record a note into <config root>/system_prompt.md, inside the marked 'About the operator' section, so every future session and subagent sees it. The file is resolved from the config root and is never an argument; the note must not contain the section markers. Omit TEXT to read the note from STDIN (multi-line notes need no quoting)."
+}

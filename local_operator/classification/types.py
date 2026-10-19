@@ -181,10 +181,13 @@ class DecisionRequest:
 class DecisionResponse:
     """What a leg answered, with its own accounting.
 
-    ``cost_usd`` is ``None`` when the vendor reported no ``usage.cost``: the
-    contract is explicit that a missing cost is reported as missing, never
-    estimated. (No price row for a decision model exists in this repo yet, so
-    the "compute it from the configured price row" path has nothing to read.)
+    ``cost_usd`` is ``None`` when neither the vendor's ``usage.cost`` NOR its
+    top-level ``cost`` object stated a figure: the contract is explicit that a
+    missing cost is reported as missing, never estimated. (No price row for a
+    decision model exists in this repo, so the "compute it from the configured
+    price row" path has nothing to read — and the vendor's own statement is
+    better evidence than any listing anyway; see
+    :func:`local_operator.classification.vendors._server_cost_usd`.)
 
     The token counts follow the SAME rule, and it has to be stated because ``0``
     is a legal figure here: ``usage`` is optional on the wire (the route answers
@@ -201,6 +204,22 @@ class DecisionResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    #: What ``cost_usd`` MEANS in money terms, when the leg said so. Filled from
+    #: the top-level ``cost`` object's mapped ``basis`` (Radient's route, which
+    #: labelled ``billed`` for a settled charge and ``quote``/``estimated`` for
+    #: one that has not settled — a quote must never print as a charge). ``None``
+    #: for the ``usage.cost`` path, whose amount is the request's own receipt and
+    #: carries no basis field on the wire; the channel ledger then applies its own
+    #: documented default. ADDITIVE: existing constructors keep working unchanged.
+    cost_basis: str | None = None
+    #: The id the vendor says the amount was PRICED FROM — the top-level
+    #: ``cost.model`` object's ``model`` field. It is deliberately separate
+    #: from :attr:`model`, which is the vendor's echo of the requested id
+    #: (``jev-1.13.0`` for a ``jev-1.13`` request): the echo is wire evidence,
+    #: while this is the billing identity a ledger row must carry. ``None``
+    #: when the response stated no cost object. ADDITIVE: existing
+    #: constructors keep working unchanged.
+    cost_model: str | None = None
     latency_s: float = 0.0
 
 
