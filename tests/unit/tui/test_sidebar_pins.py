@@ -382,11 +382,12 @@ def test_a_human_unpin_is_remembered_and_a_repin_forgets_it(tmp_path: Path) -> N
     assert explicitly_unpinned(tmp_path) == set()
 
 
-def test_a_bootstrap_reassert_neither_creates_nor_clears_intent(tmp_path: Path) -> None:
-    """The boot path must be able to repair a LOST pin without claiming intent.
+def test_a_bootstrap_reassert_repairs_a_lost_pin_but_refuses_a_marked_id(tmp_path: Path) -> None:
+    """A bootstrap pin may repair a lost pin; it may never override a human unpin.
 
-    A bootstrap pin over an id with no marker writes the pin; a bootstrap pin
-    over an id the person unpinned still respects the marker.
+    The refusal happens inside the store's lock (round 2's TOCTOU fix), so the
+    marked id stays off and the marker is untouched. A bootstrap pin over an
+    UNMARKED id is the repair path and still works.
     """
     _session(tmp_path, "a" * 12)
     _session(tmp_path, "b" * 12)
@@ -395,5 +396,42 @@ def test_a_bootstrap_reassert_neither_creates_nor_clears_intent(tmp_path: Path) 
 
     assert set_pin(tmp_path, "b" * 12, False) is False
     assert explicitly_unpinned(tmp_path) == {"b" * 12}
-    assert set_pin(tmp_path, "b" * 12, True, source=SOURCE_BOOTSTRAP) is True
+    assert set_pin(tmp_path, "b" * 12, True, source=SOURCE_BOOTSTRAP) is False
+    assert "b" * 12 not in read_pins(tmp_path)
     assert explicitly_unpinned(tmp_path) == {"b" * 12}
+
+
+def test_a_human_unpin_wins_against_a_concurrent_bootstrap_reassert(tmp_path: Path) -> None:
+    """The round-2 TOCTOU, driven as two real threads.
+
+    The old shape read the unpin ledger in the CALLER and then pinned in a
+    second lock acquisition; a human unpin landing between them left
+    ``pinned=True`` with the marker set. Both interleavings of the fixed
+    one-lock operation end unpinned, so this asserts the invariant over
+    repeated races rather than one lucky schedule.
+    """
+    import threading
+
+    _session(tmp_path, "a" * 12)
+    sid = "a" * 12
+    for _ in range(25):
+        assert set_pin(tmp_path, sid, True) is True
+        assert explicitly_unpinned(tmp_path) == set()
+        barrier = threading.Barrier(2)
+
+        def bootstrap_reassert() -> None:
+            barrier.wait(timeout=10)
+            set_pin(tmp_path, sid, True, source=SOURCE_BOOTSTRAP)
+
+        def human_unpin() -> None:
+            barrier.wait(timeout=10)
+            set_pin(tmp_path, sid, False)
+
+        first = threading.Thread(target=bootstrap_reassert)
+        second = threading.Thread(target=human_unpin)
+        first.start()
+        second.start()
+        first.join(timeout=15)
+        second.join(timeout=15)
+        assert sid not in read_pins(tmp_path), "a human unpin was overwritten by the reassert"
+        assert sid in explicitly_unpinned(tmp_path)

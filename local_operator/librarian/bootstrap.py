@@ -288,19 +288,15 @@ async def ensure_session(
     # already there, so the steady-state cost is one lock plus one small read.
     if hers is not None:
         try:
-            from local_operator.tui.sidebar_pins import (
-                SOURCE_BOOTSTRAP,
-                explicitly_unpinned,
-                set_pin,
-            )
+            from local_operator.tui.sidebar_pins import SOURCE_BOOTSTRAP, set_pin
 
-            # A DELIBERATE UNPIN WINS. The reassert exists to repair a pin lost
-            # to the concurrent-boot race, not to overrule a person who removed
-            # the row; the ledger records only human writes (``set_pin`` and
-            # ``toggle_pin``), so a bootstrap reassert can never create or clear
-            # one.
-            if hers not in explicitly_unpinned(root):
-                await asyncio.to_thread(set_pin, root, hers, True, source=SOURCE_BOOTSTRAP)
+            # A DELIBERATE UNPIN WINS, and the store enforces that INSIDE its
+            # own lock. A pre-read here followed by this call was a TOCTOU: a
+            # human unpin landing between the two re-pinned an id they had just
+            # removed (review round 2). ``set_pin`` now checks the intent ledger
+            # and performs the bootstrap mutation under one lock, so this call
+            # is the whole operation.
+            await asyncio.to_thread(set_pin, root, hers, True, source=SOURCE_BOOTSTRAP)
         except Exception:  # noqa: BLE001 — a pin is decoration; the session is not
             logger.warning("librarian: could not pin her session", exc_info=True)
 
