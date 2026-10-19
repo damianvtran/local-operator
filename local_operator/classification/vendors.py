@@ -116,7 +116,7 @@ from local_operator.classification.types import (
 )
 from local_operator.clients._http import scrub_secrets
 from local_operator.clients.radient_cost import RadientCost, cost_from_payload
-from local_operator.model_ids import (
+from local_operator.decision_models import (
     CANONICAL_DECISIONS_MODEL,
     OPENROUTER_DECISIONS_MODEL,
     PINNED_DECISIONS_MODEL,
@@ -144,7 +144,7 @@ turns every OpenRouter call into a fall-through (§3).
 """
 
 #: Wire ids the three legs request. The canonical/pinned/catalogue distinction
-#: and the alias registry live in ``local_operator.model_ids``; these names stay
+#: and the alias registry live in ``local_operator.decision_models``; these names stay
 #: because they are what each vendor's request body must carry verbatim.
 RADIENT_MODEL = CANONICAL_DECISIONS_MODEL
 TYPESAFE_MODEL = PINNED_DECISIONS_MODEL

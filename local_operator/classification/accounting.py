@@ -90,7 +90,7 @@ from local_operator.classification.types import (
     DecisionVendorError,
 )
 from local_operator.clients.radient_cost import micro_from_amount
-from local_operator.model_ids import canonical_model_id
+from local_operator.decision_models import canonical_model_id
 from local_operator.session.channel_spend import (
     BASIS_BILLED,
     COST_SOURCE_NONE,

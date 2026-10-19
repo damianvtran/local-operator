@@ -835,7 +835,7 @@ async def test_the_service_records_the_priced_id_while_the_echo_rides_detail(man
 
 async def test_canonical_model_id_normalises_none_to_the_empty_string() -> None:
     """Q-1: the leaf's contract is ``str`` in and ``str`` out, empty for no model."""
-    from local_operator.model_ids import canonical_model_id
+    from local_operator.decision_models import canonical_model_id
 
     assert canonical_model_id(None) == ""
     assert canonical_model_id("") == ""

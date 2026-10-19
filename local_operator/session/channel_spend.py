@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from local_operator.model_ids import canonical_model_id
+from local_operator.decision_models import canonical_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -964,7 +964,7 @@ def _channel_rows(records: Sequence[ChannelSpendRecord]) -> list[dict[str, Any]]
 
     Grouping happens HERE rather than in the UI so every surface groups
     identically and the micro-USD sums are computed once, in exact integers.
-    The model key is CANONICAL (:func:`local_operator.model_ids.canonical_model_id`):
+    The model key is CANONICAL (:func:`local_operator.decision_models.canonical_model_id`):
     a historical row stored under a vendor echo (``jev-1.13.0``) or a dated
     echo is the same billable model as ``jev-1.13`` and must not draw a second
     row — or a second, unexplained price.
