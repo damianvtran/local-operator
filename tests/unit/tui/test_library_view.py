@@ -241,6 +241,11 @@ def test_librarian_is_a_registered_frontend_local_slash_command() -> None:
     )
 
 
+def _selected_is(view: LibraryView, asset_id: str) -> bool:
+    selected = view.selected()
+    return selected is not None and selected["id"] == asset_id
+
+
 @pytest.mark.asyncio
 async def test_library_lists_the_payload_and_moves_the_cursor(calls) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -308,7 +313,9 @@ async def test_the_rail_filters_by_category_and_hides_below_ninety(calls) -> Non
         await pilot.pause()
         await pilot.pause()
         assert view._rail.display is False
-        assert view._right.styles.width.value == 30
+        width = view._right.styles.width
+        assert width is not None
+        assert width.value == 30
 
         await pilot.resize_terminal(76, 30)
         await pilot.pause()
@@ -410,7 +417,7 @@ async def test_the_form_saves_the_asset_it_opened_for_across_a_reload(calls, mon
         # row 0, so the live cursor names a different asset than the form.
         view.load(_payload([second, first]))
         await pilot.pause()
-        assert view.selected() is not None and view.selected()["id"] == second["id"]
+        assert _selected_is(view, second["id"])
 
         view._name_input.value = "A renamed"
         view._tags_input.focus()
@@ -461,7 +468,7 @@ async def test_an_in_flight_reload_cannot_retarget_the_form(monkeypatch) -> None
 
         gate.set()
         await _settle(
-            pilot, lambda: view.selected() is not None and view.selected()["id"] == second["id"]
+            pilot, lambda: _selected_is(view, second["id"])
         )
 
         view._name_input.value = "A renamed"
