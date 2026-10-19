@@ -618,7 +618,14 @@ async def session_report(
         # is blanked because one response must not ship two encodings for one
         # idea (the docstring above states the whole rule).
         payload = dataclasses.asdict(
-            dataclasses.replace(report, by_model={}, by_purpose={}, by_purpose_outcome={})
+            dataclasses.replace(
+                report,
+                by_model={},
+                by_model_basis={},
+                descendants_by_basis={},
+                by_purpose={},
+                by_purpose_outcome={},
+            )
         )
         payload["by_model"] = [
             {
@@ -627,6 +634,19 @@ async def session_report(
                 "aggregate": dataclasses.asdict(aggregate),
             }
             for (provider, model_id), aggregate in report.by_model.items()
+        ]
+        payload["by_model_basis"] = [
+            {
+                "provider": provider,
+                "model_id": model_id,
+                "billing_basis": basis,
+                "aggregate": dataclasses.asdict(aggregate),
+            }
+            for (provider, model_id, basis), aggregate in report.by_model_basis.items()
+        ]
+        payload["descendants_by_basis"] = [
+            {"billing_basis": basis, "aggregate": dataclasses.asdict(aggregate)}
+            for basis, aggregate in report.descendants_by_basis.items()
         ]
         payload["by_purpose"] = [
             {"purpose": purpose, "aggregate": dataclasses.asdict(aggregate)}
