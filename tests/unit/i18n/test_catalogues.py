@@ -59,6 +59,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",
         "wire.slash",
+        # The Library slice's two slash doors (`/library`, `/librarian`)
+        # resolve through this English-only CHILD of `wire.slash`, the
+        # `wire.settings.account_policy` shape: their copy must not move the
+        # already-audited `wire.slash` locale hashes.
+        "wire.slash.library",
         "wire.aida_cadence",
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
@@ -86,6 +91,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
