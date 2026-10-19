@@ -140,47 +140,31 @@ _CONTEXT_LOCATORS = 8
 #: A word, after locators are removed, is what distinguishes a decision/goal line
 #: from a bare path. Unicode letters in ANY script: `[^\W\d_]` is a letter (not a
 #: digit or underscore), so CJK/Cyrillic/Greek knowledge is not silently English-only
-#: (QA Q8). The floor is TWO: one loose character is too often debris (a stray
-#: letter, an enumerated label), while two-letter words are real. This deliberately
-#: does NOT admit a one-character CJK word; that is the accepted tradeoff, not a
-#: claim that such words do not exist.
-_WORD = re.compile(r"[^\W\d_]{2,}")
-#: Locator shapes that `_LOCATOR` deliberately does NOT own (that grammar is pinned
-#: byte-identical to ``compaction/mine.py``): Windows drive paths, UNC shares, bare
-#: hosts and `mailto:`. They are context like every other locator, so they must not
-#: make a locator-only bullet look substantive (QA m1). Admission-only pattern; the
-#: case-insensitive flag is what makes `MAILTO:`/`MailTo:` the same scheme.
-_ADJACENT_LOCATOR = re.compile(
-    r"\b[A-Za-z]:[\\/][^\s<>\"']{1,400}"
-    r"|\\\\[^\s<>\"']{1,400}"
-    r"|(?<![\w@.-])mailto:[^\s<>\"']{0,400}"
-    r"|(?<![\w@.-])(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?",
+#: (QA Q8). Alphabetic scripts need TWO letters (a single Latin/Cyrillic letter is
+#: usually debris), but one CJK/kana/hangul character IS a word in its script, so
+#: those ranges are admitted on their own.
+_WORD = re.compile(
+    r"(?:[^\W\d_]{2,}" r"|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff])"
+)
+#: One whitespace token that is ENTIRELY locator material, used by the residue
+#: test. The token view is deliberate: rounds 2-4 showed a span grammar cannot
+#: decide where a spaced path ends without breaking its neighbour
+#: (`C:\Program Files\app` vs `C:\repo\app is the build root`). Removing every
+#: locator token and judging what REMAINS makes prose the only thing that can
+#: keep a candidate alive; the boundary between path and prose no longer decides
+#: the verdict.
+_LOCATOR_TOKEN = re.compile(
+    r".*[\\/].*"
+    r"|mailto:.*"
+    r"|(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/.*)?"
+    r"|[\w.+-]{1,64}@[\w.-]{1,255}\.[A-Za-z]{2,24}"
+    r"|(?=[0-9a-fA-F]{7,12}\Z)[0-9a-fA-F]*\d[0-9a-fA-F]*",
     re.IGNORECASE,
 )
-#: One path segment for the full-body predicate. Spaces belong to a segment only
-#: when ANOTHER separator follows it, which is what keeps `C:\Program Files\app`
-#: a path while `C:\repo\app is the build root` is a path plus prose (QA round 3,
-#: B1). A final segment with spaces is deliberately not admitted: it is
-#: indistinguishable from prose, and over-blocking knowledge is the worse error.
-_PATH_SEGMENT = r"[^\\/<>\"'\s]+(?:\s+[^\\/<>\"'\s]+)*"
-_PATH_TAIL = r"[^\\/<>\"'\s]+"
-_DRIVE_PATH = rf"[A-Za-z]:[\\/](?:{_PATH_SEGMENT}[\\/])*{_PATH_TAIL}"
-_UNC_PATH = rf"\\\\(?:{_PATH_SEGMENT}[\\/])*{_PATH_TAIL}"
-_POSIX_PATH = rf"/(?:{_PATH_SEGMENT}/)*{_PATH_TAIL}"
-#: The WHOLE candidate is one locator. A token rule cannot see a path with spaces
-#: or a bare host followed by a path, so this full-body predicate is the
-#: shape-complete rule: a candidate is context when it IS a locator, never merely
-#: because a locator appears inside a sentence (QA MINOR 1). The path grammars
-#: stop before trailing prose, so a leading locator plus a sentence is KNOWLEDGE
-#: and is admitted (QA round 3, B1).
-_LOCATOR_ONLY = re.compile(
-    rf"^\s*(?:{_DRIVE_PATH}|{_UNC_PATH}|{_POSIX_PATH}"
-    r"|mailto:[^\s<>\"']*"
-    r"|[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s<>\"']*"
-    r"|(?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24}(?:/[^\s<>\"']*)?"
-    r")\s*$",
-    re.IGNORECASE,
-)
+#: A plain FINAL token that can be the last segment of a spaced path
+#: (`C:\Program Files`). Only path-ish words qualify: lowercase prose after a
+#: path stays knowledge (`C:\repo\app done` is a fact).
+_PATH_TAILISH = re.compile(r"(?:[A-Z][\w.-]*|[\w.-]*[._0-9-][\w.-]*)")
 
 
 class CaptureRows(list[dict[str, Any]]):
@@ -500,23 +484,53 @@ def _without_prompt(source: str) -> str:
     return source if index < 0 else source[:index]
 
 
-def _substantive(body: str) -> bool:
-    """Whether a candidate still says something after its locators are removed.
+def _is_locator_token(token: str) -> bool:
+    """Whether one whitespace token is entirely locator material."""
+    return bool(_LOCATOR_TOKEN.fullmatch(token) or _LOCATOR.fullmatch(token))
 
-    This is the admission rule that makes a transcript of URLs and paths yield
-    ZERO facts: `- ~/tools/x/proof.md` is a locator with no memory around it,
-    while `- Store evidence at ~/tools/x/proof.md` is a decision whose path is
-    supporting detail. A candidate that IS one locator shape — Windows path with
-    spaces, UNC share, bare host with a path, any URI scheme in any case — is
-    refused whole; otherwise the inline grammar is removed and what remains must
-    contain a word. A candidate with nothing left is COUNTED at admission, never
-    silently dropped as an `ok`/0 pass (QA Q8).
+
+def _substantive(body: str) -> bool:
+    r"""Whether what REMAINS after locators are removed says something.
+
+    The verdict is the residue, never the shape of the candidate. Rounds 2-4
+    each moved the boundary between "path with spaces" and "path followed by
+    prose" and broke a neighbour (`C:\Program Files\app` vs `C:\repo\app is
+    the build root` are the same prefix). Token-by-token removal has no such
+    boundary to get wrong: a body that is only paths/hosts/ids leaves no prose
+    and is refused; a body with either side of a path in it leaves its sentence
+    and is admitted. `_WORD` is the same script-agnostic test used elsewhere.
+
+    The one continuation rule is for a spaced path's final segment
+    (`C:\Program Files`), which carries no separator of its own: a path-ish
+    final token right after a locator is part of that locator. Lowercase prose
+    there (`C:\repo\app done`) stays knowledge, because discarding knowledge is
+    the worse error.
     """
-    if _LOCATOR_ONLY.match(body):
-        return False
-    remaining = _LOCATOR.sub(" ", body)
-    remaining = _ADJACENT_LOCATOR.sub(" ", remaining)
-    return bool(_WORD.search(remaining))
+    kept: list[str] = []
+    tokens = body.split()
+    previous_locator = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        cleaned = token.strip("()[]{}<>,;:!?\"'`")
+        if _is_locator_token(cleaned):
+            previous_locator = True
+            index += 1
+            continue
+        if cleaned.lower() in ("branch", "thread") and index + 1 < len(tokens):
+            # `_LOCATOR` owns the two-token `branch <ref>` form; mirror it here
+            # so a bare reference does not leave the label behind as prose.
+            if re.fullmatch(r"[\w./-]{3,128}", tokens[index + 1]):
+                previous_locator = True
+                index += 2
+                continue
+        if previous_locator and index == len(tokens) - 1 and _PATH_TAILISH.fullmatch(cleaned):
+            index += 1
+            continue
+        kept.append(token)
+        previous_locator = False
+        index += 1
+    return bool(_WORD.search(" ".join(kept)))
 
 
 def _admitted(body: str, tag: str) -> None:
