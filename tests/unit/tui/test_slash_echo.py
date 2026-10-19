@@ -126,6 +126,12 @@ ECHO_POLICY = {
     # replaces the transcript region and takes no argument, so a user row
     # printed behind it would only be readable after leaving.
     "schedule": False,
+    # The PAGE is the receipt (same rule as `/settings` and `/review`): it
+    # replaces the transcript region, and its rows are the answer.
+    "library": False,
+    # A control command (`status` is the default), never words for the model:
+    # the receipt names the Librarian's state, and `open` switches sessions.
+    "librarian": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -252,6 +258,11 @@ PROMPT_POLICY = {
     # replaces the transcript region and takes no argument, so a user row
     # printed behind it would only be readable after leaving.
     "schedule": False,
+    # Takes no argument at all, so an inline engage has nothing to consume.
+    "library": False,
+    # The verbs are a selection, and a bare `/librarian` reports status; none
+    # of them is a prompt.
+    "librarian": False,
     "sidebar": False,
     "search": False,
     "accounts": False,

@@ -2223,6 +2223,188 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page library view ────────────────────────────────────────────── *
+ *
+ * The fourth sibling MODE (see the org-chart, settings, projects, import,
+ * review and schedule blocks): opened by `/library`, it takes the transcript's
+ * region and leaves the dock greyed. The outer rows are the settings page's
+ * title/rule/columns/status/hints contract; this block adds the THIRD column
+ * the settings page does not have — a filter rail beside the list and the
+ * detail/preview pane.
+ *
+ * The rail and the detail column are hidden in PYTHON (`_layout`) rather than
+ * by a media rule: Textual has no width query that can also decide which of
+ * two siblings keeps the slack, and the sibling pages already resolve their
+ * narrow layout in one place. The widths here are the wide-state defaults.
+ *
+ * NO NEW COLOURS. Every ink and ground is a `$lo-*` token; a background is
+ * `transparent` wherever the themed screen already supplies one, so a themed
+ * or transparent terminal is never painted over with an opaque rectangle. */
+.library-view {
+    height: 1fr;
+    padding: 1 1 1 1;
+}
+
+.library-view-title-row {
+    height: 1;
+}
+
+.library-view-title {
+    width: 1fr;
+    height: 1;
+}
+
+/* One row, no box: the field sits in the title line, so a bordered input
+ * would make the page's first row 3 cells tall and push the list down. */
+.library-view-search {
+    width: 30;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: transparent;
+    color: $lo-fg;
+}
+
+.library-view-search:focus {
+    background: $lo-tint-select;
+}
+
+.library-view-rule {
+    height: 1;
+}
+
+.library-view-columns {
+    height: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* The rail and the list scroll VERTICALLY only; a horizontal bar here would
+ * lose two cells to an axis nothing travels, the same bug the settings body
+ * documents. 1-cell scrollbars against the shared neutral ramp. */
+.library-view-rail {
+    width: 22;
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.library-view-rail-canvas {
+    width: 1fr;
+    height: auto;
+}
+
+.library-view-list {
+    width: 1fr;
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.library-view-list-canvas {
+    width: 1fr;
+    height: auto;
+}
+
+/* The right column owns the detail pane and, while editing, the metadata
+ * form. A fixed width for the reading state; `_layout` widens it to `1fr` on
+ * a narrow page while the form is open, where it is the subject. */
+.library-view-right {
+    width: 36;
+    height: 1fr;
+    padding: 0 0 0 3;
+}
+
+.library-view-detail {
+    width: 1fr;
+    height: 1fr;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.library-view-detail-canvas,
+.library-view-preview-host,
+.library-view-preview-text,
+.library-view-preview-note {
+    width: 1fr;
+    height: auto;
+}
+
+.library-view-form {
+    width: 1fr;
+    height: 1fr;
+}
+
+/* `height: 2` with one row of lead-in: Textual's box model makes `height: 1`
+ * plus `padding: 1` a ZERO-row content box, and the label painted nothing
+ * (measured in the form frame before this rule). */
+.library-view-form-label {
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+/* `transparent`, not a token: the form is a field over the page the theme
+ * already painted, and an opaque control ground would sit as a rectangle in
+ * the middle of a transparent-themed terminal. Focus takes the shared
+ * selection tint, the one ground every surface in the app uses. */
+.library-view-form-input {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: transparent;
+    color: $lo-fg;
+}
+
+.library-view-form-description {
+    height: 5;
+    border: none;
+    padding: 0 1;
+    background: transparent;
+    color: $lo-fg;
+}
+
+.library-view-form-input:focus,
+.library-view-form-description:focus {
+    background: $lo-tint-select;
+}
+
+/* Same zero-content-box trap as the labels above. */
+.library-view-form-hint,
+.library-view-form-error {
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+.library-view-status {
+    height: 2;
+    padding: 1 0 0 0;
+    width: 1fr;
+}
+
+.library-view-hints {
+    height: 2;
+    width: 1fr;
+    padding: 1 0 0 0;
+}
+
+
 /* ── full-page review view ─────────────────────────────────────────────── *
  *
  * The sixth sibling MODE (see the org-chart, settings, projects and import
