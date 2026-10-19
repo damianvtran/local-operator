@@ -124,8 +124,9 @@ and compaction hints (≤80 tokens) have separate budgets. History, conflicts,
 tombstones, metadata, storage and WAL are bounded too. Overflow refuses with
 inventory/consolidation guidance; it never evicts explicit or pinned facts. Every
 write reports the scope's headroom and percent, and crossing 80% or 90% warns
-once (in the write result) with the two relief actions: forget stale facts, or
-move work-state facts to session scope.
+once (in the write result) with relief for the scope under pressure: forget
+stale facts everywhere, and move work-state facts to session scope where that
+move exists (global); session and the other scopes consolidate in place.
 
 ## Compaction and mobility
 

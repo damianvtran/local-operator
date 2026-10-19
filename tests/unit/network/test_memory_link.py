@@ -705,3 +705,93 @@ def test_a_missing_admin_grant_has_a_real_remedy(tmp_path):
     # Wrapped at the row bar, so assert the distinctive word rather than the phrase.
     assert "receiver-admin" in human
     assert "exclude" in human
+
+
+def test_status_bounds_a_long_peer_message(tmp_path):
+    """D2: peer verbosity must not push the failure out of the viewport."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "f" * 32
+    long_message = "diagnostic word " * 200
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": long_message,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    lines = human.splitlines()
+    start = next(i for i, line in enumerate(lines) if "Not syncing with" in line)
+    # The failure and its remedy are near the top, not after 30 lines of prose.
+    assert start < 10
+    assert any("1 failing" in line for line in lines[:start])
+    assert "Full peer text" in human
+    # The bounded excerpt is a handful of lines; the remedy and the pointer follow.
+    end = next(i for i, line in enumerate(lines[start:], start) if "Full peer text" in line)
+    remedy = next(i for i, line in enumerate(lines[start:end], start) if line.startswith("Remedy:"))
+    assert remedy - start <= 6
+    assert end > remedy
+    # Nothing is lost: the full sentence is still in the machine-readable output.
+    assert json.loads(text)["sync"]["peers"][0]["message"] == long_message
+
+
+def test_status_names_a_failing_peer_from_the_network_records(tmp_path):
+    """D4: an operator must recognise the machine, not just its 32-hex id."""
+    from local_operator.memory_cli import render_human, run
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    device = "d_" + "e" * 32
+    network_store.save(
+        NetworkRecord(
+            network_id="n_0123456789abcdef01234567",
+            name="studio",
+            self_device_id="d_" + "a" * 32,
+            members=[
+                MemberRecord(device_id=device, name="laptop-b", role="admin"),
+                MemberRecord(device_id="d_" + "a" * 32, name="studio-mac", role="admin"),
+            ],
+        ),
+        tmp_path,
+    )
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": "",
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "laptop-b" in human
+    assert device in human
+    # The machine-readable row carries the same resolved label.
+    assert json.loads(text)["sync"]["peers"][0]["name"] == "laptop-b"
