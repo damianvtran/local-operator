@@ -410,6 +410,7 @@ def _timeout_detail(
     elapsed: float,
     request_id: int,
     operation_id: str | None,
+    context: str | None = None,
 ) -> str:
     """Name which call exceeded which budget, in one line.
 
@@ -458,12 +459,20 @@ def _timeout_detail(
     so it is the caller's wall time for the whole call -- ``wait_for``'s own
     deadline begins a moment later -- which is the reading "exceeded its budget
     after N s" claims.
+
+    ``context`` is the caller's own sentence about the work the deadline cut
+    off, and it goes directly after the budget for the same truncation reason:
+    ``score`` supplies the episode's step count, which is the one fact that
+    tells a reader whether a long score was a legitimate episode or a wedged
+    scorer. It is ``None`` for every call that does not supply one, and the
+    rendered line is then byte-identical to the pre-context form.
     """
 
+    rendered_context = f"{context}; " if context else ""
     rendered_operation = f"; operation_id {operation_id[:MAX_DETAIL_NAME]}" if operation_id else ""
     return (
         f"{method} exceeded its {_rendered_budget(timeout)}s budget after {elapsed:.1f}s "
-        f"(request {request_id}{rendered_operation})"
+        f"({rendered_context}request {request_id}{rendered_operation})"
     )
 
 
@@ -516,6 +525,7 @@ class RpcClient:
         *,
         timeout: float,
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> dict[str, Any]:
         """One call, governed by the greater of ``timeout`` and what it declared.
 
@@ -532,6 +542,11 @@ class RpcClient:
         re-introduce the mismatch by passing a constant that never saw the
         request. See :mod:`local_operator.evaluation.deadlines` for the measured
         failure this exists to prevent and for the worst case it accepts.
+
+        ``timeout_context`` is optional and reaches only the timeout sentence
+        (:func:`_timeout_detail`): the score call uses it to name the episode's
+        steps, because a bare budget and request id cannot separate a long
+        legitimate episode from a wedged scorer.
         """
 
         async with self._lock:
@@ -606,6 +621,7 @@ class RpcClient:
                         elapsed=elapsed,
                         request_id=request_id,
                         operation_id=operation_id,
+                        context=timeout_context,
                     )
                     raise _attributed_channel_death(
                         error, f"{detail}; the cancel was not delivered"
@@ -626,6 +642,7 @@ class RpcClient:
                         elapsed=elapsed,
                         request_id=request_id,
                         operation_id=operation_id,
+                        context=timeout_context,
                     )
                 ) from None
             except asyncio.CancelledError:

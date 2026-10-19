@@ -3019,6 +3019,11 @@ async def run_session_episode(
                             episode_id=spec.episode_id,
                         ),
                         timeout=config.score_timeout,
+                        # Same reason as the runner's call: the fatal has to
+                        # carry the step count, because a budget and request
+                        # id alone cannot separate a long episode from a
+                        # wedged scorer (see EpisodeConfig.score_timeout).
+                        timeout_context=(f"episode ran {bridge.steps} of {bridge.max_steps} steps"),
                     )
                 ).score
                 try:
